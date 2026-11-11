@@ -244,7 +244,7 @@ UTIL_SRCS := \
     util/tamper.c \
     util/integrity.c \
     util/paths.c \
-    util/kernel_abi.c \
+     \
     util/kernel_prereq.c \
     util/log.c \
      \
@@ -1315,7 +1315,7 @@ $(FUZZ_OUT)/fuzz-upatch-info: testing/fuzz/fuzz-upatch-info.c $(FUZZ_BASE) \
                               builtin.h \
                               util/curl.c \
                               util/identity.c \
-                               util/java_agent.c util/kernel_abi.c \
+                               util/java_agent.c  \
                               \
                               util/options.c util/paths.c \
                               util/similar.c \

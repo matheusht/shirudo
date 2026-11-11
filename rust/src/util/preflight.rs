@@ -9,7 +9,6 @@ use core::ffi::{CStr, c_char, c_int, c_long};
 use core::mem::MaybeUninit;
 
 use crate::errno::{ENOENT, ENOPKG};
-use crate::sys::kernel_abi::kernel_abi_check;
 use crate::sys::libc::{
     AT_FDCWD, O_CLOEXEC, O_RDONLY, R_OK, S_IFMT, S_IFREG, STATX_SIZE, STATX_TYPE, SYS_ADD_KEY,
     SYS_KEYCTL, Statx, W_OK, access, close, errno, fclose, fgets, fopen, geteuid, open, read,
@@ -20,6 +19,7 @@ use crate::text::{cstr, decimal, strscpy, strsprintf};
 use crate::util::config::{self, Scrubbed};
 use crate::util::crypto_openssl::{Cert, cert_free, cert_key_algorithm};
 use crate::util::initrd;
+use crate::util::kernel_abi::kernel_abi_check;
 use crate::util::keys::{self, TrustedSet};
 
 /// `PREFLIGHT_DETAIL_MAX`.

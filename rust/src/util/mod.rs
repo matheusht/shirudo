@@ -27,6 +27,7 @@ mod image_config;
 mod initrd;
 mod io;
 mod json;
+mod kernel_abi;
 mod kernel_build_id;
 mod kernel_release;
 mod keyring;

@@ -2,7 +2,8 @@
 /*
  * Copyright (c) 2026 Authors of shirudo
  *
- * Live-kernel capability checks required by shirudo's signed BPF loader.
+ * Live-kernel capability checks required by shirudo's signed BPF loader,
+ * which rust/src/util/kernel_abi.rs implements.
  */
 
 #ifndef SHIRUDO_KERNEL_ABI_H
