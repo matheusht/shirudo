@@ -117,8 +117,9 @@ these conventions with their reasons, the helpers to use and the commit
 message that carries a change.
 
 - Rust under `rust/` replaces a C module whole: the module that ports
-  `util/<m>.c` is `rust/src/util/<m>.rs` or `rust/src/util/<m>/`, keeps
-  the C interface of `util/<m>.h` in a `capi` submodule of
+  `util/<m>.c` is `rust/src/util/<m>.rs` or `rust/src/util/<m>/`, and
+  the one that ports `builtin-<c>.c` is `rust/src/builtin/<c>.rs`. It
+  keeps the C interface of its header in a `capi` submodule of
   `#[unsafe(no_mangle)]` functions, so that the C callers and the tests
   stay as they are, and the C file goes in the same commit. The crate is
   `no_std`: core and alloc alone, no crates, and the C library through

@@ -9,6 +9,7 @@
 
 extern crate alloc;
 
+mod builtin;
 mod errno;
 mod ffi;
 mod heap;

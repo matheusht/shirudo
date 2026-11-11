@@ -16,6 +16,62 @@ pub unsafe fn c_str<'a>(s: *const c_char) -> &'a [u8] {
     unsafe { CStr::from_ptr(s) }.to_bytes()
 }
 
+/// The length of `parts` spliced together, with the NUL after them.
+pub const fn spliced_len(parts: &[&str]) -> usize {
+    let mut len = 1;
+    let mut p = 0;
+
+    while p < parts.len() {
+        len += parts[p].len();
+        p += 1;
+    }
+    len
+}
+
+/// `parts` spliced together and a NUL after them, in the `N` bytes
+/// spliced_len() counts.
+///
+/// # Panics
+///
+/// When a part holds a NUL or `N` is not their length, which in a
+/// constant fails the build.
+pub const fn splice<const N: usize>(parts: &[&str]) -> [u8; N] {
+    let mut out = [0u8; N];
+    let mut n = 0;
+    let mut p = 0;
+
+    while p < parts.len() {
+        let bytes = parts[p].as_bytes();
+        let mut i = 0;
+
+        while i < bytes.len() {
+            assert!(bytes[i] != 0, "a NUL in a part");
+            out[n] = bytes[i];
+            n += 1;
+            i += 1;
+        }
+        p += 1;
+    }
+    assert!(n + 1 == N, "not the parts' length");
+    out
+}
+
+/// The C string of string constants and literals spliced together at
+/// compile time, as C splices adjacent string literals and the macros
+/// that stand for them.
+macro_rules! c_splice {
+    ($($part:expr),+ $(,)?) => {{
+        const PARTS: &[&str] = &[$($part),+];
+        const BYTES: [u8; $crate::ffi::spliced_len(PARTS)] = $crate::ffi::splice(PARTS);
+
+        match ::core::ffi::CStr::from_bytes_with_nul(&BYTES) {
+            Ok(s) => s,
+            Err(_) => panic!("not a C string"),
+        }
+    }};
+}
+pub(crate) use c_splice;
+
 /// The `len` elements at `ptr`; none when `len` is 0, whatever `ptr` is.
 ///
 /// # Safety

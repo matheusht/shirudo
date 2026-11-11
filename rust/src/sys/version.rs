@@ -2,11 +2,13 @@
 // Copyright (c) 2026 Authors of shirudo
 
 //! The build identity of `util/version.h`, which the generated
-//! util/version_id.c defines.
+//! util/version_id.c defines: each the first byte of a C string.
 
 use core::ffi::c_char;
 
 unsafe extern "C" {
-    /// The first byte of the build's version ID, a C string.
+    pub static shirudo_version: c_char;
     pub static shirudo_version_id: c_char;
+    pub static shirudo_extraversion: c_char;
+    pub static shirudo_release_name: c_char;
 }

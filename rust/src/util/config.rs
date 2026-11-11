@@ -31,26 +31,26 @@ const MAP_EXPORT_URI_MAX: usize = 2048;
 const TENANT_ID_MAX: usize = 128;
 const LOG_RECORD_MAX_DEFAULT: u32 = 1024 * 1024;
 const OTLP_MAX_DEFAULT: u32 = 4 * 1024 * 1024;
-const CONF_PATH: &CStr = c"/etc/shirudo/shirudo.conf";
+pub(crate) const CONF_PATH: &CStr = c"/etc/shirudo/shirudo.conf";
 
 /// `struct config`.
 #[repr(C)]
 pub struct Config {
-    eventlog_max_bytes: u64,
+    pub(crate) eventlog_max_bytes: u64,
     pub(crate) tpm_owner_auth: [u8; OWNER_AUTH_MAX],
     pub(crate) tpm_owner_auth_len: usize,
     pub(crate) tpm_tcti: [u8; TPM_TCTI_MAX],
     pub(crate) tls_classical_hosts_valid: bool,
     pub(crate) tls_classical_hosts: [u8; TLS_HOSTS_MAX],
     pub(crate) map_export_valid: bool,
-    map_export_json_path: [u8; MAP_EXPORT_PATH_MAX],
-    map_export_otel_endpoint: [u8; MAP_EXPORT_ENDPOINT_MAX],
-    map_export_tenant_id: [u8; TENANT_ID_MAX + 1],
-    map_export_otel_insecure: bool,
-    map_export_otel_retries: u32,
-    map_export_s3_uri: [u8; MAP_EXPORT_URI_MAX],
-    map_export_log_record_max_bytes: u32,
-    map_export_otlp_max_bytes: u32,
+    pub(crate) map_export_json_path: [u8; MAP_EXPORT_PATH_MAX],
+    pub(crate) map_export_otel_endpoint: [u8; MAP_EXPORT_ENDPOINT_MAX],
+    pub(crate) map_export_tenant_id: [u8; TENANT_ID_MAX + 1],
+    pub(crate) map_export_otel_insecure: bool,
+    pub(crate) map_export_otel_retries: u32,
+    pub(crate) map_export_s3_uri: [u8; MAP_EXPORT_URI_MAX],
+    pub(crate) map_export_log_record_max_bytes: u32,
+    pub(crate) map_export_otlp_max_bytes: u32,
 }
 
 const _: () = assert!(size_of::<Config>() == 9888);

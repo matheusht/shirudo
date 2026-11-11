@@ -281,13 +281,11 @@ BUILTIN_SRCS := \
     $(BUILTIN_GENKEY_SRC) \
     builtin-status.c \
     builtin-keys.c \
-    builtin-config.c \
     builtin-image.c \
     builtin-upatch.c \
     builtin-bpm.c \
     builtin-attest.c \
-    builtin-build.c \
-    builtin-version.c
+    builtin-build.c
 
 # BPF-side libbpf headers, used straight from vendor/libbpf (the BPF
 # compile rule adds it to the include path so <bpf/...> resolves) and

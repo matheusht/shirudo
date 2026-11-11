@@ -24,26 +24,26 @@ const HELP_WIDTH: usize = 90;
 /// `struct help_item`.
 #[repr(C)]
 pub struct HelpItem {
-    name: *const c_char,
-    summary: *const c_char,
+    pub(crate) name: *const c_char,
+    pub(crate) summary: *const c_char,
 }
 
 /// `struct help_section`.
 #[repr(C)]
 pub struct HelpSection {
-    header: *const c_char,
-    items: *const HelpItem,
-    n_items: usize,
+    pub(crate) header: *const c_char,
+    pub(crate) items: *const HelpItem,
+    pub(crate) n_items: usize,
 }
 
 /// `struct help`.
 #[repr(C)]
 pub struct Help {
-    usage: *const c_char,
-    summary: *const c_char,
-    sections: *const HelpSection,
-    n_sections: usize,
-    footer: *const c_char,
+    pub(crate) usage: *const c_char,
+    pub(crate) summary: *const c_char,
+    pub(crate) sections: *const HelpSection,
+    pub(crate) n_sections: usize,
+    pub(crate) footer: *const c_char,
 }
 
 fn err_stream() -> *mut crate::sys::libc::File {
@@ -97,7 +97,7 @@ fn wrap_print(text: &[u8], indent: usize, avail: usize) {
 }
 
 /// Whether a command line word asks for help.
-fn is_help(arg: Option<&[u8]>) -> bool {
+pub(crate) fn is_help(arg: Option<&[u8]>) -> bool {
     matches!(arg, Some(b"help" | b"--help" | b"-h"))
 }
 
@@ -122,7 +122,7 @@ unsafe fn print_subcmd_list(items: &[HelpItem]) {
 /// What `h` points to, and every item of its sections, holds C strings,
 /// a header, usage, summary or footer possibly NULL, and arrays of the
 /// lengths it gives.
-unsafe fn print_help(h: &Help) {
+pub(crate) unsafe fn print_help(h: &Help) {
     let f = err_stream();
 
     // SAFETY: the stream, the formats, and the C strings of h, which
