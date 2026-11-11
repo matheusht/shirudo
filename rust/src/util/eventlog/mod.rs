@@ -15,7 +15,6 @@ use core::ffi::{CStr, c_int};
 use crate::errno::{EFBIG, EINVAL, ENAMETOOLONG, ENOENT, ENOMEM};
 use crate::sys::crypto::sha256_buffer;
 use crate::sys::hex::hex_encode;
-use crate::sys::image_config::image_config_active;
 use crate::sys::io::read_file;
 use crate::sys::libc::{
     AT_FDCWD, F_OK, O_CLOEXEC, O_RDONLY, PATH_MAX, STATX_SIZE, Statx, access, close, env, errno,
@@ -25,6 +24,7 @@ use crate::sys::log::pr_err;
 use crate::sys::malloc::{xfree, xmalloc};
 use crate::sys::seal::{seal_append_line, seal_lock};
 use crate::text::{cstr, strsprintf};
+use crate::util::image_config;
 use crate::util::json::{JsonEmit, JsonField, MAX_BYTES, parse_schema};
 use crate::util::timefmt::iso8601;
 
@@ -39,8 +39,7 @@ pub(crate) const NV_INDEX: u32 = 0x0181_8E00;
 /// The path `var` names, unless a config image fixes the paths, or
 /// `default`.
 fn path_from(var: &CStr, default: &'static CStr) -> &'static CStr {
-    // SAFETY: a call that takes nothing.
-    if unsafe { image_config_active() } {
+    if image_config::active() {
         return default;
     }
     env(var).filter(|v| !v.is_empty()).unwrap_or(default)

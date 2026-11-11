@@ -17,6 +17,7 @@ mod format;
 mod harden;
 mod help;
 mod image_bootstrap;
+mod image_config;
 mod initrd;
 mod json;
 mod kernel_build_id;

@@ -12,7 +12,6 @@ pub mod crypto;
 pub mod curl;
 pub mod hex;
 pub mod identity;
-pub mod image_config;
 pub mod io;
 pub mod libc;
 pub mod log;

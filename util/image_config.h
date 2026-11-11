@@ -1,5 +1,10 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
-/* Copyright (c) 2026 Authors of shirudo */
+/*
+ * Copyright (c) 2026 Authors of shirudo
+ *
+ * The config image a target runs from, its verified root and the
+ * configuration it carries, which rust/src/util/image_config.rs keeps.
+ */
 
 #ifndef SHIRUDO_IMAGE_CONFIG_H
 #define SHIRUDO_IMAGE_CONFIG_H

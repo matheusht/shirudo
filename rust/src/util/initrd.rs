@@ -6,8 +6,8 @@
 
 use core::ffi::CStr;
 
-use crate::sys::image_config::{image_config_active, image_config_root_fd};
 use crate::sys::libc::{F_OK, access, env};
+use crate::util::image_config;
 
 /// The paths of util/paths.h the answers come from: the keys directory
 /// and its certificate in the runtime image, in the initrd, and in the
@@ -22,8 +22,7 @@ const CERT_PATH: &CStr = c"/var/lib/shirudo/keys/cert.der";
 /// The test override `name` sets, unless it is empty or a config image
 /// is active, which no environment variable moves.
 fn test_override(name: &CStr) -> Option<&'static CStr> {
-    // SAFETY: a call that takes no pointer.
-    if unsafe { image_config_active() } {
+    if image_config::active() {
         return None;
     }
     env(name).filter(|value| !value.is_empty())
@@ -47,8 +46,7 @@ fn sysroot() -> &'static CStr {
 /// initrd's own measured copies while the initrd runs, and the state
 /// tree's otherwise.
 fn keys_dir() -> &'static CStr {
-    // SAFETY: a call that takes no pointer.
-    if unsafe { image_config_root_fd() } >= 0 {
+    if image_config::root_fd() >= 0 {
         return RUNTIME_KEYS_DIR;
     }
     if in_initrd() {
@@ -60,8 +58,7 @@ fn keys_dir() -> &'static CStr {
 
 /// The primary certificate in the directory keys_dir() gives.
 fn cert_path() -> &'static CStr {
-    // SAFETY: a call that takes no pointer.
-    if unsafe { image_config_root_fd() } >= 0 {
+    if image_config::root_fd() >= 0 {
         return RUNTIME_CERT_PATH;
     }
     if in_initrd() {

@@ -8,14 +8,13 @@
 use core::ffi::{CStr, c_char, c_int};
 use core::ptr;
 
-use crate::errno::{EIO, ENOENT, EPERM};
+use crate::errno::{EINVAL, EIO, ENOENT, EPERM};
 use crate::ffi;
 use crate::sys::hex::hex_decode_max;
-use crate::sys::image_config::image_config_get;
 use crate::sys::io::{check_trusted, read_text_line};
 use crate::sys::libc::{
-    BUFSIZ, File, IOFBF, env, errno, explicit_bzero, fclose, ferror, fileno, fopen, free, scrub,
-    setvbuf, strerror,
+    BUFSIZ, F_DUPFD_CLOEXEC, File, IOFBF, SEEK_SET, close, env, errno, explicit_bzero, fclose,
+    fcntl, fdopen, ferror, fileno, fopen, free, lseek, scrub, setvbuf, strerror,
 };
 use crate::sys::log::{pr_err, pr_warn};
 use crate::sys::string::dns_name_valid;
@@ -37,12 +36,12 @@ const CONF_PATH: &CStr = c"/etc/shirudo/shirudo.conf";
 #[repr(C)]
 pub struct Config {
     eventlog_max_bytes: u64,
-    tpm_owner_auth: [u8; OWNER_AUTH_MAX],
-    tpm_owner_auth_len: usize,
-    tpm_tcti: [u8; TPM_TCTI_MAX],
-    tls_classical_hosts_valid: bool,
-    tls_classical_hosts: [u8; TLS_HOSTS_MAX],
-    map_export_valid: bool,
+    pub(crate) tpm_owner_auth: [u8; OWNER_AUTH_MAX],
+    pub(crate) tpm_owner_auth_len: usize,
+    pub(crate) tpm_tcti: [u8; TPM_TCTI_MAX],
+    pub(crate) tls_classical_hosts_valid: bool,
+    pub(crate) tls_classical_hosts: [u8; TLS_HOSTS_MAX],
+    pub(crate) map_export_valid: bool,
     map_export_json_path: [u8; MAP_EXPORT_PATH_MAX],
     map_export_otel_endpoint: [u8; MAP_EXPORT_ENDPOINT_MAX],
     map_export_tenant_id: [u8; TENANT_ID_MAX + 1],
@@ -409,7 +408,7 @@ unsafe fn load_path(cfg: *mut Config, path: *const c_char) -> c_int {
 unsafe fn load(cfg: *mut Config) -> c_int {
     // SAFETY: the caller's configuration.
     unsafe {
-        if image_config_get(cfg.cast()) != 0 {
+        if crate::util::image_config::get(cfg) != 0 {
             return 0;
         }
         let ret = load_path(cfg, CONF_PATH.as_ptr());
@@ -431,14 +430,48 @@ unsafe fn load(cfg: *mut Config) -> c_int {
     }
 }
 
+/// The configuration in the file open on `fd`, read from its start
+/// through a copy of the fd; the caller keeps its own.
+///
+/// # Safety
+///
+/// `cfg` is a configuration to fill, and `label` a C string.
+pub(crate) unsafe fn load_fd(cfg: *mut Config, fd: c_int, label: *const c_char) -> c_int {
+    if fd < 0 {
+        return -EINVAL;
+    }
+    // SAFETY: the caller's configuration and label, and the copy of its
+    // fd, which the stream takes over or which is closed here.
+    unsafe {
+        defaults(cfg);
+        let copy = fcntl(fd, F_DUPFD_CLOEXEC, 3);
+        if copy < 0 {
+            return -errno();
+        }
+        if lseek(copy, 0, SEEK_SET) < 0 {
+            let ret = -errno();
+
+            close(copy);
+            return ret;
+        }
+        let f = fdopen(copy, c"r".as_ptr());
+        if f.is_null() {
+            let ret = -errno();
+
+            close(copy);
+            return ret;
+        }
+        let ret = parse(&mut *cfg, f, label);
+        finish(&mut *cfg, ret)
+    }
+}
+
 mod capi {
     use core::ffi::{c_char, c_int};
 
-    use super::{Config, defaults, finish, load, load_path, parse};
+    use super::{Config, load, load_path};
     use crate::errno::EINVAL;
-    use crate::sys::libc::{
-        F_DUPFD_CLOEXEC, SEEK_SET, close, errno, explicit_bzero, fcntl, fdopen, lseek,
-    };
+    use crate::sys::libc::explicit_bzero;
 
     /// # Safety
     ///
@@ -482,32 +515,10 @@ mod capi {
         fd: c_int,
         label: *const c_char,
     ) -> c_int {
-        if cfg.is_null() || fd < 0 {
+        if cfg.is_null() {
             return -EINVAL;
         }
-        // SAFETY: the caller's configuration and label, and the copy of
-        // its fd, which the stream takes over or which is closed here.
-        unsafe {
-            defaults(cfg);
-            let copy = fcntl(fd, F_DUPFD_CLOEXEC, 3);
-            if copy < 0 {
-                return -errno();
-            }
-            if lseek(copy, 0, SEEK_SET) < 0 {
-                let ret = -errno();
-
-                close(copy);
-                return ret;
-            }
-            let f = fdopen(copy, c"r".as_ptr());
-            if f.is_null() {
-                let ret = -errno();
-
-                close(copy);
-                return ret;
-            }
-            let ret = parse(&mut *cfg, f, label);
-            finish(&mut *cfg, ret)
-        }
+        // SAFETY: the caller passes its configuration and label.
+        unsafe { super::load_fd(cfg, fd, label) }
     }
 }

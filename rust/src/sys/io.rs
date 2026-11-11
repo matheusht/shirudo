@@ -8,6 +8,10 @@ use core::ffi::{c_char, c_int, c_void};
 use super::libc::File;
 
 unsafe extern "C" {
+    /// The entry `rel` beneath the directory open as `dirfd`, opened
+    /// with `flags` and close-on-exec through no symlink and nothing
+    /// outside it: an fd, or -errno.
+    pub fn open_beneath(dirfd: c_int, rel: *const c_char, flags: c_int) -> c_int;
     /// All `len` bytes at `buf` to `fd`, or a negative errno.
     pub fn write_complete(fd: c_int, buf: *const c_void, len: usize) -> c_int;
     /// The file at `path`, of at most `max` bytes, into an allocation of

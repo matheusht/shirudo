@@ -36,6 +36,7 @@ pub const O_DIRECTORY: c_int = 0o200000;
 #[cfg(target_arch = "aarch64")]
 pub const O_DIRECTORY: c_int = 0o40000;
 pub const AT_EMPTY_PATH: c_int = 0x1000;
+pub const AT_SYMLINK_NOFOLLOW: c_int = 0x100;
 pub const F_GETFD: c_int = 1;
 /// setvbuf()'s full buffering, and the size of a stdio buffer.
 pub const IOFBF: c_int = 0;
@@ -44,6 +45,7 @@ pub const STATX_TYPE: u32 = 0x1;
 pub const STATX_SIZE: u32 = 0x200;
 pub const S_IFMT: u16 = 0o170000;
 pub const S_IFREG: u16 = 0o100000;
+pub const S_IFDIR: u16 = 0o040000;
 pub const PR_SET_DUMPABLE: c_int = 4;
 pub const PR_SET_NO_NEW_PRIVS: c_int = 38;
 /// Yama's PR_SET_PTRACER, "Yama" in ASCII.
@@ -57,6 +59,21 @@ pub const LOCK_NB: c_int = 4;
 
 /// A stdio `FILE`.
 pub enum File {}
+
+/// A `DIR` stream.
+pub enum Dir {}
+
+/// `struct dirent` of the 64-bit ABIs, as readdir() gives it.
+#[repr(C)]
+pub struct Dirent {
+    d_ino: u64,
+    d_off: i64,
+    d_reclen: u16,
+    d_type: u8,
+    pub d_name: [c_char; 256],
+}
+
+const _: () = assert!(core::mem::offset_of!(Dirent, d_name) == 19);
 
 /// `struct utsname`: the fields read here, and the rest as the C library
 /// lays them out.
@@ -165,10 +182,16 @@ pub struct Statx {
     spare0: u16,
     pub ino: u64,
     pub size: u64,
-    rest: [u64; 26],
+    times: [u64; 10],
+    rdev_major: u32,
+    rdev_minor: u32,
+    pub dev_major: u32,
+    pub dev_minor: u32,
+    rest: [u64; 14],
 }
 
 const _: () = assert!(size_of::<Statx>() == 256);
+const _: () = assert!(core::mem::offset_of!(Statx, dev_major) == 136);
 
 impl Statx {
     pub const fn zeroed() -> Self {
@@ -183,7 +206,12 @@ impl Statx {
             spare0: 0,
             ino: 0,
             size: 0,
-            rest: [0; 26],
+            times: [0; 10],
+            rdev_major: 0,
+            rdev_minor: 0,
+            dev_major: 0,
+            dev_minor: 0,
+            rest: [0; 14],
         }
     }
 }
@@ -215,6 +243,10 @@ unsafe extern "C" {
     pub fn open(path: *const c_char, flags: c_int, ...) -> c_int;
     pub fn openat(dirfd: c_int, path: *const c_char, flags: c_int, ...) -> c_int;
     pub fn flock(fd: c_int, op: c_int) -> c_int;
+    pub fn fdopendir(fd: c_int) -> *mut Dir;
+    pub fn readdir(dir: *mut Dir) -> *mut Dirent;
+    pub fn closedir(dir: *mut Dir) -> c_int;
+    pub fn getline(line: *mut *mut c_char, cap: *mut usize, f: *mut File) -> isize;
     pub fn syscall(num: core::ffi::c_long, ...) -> core::ffi::c_long;
     pub fn read(fd: c_int, buf: *mut c_void, count: usize) -> isize;
     pub fn pread(fd: c_int, buf: *mut c_void, count: usize, offset: i64) -> isize;
@@ -258,6 +290,12 @@ unsafe extern "C" {
     pub fn timegm(tm: *mut Tm) -> i64;
     pub fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64;
     fn __errno_location() -> *mut c_int;
+}
+
+/// Sets errno, as a caller that tells an end from a failure by it does.
+pub fn set_errno(e: c_int) {
+    // SAFETY: glibc gives each thread its errno, valid while it runs.
+    unsafe { *__errno_location() = e };
 }
 
 /// The errno of the last failed call.
