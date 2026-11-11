@@ -19,7 +19,7 @@ pub struct Identity {
     runtime_root: [u8; 32],
     pub nv_writer_seed: [u8; 32],
     pub nv_writer_public: [u8; 384],
-    ek_name: [u8; 34],
+    pub ek_name: [u8; 34],
     dm_verity_ring: i32,
     dm_verity_key: i32,
     nv_index: u32,
@@ -53,4 +53,7 @@ unsafe extern "C" {
     /// The identity map init populated, froze and pinned this boot, into
     /// `out`: 0, -ENOENT before init, or another -errno.
     pub fn identity_read(out: *mut Identity) -> c_int;
+    /// Whether this boot enforces: 1, 0, or -errno when the
+    /// enforcement map cannot be read.
+    pub fn enforcement_active() -> c_int;
 }

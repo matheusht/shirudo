@@ -248,7 +248,6 @@ UTIL_SRCS := \
     util/kernel_prereq.c \
     util/log.c \
     util/io.c \
-    util/tpm.c \
     util/attest.c \
     util/chain.c \
     util/chain_history.c \
@@ -836,13 +835,11 @@ testing/helper/test-harden: testing/helper/test-harden.c util/log.o \
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(LIBCRYPTO_LIBS) $(ZLIB_LIBS) $(RUST_TEST_LDLIBS)
 
-# chain.o's read/extend paths reference util/tpm (libtss2), so the
-# symbols must resolve even for a helper that never extends.
-# util/malloc.o brings in x*/libc_free that chain.o/tpm.o use.
-# The Rust library resolves config_load(), called by tpm.o.
-# The register code pulls in the Rust eventlog, seal label writer and JSON codec.
+# chain.o's read/extend paths use the TPM client (libtss2) in Rust.
+# util/malloc.o brings in x*/libc_free used by chain.o.
+# The Rust library supplies config_load(), the eventlog and JSON codec.
 REGISTER_OBJS := util/config_update.o \
-                 util/chain.o util/tpm.o \
+                 util/chain.o \
                  util/upatch.o \
                  util/hex.o util/string.o \
                  util/io.o util/seal.o \
@@ -1253,7 +1250,6 @@ $(FUZZ_OUT)/fuzz-tpm-wire: testing/fuzz/fuzz-tpm-wire.c $(FUZZ_BASE) \
                             $(FUZZ_SEAL)
 $(FUZZ_OUT)/fuzz-attest: testing/fuzz/fuzz-attest.c $(FUZZ_BASE) \
                           util/attest.c util/chain.c util/chain_history.c \
-                          util/tpm.c \
                           util/io.c $(FUZZ_SEAL) \
                           util/config_update.c \
                           util/identity.c \
@@ -1329,7 +1325,7 @@ $(FUZZ_OUT)/fuzz-upatch-info: testing/fuzz/fuzz-upatch-info.c $(FUZZ_BASE) \
                               util/measured.c \
                               util/options.c util/paths.c \
                               util/similar.c \
-                              util/tpm.c \
+                              \
                               util/upatch.c \
                               util/upatch_decode.c util/upatch_maps.c \
                               util/upatch_maps_otel.c util/upatch_pins.c \
@@ -1350,7 +1346,7 @@ $(FUZZ_OUT)/fuzz-bpm-info: testing/fuzz/fuzz-bpm-info.c $(FUZZ_BASE) \
                            util/identity.c util/image_keys.c \
                            util/kconfig.c \
                                                      util/options.c util/paths.c \
-                           util/similar.c util/tpm.c \
+                           util/similar.c \
                            util/upatch_pins.c \
                            util/upatch_rodata.c $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-bpm-info: FUZZ_CFLAGS += $(TSS2_CFLAGS) $(LIBELF_CFLAGS)
@@ -1364,7 +1360,7 @@ $(FUZZ_OUT)/fuzz-attest-report: testing/fuzz/fuzz-attest-report.c \
                                util/io.c \
                                util/measured.c \
                                util/options.c util/paths.c util/similar.c \
-                               util/tpm.c \
+                               \
                                util/upatch.c util/version_id.c $(FUZZ_SEAL) \
                                $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-attest-report: FUZZ_CFLAGS += $(TSS2_CFLAGS) $(LIBELF_CFLAGS)

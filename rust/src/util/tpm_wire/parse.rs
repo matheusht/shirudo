@@ -83,7 +83,7 @@ fn public_fields(r: &mut Reader<'_>, out: &mut TpmPublic) -> Result<(), c_int> {
 }
 
 /// `public` as a TPMT_PUBLIC into `out`, and how many bytes it took.
-pub(super) fn public_marshal(public: &TpmPublic, out: &mut [u8], len: &mut usize) -> c_int {
+pub(crate) fn public_marshal(public: &TpmPublic, out: &mut [u8], len: &mut usize) -> c_int {
     if public.policy_len != 0 && public.policy_len != DIGEST_LEN {
         return -EINVAL;
     }

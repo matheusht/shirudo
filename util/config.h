@@ -35,8 +35,8 @@ struct config {
 	char		tpm_owner_auth[OWNER_AUTH_MAX] __sensitive;
 	size_t		tpm_owner_auth_len;
 	/*
-	 * The TCTI of util/tpm.c, empty for /dev/tpmrm0; the environment
-	 * overrides it.
+	 * The TCTI of the TPM client, rust/src/util/tpm.rs, empty for
+	 * /dev/tpmrm0; the environment overrides it.
 	 */
 	char		tpm_tcti[TPM_TCTI_MAX];
 	/* Exact DNS names that may negotiate classical TLS key exchange. */

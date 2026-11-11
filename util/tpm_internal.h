@@ -1,5 +1,10 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
-/* Copyright (c) 2026 Authors of shirudo */
+/*
+ * Copyright (c) 2026 Authors of shirudo
+ *
+ * The insides of rust/src/util/tpm.rs that tests reach: struct tpm in
+ * the layout the Rust code keeps, and the NV writer's steps.
+ */
 #ifndef SHIRUDO_TPM_INTERNAL_H
 #define SHIRUDO_TPM_INTERNAL_H
 

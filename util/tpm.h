@@ -2,7 +2,8 @@
 /*
  * Copyright (c) 2026 Authors of shirudo
  *
- * libtss2 wrappers for the measurement register and attestation.
+ * libtss2 wrappers for the measurement register and attestation, which
+ * rust/src/util/tpm.rs implements.
  */
 
 #ifndef SHIRUDO_TPM_H

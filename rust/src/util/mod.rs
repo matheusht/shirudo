@@ -35,5 +35,6 @@ mod similar;
 mod sysinfo;
 mod timefmt;
 mod tls_openssl;
+mod tpm;
 mod tpm_wire;
 mod upatch_table;

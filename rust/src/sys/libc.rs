@@ -237,6 +237,8 @@ unsafe extern "C" {
     pub fn getrandom(buf: *mut c_void, len: usize, flags: u32) -> isize;
     pub fn __nss_configure_lookup(db: *const c_char, service: *const c_char) -> c_int;
     pub fn getenv(name: *const c_char) -> *mut c_char;
+    pub fn setenv(name: *const c_char, value: *const c_char, overwrite: c_int) -> c_int;
+    pub fn unsetenv(name: *const c_char) -> c_int;
     pub fn statx(
         dirfd: c_int,
         path: *const c_char,

@@ -11,7 +11,7 @@ use crate::errno::{EINTR, EIO, EKEYREJECTED};
 use crate::sys::identity::{Identity, identity_read};
 use crate::sys::libc::{errno, getrandom, scrub, strerror};
 use crate::sys::log::pr_err;
-use crate::sys::tpm::{tpm_close, tpm_open, tpm_writer_create};
+use crate::util::tpm::{tpm_close, tpm_open, tpm_writer_create};
 use crate::util::tpm_wire::{DIGEST_LEN, NV_RSA_BYTES};
 
 /// A fresh seed into `seed`, and the writer key the TPM creates from it,

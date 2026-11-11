@@ -11,6 +11,13 @@ mod kdf;
 mod parse;
 mod policy;
 
+pub(crate) use capi::shirudo_tpm_ek_policy;
+pub(crate) use parse::public_marshal;
+pub(crate) use policy::{
+    nv_extend_cphash, object_name, policy_nv_written, policy_or, register_policy_final,
+    writer_auth_hash, writer_public,
+};
+
 use core::ffi::c_int;
 
 use crate::errno::EINVAL;
@@ -46,22 +53,22 @@ const CC_NV_EXTEND: u32 = 0x0000_0136;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TpmPublic {
-    ty: u16,
-    attrs: u32,
-    policy_len: usize,
-    policy: [u8; DIGEST_LEN],
-    sym_alg: u16,
-    sym_bits: u16,
-    sym_mode: u16,
-    scheme: u16,
-    scheme_hash: u16,
-    curve: u16,
-    x: [u8; 32],
-    y: [u8; 32],
-    rsa_bits: u16,
-    rsa_exponent: u32,
-    n_len: usize,
-    n: [u8; 256],
+    pub(crate) ty: u16,
+    pub(crate) attrs: u32,
+    pub(crate) policy_len: usize,
+    pub(crate) policy: [u8; DIGEST_LEN],
+    pub(crate) sym_alg: u16,
+    pub(crate) sym_bits: u16,
+    pub(crate) sym_mode: u16,
+    pub(crate) scheme: u16,
+    pub(crate) scheme_hash: u16,
+    pub(crate) curve: u16,
+    pub(crate) x: [u8; 32],
+    pub(crate) y: [u8; 32],
+    pub(crate) rsa_bits: u16,
+    pub(crate) rsa_exponent: u32,
+    pub(crate) n_len: usize,
+    pub(crate) n: [u8; 256],
 }
 
 /// `struct tpm_ecc_public`.
@@ -103,7 +110,7 @@ const _: () = assert!(size_of::<TpmEccPublic>() == 76);
 const _: () = assert!(size_of::<TpmAttest>() == 200);
 
 impl TpmPublic {
-    const fn zeroed() -> Self {
+    pub(crate) const fn zeroed() -> Self {
         TpmPublic {
             ty: 0,
             attrs: 0,

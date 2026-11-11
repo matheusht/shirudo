@@ -59,7 +59,7 @@ fn policy_hash(prev: &Digest, cc: u32, a: &[u8], b: &[u8], out: &mut Digest) -> 
     0
 }
 
-pub(super) fn policy_nv_written(prev: &Digest, written: bool, out: &mut Digest) -> c_int {
+pub(crate) fn policy_nv_written(prev: &Digest, written: bool, out: &mut Digest) -> c_int {
     policy_hash(prev, CC_POLICY_NV_WRITTEN, &[u8::from(written)], &[], out)
 }
 
@@ -78,13 +78,13 @@ pub(super) fn policy_pcr(prev: &Digest, mask: u32, pcr_digest: &Digest, out: &mu
     policy_hash(prev, CC_POLICY_PCR, &pcr_selection(mask), pcr_digest, out)
 }
 
-pub(super) fn policy_or(a: &Digest, b: &Digest, out: &mut Digest) -> c_int {
+pub(crate) fn policy_or(a: &Digest, b: &Digest, out: &mut Digest) -> c_int {
     policy_hash(&[0; DIGEST_LEN], CC_POLICY_OR, a, b, out)
 }
 
 /// The writer's fixed TPMT_PUBLIC, without the outer TPM2B_PUBLIC size:
 /// a 24-byte prefix and the modulus.
-pub(super) fn writer_public(modulus: &[u8; NV_RSA_BYTES], out: &mut [u8; NV_RSA_PUBLIC_AREA_LEN]) {
+pub(crate) fn writer_public(modulus: &[u8; NV_RSA_BYTES], out: &mut [u8; NV_RSA_PUBLIC_AREA_LEN]) {
     out[0..2].copy_from_slice(&ALG_RSA.to_be_bytes());
     out[2..4].copy_from_slice(&ALG_SHA256.to_be_bytes());
     out[4..8].copy_from_slice(&WRITER_ATTRS.to_be_bytes());
@@ -98,7 +98,7 @@ pub(super) fn writer_public(modulus: &[u8; NV_RSA_BYTES], out: &mut [u8; NV_RSA_
     put_sized(&mut out[22..], modulus);
 }
 
-pub(super) fn nv_extend_cphash(name: &[u8; NAME_LEN], event: &Digest, out: &mut Digest) -> c_int {
+pub(crate) fn nv_extend_cphash(name: &[u8; NAME_LEN], event: &Digest, out: &mut Digest) -> c_int {
     let mut command = [0u8; 4 + 2 * NAME_LEN + 2 + DIGEST_LEN];
 
     command[..4].copy_from_slice(&CC_NV_EXTEND.to_be_bytes());
@@ -108,7 +108,7 @@ pub(super) fn nv_extend_cphash(name: &[u8; NAME_LEN], event: &Digest, out: &mut 
     sha256(&command, out)
 }
 
-pub(super) fn writer_auth_hash(nonce: &[u8], cphash: &Digest, out: &mut Digest) -> c_int {
+pub(crate) fn writer_auth_hash(nonce: &[u8], cphash: &Digest, out: &mut Digest) -> c_int {
     let mut bytes = [0u8; 64 + 4 + DIGEST_LEN + NV_POLICY_REF.len()];
     let n = nonce.len();
 
@@ -158,7 +158,7 @@ pub(super) fn policy_command_code(prev: &Digest, command_code: u32, out: &mut Di
 
 /// The register's write policy from its two branches: PolicyOR of them,
 /// PolicySigned by the writer, PolicyCommandCode(NV_Extend).
-pub(super) fn register_policy_final(
+pub(crate) fn register_policy_final(
     branch_written: &Digest,
     branch_init: &Digest,
     modulus: &[u8; NV_RSA_BYTES],
@@ -239,7 +239,7 @@ pub(super) fn nv_name(
 
 /// The name of an object: nameAlg || SHA-256(TPMT_PUBLIC), for a public
 /// area named with SHA-256.
-pub(super) fn object_name(public: &[u8], name: &mut [u8; NAME_LEN]) -> c_int {
+pub(crate) fn object_name(public: &[u8], name: &mut [u8; NAME_LEN]) -> c_int {
     let mut r = Reader::new(public);
 
     // The type, then the nameAlg.
