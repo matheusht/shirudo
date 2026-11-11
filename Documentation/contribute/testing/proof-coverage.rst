@@ -118,24 +118,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
      - Strings of 0, 6 to 8 and 70 to 72 bytes
      - Accepted exactly as ``sha256:`` and 64 hex digits of either case,
        into their value; a null pointer refused
-   * - ``attest-pcrs``
-     - ``attest_parse_pcrs()``, ``attest_parse_pcr_value()``
-     - Up to 6 bytes
-     - A list is accepted exactly when it is decimal PCRs 0 to 23 apart
-       by single commas, into the mask of those PCRs; a value exactly
-       after a PCR to 23 and an equals sign
-   * - ``attest-name-digest``
-     - ``attest_parse_name_digest()``
-     - Lengths 64 to 70
-     - Accepted exactly when a name of 1 to 256 bytes runs to the first
-       equals sign and 64 hex digits follow, into that name and their
-       value
-   * - ``attest-name-digest-long``
-     - ``attest_parse_name_digest()``
-     - Lengths 321 and 322: any 8 bytes, then letters to an equals sign
-       and any 64 bytes
-     - The rule of ``attest-name-digest`` at the name's limit of 256
-       bytes
    * - ``paths-bpffs-name``
      - ``upatch_bpffs_name()``, ``upatch_name_from_bpffs()``
      - Names up to 4 bytes, pin names up to 8
@@ -753,10 +735,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
        a signature passes only on the digest of the whole attestation,
        an unparseable one is ``-EBADMSG`` and checks nothing, a rejection
        ``-EKEYREJECTED``
-   * - ``attest-fields``
-     - ``record_word()``
-     - Up to 16 characters
-     - Passes exactly ``[a-z_]``
    * - ``attest-replay-model``
      - ``on_record()``
      - Eventlogs of 1 to 3 records: an init of any reset count, the load
@@ -768,12 +746,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
        keeps the records of the last init, their digests, which are
        derived, ``inits_epoch`` and the last init's reset count and digest
        as it does; a record without a digest is refused
-   * - ``attest-pcr``
-     - ``on_pcr()`` of the evidence parser
-     - Every index and 64-byte value text
-     - Stores only PCRs 0 to 23, the value its 64 hex digits spell under
-       its index, and marks exactly that one; the other PCRs stay as they
-       were; a refusal marks nothing
    * - ``config-evidence-event``
      - ``on_event()``, ``append_event()`` of :src:`util/config_attest.c`
      - Every event the JSON parser can hand over, into a history of 0, 1,
@@ -1038,7 +1010,7 @@ the model follows the C.
        names no upatch
    * - ``Shirudo.AttestReplay``, ``on_record()``, ``verify_epoch()``,
        ``verify_replay()``, ``verify_derived()`` and the init check of
-       ``verify_state()`` of :src:`util/attest.c`
+       ``verify_state()`` of :src:`rust/src/util/attest.rs`
      - ``select_sound``: when every check passes, the certified register
        value is the fold of the last init record and the records after
        it, that init carries the expected digest and the certified reset
@@ -1418,7 +1390,7 @@ the text of the usage messages, which only ``pr_err()`` reads, and
 unit cases. Of :src:`util/sysinfo.c` the
 proofs cover the image identity's parsers; reading the files they parse,
 and the readers of ``/proc`` and the root file system, go to the kernel
-and have none. Of :src:`util/attest.c` the proofs cover the functions
+and have none. Of :src:`rust/src/util/attest.rs` the proofs cover the functions
 the table names, and ``Shirudo.AttestReplay`` models how
 ``attest_verify()`` selects and replays the eventlog's records. The
 other steps of ``verify_document()``, ``evidence_parse()`` to

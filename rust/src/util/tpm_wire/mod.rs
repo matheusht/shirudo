@@ -11,7 +11,11 @@ mod kdf;
 mod parse;
 mod policy;
 
-pub(crate) use capi::{shirudo_tpm_ek_policy, tpm_nv_name, tpm_register_policy};
+pub(crate) use capi::{
+    shirudo_tpm_ek_policy, tpm_attest_parse, tpm_credential_protect, tpm_ecc_public_parse,
+    tpm_ecdsa_signature_parse, tpm_kdfe, tpm_nv_name, tpm_object_name, tpm_public_parse,
+    tpm_qualified_name, tpm_register_policy,
+};
 pub(crate) use parse::public_marshal;
 pub(crate) use policy::{
     nv_extend_cphash, object_name, policy_nv_written, policy_or, register_policy_final,
@@ -27,20 +31,20 @@ pub(crate) const DIGEST_LEN: usize = 32;
 pub(crate) const NAME_LEN: usize = 2 + DIGEST_LEN;
 pub(crate) const NV_RSA_BYTES: usize = 384;
 const NV_RSA_PUBLIC_AREA_LEN: usize = 24 + NV_RSA_BYTES;
-const CREDENTIAL_LEN: usize = 32;
-const ID_OBJECT_LEN: usize = 2 + 32 + 2 + CREDENTIAL_LEN;
+pub(crate) const CREDENTIAL_LEN: usize = 32;
+pub(crate) const ID_OBJECT_LEN: usize = 2 + 32 + 2 + CREDENTIAL_LEN;
 
-const ALG_RSA: u16 = 0x0001;
+pub(crate) const ALG_RSA: u16 = 0x0001;
 const ALG_AES: u16 = 0x0006;
 const ALG_SHA256: u16 = 0x000B;
-const ALG_ECC: u16 = 0x0023;
+pub(crate) const ALG_ECC: u16 = 0x0023;
 const ALG_ECDSA: u16 = 0x0018;
 const ALG_RSASSA: u16 = 0x0014;
 const ALG_NULL: u16 = 0x0010;
 const ALG_CFB: u16 = 0x0043;
 const ECC_NIST_P256: u16 = 0x0003;
-const ST_ATTEST_NV: u16 = 0x8014;
-const ST_ATTEST_QUOTE: u16 = 0x8018;
+pub(crate) const ST_ATTEST_NV: u16 = 0x8014;
+pub(crate) const ST_ATTEST_QUOTE: u16 = 0x8018;
 const GENERATED: u32 = 0xFF54_4347;
 const PCR_SELECT_LEN: usize = 3;
 const PCR_SELECTION_LEN: usize = 7 + PCR_SELECT_LEN;
@@ -74,35 +78,35 @@ pub struct TpmPublic {
 /// `struct tpm_ecc_public`.
 #[repr(C)]
 pub struct TpmEccPublic {
-    attrs: u32,
-    scheme: u16,
-    hash: u16,
-    curve: u16,
-    x: [u8; 32],
-    y: [u8; 32],
+    pub(crate) attrs: u32,
+    pub(crate) scheme: u16,
+    pub(crate) hash: u16,
+    pub(crate) curve: u16,
+    pub(crate) x: [u8; 32],
+    pub(crate) y: [u8; 32],
 }
 
 /// `struct tpm_attest`: a TPMS_ATTEST, its pointers into the buffer it
 /// was parsed from.
 #[repr(C)]
 pub struct TpmAttest {
-    ty: u16,
-    signer: [u8; NAME_LEN],
-    signer_len: usize,
-    extra: *const u8,
-    extra_len: usize,
-    clock: u64,
-    reset_count: u32,
-    restart_count: u32,
-    safe: bool,
-    firmware_version: u64,
-    pcr_mask: u32,
-    pcr_digest: [u8; DIGEST_LEN],
-    index_name: [u8; NAME_LEN],
-    index_name_len: usize,
-    offset: u16,
-    nv_data: *const u8,
-    nv_len: usize,
+    pub(crate) ty: u16,
+    pub(crate) signer: [u8; NAME_LEN],
+    pub(crate) signer_len: usize,
+    pub(crate) extra: *const u8,
+    pub(crate) extra_len: usize,
+    pub(crate) clock: u64,
+    pub(crate) reset_count: u32,
+    pub(crate) restart_count: u32,
+    pub(crate) safe: bool,
+    pub(crate) firmware_version: u64,
+    pub(crate) pcr_mask: u32,
+    pub(crate) pcr_digest: [u8; DIGEST_LEN],
+    pub(crate) index_name: [u8; NAME_LEN],
+    pub(crate) index_name_len: usize,
+    pub(crate) offset: u16,
+    pub(crate) nv_data: *const u8,
+    pub(crate) nv_len: usize,
 }
 
 const _: () = assert!(size_of::<TpmPublic>() == 400);

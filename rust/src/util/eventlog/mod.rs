@@ -11,7 +11,8 @@ mod capi;
 mod records;
 
 pub(crate) use capi::{
-    eventlog_boot_init, eventlog_boot_upatches, eventlog_path, eventlog_upatches,
+    eventlog_boot_id, eventlog_boot_init, eventlog_boot_lines, eventlog_boot_upatches,
+    eventlog_path, eventlog_timestamp, eventlog_upatches,
 };
 pub(crate) use records::{EventlogInit, UPATCH_INIT, UPATCH_UNLOAD};
 

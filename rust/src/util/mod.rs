@@ -3,6 +3,7 @@
 
 //! The ports of `util/`, one module for each C file they replace.
 
+mod attest;
 mod bpm_oci;
 mod bpm_package;
 mod bpm_source_config;

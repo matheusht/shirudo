@@ -35,13 +35,13 @@ use crate::util::tpm_wire::{DIGEST_LEN, NAME_LEN, NV_RSA_BYTES, tpm_nv_name, tpm
 const CHAIN_NAME: &[u8] = b"shirudo";
 /// `CHAIN_PCR`: PCR 9, which holds the initrd and nothing measured after
 /// it, and takes the anchor.
-const PCR: u32 = 9;
+pub(crate) const PCR: u32 = 9;
 /// `CHAIN_PHASE_PCR`: PCR 11, which systemd extends with the boot phase.
-const PHASE_PCR: u32 = 11;
+pub(crate) const PHASE_PCR: u32 = 11;
 /// `CHAIN_PCR_MASK`: the PCRs the init branch binds to.
-const PCR_MASK: u32 = (1 << PCR) | (1 << PHASE_PCR);
+pub(crate) const PCR_MASK: u32 = (1 << PCR) | (1 << PHASE_PCR);
 /// `CHAIN_ANCHOR_MAX`.
-const ANCHOR_MAX: usize = 128;
+pub(crate) const ANCHOR_MAX: usize = 128;
 
 /// `struct measured_upatch`: a member of the set an init event lists.
 #[repr(C)]
@@ -102,7 +102,7 @@ const _: () = assert!(core::mem::offset_of!(ChainStatus, init) == 80);
 
 /// memneq_explicit() of include/shirudo/string.h: whether the two
 /// differ, in a time that depends on their length alone.
-fn memneq_explicit(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn memneq_explicit(a: &[u8], b: &[u8]) -> bool {
     let mut neq = 0u8;
 
     for (x, y) in a.iter().zip(b) {
@@ -1073,7 +1073,9 @@ fn status_on(tpm: *mut Tpm, st: &mut ChainStatus) -> c_int {
     ret
 }
 
-pub(crate) use capi::chain_fold;
+pub(crate) use capi::{
+    chain_anchor, chain_fold, chain_key_event, chain_tree_event, chain_upatch_event,
+};
 
 mod capi {
     use core::ffi::{c_char, c_int, c_void};

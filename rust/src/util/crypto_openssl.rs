@@ -59,12 +59,12 @@ impl Sha256Ctx {
 /// `struct cert_pubkey`.
 #[repr(C)]
 pub struct CertPubkey {
-    rsa: bool,
-    n: [u8; 512],
-    n_len: usize,
-    e: u32,
-    x: [u8; 32],
-    y: [u8; 32],
+    pub(crate) rsa: bool,
+    pub(crate) n: [u8; 512],
+    pub(crate) n_len: usize,
+    pub(crate) e: u32,
+    pub(crate) x: [u8; 32],
+    pub(crate) y: [u8; 32],
 }
 
 const _: () = assert!(size_of::<CertPubkey>() == 600);
@@ -243,7 +243,12 @@ pub(crate) unsafe fn sha256_buffer(data: *const c_void, len: usize, out: *mut u8
 ///
 /// `data` is NULL or holds `len` bytes, and `out` is NULL or has room
 /// for `out_sz`.
-unsafe fn base64_encode(data: *const u8, len: usize, out: *mut c_char, out_sz: usize) -> c_int {
+pub(crate) unsafe fn base64_encode(
+    data: *const u8,
+    len: usize,
+    out: *mut c_char,
+    out_sz: usize,
+) -> c_int {
     if data.is_null() || out.is_null() || len > c_int::MAX as usize {
         return -EINVAL;
     }
@@ -300,7 +305,7 @@ fn p256_public_key(x: &[u8; 32], y: &[u8; 32]) -> *mut EvpPkey {
 
 /// 0 when (r, s) is the ECDSA P-256 signature of the digest by the key
 /// at (x, y), -EKEYREJECTED when not, -EINVAL for a key off the curve.
-fn ecdsa_p256_verify(
+pub(crate) fn ecdsa_p256_verify(
     x: &[u8; 32],
     y: &[u8; 32],
     digest: &[u8; 32],
@@ -882,7 +887,7 @@ pub(crate) unsafe fn aes128_cfb_encrypt(
 /// `n`, `label` and `inp` hold their lengths, `out` has room for `cap`,
 /// and `out_len` points to a size.
 #[allow(clippy::too_many_arguments)]
-unsafe fn rsa_oaep_encrypt(
+pub(crate) unsafe fn rsa_oaep_encrypt(
     n: *const u8,
     n_len: usize,
     e: u32,
@@ -975,7 +980,7 @@ unsafe fn rsa_oaep_encrypt(
 
 /// One ephemeral P-256 ECDH against the point (x, y): the ephemeral
 /// public point and the shared secret's x coordinate.
-fn ecdh_p256_ephemeral(
+pub(crate) fn ecdh_p256_ephemeral(
     x: &[u8; 32],
     y: &[u8; 32],
     eph_x: &mut [u8; 32],
@@ -1035,7 +1040,7 @@ fn ecdh_p256_ephemeral(
 ///
 /// `inp` holds `in_len` bytes, `out` has room for `cap`, and `out_len`
 /// points to a size.
-unsafe fn base64_decode(
+pub(crate) unsafe fn base64_decode(
     inp: *const c_char,
     in_len: usize,
     out: *mut u8,
@@ -1077,7 +1082,7 @@ fn bn_num_bytes(a: *const Bignum) -> c_int {
 ///
 /// `cert` is NULL or points to a cert, and `out` to room for a
 /// cert_pubkey.
-unsafe fn cert_pubkey(cert: *const Cert, out: *mut CertPubkey) -> c_int {
+pub(crate) unsafe fn cert_pubkey(cert: *const Cert, out: *mut CertPubkey) -> c_int {
     let mut group = [0u8; 32];
     let mut ret = -EINVAL;
 
@@ -1147,7 +1152,7 @@ unsafe fn cert_pubkey(cert: *const Cert, out: *mut CertPubkey) -> c_int {
 ///
 /// `cert` is NULL or points to a cert, `bundle_path` is NULL or a C
 /// string, and `reason` points to where the reason goes.
-unsafe fn cert_verify_chain(
+pub(crate) unsafe fn cert_verify_chain(
     cert: *const Cert,
     bundle_path: *const c_char,
     reason: *mut *const c_char,

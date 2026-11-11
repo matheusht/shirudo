@@ -248,7 +248,7 @@ UTIL_SRCS := \
     util/kernel_prereq.c \
     util/log.c \
      \
-    util/attest.c \
+     \
     util/chain_history.c \
     util/hex.c \
     util/string.c \
@@ -889,7 +889,7 @@ testing/helper/test-tpm-wire: testing/helper/test-tpm-wire.c util/hex.o \
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ -lcrypto -lssl $(ZLIB_LIBS) $(RUST_TEST_LDLIBS)
 
-testing/helper/test-register: testing/helper/test-register.c util/attest.o \
+testing/helper/test-register: testing/helper/test-register.c  \
                         util/upatch.o $(TPM_CLIENT_SRCS) $(REGISTER_OBJS)
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $(filter-out %.h,$^) $(REGISTER_LIBS) \
@@ -916,7 +916,7 @@ testing/helper/test-nv-cphash: testing/helper/test-nv-cphash.c \
 		-Wl,--wrap=enforcement_active
 
 testing/helper/test-tpm-session: testing/helper/test-tpm-session.c \
-		util/attest.o util/upatch.o $(TPM_CLIENT_SRCS) $(REGISTER_OBJS)
+		 util/upatch.o $(TPM_CLIENT_SRCS) $(REGISTER_OBJS) $(RUST_LIB)
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $(filter-out %.h,$^) $(REGISTER_LIBS) \
 		-Wl,--wrap=enforcement_active,--wrap=identity_read
@@ -1046,7 +1046,7 @@ testing/helper/test-tpm-command: testing/helper/test-tpm-command.c include/shiru
 	$(Q)$(CC) $(CFLAGS) -o $@ $<
 
 testing/helper/test-config-attest: testing/helper/test-config-attest.c \
-		util/attest.o util/upatch.o $(REGISTER_OBJS)
+		 util/upatch.o $(REGISTER_OBJS)
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(REGISTER_LIBS)
 
@@ -1246,7 +1246,7 @@ $(FUZZ_OUT)/fuzz-tpm-wire: testing/fuzz/fuzz-tpm-wire.c $(FUZZ_BASE) \
                              \
                             $(FUZZ_SEAL)
 $(FUZZ_OUT)/fuzz-attest: testing/fuzz/fuzz-attest.c $(FUZZ_BASE) \
-                          util/attest.c util/chain_history.c \
+                           util/chain_history.c \
                            $(FUZZ_SEAL) \
                           util/identity.c \
                           util/version_id.c util/upatch.c \
@@ -1344,7 +1344,7 @@ $(FUZZ_OUT)/fuzz-bpm-info: FUZZ_CFLAGS += $(TSS2_CFLAGS) $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-bpm-info: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) $(LIBELF_LIBS)
 $(FUZZ_OUT)/fuzz-attest-report: testing/fuzz/fuzz-attest-report.c \
                                $(FUZZ_BASE) testing/fuzz/output.c \
-                               builtin-attest.c builtin.h util/attest.c \
+                               builtin-attest.c builtin.h  \
                                util/chain_history.c \
                                \
                                util/identity.c \

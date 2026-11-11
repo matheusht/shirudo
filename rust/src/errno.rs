@@ -10,6 +10,7 @@ pub const EPERM: c_int = 1;
 pub const ENOENT: c_int = 2;
 pub const EINTR: c_int = 4;
 pub const EIO: c_int = 5;
+pub const ENXIO: c_int = 6;
 pub const E2BIG: c_int = 7;
 pub const EBADF: c_int = 9;
 pub const EAGAIN: c_int = 11;

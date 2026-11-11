@@ -3,9 +3,24 @@
 
 //! The string helpers of `include/shirudo/string.h` that stay in C.
 
-use core::ffi::c_char;
+use core::ffi::{c_char, c_int};
 
 unsafe extern "C" {
+    /// How many of the `len` bytes at `s`, from the first, are decimal
+    /// digits.
+    pub fn digits(s: *const c_char, len: usize) -> usize;
+    /// The decimal number the `len` bytes at `s` spell, digits alone and
+    /// at most `max`, into `*out`; -EINVAL or -ERANGE.
+    pub fn parse_u64(s: *const c_char, len: usize, max: u64, out: *mut u64) -> c_int;
+    /// parse_u64() of hexadecimal digits.
+    pub fn parse_x64(s: *const c_char, len: usize, max: u64, out: *mut u64) -> c_int;
+    /// The string `src` into the `size` bytes at `dst`, terminated
+    /// whenever `size` is not 0: its length, or -E2BIG when it did not
+    /// fit.
+    pub fn strscpy(dst: *mut c_char, src: *const c_char, size: usize) -> isize;
+    /// snprintf() into the `size` bytes at `buf`: the length written, or
+    /// -E2BIG, with `buf` left empty, when the output did not fit.
+    pub fn strsprintf(buf: *mut c_char, size: usize, fmt: *const c_char, ...) -> c_int;
     /// A DNS host name: labels of letters, digits and inner hyphens, 1 to
     /// 63 bytes each and 253 in all, not all of them decimal or 0x
     /// numbers, which an IPv4 parser would read as an address.

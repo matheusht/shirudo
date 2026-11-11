@@ -3,7 +3,8 @@
  * Copyright (c) 2026 Authors of shirudo
  *
  * Attestation: the evidence a target emits, the prediction and the
- * verification an operator runs against it.
+ * verification an operator runs against it, which rust/src/util/attest.rs
+ * implements.
  */
 
 #ifndef SHIRUDO_ATTEST_H

@@ -37,9 +37,9 @@ const DIGEST_LEN: usize = 32;
 const NAME_LEN: usize = 34;
 const NV_RSA_BYTES: usize = 384;
 const NV_RSA_PUBLIC_AREA_LEN: usize = 408;
-const PUBLIC_MAX: usize = 512;
-const ATTEST_MAX: usize = 1024;
-const SIGNATURE_MAX: usize = 160;
+pub(crate) const PUBLIC_MAX: usize = 512;
+pub(crate) const ATTEST_MAX: usize = 1024;
+pub(crate) const SIGNATURE_MAX: usize = 160;
 const PCR_SELECT_LEN: u8 = 3;
 /// TPM_TCTI_MAX of util/config.h.
 const TCTI_MAX: usize = 256;
@@ -48,7 +48,7 @@ const TCTI_MAX: usize = 256;
 /// attributes and the TCG endorsement key's, of util/tpm_wire.h.
 pub(crate) const REGISTER_ATTRS: u32 = 0x0e06_0048;
 const WRITER_ATTRS: u32 = 0x0004_0072;
-const EK_ATTRS: u32 = 0x0003_00b2;
+pub(crate) const EK_ATTRS: u32 = 0x0003_00b2;
 /// TPM_NV_POLICY_REF, without the NUL sizeof() counts.
 const NV_POLICY_REF: &[u8] = b"shirudo-nv-writer-v1";
 /// CONF_PATH of util/paths.h, which a message names.
@@ -59,10 +59,10 @@ const CONF_PATH: &CStr = c"/etc/shirudo/shirudo.conf";
 #[derive(Clone, Copy)]
 pub struct TpmKey {
     handle: u32,
-    public: [u8; PUBLIC_MAX],
-    public_len: usize,
-    name: [u8; NAME_LEN],
-    name_len: usize,
+    pub(crate) public: [u8; PUBLIC_MAX],
+    pub(crate) public_len: usize,
+    pub(crate) name: [u8; NAME_LEN],
+    pub(crate) name_len: usize,
 }
 
 impl TpmKey {
@@ -105,10 +105,10 @@ pub struct TpmNvInfo {
 /// `struct tpm_attestation`.
 #[repr(C)]
 pub struct TpmAttestation {
-    attest: [u8; ATTEST_MAX],
-    attest_len: usize,
-    signature: [u8; SIGNATURE_MAX],
-    signature_len: usize,
+    pub(crate) attest: [u8; ATTEST_MAX],
+    pub(crate) attest_len: usize,
+    pub(crate) signature: [u8; SIGNATURE_MAX],
+    pub(crate) signature_len: usize,
 }
 
 /// `struct tpm_writer_authorization`: what the NV writer signs to
@@ -2118,9 +2118,10 @@ fn ek_certificate(t: &Tpm, out: &mut [u8], len: &mut usize, rsa: &mut bool) -> c
 
 /// For Rust callers.
 pub(crate) use capi::{
-    tpm_close, tpm_nv_define, tpm_nv_extend, tpm_nv_extend_first, tpm_nv_info, tpm_nv_read,
-    tpm_nv_set_writer, tpm_nv_undefine, tpm_open, tpm_open_quiet, tpm_pcr_extend, tpm_pcr_read,
-    tpm_reset_count, tpm_writer_create,
+    tpm_activate_credential, tpm_ak_create, tpm_close, tpm_ek_certificate, tpm_ek_create,
+    tpm_key_flush, tpm_nv_certify, tpm_nv_define, tpm_nv_extend, tpm_nv_extend_first, tpm_nv_info,
+    tpm_nv_read, tpm_nv_set_writer, tpm_nv_undefine, tpm_open, tpm_open_quiet, tpm_pcr_extend,
+    tpm_pcr_read, tpm_quote, tpm_reset_count, tpm_writer_create,
 };
 
 mod capi {

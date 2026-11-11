@@ -15,7 +15,7 @@ policy and binding, the events and the eventlog, the evidence, what the
 operator's verifier computes, the separate config PCR, and the limits.
 :src:`rust/src/util/chain.rs`, :src:`rust/src/util/tpm.rs`,
 :src:`rust/src/util/tpm_wire/`, :src:`rust/src/util/eventlog/` and
-:src:`util/attest.c` are the reference.
+:src:`rust/src/util/attest.rs` are the reference.
 
 Problem
 -------

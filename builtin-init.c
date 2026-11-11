@@ -1384,7 +1384,7 @@ static int chain_extend_init(struct measured_upatch *set, size_t n)
 	/*
 	 * init_event = SHA256("shirudo-init\0" || cert_sha256 || set_digest
 	 *                     || tree_root), the formula the operator's
-	 * predictor shares (util/attest.c).
+	 * predictor shares (builtin-attest.c).
 	 */
 	ret = tree_root_at_boot(tree_root);
 	if (ret) {

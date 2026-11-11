@@ -37,13 +37,13 @@ const _: () = assert!(size_of::<EvidenceEvent>() == 48);
 pub struct Evidence {
     events: *mut EvidenceEvent,
     initial_pcr: [u8; 32],
-    value: [u8; 32],
-    n_events: usize,
+    pub(crate) value: [u8; 32],
+    pub(crate) n_events: usize,
     capacity: usize,
-    reset_count: u32,
-    restart_count: u32,
-    pcr: u32,
-    present: bool,
+    pub(crate) reset_count: u32,
+    pub(crate) restart_count: u32,
+    pub(crate) pcr: u32,
+    pub(crate) present: bool,
 }
 
 const _: () = assert!(size_of::<Evidence>() == 104);
@@ -466,6 +466,11 @@ fn verify(
     }
     (0, c"config root history matches the quoted PCR")
 }
+
+pub(crate) use capi::{
+    config_evidence_clear, config_evidence_collect, config_evidence_emit, config_evidence_parse,
+    config_evidence_verify,
+};
 
 mod capi {
     use core::ffi::{c_char, c_int};
