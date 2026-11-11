@@ -8,6 +8,7 @@
 pub mod bpm_tree;
 pub mod btf;
 pub mod curl;
+pub mod dm_verity;
 pub mod elf;
 pub mod hex;
 pub mod identity;

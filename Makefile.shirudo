@@ -257,7 +257,7 @@ UTIL_SRCS := \
     util/bpm_tree_overlap.c \
     util/curl.c \
     util/kconfig.c \
-    util/image_cache.c \
+     \
     util/image_runtime.c \
     util/image_guards.c \
     util/image_keys.c \

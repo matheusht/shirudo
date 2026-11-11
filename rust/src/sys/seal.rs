@@ -35,6 +35,9 @@ unsafe extern "C" {
     pub fn seal_lock(path: *const c_char) -> c_int;
     /// Whether the file at `path` carries shirudo's seal label.
     pub fn seal_owns(path: *const c_char) -> bool;
+    /// The seal label on the file at `path`, a symlink's own inode
+    /// rather than its target's: 0 or -errno.
+    pub fn seal_label(path: *const c_char) -> c_int;
     /// The file at `path`, under a sealed directory, opened to be read:
     /// an fd, or -errno.
     pub fn seal_open_read(path: *const c_char) -> c_int;

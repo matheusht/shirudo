@@ -46,6 +46,7 @@ pub const CURLOPT_HEADERDATA: c_int = 10029;
 pub const CURLOPT_SSLVERSION: c_int = 32;
 pub const CURLOPT_CUSTOMREQUEST: c_int = 10036;
 pub const CURLOPT_NOBODY: c_int = 44;
+pub const CURLOPT_FAILONERROR: c_int = 45;
 pub const CURLOPT_FOLLOWLOCATION: c_int = 52;
 pub const CURLOPT_SSL_VERIFYPEER: c_int = 64;
 pub const CURLOPT_MAXREDIRS: c_int = 68;

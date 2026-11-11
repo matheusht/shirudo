@@ -328,6 +328,9 @@ unsafe extern "C" {
     pub fn read(fd: c_int, buf: *mut c_void, count: usize) -> isize;
     pub fn pread(fd: c_int, buf: *mut c_void, count: usize, offset: i64) -> isize;
     pub fn unlink(path: *const c_char) -> c_int;
+    pub fn link(from: *const c_char, to: *const c_char) -> c_int;
+    pub fn rmdir(path: *const c_char) -> c_int;
+    pub fn mkdtemp(template: *mut c_char) -> *mut c_char;
     pub fn access(path: *const c_char, mode: c_int) -> c_int;
     pub fn geteuid() -> u32;
     pub fn faccessat(dirfd: c_int, path: *const c_char, mode: c_int, flags: c_int) -> c_int;
@@ -351,6 +354,13 @@ unsafe extern "C" {
         value: *mut c_void,
         size: usize,
     ) -> isize;
+    pub fn fsetxattr(
+        fd: c_int,
+        name: *const c_char,
+        value: *const c_void,
+        size: usize,
+        flags: c_int,
+    ) -> c_int;
     pub fn strcasecmp(a: *const c_char, b: *const c_char) -> c_int;
     pub fn strncasecmp(a: *const c_char, b: *const c_char, n: usize) -> c_int;
     pub fn qsort(

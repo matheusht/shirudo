@@ -17,8 +17,8 @@ use crate::text::strsprintf;
 
 const BLOCK_SIZE: u64 = 4096;
 const SALT_SIZE: usize = 32;
-const SIG_MAX: u64 = 16384;
-const MAX_BYTES: u64 = 1 << 40;
+pub(crate) const SIG_MAX: u64 = 16384;
+pub(crate) const MAX_BYTES: u64 = 1 << 40;
 const DIGESTS_PER_BLOCK: u64 = BLOCK_SIZE / 32;
 const SUPERBLOCK_SIZE: usize = 512;
 
@@ -30,14 +30,14 @@ pub struct ConfigImage {
     hash_blocks: u64,
     signed_root: bool,
     salt: [u8; SALT_SIZE],
-    root_hash: [u8; 32],
+    pub(crate) root_hash: [u8; 32],
 }
 
 /// `struct config_image_open`: an image and its open parts, -1 for one
 /// not open.
 #[repr(C)]
 pub struct ConfigImageOpen {
-    image: ConfigImage,
+    pub(crate) image: ConfigImage,
     data_fd: c_int,
     hash_fd: c_int,
     signature_fd: c_int,
@@ -318,6 +318,8 @@ fn open_image(
         }
     }
 }
+
+pub(crate) use capi::{config_image_close, config_image_open};
 
 mod capi {
     use core::ffi::{CStr, c_char, c_int};

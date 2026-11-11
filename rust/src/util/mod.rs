@@ -23,6 +23,7 @@ mod format;
 mod harden;
 mod help;
 mod image_bootstrap;
+mod image_cache;
 mod image_config;
 mod initrd;
 mod io;

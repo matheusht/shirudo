@@ -1,5 +1,9 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
-/* Copyright (c) 2026 Authors of shirudo */
+/*
+ * Copyright (c) 2026 Authors of shirudo
+ *
+ * The config image cache, which rust/src/util/image_cache.rs implements.
+ */
 
 #ifndef SHIRUDO_IMAGE_CACHE_H
 #define SHIRUDO_IMAGE_CACHE_H
