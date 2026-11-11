@@ -20,9 +20,9 @@ const NAME_LEN: usize = 34;
 const NV_RSA_BYTES: usize = 384;
 
 /// `enum eventlog_upatch_event`.
-pub(super) const UPATCH_INIT: c_int = 0;
+pub(crate) const UPATCH_INIT: c_int = 0;
 pub(super) const UPATCH_LOAD: c_int = 1;
-pub(super) const UPATCH_UNLOAD: c_int = 2;
+pub(crate) const UPATCH_UNLOAD: c_int = 2;
 
 /// What `eventlog_boot_lines()` calls with each line.
 pub(super) type LineFn =

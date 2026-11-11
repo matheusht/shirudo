@@ -294,6 +294,12 @@ unsafe extern "C" {
     pub fn strcmp(a: *const c_char, b: *const c_char) -> c_int;
     pub fn strlen(s: *const c_char) -> usize;
     pub fn strnlen(s: *const c_char, max: usize) -> usize;
+    pub fn getxattr(
+        path: *const c_char,
+        name: *const c_char,
+        value: *mut c_void,
+        size: usize,
+    ) -> isize;
     pub fn strcasecmp(a: *const c_char, b: *const c_char) -> c_int;
     pub fn strncasecmp(a: *const c_char, b: *const c_char, n: usize) -> c_int;
     pub fn qsort(

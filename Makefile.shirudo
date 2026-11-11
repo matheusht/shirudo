@@ -238,7 +238,6 @@ UTIL_SRCS := \
     util/sysinfo_image.c \
     util/upatch.c \
     util/xdp.c \
-    util/measured.c \
     util/java_agent.c \
     util/identity.c \
     util/tamper.c \
@@ -1318,7 +1317,7 @@ $(FUZZ_OUT)/fuzz-upatch-info: testing/fuzz/fuzz-upatch-info.c $(FUZZ_BASE) \
                               util/curl.c \
                               util/identity.c \
                               util/io.c util/java_agent.c util/kernel_abi.c \
-                              util/measured.c \
+                              \
                               util/options.c util/paths.c \
                               util/similar.c \
                               util/upatch.c \
@@ -1351,7 +1350,7 @@ $(FUZZ_OUT)/fuzz-attest-report: testing/fuzz/fuzz-attest-report.c \
                                util/config_update.c \
                                util/identity.c \
                                util/io.c \
-                               util/measured.c \
+                               \
                                util/options.c util/paths.c util/similar.c \
                                util/upatch.c util/version_id.c $(FUZZ_SEAL) \
                                $(LIBBPF_A)

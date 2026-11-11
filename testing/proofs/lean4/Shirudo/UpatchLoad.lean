@@ -129,9 +129,9 @@ lock across the purge, `recorded_runs`, even with no process left and the
 register and the log agreeing (`xattr_needs_undo`, `purge_needs_lock`);
 and without the `measured_holds()` filter of `boot_restore()`,
 `init_restores_exactly` (`init_needs_filter`).
-testing/proofs/cbmc/measured-fold-model.c checks `measured_event()` and
-`measured_holds()` against `fold` and `held` on every sequence of up to
-six records.
+A CBMC harness checked `measured_event()` and `measured_holds()` of
+util/measured.c against `fold` and `held` on every sequence of up to six
+records; it went with the C in the port to Rust.
 -/
 
 namespace Shirudo.UpatchLoad

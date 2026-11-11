@@ -1,5 +1,9 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
-/* Copyright (c) 2026 Authors of shirudo */
+/*
+ * Copyright (c) 2026 Authors of shirudo
+ *
+ * The measured set, which rust/src/util/measured.rs implements.
+ */
 
 #ifndef SHIRUDO_MEASURED_H
 #define SHIRUDO_MEASURED_H

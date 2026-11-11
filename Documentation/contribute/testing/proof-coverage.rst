@@ -787,13 +787,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
      - Stores only PCRs 0 to 23, the value its 64 hex digits spell under
        its index, and marks exactly that one; the other PCRs stay as they
        were; a refusal marks nothing
-   * - ``measured-fold-model``
-     - ``measured_event()``, ``measured_holds()``
-     - Every sequence of up to six init, load and unload records over two
-       names and two payloads
-     - The set holds a name with a payload exactly as the Lean model
-       ``Shirudo.UpatchLoad`` folds the records, and never with the empty
-       payload of a missing xattr
    * - ``config-update-follows``
      - ``event_follows()`` and ``same_event()`` of :src:`util/config_update.c`
      - Every record ``record_decode()`` accepts, and the zeroed one before
@@ -1035,7 +1028,7 @@ the model follows the C.
        any name of 1 to 256 bytes; sequence numbers of a ``__s64``
      - Review; the C harness for event encoding was removed with the
        C implementation
-   * - ``Shirudo.Measured``, ``measured_event()`` of :src:`util/measured.c`
+   * - ``Shirudo.Measured``, ``measured_event()`` of :src:`rust/src/util/measured.rs`
      - ``holds_iff``: ``measured_holds()`` finds a name and payload exactly
        when the last init, load or unload bearing on the name is its load
        with that payload; ``measuredSet_nodup``: each name once;
@@ -1228,8 +1221,8 @@ the model follows the C.
        record; the revocation purge ``init`` runs before the restore; a
        restore that fails, which is ``rebootFail``; key revocations and
        tree operations, which extend the same register
-     - CBMC, ``measured-fold-model``, for ``measured_event()`` and
-       ``measured_holds()`` up to six records; review for the rest
+     - Review; the bounded C harness for the measured set was removed
+       when that implementation moved to Rust
    * - ``Shirudo.TreeSync``, ``cmd_bpm_tree_sync()`` and
        ``tree_recover_pending()`` of :src:`builtin-bpm.c`
      - ``generation_mono``, ``lastSeq_mono``, ``log_grows``: between any two
@@ -1471,7 +1464,7 @@ round-trips; ``upatch_rodata_symbol_range()`` of
 rewrites; ``chain_init_event()`` of :src:`rust/src/util/chain.rs` on a set that is
 not empty; ``upatch_name_signed()``, ``upatch_member_valid()`` and
 ``prog_specs_xdp_classes()`` of :src:`util/upatch.c`; the reading of
-the eventlog behind boot restore in :src:`util/measured.c`,
+the eventlog behind boot restore in :src:`rust/src/util/measured.rs`,
 ``init_of_live()``, ``record_event()`` and the walk of
 ``verified_upatches()``, and that ``upatches_line()`` of
 :src:`rust/src/util/eventlog/` hands init the names and payloads whose events

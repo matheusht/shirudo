@@ -46,8 +46,8 @@ const ANCHOR_MAX: usize = 128;
 /// `struct measured_upatch`: a member of the set an init event lists.
 #[repr(C)]
 pub struct MeasuredUpatch {
-    name: [u8; NAME_MAX + 1],
-    payload_hex: [u8; 2 * PAYLOAD_HASH_LEN + 1],
+    pub(crate) name: [u8; NAME_MAX + 1],
+    pub(crate) payload_hex: [u8; 2 * PAYLOAD_HASH_LEN + 1],
 }
 
 /// `struct chain_init_info`: the binding chain_init() made or found.

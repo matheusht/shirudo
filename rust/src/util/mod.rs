@@ -28,6 +28,7 @@ mod kernel_build_id;
 mod kernel_release;
 mod keyring;
 mod keys;
+mod measured;
 mod nv_writer;
 mod preflight;
 mod report;

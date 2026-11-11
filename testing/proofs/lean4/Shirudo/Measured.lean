@@ -2,14 +2,15 @@
 -- Copyright (c) 2026 Authors of shirudo
 
 /-!
-The measured set of util/measured.c: the upatches the eventlog records as
-loaded, each with the payload of its load. `eventlog_upatches()` and
-`eventlog_boot_upatches()` of rust/src/util/eventlog/ walk the records in
-order and call `measured_event()` for each load and unload they measure:
-an init record gives `EVENTLOG_UPATCH_INIT`, which starts the set over,
-then a load for each upatch of its set, an `upatch_load` record a load and
-an `upatch_unload` record an unload. The walk stops at the first error,
-and `measured_set_log()` and `measured_set_boot()` fail with it.
+The measured set of rust/src/util/measured.rs: the upatches the eventlog
+records as loaded, each with the payload of its load.
+`eventlog_upatches()` and `eventlog_boot_upatches()` of
+rust/src/util/eventlog/ walk the records in order and call
+`measured_event()` for each load and unload they measure: an init record
+gives `EVENTLOG_UPATCH_INIT`, which starts the set over, then a load for
+each upatch of its set, an `upatch_load` record a load and an
+`upatch_unload` record an unload. The walk stops at the first error, and
+`measured_set_log()` and `measured_set_boot()` fail with it.
 
 `measured_event()` keeps the set in an array: a load overwrites the
 payload of the entry of its name, or appends one and refuses a 4097th
@@ -36,7 +37,7 @@ writes, a set only in an init record.
 
 namespace Shirudo.Measured
 
-/-- `MEASURED_MAX` of util/measured.c. -/
+/-- `MEASURED_MAX` of rust/src/util/measured.rs. -/
 def measuredMax : Nat := 4096
 
 /-- `UPATCH_NAME_MAX`: an entry's name holds this many bytes and a NUL. -/
