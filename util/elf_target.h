@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * Copyright (c) 2026 Authors of shirudo
+ *
+ * The GNU build ID of a uprobe.multi target and the offsets of the
+ * symbols it names, which rust/src/util/elf_target.rs implements.
  */
 
 #ifndef SHIRUDO_ELF_TARGET_H

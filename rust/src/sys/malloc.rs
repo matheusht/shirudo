@@ -32,4 +32,7 @@ unsafe extern "C" {
     pub fn xstrndup(s: *const c_char, n: usize) -> *mut c_char;
     /// Scrubs and frees what xstrndup() gave; NULL is nothing to free.
     pub fn xstrfree(s: *mut c_char);
+    /// Frees what the C library or a library on it allocated, as
+    /// scandir(), getline() and realpath() do; NULL is nothing to free.
+    pub fn libc_free(p: *mut c_void);
 }

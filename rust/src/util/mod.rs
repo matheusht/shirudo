@@ -13,6 +13,7 @@ mod config_attest;
 mod config_image;
 mod config_measure;
 mod crypto_openssl;
+mod elf_target;
 mod eventlog;
 mod format;
 mod harden;

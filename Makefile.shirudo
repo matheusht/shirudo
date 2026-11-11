@@ -276,7 +276,6 @@ UTIL_SRCS := \
     util/upatch_rodata.c \
     util/upatch_decode.c \
     util/upatch_maps_otel.c \
-    util/elf_target.c \
     util/upatch_pins.c \
     util/upatch_verify.c \
     util/upatch_resolve.c
@@ -329,7 +328,8 @@ BUILD_SRCS := \
     tools/shirudo-build/bpm-publish.c \
     tools/shirudo-build/bpm-show.c \
     tools/shirudo-build/vouch.c \
-    tools/shirudo-build/image.c
+    tools/shirudo-build/image.c \
+    util/elf_target_func.c
 
 # shirudo-quote-check is a backend's program: it checks keepalive quotes
 # with the TPM parsers of util/ and is never linked into shirudo.
@@ -561,7 +561,7 @@ tools/shirudo-build/shirudo-build: $(BUILD_OBJS) $(SIGN_OBJ) \
                                    util/log.o util/loader.o \
                                    util/io.o util/malloc.o util/paths.o \
                                    util/upatch.o \
-                                   util/elf_target.o util/hex.o util/keys.o \
+                                   util/hex.o util/keys.o \
                                    util/seal.o util/string.o \
                                    util/curl.o \
                                    util/upatch_rodata.o \
@@ -1270,8 +1270,7 @@ $(FUZZ_OUT)/fuzz-eventlog: testing/fuzz/fuzz-eventlog.c $(FUZZ_BASE) \
 $(FUZZ_OUT)/fuzz-eventlog: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-eventlog: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS) $(ZLIB_LIBS)
 $(FUZZ_OUT)/fuzz-kernel: testing/fuzz/fuzz-kernel.c $(FUZZ_BASE)
-$(FUZZ_OUT)/fuzz-elf: testing/fuzz/fuzz-elf.c $(FUZZ_BASE) \
-                       util/elf_target.c $(LIBBPF_A)
+$(FUZZ_OUT)/fuzz-elf: testing/fuzz/fuzz-elf.c $(FUZZ_BASE) $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-elf: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-elf: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS)
 $(FUZZ_OUT)/fuzz-serializer: testing/fuzz/fuzz-serializer.c $(FUZZ_BASE) \
@@ -1326,7 +1325,7 @@ $(FUZZ_OUT)/fuzz-quote-check: testing/fuzz/fuzz-quote-check.c $(FUZZ_BASE) \
 $(FUZZ_OUT)/fuzz-upatch-info: testing/fuzz/fuzz-upatch-info.c $(FUZZ_BASE) \
                               testing/fuzz/output.c builtin-upatch.c \
                               builtin.h util/chain.c \
-                              util/curl.c util/elf_target.c \
+                              util/curl.c \
                               util/identity.c \
                               util/io.c util/java_agent.c util/kernel_abi.c \
                               util/keys.c util/measured.c \
