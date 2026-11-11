@@ -12,7 +12,6 @@ use core::ptr;
 use crate::errno::{E2BIG, EFBIG, EINVAL, ENAMETOOLONG, ENOENT, ENOMEM, ENOSPC};
 use crate::ffi;
 use crate::sys::hex::{hex_decode, hex_encode, sha256_digest_decode};
-use crate::sys::io::{read_file, read_text_line};
 use crate::sys::libc::{
     File, O_RDONLY, PATH_MAX, R_OK, Utsname, access, close, errno, fclose, fdopen, fopen, strerror,
     uname,
@@ -28,6 +27,7 @@ use crate::sys::zlib::{
 use crate::text::{cstr, find, strscpy, strsprintf};
 use crate::util::crypto_openssl::sha256_calc;
 use crate::util::image_config;
+use crate::util::io::{read_file, read_text_line};
 use crate::util::json::{JsonEmit, JsonField, MAX_BYTES, parse_schema};
 use crate::util::kernel_build_id::read_build_id;
 use crate::util::kernel_release::prefix_matches;

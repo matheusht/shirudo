@@ -11,7 +11,8 @@ use super::{
     strsprintf,
 };
 use crate::errno::{E2BIG, EINVAL, ENAMETOOLONG, ENOENT, ENOSPC};
-use crate::sys::{io, libc, malloc};
+use crate::sys::{libc, malloc};
+use crate::util::io;
 
 const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 

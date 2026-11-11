@@ -19,7 +19,6 @@ use core::ffi::{CStr, c_int};
 
 use crate::errno::{EFBIG, EINVAL, ENAMETOOLONG, ENOENT, ENOMEM};
 use crate::sys::hex::hex_encode;
-use crate::sys::io::read_file;
 use crate::sys::libc::{
     AT_FDCWD, F_OK, O_CLOEXEC, O_RDONLY, PATH_MAX, STATX_SIZE, Statx, access, close, env, errno,
     open, read, statx, strerror, time, unlink,
@@ -30,6 +29,7 @@ use crate::sys::seal::{seal_append_line, seal_lock};
 use crate::text::{cstr, strsprintf};
 use crate::util::crypto_openssl::sha256_calc;
 use crate::util::image_config;
+use crate::util::io::read_file;
 use crate::util::json::{JsonEmit, JsonField, MAX_BYTES, parse_schema};
 use crate::util::timefmt::iso8601;
 

@@ -12,7 +12,6 @@ use core::ffi::{CStr, c_char, c_int, c_uint};
 use core::mem::MaybeUninit;
 
 use crate::errno::{E2BIG, EINVAL, EIO, ELOOP, ENOENT, ENOTDIR, EPERM};
-use crate::sys::io::open_beneath;
 use crate::sys::libc::{
     AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW, F_DUPFD_CLOEXEC, O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW,
     O_RDONLY, S_IFDIR, S_IFMT, S_IFREG, STATX_TYPE, Statx, close, closedir, errno, explicit_bzero,
@@ -20,6 +19,7 @@ use crate::sys::libc::{
 };
 use crate::text::parse_u64;
 use crate::util::config::{Config, Scrubbed, load_fd};
+use crate::util::io::open_beneath;
 
 /// `enum image_path`: the entries of the image, by their paths under its
 /// root.
@@ -414,8 +414,8 @@ mod capi {
     use core::ffi::{CStr, c_char, c_int, c_uint};
 
     use crate::errno::EINVAL;
-    use crate::sys::io::open_beneath;
     use crate::util::config::Config;
+    use crate::util::io::open_beneath;
 
     #[unsafe(no_mangle)]
     pub extern "C" fn image_config_active() -> bool {

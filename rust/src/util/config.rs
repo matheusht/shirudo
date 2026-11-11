@@ -12,7 +12,6 @@ use core::ptr;
 use crate::errno::{EINVAL, EIO, ENOENT, EPERM};
 use crate::ffi;
 use crate::sys::hex::hex_decode_max;
-use crate::sys::io::{check_trusted, read_text_line};
 use crate::sys::libc::{
     BUFSIZ, F_DUPFD_CLOEXEC, File, IOFBF, SEEK_SET, close, env, errno, explicit_bzero, fclose,
     fcntl, fdopen, ferror, fileno, fopen, free, lseek, scrub, setvbuf, strerror,
@@ -20,6 +19,7 @@ use crate::sys::libc::{
 use crate::sys::log::{pr_err, pr_warn};
 use crate::sys::string::dns_name_valid;
 use crate::text::{parse_u64, strscpy, trim_blanks};
+use crate::util::io::{check_trusted, read_text_line};
 use crate::util::json::MAX_BYTES;
 
 const OWNER_AUTH_MAX: usize = 256;

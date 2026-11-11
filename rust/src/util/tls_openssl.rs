@@ -20,7 +20,6 @@ use crate::sys::curl::{
     curl_easy_getinfo, curl_easy_setopt, curl_free, curl_url, curl_url_cleanup, curl_url_get,
     curl_url_set,
 };
-use crate::sys::io::check_trusted;
 use crate::sys::libc::{O_CLOEXEC, O_RDONLY, close, open, strcasecmp, strncasecmp};
 use crate::sys::log::pr_warn;
 use crate::sys::openssl::{
@@ -37,6 +36,7 @@ use crate::sys::string::dns_name_valid;
 use crate::text::cstr;
 use crate::util::config::{self, Scrubbed};
 use crate::util::image_config;
+use crate::util::io::check_trusted;
 
 /// The groups of every host by default: hybrid ML-KEM alone.
 const TLS_GROUPS: &CStr = c"*X25519MLKEM768:SecP256r1MLKEM768";

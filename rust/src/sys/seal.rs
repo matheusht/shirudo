@@ -35,6 +35,9 @@ unsafe extern "C" {
     pub fn seal_lock(path: *const c_char) -> c_int;
     /// Whether the file at `path` carries shirudo's seal label.
     pub fn seal_owns(path: *const c_char) -> bool;
+    /// The file at `path`, under a sealed directory, opened to be read:
+    /// an fd, or -errno.
+    pub fn seal_open_read(path: *const c_char) -> c_int;
     /// `line` appended as one record to the sealed log at `path`, under
     /// the lock that keeps its appenders apart: 0 or -errno.
     pub fn seal_append_line(path: *const c_char, line: *const c_char, len: usize) -> c_int;

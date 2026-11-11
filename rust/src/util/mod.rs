@@ -24,6 +24,7 @@ mod help;
 mod image_bootstrap;
 mod image_config;
 mod initrd;
+mod io;
 mod json;
 mod kernel_build_id;
 mod kernel_release;

@@ -10,8 +10,6 @@ string-tokens		--unwind 8 LEN=0-4
 string-search		--unwind 8 LEN=0-5
 string-sanitize		--unwind 8 LEN=0-6
 hex			--unwind 12
-io-lines		--unwind 10
-io-append	--unwind 12 LEN=0-6
 attest-pcrs		--unwind 9
 attest-name-digest	--unwind 72 LEN=64-70
 attest-name-digest-long	--unwind 72 --unwindset any_spec.0:323,harness.0:323,harness.1:323,strnlen.0:323,strchr.0:323,strlen.0:323,memcmp.0:323 LEN=321,322

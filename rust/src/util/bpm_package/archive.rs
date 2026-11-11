@@ -12,7 +12,6 @@ use super::tar::{
 };
 use crate::errno::{E2BIG, EFBIG, EINVAL, EIO, ENAMETOOLONG, ENOENT, ENOMEM, EPERM};
 use crate::ffi;
-use crate::sys::io::write_complete;
 use crate::sys::libc::{
     F_DUPFD_CLOEXEC, O_CREAT, O_EXCL, O_WRONLY, PATH_MAX, SEEK_SET, close, errno, fchmod, fcntl,
     lseek,
@@ -22,6 +21,7 @@ use crate::sys::seal::{seal_mkdir_p, seal_open};
 use crate::sys::zlib::{GzFileS, Z_OK, gzclose, gzdirect, gzdopen, gzopen, gzread};
 use crate::text::{at, cstr, strsprintf};
 use crate::util::bpm_oci::{MAX_PACKAGE_BYTES, MAX_PACKAGE_ENTRIES};
+use crate::util::io::write_complete;
 
 /// The most a read asks zlib for at once.
 const CHUNK: usize = 65536;

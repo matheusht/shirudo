@@ -13,7 +13,6 @@ use core::ptr;
 use crate::errno::{E2BIG, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT, ENOKEY, ENOMEM, EPERM};
 use crate::ffi;
 use crate::sys::hex::hex_encode;
-use crate::sys::io::{check_trusted, open_beneath, read_fd};
 use crate::sys::libc::{
     AT_EMPTY_PATH, Dirent, F_OK, O_CLOEXEC, O_DIRECTORY, O_RDONLY, PATH_MAX, S_IFMT, S_IFREG,
     STATX_SIZE, STATX_TYPE, Statx, access, alphasort, close, errno, faccessat, open, read, scandir,
@@ -28,6 +27,7 @@ use crate::util::crypto_openssl::{
     Cert, cert_free, cert_pubkey_digest, cert_read_der, sha256_buffer, verify_detached,
 };
 use crate::util::image_config;
+use crate::util::io::{check_trusted, open_beneath, read_fd};
 
 /// `KEYS_MAX`: the most certificates a set holds.
 const KEYS_MAX: usize = 16;

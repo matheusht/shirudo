@@ -47,6 +47,10 @@ pub const BUFSIZ: usize = 8192;
 pub const STATX_TYPE: u32 = 0x1;
 pub const STATX_SIZE: u32 = 0x200;
 pub const STATX_BASIC_STATS: u32 = 0x7ff;
+/// `STATX_ATTR_MOUNT_ROOT`: the file is the root of a mount.
+pub const STATX_ATTR_MOUNT_ROOT: u64 = 0x2000;
+pub const O_PATH: c_int = 0o10000000;
+pub const S_ISVTX: u16 = 0o1000;
 pub const S_IFMT: u16 = 0o170000;
 pub const S_IFREG: u16 = 0o100000;
 pub const S_IFDIR: u16 = 0o040000;
@@ -63,6 +67,25 @@ pub const LOCK_NB: c_int = 4;
 
 /// A stdio `FILE`.
 pub enum File {}
+
+/// `struct statfs` of the 64-bit ABIs: its type, and the rest of its
+/// 120 bytes.
+#[repr(C)]
+pub struct Statfs {
+    pub f_type: i64,
+    rest: [i64; 14],
+}
+
+const _: () = assert!(size_of::<Statfs>() == 120);
+
+impl Statfs {
+    pub const fn zeroed() -> Self {
+        Statfs {
+            f_type: 0,
+            rest: [0; 14],
+        }
+    }
+}
 
 /// What fgetc() returns at the end or on an error.
 pub const EOF: c_int = -1;
@@ -196,7 +219,9 @@ pub struct Statx {
     spare0: u16,
     pub ino: u64,
     pub size: u64,
-    times: [u64; 10],
+    blocks: u64,
+    pub attributes_mask: u64,
+    times: [u64; 8],
     rdev_major: u32,
     rdev_minor: u32,
     pub dev_major: u32,
@@ -220,7 +245,9 @@ impl Statx {
             spare0: 0,
             ino: 0,
             size: 0,
-            times: [0; 10],
+            blocks: 0,
+            attributes_mask: 0,
+            times: [0; 8],
             rdev_major: 0,
             rdev_minor: 0,
             dev_major: 0,
@@ -266,6 +293,9 @@ unsafe extern "C" {
     pub fn openat(dirfd: c_int, path: *const c_char, flags: c_int, ...) -> c_int;
     pub fn flock(fd: c_int, op: c_int) -> c_int;
     pub fn fsync(fd: c_int) -> c_int;
+    pub fn fstatfs(fd: c_int, buf: *mut Statfs) -> c_int;
+    pub fn realpath(path: *const c_char, resolved: *mut c_char) -> *mut c_char;
+    pub fn write(fd: c_int, buf: *const c_void, count: usize) -> isize;
     pub fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> c_int;
     pub fn renameat(
         olddirfd: c_int,

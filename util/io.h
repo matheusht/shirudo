@@ -1,5 +1,9 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
-/* Copyright (c) 2026 Authors of shirudo */
+/*
+ * Copyright (c) 2026 Authors of shirudo
+ *
+ * The file helpers, which rust/src/util/io.rs implements.
+ */
 
 #ifndef SHIRUDO_IO_H
 #define SHIRUDO_IO_H

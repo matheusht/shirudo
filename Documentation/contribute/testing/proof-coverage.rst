@@ -118,19 +118,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
      - Strings of 0, 6 to 8 and 70 to 72 bytes
      - Accepted exactly as ``sha256:`` and 64 hex digits of either case,
        into their value; a null pointer refused
-   * - ``io-lines``
-     - ``lines_len()``
-     - Up to 8 bytes
-     - Ends at a newline or is 0, with no newline behind it
-   * - ``io-append``
-     - ``append_line()``, ``last_line_end()``, ``write_complete()``
-     - Files of 0 to 6 bytes, lines of up to 3; ``fstat()``,
-       ``ftruncate()``, ``write()`` and ``fsync()`` stubs on the file,
-       the first write failing, cut short or interrupted, ``pread()``
-       never failing
-     - A line holding a line break or a NUL refused, the file unchanged;
-       else the file cut back to its last line break, then the line and
-       one line break; a failed write or sync cut back to that line break
    * - ``attest-pcrs``
      - ``attest_parse_pcrs()``, ``attest_parse_pcr_value()``
      - Up to 6 bytes
@@ -1409,7 +1396,7 @@ The bpm_oci unit cases and the oci-http fuzz target read real answers. The zip d
 a fuzz target nor a proof; its unit cases cut and flip a jar byte by
 byte.
 
-Of :src:`util/io.c` the proofs cover ``lines_len()``,
+Of :src:`rust/src/util/io.rs` the proofs cover ``lines_len()``,
 ``read_text_line()`` and the append of a record. ``pread()`` never fails
 in them, so the retry of ``last_line_end()`` after ``EINTR`` and its
 refusal of a short read have no proof, nor have the readers of whole

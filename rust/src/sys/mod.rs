@@ -10,7 +10,6 @@ pub mod curl;
 pub mod elf;
 pub mod hex;
 pub mod identity;
-pub mod io;
 pub mod kernel_abi;
 pub mod libc;
 pub mod loader;

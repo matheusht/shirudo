@@ -20,11 +20,11 @@ use crate::errno::{
 use crate::ffi;
 use crate::sys::curl::{self, Curl, CurlSlist};
 use crate::sys::hex::hex_encode;
-use crate::sys::io::write_complete;
 use crate::sys::libc::{self, SEEK_SET, scrub};
 use crate::sys::log::pr_err;
 use crate::sys::malloc::{xfree, xreallocarray};
 use crate::util::crypto_openssl::{SHA256_LEN, sha256_buffer};
+use crate::util::io::write_complete;
 use crate::util::tls_openssl::{tls_ca_cleanup, tls_curl_policy};
 
 /// A download bounded by the size its manifest declares.

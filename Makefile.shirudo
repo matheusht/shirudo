@@ -236,6 +236,7 @@ CLANG_BPF := $(CLANG) -target bpf -mcpu=v4 -fno-jump-tables -O2 -g -Wall -Wextra
 UTIL_SRCS := \
     util/loader.c \
     util/sysinfo_image.c \
+    util/io_trusted.c \
     util/upatch.c \
     util/xdp.c \
     util/java_agent.c \
@@ -246,7 +247,7 @@ UTIL_SRCS := \
     util/kernel_abi.c \
     util/kernel_prereq.c \
     util/log.c \
-    util/io.c \
+     \
     util/attest.c \
     util/chain_history.c \
     util/hex.c \
@@ -553,7 +554,7 @@ build/target/util/loader.o: $(BPF_OBJS)
 # the core shirudo binary.
 tools/shirudo-build/shirudo-build: $(BUILD_OBJS) $(SIGN_OBJ) \
                                    util/log.o util/loader.o \
-                                   util/io.o util/malloc.o util/paths.o \
+                                    util/malloc.o util/paths.o \
                                    util/upatch.o \
                                    util/hex.o \
                                    util/seal.o util/string.o \
@@ -572,7 +573,7 @@ tools/shirudo-build/shirudo-build: $(BUILD_OBJS) $(SIGN_OBJ) \
 # whatever the profile. The sanitizer runtimes do not link statically.
 PKG_CONFIG ?= pkg-config
 QUOTE_CHECK_UTIL_SRCS := util/hex.c \
-                         util/io.c util/seal.c util/log.c \
+                          util/seal.c util/log.c \
                          util/malloc.c util/string.c util/options.c
 
 # A distribution without a static libcrypto, Fedora for one, gets the
@@ -838,7 +839,7 @@ testing/helper/test-harden: testing/helper/test-harden.c util/log.o \
 REGISTER_OBJS := \
                  util/upatch.o \
                  util/hex.o util/string.o \
-                 util/io.o util/seal.o \
+                  util/seal.o \
                  util/log.o util/malloc.o \
                  util/identity.o \
                  $(VERSION_OBJ) $(LIBBPF_A) $(RUST_LIB)
@@ -872,7 +873,7 @@ testing/helper/test-keys: testing/helper/test-keys.c \
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(REGISTER_LIBS)
 
-testing/helper/test-seal: testing/helper/test-seal.c util/seal.o util/io.o \
+testing/helper/test-seal: testing/helper/test-seal.c util/seal.o  \
                           util/log.o util/string.o util/malloc.o \
                           util/hex.o $(RUST_LIB)
 	@printf '  CC      $@\n'
@@ -883,7 +884,7 @@ testing/helper/test-eventlog: testing/helper/test-eventlog.c $(REGISTER_OBJS)
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(REGISTER_LIBS)
 
 testing/helper/test-tpm-wire: testing/helper/test-tpm-wire.c util/hex.o \
-                        util/io.o util/seal.o util/malloc.o util/log.o \
+                         util/seal.o util/malloc.o util/log.o \
                         util/string.o $(RUST_LIB)
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ -lcrypto -lssl $(ZLIB_LIBS) $(RUST_TEST_LDLIBS)
@@ -920,7 +921,7 @@ testing/helper/test-tpm-session: testing/helper/test-tpm-session.c \
 	$(Q)$(CC) $(CFLAGS) -o $@ $(filter-out %.h,$^) $(REGISTER_LIBS) \
 		-Wl,--wrap=enforcement_active,--wrap=identity_read
 
-testing/helper/test-config: testing/helper/test-config.c util/io.o util/seal.o util/log.o util/hex.o \
+testing/helper/test-config: testing/helper/test-config.c  util/seal.o util/log.o util/hex.o \
                             util/string.o util/malloc.o $(RUST_LIB)
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(RUST_TEST_LDLIBS)
@@ -976,7 +977,7 @@ testing/helper/test-otel-map: testing/helper/test-otel-map.c util/upatch_maps.o 
                         util/upatch_resolve.o \
                         util/upatch.o util/string.o util/log.o \
                         util/paths.o \
-                        util/io.o util/malloc.o $(LIBBPF_A) util/hex.o \
+                         util/malloc.o $(LIBBPF_A) util/hex.o \
                         $(RUST_LIB)
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
@@ -995,7 +996,7 @@ testing/helper/test-upatch-serializer-pages: testing/helper/test-upatch-serializ
                                        util/upatch_maps.o util/upatch_pins.o util/upatch_resolve.o \
                                        util/seal.o \
                                        util/string.o \
-                                       util/malloc.o util/io.o util/paths.o \
+                                       util/malloc.o  util/paths.o \
                                        util/log.o util/hex.o \
                                        $(RUST_LIB)
 	@printf '  CC      $@\n'
@@ -1003,22 +1004,22 @@ testing/helper/test-upatch-serializer-pages: testing/helper/test-upatch-serializ
 
 testing/helper/test-upatch-rodata: testing/helper/test-upatch-rodata.c \
                                util/upatch.o util/seal.o \
-                               util/string.o util/malloc.o util/io.o \
+                               util/string.o util/malloc.o  \
                                util/log.o util/hex.o $(RUST_LIB)
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
 testing/helper/test-upatch-decode: testing/helper/test-upatch-decode.c \
 			      util/upatch_decode.o util/upatch.o util/malloc.o util/hex.o \
-			      util/string.o util/seal.o util/io.o util/log.o \
+			      util/string.o util/seal.o  util/log.o \
 			      $(RUST_LIB)
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
-testing/helper/test-exec-churn: testing/helper/test-exec-churn.c util/io.o util/seal.o util/malloc.o \
-                                 util/log.o util/string.o
+testing/helper/test-exec-churn: testing/helper/test-exec-churn.c  util/seal.o util/malloc.o \
+                                 util/log.o util/string.o $(RUST_LIB)
 	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) -o $@ $^
+	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
 testing/end2end/exec-paths: testing/end2end/exec_paths.c
 	@printf '  CC      $@\n'
@@ -1030,7 +1031,7 @@ testing/end2end/policy-exec: testing/end2end/policy_exec.c
 
 testing/helper/test-config-image: testing/helper/test-config-image.c \
 		util/malloc.o \
-		util/io.o util/seal.o util/hex.o util/log.o \
+		 util/seal.o util/hex.o util/log.o \
 		util/string.o $(RUST_LIB)
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ -lcrypto -lssl $(ZLIB_LIBS) $(RUST_TEST_LDLIBS)
@@ -1060,7 +1061,7 @@ testing/helper/test-image-keys: testing/helper/test-image-keys.c \
 
 testing/helper/test-image-config: testing/helper/test-image-config.c \
 		util/hex.o \
-		util/io.o util/seal.o util/log.o util/malloc.o \
+		 util/seal.o util/log.o util/malloc.o \
 		util/string.o $(RUST_LIB)
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(LIBCRYPTO_LIBS) $(LIBSSL_LIBS) $(ZLIB_LIBS) \
@@ -1093,9 +1094,10 @@ testing/helper/test-mode-objects: testing/helper/test-mode-objects.c \
 	$(Q)$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ -lelf -lz
 
 testing/helper/test-seal-output: testing/helper/test-seal-output.c \
-		util/seal.o util/io.o util/log.o util/string.o util/malloc.o
+		util/seal.o  util/log.o util/string.o util/malloc.o $(RUST_LIB)
 	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ -Wl,--wrap=write_complete
+	$(Q)$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ -Wl,--wrap=write_complete \
+		$(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
 test-helpers: $(TEST_HELPERS)
 
@@ -1209,7 +1211,7 @@ FUZZ_LIBS := $(RUST_FUZZ_LIB) $(LIBCRYPTO_LIBS) $(LIBSSL_LIBS) \
              -Wl,-z,start-stop-gc
 FUZZ_BASE := util/string.c util/hex.c util/malloc.c testing/fuzz/log.c
 FUZZ_SEAL := util/seal.c
-FUZZ_OCI := util/curl.c util/io.c $(FUZZ_SEAL)
+FUZZ_OCI := util/curl.c  $(FUZZ_SEAL)
 FUZZ_PACKAGE := util/bpm_tree.c util/chain_history.c \
                 util/upatch.c $(FUZZ_OCI)
 
@@ -1233,7 +1235,7 @@ $(FUZZ_OUT)/fuzz-prog-metadata: testing/fuzz/fuzz-prog-metadata.c \
                                  $(FUZZ_BASE) util/upatch.c
 $(FUZZ_OUT)/fuzz-rodata: testing/fuzz/fuzz-rodata.c $(FUZZ_BASE) \
                           util/upatch.c util/upatch_rodata.c \
-                          util/io.c $(FUZZ_SEAL) $(LIBBPF_A)
+                           $(FUZZ_SEAL) $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-rodata: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-rodata: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS) $(ZLIB_LIBS)
 $(FUZZ_OUT)/fuzz-bpm-tar: testing/fuzz/fuzz-bpm-tar.c $(FUZZ_BASE) \
@@ -1241,11 +1243,11 @@ $(FUZZ_OUT)/fuzz-bpm-tar: testing/fuzz/fuzz-bpm-tar.c $(FUZZ_BASE) \
 $(FUZZ_OUT)/fuzz-bpm-package: testing/fuzz/fuzz-bpm-package.c $(FUZZ_BASE) \
                                $(FUZZ_PACKAGE)
 $(FUZZ_OUT)/fuzz-tpm-wire: testing/fuzz/fuzz-tpm-wire.c $(FUZZ_BASE) \
-                            util/io.c \
+                             \
                             $(FUZZ_SEAL)
 $(FUZZ_OUT)/fuzz-attest: testing/fuzz/fuzz-attest.c $(FUZZ_BASE) \
                           util/attest.c util/chain_history.c \
-                          util/io.c $(FUZZ_SEAL) \
+                           $(FUZZ_SEAL) \
                           util/identity.c \
                           util/version_id.c util/upatch.c \
                           $(LIBBPF_A)
@@ -1253,7 +1255,7 @@ $(FUZZ_OUT)/fuzz-attest: FUZZ_CFLAGS += $(TSS2_CFLAGS) $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-attest: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) $(LIBELF_LIBS) $(ZLIB_LIBS)
 $(FUZZ_OUT)/fuzz-eventlog: testing/fuzz/fuzz-eventlog.c $(FUZZ_BASE) \
                             util/upatch.c \
-                            $(FUZZ_SEAL) util/io.c \
+                            $(FUZZ_SEAL)  \
                             util/identity.c $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-eventlog: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-eventlog: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS) $(ZLIB_LIBS)
@@ -1263,21 +1265,21 @@ $(FUZZ_OUT)/fuzz-elf: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-elf: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS)
 $(FUZZ_OUT)/fuzz-serializer: testing/fuzz/fuzz-serializer.c $(FUZZ_BASE) \
                               util/upatch_maps.c util/upatch_pins.c \
-                              util/upatch_resolve.c $(FUZZ_SEAL) util/io.c util/paths.c \
+                              util/upatch_resolve.c $(FUZZ_SEAL)  util/paths.c \
                               $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-serializer: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-serializer: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS)
 $(FUZZ_OUT)/fuzz-cms: testing/fuzz/fuzz-cms.c $(FUZZ_BASE) \
-                       util/io.c $(FUZZ_SEAL)
+                        $(FUZZ_SEAL)
 $(FUZZ_OUT)/fuzz-decoder: testing/fuzz/fuzz-decoder.c $(FUZZ_BASE) \
-                           util/upatch_decode.c util/upatch.c util/io.c \
+                           util/upatch_decode.c util/upatch.c  \
                            $(FUZZ_SEAL)
 $(FUZZ_OUT)/fuzz-decoder: FUZZ_CFLAGS += $(LUAJIT_CFLAGS) -DHAVE_LUAJIT \
 	-DFUZZ_SOURCE_TREE='"$(CURDIR)"'
 $(FUZZ_OUT)/fuzz-decoder: FUZZ_LIBS += $(LUAJIT_LIBS)
 $(FUZZ_OUT)/fuzz-otel: testing/fuzz/fuzz-otel.c $(FUZZ_BASE) \
                         util/upatch_maps_otel.c util/curl.c \
-                        util/io.c util/version_id.c \
+                         util/version_id.c \
                         $(FUZZ_SEAL)
 $(FUZZ_OUT)/fuzz-beefile: testing/fuzz/fuzz-beefile.c $(FUZZ_BASE) \
                            tools/shirudo-build/bpm-build.c $(FUZZ_PACKAGE) \
@@ -1291,13 +1293,13 @@ $(FUZZ_OUT)/fuzz-oci-ref: testing/fuzz/fuzz-oci-ref.c $(FUZZ_BASE) \
 $(FUZZ_OUT)/fuzz-registry-auth: testing/fuzz/fuzz-registry-auth.c \
                                  $(FUZZ_BASE) $(FUZZ_OCI)
 $(FUZZ_OUT)/fuzz-config: testing/fuzz/fuzz-config.c $(FUZZ_BASE) \
-                          util/seal.c util/io.c
+                          util/seal.c
 $(FUZZ_OUT)/fuzz-image: testing/fuzz/fuzz-image.c $(FUZZ_BASE) \
-                         util/io.c util/paths.c \
+                          util/paths.c \
                          $(FUZZ_SEAL)
 $(FUZZ_OUT)/fuzz-config-update: testing/fuzz/fuzz-config-update.c \
                                  $(FUZZ_BASE) \
-                                 util/io.c $(FUZZ_SEAL)
+                                  $(FUZZ_SEAL)
 FUZZ_TREE_STATE := util/bpm_tree.c \
                    util/chain_history.c util/upatch.c $(FUZZ_OCI) \
                    util/kconfig.c
@@ -1307,13 +1309,13 @@ $(FUZZ_OUT)/fuzz-kconfig: testing/fuzz/fuzz-kconfig.c $(FUZZ_BASE) \
                            $(FUZZ_TREE_STATE)
 $(FUZZ_OUT)/fuzz-quote-check: testing/fuzz/fuzz-quote-check.c $(FUZZ_BASE) \
                                tools/quote-check/row.c \
-                               util/io.c util/seal.c
+                                util/seal.c
 $(FUZZ_OUT)/fuzz-upatch-info: testing/fuzz/fuzz-upatch-info.c $(FUZZ_BASE) \
                               testing/fuzz/output.c builtin-upatch.c \
                               builtin.h \
                               util/curl.c \
                               util/identity.c \
-                              util/io.c util/java_agent.c util/kernel_abi.c \
+                               util/java_agent.c util/kernel_abi.c \
                               \
                               util/options.c util/paths.c \
                               util/similar.c \
@@ -1346,7 +1348,6 @@ $(FUZZ_OUT)/fuzz-attest-report: testing/fuzz/fuzz-attest-report.c \
                                util/chain_history.c \
                                \
                                util/identity.c \
-                               util/io.c \
                                \
                                util/options.c util/paths.c util/similar.c \
                                util/upatch.c util/version_id.c $(FUZZ_SEAL) \
