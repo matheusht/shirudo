@@ -24,3 +24,4 @@ mod report;
 mod similar;
 mod timefmt;
 mod tpm_wire;
+mod upatch_table;

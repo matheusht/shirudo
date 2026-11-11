@@ -2,7 +2,8 @@
 /*
  * Copyright (c) 2026 Authors of shirudo
  *
- * The upatches-loaded table of `shirudo status`.
+ * The upatches-loaded table of `shirudo status`, which
+ * rust/src/util/upatch_table.rs implements.
  */
 
 #ifndef SHIRUDO_UTIL_UPATCH_TABLE_H

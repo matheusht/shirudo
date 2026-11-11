@@ -183,6 +183,8 @@ unsafe extern "C" {
     pub fn snprintf(buf: *mut c_char, size: usize, fmt: *const c_char, ...) -> c_int;
     pub fn gmtime_r(t: *const i64, tm: *mut Tm) -> *mut Tm;
     pub fn strftime(out: *mut c_char, max: usize, fmt: *const c_char, tm: *const Tm) -> usize;
+    pub fn strptime(s: *const c_char, fmt: *const c_char, tm: *mut Tm) -> *mut c_char;
+    pub fn timegm(tm: *mut Tm) -> i64;
     pub fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64;
     fn __errno_location() -> *mut c_int;
 }

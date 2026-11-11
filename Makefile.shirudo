@@ -288,8 +288,7 @@ UTIL_SRCS := \
     util/elf_target.c \
     util/upatch_pins.c \
     util/upatch_verify.c \
-    util/upatch_resolve.c \
-    util/upatch_table.c
+    util/upatch_resolve.c
 
 BUILTIN_GENKEY_SRC := builtin-genkey.c
 
@@ -1350,7 +1349,7 @@ $(FUZZ_OUT)/fuzz-upatch-info: testing/fuzz/fuzz-upatch-info.c $(FUZZ_BASE) \
                               util/upatch.c \
                               util/upatch_decode.c util/upatch_maps.c \
                               util/upatch_maps_otel.c util/upatch_pins.c \
-                              util/upatch_resolve.c util/upatch_table.c \
+                              util/upatch_resolve.c \
                               util/upatch_verify.c util/version_id.c \
                               util/xdp.c $(FUZZ_SEAL) $(LIBBPF_A)
 # util/upatch_decode.c defines upatch_decode_map_signal(), which
