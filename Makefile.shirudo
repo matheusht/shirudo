@@ -273,7 +273,6 @@ UTIL_SRCS := \
     util/image_keys.c \
     util/dm_verity.c \
     util/config_update.c \
-    util/config_attest.c \
     util/malloc.c \
     util/options.c \
     util/keepalive.c \
@@ -851,7 +850,7 @@ testing/helper/test-harden: testing/helper/test-harden.c util/log.o \
 # util/malloc.o brings in x*/libc_free that chain.o/tpm.o use.
 # The Rust library resolves config_load(), called by tpm.o.
 # The register code pulls in the Rust eventlog, seal label writer and JSON codec.
-REGISTER_OBJS := util/config_attest.o util/config_update.o \
+REGISTER_OBJS := util/config_update.o \
                  util/chain.o util/tpm.o \
                  util/upatch.o \
                  util/hex.o util/crypto_openssl.o util/string.o \
@@ -1265,7 +1264,7 @@ $(FUZZ_OUT)/fuzz-attest: testing/fuzz/fuzz-attest.c $(FUZZ_BASE) \
                           util/attest.c util/chain.c util/chain_history.c \
                           util/tpm.c \
                           util/crypto_openssl.c util/io.c $(FUZZ_SEAL) \
-                          util/config_attest.c util/config_update.c \
+                          util/config_update.c \
                           util/identity.c \
                           util/keyring.c util/version_id.c util/upatch.c \
                           $(LIBBPF_A)
@@ -1374,7 +1373,6 @@ $(FUZZ_OUT)/fuzz-attest-report: testing/fuzz/fuzz-attest-report.c \
                                $(FUZZ_BASE) testing/fuzz/output.c \
                                builtin-attest.c builtin.h util/attest.c \
                                util/chain.c util/chain_history.c \
-                               util/config_attest.c \
                                util/config_update.c util/crypto_openssl.c \
                                util/identity.c \
                                util/io.c util/keyring.c \

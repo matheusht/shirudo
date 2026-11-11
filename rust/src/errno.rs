@@ -28,4 +28,5 @@ pub const EPROTONOSUPPORT: c_int = 93;
 pub const EHOSTUNREACH: c_int = 113;
 pub const EINPROGRESS: c_int = 115;
 pub const ESTALE: c_int = 116;
+pub const EUCLEAN: c_int = 117;
 pub const EKEYREJECTED: c_int = 129;

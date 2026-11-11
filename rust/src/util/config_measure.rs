@@ -10,8 +10,8 @@ use crate::errno::EINVAL;
 use crate::sys::crypto::sha256_buffer;
 
 /// `enum config_event_kind`.
-const EVENT_BOOT: c_int = 1;
-const EVENT_UPDATE: c_int = 2;
+pub(crate) const EVENT_BOOT: c_int = 1;
+pub(crate) const EVENT_UPDATE: c_int = 2;
 
 const DOMAIN: &[u8] = b"shirudo-config-root-v1\0";
 
@@ -26,7 +26,7 @@ pub(crate) fn pcr_valid(pcr: u32) -> c_int {
 
 /// The event that measures a config root: SHA-256 of the domain with its
 /// NUL, the kind as a big-endian u32, and the root.
-fn event(kind: c_int, root_hash: &[u8; 32], out: *mut u8) -> c_int {
+pub(crate) fn event(kind: c_int, root_hash: &[u8; 32], out: *mut u8) -> c_int {
     let mut data = [0u8; DOMAIN.len() + 4 + 32];
 
     if kind != EVENT_BOOT && kind != EVENT_UPDATE {

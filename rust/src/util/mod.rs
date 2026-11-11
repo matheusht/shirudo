@@ -9,6 +9,7 @@ mod bpm_source_config;
 mod bpm_state;
 mod conditions;
 mod config;
+mod config_attest;
 mod config_image;
 mod config_measure;
 mod eventlog;

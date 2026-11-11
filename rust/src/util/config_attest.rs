@@ -1,0 +1,563 @@
+// SPDX-License-Identifier: BSD-2-Clause
+// Copyright (c) 2026 Authors of shirudo
+
+//! The config's history as attestation evidence, behind
+//! `util/config_attest.h`: collected from the update records, emitted
+//! with a quote, parsed back by a verifier, and checked there against
+//! the quoted PCR, the TPM boot and the root an operator approved.
+
+use core::ffi::{CStr, c_int, c_void};
+
+use crate::errno::{E2BIG, EINVAL, EKEYREJECTED, ENOMEM, EOVERFLOW, EUCLEAN};
+use crate::sys::chain::chain_fold;
+use crate::sys::config_update::{
+    ConfigUpdate, ConfigUpdateRecord, config_update_check, config_update_events,
+};
+use crate::sys::hex::{hex_decode, hex_encode};
+use crate::sys::malloc::{xfree, xreallocarray};
+use crate::text::cstr;
+use crate::util::config_measure::{EVENT_BOOT, EVENT_UPDATE, event as measure_event, pcr_valid};
+use crate::util::json::{JsonArray, JsonEmit, JsonField, parse_schema};
+
+/// `CONFIG_EVIDENCE_EVENTS_MAX`.
+const EVENTS_MAX: usize = 4096;
+
+/// `struct config_evidence_event`.
+#[repr(C)]
+pub struct EvidenceEvent {
+    root_hash: [u8; 32],
+    sequence: u64,
+    kind: c_int,
+}
+
+const _: () = assert!(size_of::<EvidenceEvent>() == 48);
+
+/// `struct config_evidence`.
+#[repr(C)]
+pub struct Evidence {
+    events: *mut EvidenceEvent,
+    initial_pcr: [u8; 32],
+    value: [u8; 32],
+    n_events: usize,
+    capacity: usize,
+    reset_count: u32,
+    restart_count: u32,
+    pcr: u32,
+    present: bool,
+}
+
+const _: () = assert!(size_of::<Evidence>() == 104);
+const _: () = assert!(core::mem::offset_of!(Evidence, present) == 100);
+
+/// The view zeroed whole, padding too.
+///
+/// # Safety
+///
+/// `view` points to room for a view.
+unsafe fn zero(view: *mut Evidence) {
+    // SAFETY: the caller passes the room.
+    unsafe { view.write_bytes(0, 1) };
+}
+
+fn append_event(view: &mut Evidence, root_hash: &[u8; 32], sequence: u64, kind: c_int) -> c_int {
+    if view.n_events >= EVENTS_MAX {
+        return -E2BIG;
+    }
+    if view.n_events == view.capacity {
+        let capacity = if view.capacity != 0 {
+            view.capacity * 2
+        } else {
+            16
+        };
+        // SAFETY: the events so far, from xreallocarray() or NULL.
+        let events: *mut EvidenceEvent = unsafe {
+            xreallocarray(
+                view.events.cast(),
+                view.capacity,
+                capacity,
+                size_of::<EvidenceEvent>(),
+            )
+        }
+        .cast();
+
+        if events.is_null() {
+            return -ENOMEM;
+        }
+        view.events = events;
+        view.capacity = capacity;
+    }
+    // SAFETY: room for entry n_events, zeroed whole, then filled field
+    // by field as the C's assignment of a zeroed local left it.
+    unsafe {
+        let e = view.events.add(view.n_events);
+
+        e.write_bytes(0, 1);
+        (*e).root_hash = *root_hash;
+        (*e).sequence = sequence;
+        (*e).kind = kind;
+    }
+    view.n_events += 1;
+    0
+}
+
+/// The events of the view.
+fn events(view: &Evidence) -> &[EvidenceEvent] {
+    if view.events.is_null() {
+        return &[];
+    }
+    // SAFETY: n_events entries at events, which append_event() wrote.
+    unsafe { core::slice::from_raw_parts(view.events, view.n_events) }
+}
+
+/// The PCR the events fold to from the initial value: 0, -EINVAL for no
+/// events, -EKEYREJECTED for a history out of order.
+fn replay(view: &Evidence, out: &mut [u8; 32]) -> c_int {
+    let mut digest = [0u8; 32];
+    let mut sequence = 0u64;
+
+    if view.events.is_null() || view.n_events == 0 || view.n_events > EVENTS_MAX {
+        return -EINVAL;
+    }
+    *out = view.initial_pcr;
+    for (i, event) in events(view).iter().enumerate() {
+        let kind = if i != 0 { EVENT_UPDATE } else { EVENT_BOOT };
+
+        if event.sequence == 0
+            || event.sequence > i64::MAX as u64
+            || (i != 0 && event.sequence != sequence.wrapping_add(1))
+            || event.kind != kind
+        {
+            return -EKEYREJECTED;
+        }
+        let mut ret = measure_event(event.kind, &event.root_hash, digest.as_mut_ptr());
+
+        if ret == 0 {
+            // SAFETY: the register value and the event digest.
+            ret = unsafe { chain_fold(out.as_mut_ptr(), digest.as_ptr()) };
+        }
+        if ret != 0 {
+            return ret;
+        }
+        sequence = event.sequence;
+    }
+    0
+}
+
+unsafe extern "C" fn collect_event(
+    record: *const ConfigUpdateRecord,
+    opaque: *mut c_void,
+) -> c_int {
+    // SAFETY: config_update_events() passes a record, and the view
+    // collect() made the context, touched through this pointer alone
+    // while the walk runs.
+    let (r, view) = unsafe { (&*record, &mut *opaque.cast::<Evidence>()) };
+
+    if r.reset_count != view.reset_count || r.restart_count != view.restart_count {
+        return 0;
+    }
+    if r.pcr != view.pcr || r.sequence > i64::MAX as u64 || r.initial_pcr != view.initial_pcr {
+        return -EUCLEAN;
+    }
+    append_event(view, &r.root_hash, r.sequence, r.kind)
+}
+
+/// The evidence of the active config from the update records, or none
+/// without an update: 0, or -errno with the view cleared.
+///
+/// # Safety
+///
+/// `update` is NULL or an open update, and `out` points to room for a
+/// view.
+unsafe fn collect(update: *mut ConfigUpdate, out: *mut Evidence) -> c_int {
+    let mut active = ConfigUpdateRecord::zeroed();
+
+    // SAFETY: the caller passes the room.
+    unsafe { zero(out) };
+    if update.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller's update, and a record to fill.
+    let mut ret = unsafe { config_update_check(update, &mut active) };
+    if ret != 0 {
+        return ret;
+    }
+    // SAFETY: the view, zeroed above.
+    let view = unsafe { &mut *out };
+
+    view.pcr = active.pcr;
+    view.reset_count = active.reset_count;
+    view.restart_count = active.restart_count;
+    view.initial_pcr = active.initial_pcr;
+    // SAFETY: the caller's update, the callback, and the view it takes,
+    // not touched here while the walk runs.
+    ret = unsafe { config_update_events(update, Some(collect_event), out.cast()) };
+    // SAFETY: as above, the walk is over.
+    let view = unsafe { &mut *out };
+    if ret == 0 {
+        let mut value = [0u8; 32];
+
+        ret = replay(view, &mut value);
+        if ret == 0 {
+            view.value = value;
+        }
+    }
+    if ret == 0 {
+        let last = &events(view)[view.n_events - 1];
+
+        if last.sequence != active.sequence || last.root_hash != active.root_hash {
+            ret = -EUCLEAN;
+        }
+    }
+    if ret != 0 {
+        // SAFETY: the view, its events from xreallocarray().
+        unsafe { clear(out) };
+        return ret;
+    }
+    view.present = true;
+    0
+}
+
+/// Frees the view's events and zeroes it.
+///
+/// # Safety
+///
+/// `view` is NULL or points to a view whose events are NULL or from
+/// xreallocarray().
+unsafe fn clear(view: *mut Evidence) {
+    if view.is_null() {
+        return;
+    }
+    // SAFETY: the caller passes the view and its events, freed once.
+    unsafe {
+        xfree(
+            (*view).events.cast(),
+            (*view).capacity * size_of::<EvidenceEvent>(),
+        );
+        zero(view);
+    }
+}
+
+fn emit_hash(e: &mut JsonEmit, key: &[u8], bytes: &[u8; 32]) {
+    let mut hex = [0u8; 65];
+
+    // SAFETY: 32 bytes, and room for their 64 digits and a NUL.
+    unsafe { hex_encode(bytes.as_ptr(), 32, hex.as_mut_ptr().cast()) };
+    e.kv_string(key, cstr(&hex));
+}
+
+/// The view as the `config` object of the evidence: 0, -EOVERFLOW for a
+/// sequence past an int64, or the emitter's error.
+fn emit(e: &mut JsonEmit, view: &Evidence) -> c_int {
+    if !view.present {
+        return 0;
+    }
+    e.obj_open_key(b"config");
+    e.kv_int(b"schema", 1);
+    e.kv_int(b"pcr", i64::from(view.pcr));
+    e.kv_int(b"reset_count", i64::from(view.reset_count));
+    e.kv_int(b"restart_count", i64::from(view.restart_count));
+    emit_hash(e, b"initial_pcr", &view.initial_pcr);
+    e.arr_open(b"events");
+    for event in events(view) {
+        if event.sequence > i64::MAX as u64 {
+            return -EOVERFLOW;
+        }
+        e.obj_open();
+        e.kv_int(b"sequence", event.sequence as i64);
+        e.kv_int(b"kind", i64::from(event.kind));
+        emit_hash(e, b"root_hash", &event.root_hash);
+        e.obj_close();
+    }
+    e.arr_close();
+    e.obj_close();
+    e.err()
+}
+
+/// What the schema of an event fills, and the view the events go to.
+struct EventParser {
+    view: *mut Evidence,
+    event_fields: *const JsonField,
+    n_fields: usize,
+    sequence: i64,
+    kind: i64,
+    root_hash: [u8; 65],
+}
+
+unsafe extern "C" fn on_event(opaque: *mut c_void) -> c_int {
+    let p = opaque.cast::<EventParser>();
+    let mut root_hash = [0u8; 32];
+
+    // SAFETY: the parser parse() made the array's context, read through
+    // this pointer alone as the JSON parser writes its fields through its
+    // own and is not running now; its fields and view outlive the parse.
+    unsafe {
+        let fields = core::slice::from_raw_parts((*p).event_fields, (*p).n_fields);
+
+        if !fields.iter().all(JsonField::seen) {
+            return -EINVAL;
+        }
+        let (sequence, kind) = ((*p).sequence, (*p).kind);
+
+        if sequence <= 0
+            || (kind != i64::from(EVENT_BOOT) && kind != i64::from(EVENT_UPDATE))
+            || cstr(&(*p).root_hash).len() != 64
+            || hex_decode(
+                (&raw const (*p).root_hash).cast(),
+                root_hash.as_mut_ptr(),
+                32,
+            ) != 0
+        {
+            return -EINVAL;
+        }
+        append_event(&mut *(*p).view, &root_hash, sequence as u64, kind as c_int)
+    }
+}
+
+/// The `config` object of evidence a verifier received into `out`: 0,
+/// with the view not present when there is none, or -errno with the view
+/// cleared.
+///
+/// # Safety
+///
+/// `out` points to room for a view.
+unsafe fn parse(evidence: &[u8], out: *mut Evidence) -> c_int {
+    let (mut schema, mut reset, mut restart, mut pcr) = (0i64, 0i64, 0i64, 0i64);
+    let mut initial = [0u8; 65];
+    let mut parser = EventParser {
+        view: out,
+        event_fields: core::ptr::null(),
+        n_fields: 0,
+        sequence: 0,
+        kind: 0,
+        root_hash: [0; 65],
+    };
+
+    // SAFETY: the caller passes the room.
+    unsafe { zero(out) };
+    let mut event_fields = [
+        JsonField::int(c"sequence", &raw mut parser.sequence),
+        JsonField::int(c"kind", &raw mut parser.kind),
+        JsonField::string(c"root_hash", (&raw mut parser.root_hash).cast(), 65),
+    ];
+    // One pointer to the fields, which the parser writes and on_event()
+    // reads, and the parser whole made the array's context after.
+    let ef = event_fields.as_mut_ptr();
+    parser.event_fields = ef.cast_const();
+    parser.n_fields = event_fields.len();
+    let mut sink = JsonArray::new(on_event, (&raw mut parser).cast());
+    let mut config_fields = [
+        JsonField::int(c"schema", &raw mut schema),
+        JsonField::int(c"pcr", &raw mut pcr),
+        JsonField::int(c"reset_count", &raw mut reset),
+        JsonField::int(c"restart_count", &raw mut restart),
+        JsonField::string(c"initial_pcr", initial.as_mut_ptr(), initial.len()),
+        JsonField::array(c"events", &raw mut sink, ef, 3),
+    ];
+    let mut top = [JsonField::object(
+        c"config",
+        config_fields.as_mut_ptr(),
+        config_fields.len(),
+    )];
+    // SAFETY: every pointer of the schema names a local of this frame or
+    // the caller's view, which outlive the parse and are touched
+    // meanwhile only through those pointers and the parser's.
+    let mut ret = unsafe { parse_schema(evidence, top.as_mut_ptr(), top.len()) };
+
+    if ret == 0 {
+        if !top[0].seen() {
+            return 0;
+        }
+        // SAFETY: the view, which the parse no longer touches.
+        let view = unsafe { &mut *out };
+
+        let fields_ok = config_fields.iter().all(JsonField::seen)
+            && schema == 1
+            && (0..=i64::from(u32::MAX)).contains(&reset)
+            && (0..=i64::from(u32::MAX)).contains(&restart)
+            && (0..=15).contains(&pcr)
+            && pcr_valid(pcr as u32) == 0
+            && cstr(&initial).len() == 64;
+        let decoded = fields_ok && {
+            // SAFETY: a C string of 64 digits, and the room of the
+            // initial value.
+            let r =
+                unsafe { hex_decode(initial.as_ptr().cast(), view.initial_pcr.as_mut_ptr(), 32) };
+
+            r == 0
+        };
+
+        ret = if !decoded {
+            -EINVAL
+        } else {
+            view.pcr = pcr as u32;
+            view.reset_count = reset as u32;
+            view.restart_count = restart as u32;
+            let mut value = [0u8; 32];
+            let ret = replay(view, &mut value);
+
+            if ret == 0 {
+                view.value = value;
+                view.present = true;
+            }
+            ret
+        };
+    }
+    if ret != 0 {
+        // SAFETY: the view, its events from xreallocarray().
+        unsafe { clear(out) };
+    }
+    ret
+}
+
+/// What a quote says: the PCRs it covers, the TPM boot it was made in,
+/// and the PCR values.
+struct Quote<'a> {
+    mask: u32,
+    reset: u32,
+    restart: u32,
+    pcrs: &'a [[u8; 32]; 24],
+}
+
+/// Whether the evidence is the history of the quoted config PCR, in the
+/// quote's TPM boot, ending in the root an operator approved: 0 or
+/// -EKEYREJECTED, and the reason.
+fn verify(
+    view: &Evidence,
+    quote: &Quote,
+    expected_root: Option<&[u8; 32]>,
+    expected_pcr: c_int,
+) -> (c_int, &'static CStr) {
+    let mut value = [0u8; 32];
+
+    if !view.present {
+        let ret = if expected_root.is_some() || expected_pcr >= 0 {
+            -EKEYREJECTED
+        } else {
+            0
+        };
+
+        return (ret, c"configuration evidence is missing");
+    }
+    if pcr_valid(view.pcr) != 0
+        || quote.mask & (1u32 << view.pcr) == 0
+        || (expected_pcr >= 0 && view.pcr != expected_pcr as u32)
+    {
+        return (-EKEYREJECTED, c"config PCR is unquoted or unexpected");
+    }
+    if view.reset_count != quote.reset || view.restart_count != quote.restart {
+        return (-EKEYREJECTED, c"config history belongs to another TPM boot");
+    }
+    if expected_root.is_some() && expected_pcr < 0 {
+        return (-EKEYREJECTED, c"expected config root needs an expected PCR");
+    }
+    let ret = replay(view, &mut value);
+    if ret != 0 || value != quote.pcrs[view.pcr as usize] {
+        let ret = if ret != 0 { ret } else { -EKEYREJECTED };
+
+        return (ret, c"config history does not match the quoted PCR");
+    }
+    if let Some(root) = expected_root
+        && events(view)[view.n_events - 1].root_hash != *root
+    {
+        return (
+            -EKEYREJECTED,
+            c"config root was not approved by the operator",
+        );
+    }
+    (0, c"config root history matches the quoted PCR")
+}
+
+mod capi {
+    use core::ffi::{c_char, c_int};
+
+    use super::Evidence;
+    use crate::ffi;
+    use crate::sys::config_update::ConfigUpdate;
+    use crate::util::json::JsonEmit;
+
+    /// # Safety
+    ///
+    /// `update` is NULL or an open update, and `out` points to room for a
+    /// view.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn config_evidence_collect(
+        update: *mut ConfigUpdate,
+        out: *mut Evidence,
+    ) -> c_int {
+        // SAFETY: the caller passes the update and the room.
+        unsafe { super::collect(update, out) }
+    }
+
+    /// # Safety
+    ///
+    /// `view` is NULL or points to a view whose events are NULL or from
+    /// xreallocarray().
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn config_evidence_clear(view: *mut Evidence) {
+        // SAFETY: the caller passes the view.
+        unsafe { super::clear(view) }
+    }
+
+    /// # Safety
+    ///
+    /// `emit` points to an emitter and `view` to a view.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn config_evidence_emit(
+        emit: *mut JsonEmit,
+        view: *const Evidence,
+    ) -> c_int {
+        // SAFETY: the caller passes the emitter and the view.
+        unsafe { super::emit(&mut *emit, &*view) }
+    }
+
+    /// # Safety
+    ///
+    /// `evidence` holds `length` bytes, and `out` points to room for a
+    /// view.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn config_evidence_parse(
+        evidence: *const c_char,
+        length: usize,
+        out: *mut Evidence,
+    ) -> c_int {
+        // SAFETY: the caller passes the evidence and the room.
+        unsafe { super::parse(ffi::slice(evidence.cast(), length), out) }
+    }
+
+    /// # Safety
+    ///
+    /// `view` points to a view, `pcrs` to 24 PCR values, `expected_root`
+    /// is NULL or points to 32 bytes, and `reason` points to where the
+    /// reason goes.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn config_evidence_verify(
+        view: *const Evidence,
+        quote_mask: u32,
+        reset: u32,
+        restart: u32,
+        pcrs: *const [u8; 32],
+        expected_root: *const u8,
+        expected_pcr: c_int,
+        reason: *mut *const c_char,
+    ) -> c_int {
+        // SAFETY: the caller passes the view, the PCRs, the root and the
+        // place of the reason.
+        unsafe {
+            let quote = super::Quote {
+                mask: quote_mask,
+                reset,
+                restart,
+                pcrs: &*pcrs.cast::<[[u8; 32]; 24]>(),
+            };
+            let (ret, why) = super::verify(
+                &*view,
+                &quote,
+                expected_root.cast::<[u8; 32]>().as_ref(),
+                expected_pcr,
+            );
+
+            *reason = why.as_ptr();
+            ret
+        }
+    }
+}

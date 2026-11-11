@@ -1,5 +1,10 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
-/* Copyright (c) 2026 Authors of shirudo */
+/*
+ * Copyright (c) 2026 Authors of shirudo
+ *
+ * The config's history as attestation evidence, which
+ * rust/src/util/config_attest.rs collects, emits, parses and verifies.
+ */
 
 #ifndef SHIRUDO_CONFIG_ATTEST_H
 #define SHIRUDO_CONFIG_ATTEST_H
