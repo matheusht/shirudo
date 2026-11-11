@@ -589,18 +589,19 @@ it.
   `rust/src/util/<m>/` for one that takes more than a file: safe code
   over slices and Rust types, and a `capi` submodule whose
   `#[unsafe(no_mangle)] pub unsafe extern "C"` functions keep the names,
-  types and behavior `util/<m>.h` declares, down to what one returns
-  for an empty buffer. The header stays and names the Rust file. The C
-  file goes in the same commit, and every link in `Makefile.shirudo`
-  that took its object takes `$(RUST_LIB)` after the objects and
+  types and behavior `util/<m>.h` declares, down to what one returns for
+  an empty buffer. The header stays and names the Rust file. The C file
+  goes in the same commit, and every link in `Makefile.shirudo` that
+  took its object takes `$(RUST_LIB)` after the objects and
   `$(RUST_LDLIBS)` after the libraries, `$(RUST_TEST_LDLIBS)` in a
-  helper, unit or fuzz link, which lets the link drop the Rust it does
-  not reach and the C that Rust calls. A helper that links few libraries
-  also names one the archive calls that it would find only behind
-  another, zlib behind libcrypto: ld refuses such a symbol before
-  `--gc-sections` drops the call. A test or fuzz target that
-  included the C file to reach a static function calls an export of the
-  port instead, which the header declares as one for it.
+  helper, unit or fuzz link and in shirudo-build's, which take a few
+  util objects, as it lets the link drop the Rust it does not reach and
+  the C that Rust calls. A helper that links few libraries also names
+  one the archive calls that it would find only behind another, zlib
+  behind libcrypto: ld refuses such a symbol before `--gc-sections`
+  drops the call. A test or fuzz target that included the C file to
+  reach a static function calls an export of the port instead, which the
+  header declares as one for it.
 - `rust/src/ffi.rs` turns what C hands over into Rust views: `c_str()`
   for a C string, `slice()` for an array that may be NULL when empty,
   `bytes_mut()` for a C buffer to write into as it is,

@@ -1,5 +1,10 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
-/* Copyright (c) 2026 Authors of shirudo */
+/*
+ * Copyright (c) 2026 Authors of shirudo
+ *
+ * The TPM key that alone may extend the measurement register, which
+ * rust/src/util/nv_writer.rs implements.
+ */
 #ifndef SHIRUDO_NV_WRITER_H
 #define SHIRUDO_NV_WRITER_H
 

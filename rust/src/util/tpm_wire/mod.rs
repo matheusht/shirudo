@@ -15,10 +15,10 @@ use core::ffi::c_int;
 
 use crate::errno::EINVAL;
 
-const DIGEST_LEN: usize = 32;
+pub(crate) const DIGEST_LEN: usize = 32;
 /// nameAlg and a SHA-256.
 const NAME_LEN: usize = 2 + DIGEST_LEN;
-const NV_RSA_BYTES: usize = 384;
+pub(crate) const NV_RSA_BYTES: usize = 384;
 const NV_RSA_PUBLIC_AREA_LEN: usize = 24 + NV_RSA_BYTES;
 const CREDENTIAL_LEN: usize = 32;
 const ID_OBJECT_LEN: usize = 2 + 32 + 2 + CREDENTIAL_LEN;

@@ -115,6 +115,7 @@ unsafe extern "C" {
     pub fn prctl(option: c_int, ...) -> c_int;
     pub fn setrlimit(resource: c_int, rlim: *const Rlimit) -> c_int;
     pub fn mlockall(flags: c_int) -> c_int;
+    pub fn getrandom(buf: *mut c_void, len: usize, flags: u32) -> isize;
     pub fn __nss_configure_lookup(db: *const c_char, service: *const c_char) -> c_int;
     pub fn getenv(name: *const c_char) -> *mut c_char;
     pub fn statx(

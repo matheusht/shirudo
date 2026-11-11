@@ -246,7 +246,6 @@ UTIL_SRCS := \
     util/keyring.c \
     util/keys.c \
     util/identity.c \
-    util/nv_writer.c \
     util/tamper.c \
     util/integrity.c \
     util/paths.c \
@@ -418,9 +417,9 @@ RUST_LIB    := $(RUST_TARGET)/release/libshirudo_rs.a
 RUST_SRCS   := $(shell find $(RUST_DIR)/src -name '*.rs') \
                $(RUST_DIR)/Cargo.toml $(RUST_DIR)/Cargo.lock
 RUST_LDLIBS := -static-libgcc
-# LTO leaves one object in the archive, which a test linking a few util
-# objects pulls in whole: the sections it does not reach go, and with
-# them the references to C it does not link.
+# LTO leaves one object in the archive, which a link of a few util
+# objects, a test's or shirudo-build's, pulls in whole: the sections it
+# does not reach go, and with them the references to C it does not link.
 RUST_TEST_LDLIBS := $(RUST_LDLIBS) -Wl,--gc-sections
 RUSTFLAGS_WERROR := $(if $(filter 1,$(WERROR)),-D warnings)
 
@@ -587,7 +586,7 @@ tools/shirudo-build/shirudo-build: $(BUILD_OBJS) $(SIGN_OBJ) \
                                    $(LIBBPF_A) $(RUST_LIB)
 	@printf '  LD      $@\n'
 	$(Q)$(LD) $(CFLAGS) $(HARDEN_LDFLAGS) $(LDFLAGS) $(RPATH_LDFLAGS) -o $@ $^ \
-	    $(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_LDLIBS)
+	    $(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
 # A backend runs the checker where it does not choose the libraries, as
 # a function inside a database container for one, so it is a static PIE
@@ -866,7 +865,7 @@ REGISTER_OBJS := util/config_attest.o util/config_update.o \
                  util/hex.o util/crypto_openssl.o util/string.o \
                  util/io.o util/seal.o util/image_config.o \
                  util/log.o util/malloc.o \
-                 util/nv_writer.o util/identity.o \
+                 util/identity.o \
                  $(VERSION_OBJ) $(LIBBPF_A) $(RUST_LIB)
 REGISTER_LIBS := $(LIBCRYPTO_LIBS) $(LIBSSL_LIBS) $(TSS2_LIBS) \
                  $(LIBBPF_A) $(LIBELF_LIBS) $(ZLIB_LIBS) $(RUST_TEST_LDLIBS)
@@ -1272,7 +1271,7 @@ $(FUZZ_OUT)/fuzz-tpm-wire: testing/fuzz/fuzz-tpm-wire.c $(FUZZ_BASE) \
                             $(FUZZ_SEAL)
 $(FUZZ_OUT)/fuzz-attest: testing/fuzz/fuzz-attest.c $(FUZZ_BASE) \
                           util/attest.c util/chain.c util/chain_history.c \
-                          util/nv_writer.c util/tpm.c \
+                          util/tpm.c \
                           util/crypto_openssl.c util/io.c $(FUZZ_SEAL) \
                           util/config_attest.c util/config_update.c \
                           util/identity.c \
@@ -1350,7 +1349,6 @@ $(FUZZ_OUT)/fuzz-upatch-info: testing/fuzz/fuzz-upatch-info.c $(FUZZ_BASE) \
                               util/help.c util/identity.c \
                               util/io.c util/java_agent.c util/kernel_abi.c \
                               util/keyring.c util/keys.c util/measured.c \
-                              util/nv_writer.c \
                               util/options.c util/paths.c util/report.c \
                               util/serializer.c util/similar.c \
                               util/tls_openssl.c util/tpm.c \
@@ -1374,7 +1372,7 @@ $(FUZZ_OUT)/fuzz-bpm-info: testing/fuzz/fuzz-bpm-info.c $(FUZZ_BASE) \
                            util/identity.c util/image_keys.c \
                            util/kconfig.c \
                                                   util/keyring.c \
-                           util/nv_writer.c util/options.c util/paths.c \
+                           util/options.c util/paths.c \
                            util/similar.c util/tpm.c \
                            util/upatch_pins.c \
                            util/upatch_rodata.c $(LIBBPF_A)
@@ -1388,7 +1386,7 @@ $(FUZZ_OUT)/fuzz-attest-report: testing/fuzz/fuzz-attest-report.c \
                                util/config_update.c util/crypto_openssl.c \
                                util/help.c util/identity.c \
                                util/io.c util/keyring.c \
-                               util/keys.c util/measured.c util/nv_writer.c \
+                               util/keys.c util/measured.c \
                                util/options.c util/paths.c util/similar.c \
                                util/tpm.c \
                                util/upatch.c util/version_id.c $(FUZZ_SEAL) \
