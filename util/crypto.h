@@ -4,7 +4,8 @@
  *
  * The crypto interface of both profiles, on OpenSSL alone, so every key
  * algorithm the kernel verifies and the hybrid key exchange come from
- * one implementation.
+ * one implementation: rust/src/util/crypto_openssl.rs, and for the TLS
+ * policy util/tls_openssl.c.
  */
 
 #ifndef SHIRUDO_CRYPTO_H

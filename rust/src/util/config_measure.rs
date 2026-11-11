@@ -7,7 +7,7 @@
 use core::ffi::c_int;
 
 use crate::errno::EINVAL;
-use crate::sys::crypto::sha256_buffer;
+use crate::util::crypto_openssl::sha256_buffer;
 
 /// `enum config_event_kind`.
 pub(crate) const EVENT_BOOT: c_int = 1;
@@ -44,7 +44,7 @@ mod capi {
 
     use super::{event, pcr_valid};
     use crate::errno::EINVAL;
-    use crate::sys::crypto::sha256_buffer;
+    use crate::util::crypto_openssl::sha256_buffer;
 
     #[unsafe(no_mangle)]
     pub extern "C" fn config_measure_pcr_valid(pcr: u32) -> c_int {

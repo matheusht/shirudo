@@ -12,9 +12,9 @@ use super::{
     strscpy, strsprintf, trim, version_ok,
 };
 use crate::errno::{EINVAL, ENAMETOOLONG, EPERM};
-use crate::sys::crypto::{Cert, cert_free, cert_read_file};
 use crate::sys::libc::{self, AT_FDCWD, S_IFMT, S_IFREG, STATX_SIZE, STATX_TYPE, Statx};
 use crate::sys::log::pr_err;
+use crate::util::crypto_openssl::{Cert, cert_free, cert_read_file};
 
 /// `oci://host[:port]` into the client, with the transport
 /// BPM_OCI_SCHEME picks, the CA file BPM_OCI_CA_FILE names and the

@@ -12,6 +12,7 @@ mod config;
 mod config_attest;
 mod config_image;
 mod config_measure;
+mod crypto_openssl;
 mod eventlog;
 mod format;
 mod harden;

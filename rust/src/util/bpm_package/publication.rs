@@ -10,7 +10,6 @@ use core::ptr;
 use crate::errno::{E2BIG, EBADMSG, EINVAL, ENAMETOOLONG, ENOMEM};
 use crate::ffi;
 use crate::sys::bpm_tree::{TreePublication, tree_parse};
-use crate::sys::crypto::{Cert, cert_free, cert_read_fd, cert_read_file, verify_detached};
 use crate::sys::libc::PATH_MAX;
 use crate::sys::malloc::{xcalloc, xfree};
 use crate::text::{contains, cstr, strsprintf};
@@ -19,6 +18,7 @@ use crate::util::bpm_oci::{
     TREE_ARTIFACT, TREE_MEDIA, TREE_SIG_MEDIA, buffer_free, descriptor, emit_descriptor,
     get_memory, get_signed, parse_manifest, sha256_hex, url,
 };
+use crate::util::crypto_openssl::{Cert, cert_free, cert_read_fd, cert_read_file, verify_detached};
 use crate::util::json::emit_fixed;
 
 unsafe extern "C" {

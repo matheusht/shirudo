@@ -29,5 +29,15 @@ unsafe extern "C" {
     /// Whether the file open on `fd` at `path` may steer what shirudo
     /// trusts: under /etc/shirudo and /var/lib/shirudo, a regular file
     /// nobody else can write, nor with `secret` read. 0, or -EPERM logged.
+    /// The whole file behind `fd`, from its start, a regular file only
+    /// root may write, of at most `max` bytes, into an allocation of
+    /// `*len + 1` bytes ending in a NUL, which `xfree()` releases.
+    pub fn read_fd(
+        fd: c_int,
+        label: *const c_char,
+        max: usize,
+        out: *mut c_void,
+        len: *mut usize,
+    ) -> c_int;
     pub fn check_trusted(fd: c_int, path: *const c_char, secret: bool) -> c_int;
 }

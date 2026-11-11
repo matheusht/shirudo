@@ -9,8 +9,8 @@ use core::ffi::c_int;
 
 use super::{CREDENTIAL_LEN, DIGEST_LEN, ID_OBJECT_LEN, NAME_LEN};
 use crate::errno::{EINVAL, EIO};
-use crate::sys::crypto::{aes128_cfb_encrypt, hmac_sha256, sha256_buffer};
 use crate::sys::libc::scrub;
+use crate::util::crypto_openssl::{aes128_cfb_encrypt, hmac_sha256, sha256_buffer};
 
 /// The most bytes one KDFa derivation gives.
 const KDFA_MAX: usize = 4096;

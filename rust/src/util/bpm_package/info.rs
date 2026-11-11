@@ -11,7 +11,6 @@ use super::PackageInfo;
 use super::archive::{Found, read_member_in};
 use crate::errno::{EINVAL, EKEYREJECTED};
 use crate::ffi;
-use crate::sys::crypto::{Cert, SHA256_LEN, cert_pubkey_digest};
 use crate::sys::hex::hex_encode;
 use crate::sys::log::pr_err;
 use crate::sys::malloc::xfree;
@@ -21,6 +20,7 @@ use crate::sys::openssl::{
 };
 use crate::text::cstr;
 use crate::util::bpm_oci::{MAX_DIGEST, MAX_NAME, copy_string, package_name_ok, version_ok};
+use crate::util::crypto_openssl::{Cert, SHA256_LEN, cert_pubkey_digest};
 use crate::util::json::{JsonField, parse_schema};
 
 /// The most a package's build environment or certificate may hold.

@@ -18,7 +18,7 @@ use super::{
 use crate::ffi;
 
 use crate::errno::{EBADMSG, EINVAL, EKEYREJECTED};
-use crate::sys::crypto::sha256_buffer;
+use crate::util::crypto_openssl::sha256_buffer;
 
 unsafe extern "C" {
     fn ecdsa_p256_verify(

@@ -12,7 +12,7 @@ use super::{
     put_sized,
 };
 use crate::errno::{EINVAL, EIO};
-use crate::sys::crypto::{
+use crate::util::crypto_openssl::{
     Sha256Ctx, sha256_buffer, sha256_final, sha256_free, sha256_init, sha256_update,
 };
 

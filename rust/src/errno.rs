@@ -23,6 +23,7 @@ pub const ENOSPC: c_int = 28;
 pub const ERANGE: c_int = 34;
 pub const ENAMETOOLONG: c_int = 36;
 pub const ELOOP: c_int = 40;
+pub const ENOPKG: c_int = 65;
 pub const EBADMSG: c_int = 74;
 pub const EOVERFLOW: c_int = 75;
 pub const EILSEQ: c_int = 84;

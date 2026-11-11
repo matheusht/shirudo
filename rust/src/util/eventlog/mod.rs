@@ -13,7 +13,6 @@ mod records;
 use core::ffi::{CStr, c_int};
 
 use crate::errno::{EFBIG, EINVAL, ENAMETOOLONG, ENOENT, ENOMEM};
-use crate::sys::crypto::sha256_buffer;
 use crate::sys::hex::hex_encode;
 use crate::sys::io::read_file;
 use crate::sys::libc::{
@@ -24,6 +23,7 @@ use crate::sys::log::pr_err;
 use crate::sys::malloc::{xfree, xmalloc};
 use crate::sys::seal::{seal_append_line, seal_lock};
 use crate::text::{cstr, strsprintf};
+use crate::util::crypto_openssl::sha256_buffer;
 use crate::util::image_config;
 use crate::util::json::{JsonEmit, JsonField, MAX_BYTES, parse_schema};
 use crate::util::timefmt::iso8601;
