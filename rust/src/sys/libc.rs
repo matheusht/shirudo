@@ -11,6 +11,7 @@ pub const F_DUPFD_CLOEXEC: c_int = 1030;
 pub const SEEK_SET: c_int = 0;
 pub const F_OK: c_int = 0;
 pub const R_OK: c_int = 4;
+pub const W_OK: c_int = 2;
 pub const O_RDONLY: c_int = 0;
 pub const O_WRONLY: c_int = 0o1;
 pub const O_RDWR: c_int = 0o2;
@@ -275,6 +276,7 @@ unsafe extern "C" {
     pub fn pread(fd: c_int, buf: *mut c_void, count: usize, offset: i64) -> isize;
     pub fn unlink(path: *const c_char) -> c_int;
     pub fn access(path: *const c_char, mode: c_int) -> c_int;
+    pub fn geteuid() -> u32;
     pub fn faccessat(dirfd: c_int, path: *const c_char, mode: c_int, flags: c_int) -> c_int;
     pub fn time(t: *mut i64) -> i64;
     pub fn strerror(errnum: c_int) -> *const c_char;

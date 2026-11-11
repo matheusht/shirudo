@@ -28,6 +28,7 @@ mod kernel_release;
 mod keyring;
 mod keys;
 mod nv_writer;
+mod preflight;
 mod report;
 mod serializer;
 mod similar;

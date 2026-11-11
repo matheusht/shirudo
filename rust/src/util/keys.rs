@@ -320,7 +320,7 @@ fn der_keep(sha256: &[u8; 32], der: &[u8]) -> c_int {
 
 /// The kept bytes of the certificate `c`: 0, or -ENOKEY for one no set
 /// took.
-fn cert_der(c: &TrustedCert) -> Result<&'static [u8], c_int> {
+pub(crate) fn cert_der(c: &TrustedCert) -> Result<&'static [u8], c_int> {
     kept()
         .iter()
         .find(|e| e.sha256 == c.sha256)
@@ -334,7 +334,7 @@ fn cert_der(c: &TrustedCert) -> Result<&'static [u8], c_int> {
 /// # Safety
 ///
 /// `cert` is room for a certificate.
-unsafe fn cert_read(c: &TrustedCert, cert: *mut Cert) -> c_int {
+pub(crate) unsafe fn cert_read(c: &TrustedCert, cert: *mut Cert) -> c_int {
     match cert_der(c) {
         // SAFETY: the kept bytes, into the caller's certificate.
         Ok(der) => unsafe { cert_read_der(der.as_ptr(), der.len(), cert) },
@@ -534,6 +534,16 @@ unsafe fn verify_vouch(
     // SAFETY: the payload's allocation, freed once.
     unsafe { xfree(payload.cast(), payload_sz) };
     ret
+}
+
+/// The members of a set.
+pub(crate) fn members(set: &TrustedSet) -> &[TrustedCert] {
+    &set.certs[..set.n.min(KEYS_MAX)]
+}
+
+/// The path a member was read from.
+pub(crate) fn cert_path(c: &TrustedCert) -> &[u8] {
+    cstr(&c.path)
 }
 
 /// Whether the set holds the certificate of `fingerprint`.
@@ -1186,7 +1196,7 @@ unsafe fn load_image_root(
 ///
 /// `keys_dir` is a C string, `revoked_dir` NULL or one, and `set` room
 /// for a set.
-unsafe fn load(
+pub(crate) unsafe fn load(
     keys_dir: *const c_char,
     revoked_dir: *const c_char,
     with_trusted: bool,

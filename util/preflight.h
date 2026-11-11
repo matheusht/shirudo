@@ -2,7 +2,8 @@
 /*
  * Copyright (c) 2026 Authors of shirudo
  *
- * Pre-flight infrastructure-prerequisite gate for `shirudo init`.
+ * Pre-flight infrastructure-prerequisite gate for `shirudo init`, which
+ * rust/src/util/preflight.rs runs.
  */
 
 #ifndef SHIRUDO_PREFLIGHT_H

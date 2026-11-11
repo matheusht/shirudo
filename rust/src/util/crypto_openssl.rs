@@ -544,7 +544,11 @@ pub(crate) unsafe fn cert_pubkey_digest(cert: *const Cert, out: *mut u8) -> c_in
 ///
 /// `cert` is NULL or points to a cert, and `out` NULL or room for
 /// `out_sz`.
-unsafe fn cert_key_algorithm(cert: *const Cert, out: *mut c_char, out_sz: usize) -> c_int {
+pub(crate) unsafe fn cert_key_algorithm(
+    cert: *const Cert,
+    out: *mut c_char,
+    out_sz: usize,
+) -> c_int {
     // SAFETY: the caller passes NULL or a cert.
     let Some(x509) = (unsafe { x509_of(cert) }).filter(|_| !out.is_null() && out_sz != 0) else {
         return -EINVAL;

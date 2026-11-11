@@ -45,7 +45,7 @@ fn sysroot() -> &'static CStr {
 /// The keys init enrols: the runtime image's under a config image, the
 /// initrd's own measured copies while the initrd runs, and the state
 /// tree's otherwise.
-fn keys_dir() -> &'static CStr {
+pub(crate) fn keys_dir() -> &'static CStr {
     if image_config::root_fd() >= 0 {
         return RUNTIME_KEYS_DIR;
     }
@@ -57,7 +57,7 @@ fn keys_dir() -> &'static CStr {
 }
 
 /// The primary certificate in the directory keys_dir() gives.
-fn cert_path() -> &'static CStr {
+pub(crate) fn cert_path() -> &'static CStr {
     if image_config::root_fd() >= 0 {
         return RUNTIME_CERT_PATH;
     }
