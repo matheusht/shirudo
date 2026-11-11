@@ -42,6 +42,9 @@ unsafe extern "C" {
     /// `len` bytes at `buf` and a newline into the output, which it
     /// closes, unlinking a file it could not finish: 0 or -errno.
     pub fn seal_output_commit(out: *mut SealOutput, buf: *const c_void, len: usize) -> c_int;
+    /// The label of the directory open as `dfd` on the inode behind `fd`:
+    /// 0 or -errno.
+    pub fn seal_inherit(dfd: c_int, fd: c_int) -> c_int;
     /// The `len` bytes at `data` as the whole of the sealed file at
     /// `path`, written in place of what was there: 0 or -errno.
     pub fn seal_write_file(

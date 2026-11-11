@@ -1,5 +1,10 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
-/* Copyright (c) 2026 Authors of shirudo */
+/*
+ * Copyright (c) 2026 Authors of shirudo
+ *
+ * The user side of the map serializer, which rust/src/util/serializer.rs
+ * implements.
+ */
 
 #ifndef SHIRUDO_UTIL_SERIALIZER_H
 #define SHIRUDO_UTIL_SERIALIZER_H

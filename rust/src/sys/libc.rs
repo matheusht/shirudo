@@ -21,6 +21,10 @@ pub const O_CLOEXEC: c_int = 0o2000000;
 pub const O_NOFOLLOW: c_int = 0o400000;
 #[cfg(target_arch = "aarch64")]
 pub const O_NOFOLLOW: c_int = 0o100000;
+#[cfg(target_arch = "x86_64")]
+pub const O_DIRECTORY: c_int = 0o200000;
+#[cfg(target_arch = "aarch64")]
+pub const O_DIRECTORY: c_int = 0o40000;
 pub const AT_EMPTY_PATH: c_int = 0x1000;
 pub const F_GETFD: c_int = 1;
 /// setvbuf()'s full buffering, and the size of a stdio buffer.
@@ -38,6 +42,8 @@ pub const RLIMIT_CORE: c_int = 4;
 pub const MCL_CURRENT: c_int = 1;
 pub const MCL_FUTURE: c_int = 2;
 pub const SC_NPROCESSORS_ONLN: c_int = 84;
+pub const LOCK_EX: c_int = 2;
+pub const LOCK_NB: c_int = 4;
 
 /// A stdio `FILE`.
 pub enum File {}
@@ -197,6 +203,8 @@ unsafe extern "C" {
     pub fn close(fd: c_int) -> c_int;
     pub fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
     pub fn open(path: *const c_char, flags: c_int, ...) -> c_int;
+    pub fn openat(dirfd: c_int, path: *const c_char, flags: c_int, ...) -> c_int;
+    pub fn flock(fd: c_int, op: c_int) -> c_int;
     pub fn read(fd: c_int, buf: *mut c_void, count: usize) -> isize;
     pub fn pread(fd: c_int, buf: *mut c_void, count: usize, offset: i64) -> isize;
     pub fn unlink(path: *const c_char) -> c_int;

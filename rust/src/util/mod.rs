@@ -22,6 +22,7 @@ mod kernel_build_id;
 mod kernel_release;
 mod nv_writer;
 mod report;
+mod serializer;
 mod similar;
 mod sysinfo;
 mod timefmt;

@@ -279,7 +279,6 @@ UTIL_SRCS := \
     util/keepalive.c \
     util/keepalive_quote.c \
     util/seal.c \
-    util/serializer.c \
     util/upatch_maps.c \
     util/upatch_rodata.c \
     util/upatch_decode.c \
@@ -989,7 +988,7 @@ testing/helper/test-signed-load: testing/helper/test-signed-load.c
 
 testing/helper/test-otel-map: testing/helper/test-otel-map.c util/upatch_maps.o \
                         util/upatch_maps_otel.o util/curl.o util/crypto_openssl.o \
-                        util/tls_openssl.o util/serializer.o util/seal.o \
+                        util/tls_openssl.o util/seal.o \
                         util/image_config.o \
                         util/upatch_decode.o util/upatch_pins.o \
                         util/upatch_resolve.o \
@@ -1012,7 +1011,7 @@ testing/helper/test-upatch-prog-metadata: testing/helper/test-upatch-prog-metada
 
 testing/helper/test-upatch-serializer-pages: testing/helper/test-upatch-serializer-pages.c \
                                        util/upatch_maps.o util/upatch_pins.o util/upatch_resolve.o \
-                                       util/serializer.o util/seal.o \
+                                       util/seal.o \
                                        util/string.o \
                                        util/image_config.o \
                                        util/malloc.o util/io.o util/paths.o \
@@ -1285,7 +1284,7 @@ $(FUZZ_OUT)/fuzz-elf: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-elf: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS)
 $(FUZZ_OUT)/fuzz-serializer: testing/fuzz/fuzz-serializer.c $(FUZZ_BASE) \
                               util/upatch_maps.c util/upatch_pins.c \
-                              util/upatch_resolve.c util/serializer.c $(FUZZ_SEAL) util/io.c util/paths.c \
+                              util/upatch_resolve.c $(FUZZ_SEAL) util/io.c util/paths.c \
                               $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-serializer: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-serializer: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS)
@@ -1343,7 +1342,7 @@ $(FUZZ_OUT)/fuzz-upatch-info: testing/fuzz/fuzz-upatch-info.c $(FUZZ_BASE) \
                               util/io.c util/java_agent.c util/kernel_abi.c \
                               util/keyring.c util/keys.c util/measured.c \
                               util/options.c util/paths.c \
-                              util/serializer.c util/similar.c \
+                              util/similar.c \
                               util/tls_openssl.c util/tpm.c \
                               util/upatch.c \
                               util/upatch_decode.c util/upatch_maps.c \
