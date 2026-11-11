@@ -249,7 +249,6 @@ UTIL_SRCS := \
     util/nv_writer.c \
     util/tamper.c \
     util/integrity.c \
-    util/initrd.c \
     util/paths.c \
     util/preflight.c \
     util/kernel_abi.c \
@@ -867,7 +866,7 @@ REGISTER_OBJS := util/config_attest.o util/config_update.o \
                  util/hex.o util/crypto_openssl.o util/string.o \
                  util/io.o util/seal.o util/image_config.o \
                  util/log.o util/malloc.o \
-                 util/initrd.o util/nv_writer.o util/identity.o \
+                 util/nv_writer.o util/identity.o \
                  $(VERSION_OBJ) $(LIBBPF_A) $(RUST_LIB)
 REGISTER_LIBS := $(LIBCRYPTO_LIBS) $(LIBSSL_LIBS) $(TSS2_LIBS) \
                  $(LIBBPF_A) $(LIBELF_LIBS) $(ZLIB_LIBS) $(RUST_TEST_LDLIBS)
@@ -1277,7 +1276,7 @@ $(FUZZ_OUT)/fuzz-attest: testing/fuzz/fuzz-attest.c $(FUZZ_BASE) \
                           util/nv_writer.c util/tpm.c \
                           util/crypto_openssl.c util/io.c $(FUZZ_SEAL) \
                           util/config_attest.c util/config_update.c \
-                          util/initrd.c util/identity.c \
+                          util/identity.c \
                           util/keyring.c util/version_id.c util/upatch.c \
                           $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-attest: FUZZ_CFLAGS += $(TSS2_CFLAGS) $(LIBELF_CFLAGS)
@@ -1349,7 +1348,7 @@ $(FUZZ_OUT)/fuzz-upatch-info: testing/fuzz/fuzz-upatch-info.c $(FUZZ_BASE) \
                               testing/fuzz/output.c builtin-upatch.c \
                               builtin.h util/chain.c util/crypto_openssl.c \
                               util/curl.c util/elf_target.c \
-                              util/help.c util/identity.c util/initrd.c \
+                              util/help.c util/identity.c \
                               util/io.c util/java_agent.c util/kernel_abi.c \
                               util/keyring.c util/keys.c util/measured.c \
                               util/nv_writer.c \
@@ -1374,7 +1373,7 @@ $(FUZZ_OUT)/fuzz-bpm-info: testing/fuzz/fuzz-bpm-info.c $(FUZZ_BASE) \
                            util/bpm_state.c util/bpm_tree_state.c \
                            util/chain.c util/help.c \
                            util/identity.c util/image_keys.c \
-                           util/initrd.c util/kconfig.c \
+                           util/kconfig.c \
                                                   util/keyring.c \
                            util/nv_writer.c util/options.c util/paths.c \
                            util/similar.c util/tpm.c \
@@ -1389,7 +1388,7 @@ $(FUZZ_OUT)/fuzz-attest-report: testing/fuzz/fuzz-attest-report.c \
                                util/config_attest.c \
                                util/config_update.c util/crypto_openssl.c \
                                util/help.c util/identity.c \
-                               util/initrd.c util/io.c util/keyring.c \
+                               util/io.c util/keyring.c \
                                util/keys.c util/measured.c util/nv_writer.c \
                                util/options.c util/paths.c util/similar.c \
                                util/tpm.c \

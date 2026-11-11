@@ -12,4 +12,6 @@ unsafe extern "C" {
     /// Whether a target runs from a config image, whose paths no
     /// environment variable moves.
     pub fn image_config_active() -> bool;
+    /// The verified root of the config image, or -1 without one.
+    pub fn image_config_root_fd() -> c_int;
 }

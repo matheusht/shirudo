@@ -2,7 +2,8 @@
 /*
  * Copyright (c) 2026 Authors of shirudo
  *
- * Where init runs: the initrd, with the root file system at /sysroot.
+ * Where init runs: the initrd, with the root file system at /sysroot,
+ * which rust/src/util/initrd.rs implements.
  */
 
 #ifndef SHIRUDO_UTIL_INITRD_H
