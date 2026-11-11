@@ -2,7 +2,8 @@
 /*
  * Copyright (c) 2026 Authors of shirudo
  *
- * The structured help every subcommand prints.
+ * The structured help every subcommand prints, which
+ * rust/src/util/help.rs implements.
  */
 
 #ifndef SHIRUDO_HELP_H

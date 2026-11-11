@@ -12,6 +12,7 @@ mod config_measure;
 mod eventlog;
 mod format;
 mod harden;
+mod help;
 mod image_bootstrap;
 mod initrd;
 mod json;

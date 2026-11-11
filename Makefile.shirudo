@@ -277,7 +277,6 @@ UTIL_SRCS := \
     util/report.c \
     util/malloc.c \
     util/sysinfo.c \
-    util/help.c \
     util/options.c \
     util/conditions.c \
     util/keepalive.c \
@@ -581,7 +580,6 @@ tools/shirudo-build/shirudo-build: $(BUILD_OBJS) $(SIGN_OBJ) \
                                    util/upatch_rodata.o \
                                    util/bpm_tree.o util/bpm_tree_overlap.o \
                                    util/chain_history.o util/options.o \
-                                   util/help.o \
                                    $(VERSION_OBJ) \
                                    $(LIBBPF_A) $(RUST_LIB)
 	@printf '  LD      $@\n'
@@ -594,8 +592,7 @@ tools/shirudo-build/shirudo-build: $(BUILD_OBJS) $(SIGN_OBJ) \
 PKG_CONFIG ?= pkg-config
 QUOTE_CHECK_UTIL_SRCS := util/crypto_openssl.c util/hex.c \
                          util/io.c util/seal.c util/log.c \
-                         util/malloc.c util/string.c util/options.c \
-                         util/help.c
+                         util/malloc.c util/string.c util/options.c
 
 # A distribution without a static libcrypto, Fedora for one, gets the
 # prefix of a static OpenSSL here. The checker's objects then compile
@@ -1312,7 +1309,7 @@ $(FUZZ_OUT)/fuzz-otel: testing/fuzz/fuzz-otel.c $(FUZZ_BASE) \
 $(FUZZ_OUT)/fuzz-beefile: testing/fuzz/fuzz-beefile.c $(FUZZ_BASE) \
                            tools/shirudo-build/bpm-build.c $(FUZZ_PACKAGE) \
                            util/upatch.c util/paths.c \
-                           util/version_id.c util/options.c util/help.c \
+                           util/version_id.c util/options.c \
                            util/similar.c
 $(FUZZ_OUT)/fuzz-oci-http: testing/fuzz/fuzz-oci-http.c $(FUZZ_BASE) \
                             $(FUZZ_OCI)
@@ -1346,7 +1343,7 @@ $(FUZZ_OUT)/fuzz-upatch-info: testing/fuzz/fuzz-upatch-info.c $(FUZZ_BASE) \
                               testing/fuzz/output.c builtin-upatch.c \
                               builtin.h util/chain.c util/crypto_openssl.c \
                               util/curl.c util/elf_target.c \
-                              util/help.c util/identity.c \
+                              util/identity.c \
                               util/io.c util/java_agent.c util/kernel_abi.c \
                               util/keyring.c util/keys.c util/measured.c \
                               util/options.c util/paths.c util/report.c \
@@ -1368,7 +1365,7 @@ $(FUZZ_OUT)/fuzz-bpm-info: testing/fuzz/fuzz-bpm-info.c $(FUZZ_BASE) \
                            testing/fuzz/output.c builtin-bpm.c builtin.h \
                            $(FUZZ_PACKAGE) \
                            util/bpm_state.c util/bpm_tree_state.c \
-                           util/chain.c util/help.c \
+                           util/chain.c \
                            util/identity.c util/image_keys.c \
                            util/kconfig.c \
                                                   util/keyring.c \
@@ -1384,7 +1381,7 @@ $(FUZZ_OUT)/fuzz-attest-report: testing/fuzz/fuzz-attest-report.c \
                                util/chain.c util/chain_history.c \
                                util/config_attest.c \
                                util/config_update.c util/crypto_openssl.c \
-                               util/help.c util/identity.c \
+                               util/identity.c \
                                util/io.c util/keyring.c \
                                util/keys.c util/measured.c \
                                util/options.c util/paths.c util/similar.c \

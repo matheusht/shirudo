@@ -143,6 +143,12 @@ unsafe extern "C" {
     pub fn fclose(f: *mut File) -> c_int;
     pub fn fileno(f: *mut File) -> c_int;
     pub fn fputs(s: *const c_char, f: *mut File) -> c_int;
+    pub fn fputc(c: c_int, f: *mut File) -> c_int;
+    pub fn fwrite(ptr: *const c_void, size: usize, n: usize, f: *mut File) -> usize;
+    pub fn fprintf(f: *mut File, fmt: *const c_char, ...) -> c_int;
+    pub fn printf(fmt: *const c_char, ...) -> c_int;
+    /// The C library's standard error stream, unbuffered.
+    pub static mut stderr: *mut File;
     pub fn snprintf(buf: *mut c_char, size: usize, fmt: *const c_char, ...) -> c_int;
     pub fn gmtime_r(t: *const i64, tm: *mut Tm) -> *mut Tm;
     pub fn strftime(out: *mut c_char, max: usize, fmt: *const c_char, tm: *const Tm) -> usize;
