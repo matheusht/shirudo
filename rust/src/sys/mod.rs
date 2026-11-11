@@ -16,6 +16,7 @@ pub mod log;
 pub mod malloc;
 pub mod openssl;
 pub mod seal;
+pub mod string;
 pub mod timefmt;
 pub mod upatch;
 pub mod zlib;

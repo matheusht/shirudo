@@ -2,7 +2,8 @@
 /*
  * Copyright (c) 2026 Authors of shirudo
  *
- * /etc/shirudo/shirudo.conf reader.
+ * /etc/shirudo/shirudo.conf reader, which rust/src/util/config.rs
+ * implements.
  */
 
 #ifndef SHIRUDO_CONFIG_H

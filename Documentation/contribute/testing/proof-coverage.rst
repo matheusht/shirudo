@@ -819,24 +819,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
      - Accepts exactly the version 1 SHA-256 layout with 4096-byte blocks,
        a 32-byte salt and 1 to 2^28 data blocks; the hash tree's size
        by dm-verity's own formula; nothing changed on refusal
-   * - ``config-auth``
-     - ``set_owner_auth()``
-     - Values of 0 to 16 bytes, any earlier value
-     - A passphrase as it stands, ``hex:`` digits as the bytes they spell;
-       a refusal keeps the value before
-   * - ``config-auth-long``
-     - ``set_owner_auth()``
-     - Passphrases of 255 to 258 bytes, any 8 bytes and then letters,
-       any earlier value
-     - A passphrase of up to 256 bytes as it stands; a longer one
-       refused, the value before kept
-   * - ``config-hosts``
-     - ``tls_classical_hosts_valid()``, ``dns_name_valid()``
-     - Values and names of 0 to 7 bytes
-     - A list exactly when empty or names apart by single commas; a name
-       exactly when labels of 1 to 63 letters, digits and hyphens apart
-       by single dots, none starting or ending with a hyphen, at most 253
-       bytes in all, not every label a number, decimal or ``0x`` and hex
    * - ``config-update-follows``
      - ``event_follows()`` and ``same_event()`` of :src:`util/config_update.c`
      - Every record ``record_decode()`` accepts, and the zeroed one before
@@ -1466,8 +1448,9 @@ The fuzz targets in :doc:`test-coverage` cover these parsers; no proof
 does: the JSON reader and writer of :src:`rust/src/util/json/`, the
 OCI client of :src:`rust/src/util/bpm_oci/` and the package reader of
 :src:`rust/src/util/bpm_package/` and the TPM wire module of
-:src:`rust/src/util/tpm_wire/` and the eventlog of
-:src:`rust/src/util/eventlog/`, whose CBMC proofs went with the C
+:src:`rust/src/util/tpm_wire/` the eventlog of
+:src:`rust/src/util/eventlog/` and site configuration in
+:src:`rust/src/util/config.rs`, whose CBMC proofs went with the C
 they proved when those modules moved to Rust; how ``json_parse()`` dispatches objects, arrays and maps to their
 schemas, and the members and elements of a JSON document longer than
 two bytes, the OTLP headers a configuration adds

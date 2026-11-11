@@ -12,6 +12,9 @@ unsafe extern "C" {
     /// The `n` bytes `2 * n` hex digits of either case spell; -EINVAL for
     /// anything else.
     pub fn hex_decode(hex: *const c_char, out: *mut u8, n: usize) -> c_int;
+    /// An even run of at most `2 * cap` hex digits into `out`, and how
+    /// many bytes; -EINVAL for anything else.
+    pub fn hex_decode_max(hex: *const c_char, out: *mut u8, cap: usize, len: *mut usize) -> c_int;
     /// The 32 bytes of a `sha256:<64 hex digits>` digest; -EINVAL for
     /// anything else.
     pub fn sha256_digest_decode(digest: *const c_char, out: *mut u8) -> c_int;

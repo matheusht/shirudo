@@ -271,7 +271,6 @@ UTIL_SRCS := \
     util/kconfig.c \
     util/kernel_build_id.c \
     util/kernel_release.c \
-    util/config.c \
     util/image_bootstrap.c \
     util/image_cache.c \
     util/image_config.c \
@@ -584,7 +583,7 @@ build/target/util/loader.o: $(BPF_OBJS)
 # the core shirudo binary.
 tools/shirudo-build/shirudo-build: $(BUILD_OBJS) $(SIGN_OBJ) util/config_image.o \
                                    util/log.o util/loader.o \
-                                   util/io.o util/malloc.o util/paths.o util/config.o \
+                                   util/io.o util/malloc.o util/paths.o \
                                    util/image_config.o util/upatch.o util/timefmt.o \
                                    util/elf_target.o util/hex.o util/keys.o \
                                    util/seal.o util/harden.o util/string.o \
@@ -869,13 +868,13 @@ testing/helper/test-harden: testing/helper/test-harden.c util/harden.o util/log.
 # chain.o's read/extend paths reference util/tpm (libtss2), so the
 # symbols must resolve even for a helper that never extends.
 # util/malloc.o brings in x*/libc_free that chain.o/tpm.o use.
-# util/config.o resolves config_load(), called by tpm.o.
+# The Rust library resolves config_load(), called by tpm.o.
 # The register code pulls in the Rust eventlog, seal label writer and JSON codec.
 REGISTER_OBJS := util/config_attest.o util/config_update.o util/config_measure.o util/config_image.o \
                  util/chain.o util/tpm.o \
                  util/timefmt.o util/upatch.o \
                  util/hex.o util/crypto_openssl.o util/string.o \
-                 util/io.o util/seal.o util/config.o util/image_config.o \
+                 util/io.o util/seal.o util/image_config.o \
                  util/log.o util/malloc.o \
                  util/initrd.o util/nv_writer.o util/identity.o \
                  $(VERSION_OBJ) $(LIBBPF_A) $(RUST_LIB)
@@ -911,9 +910,9 @@ testing/helper/test-keys: testing/helper/test-keys.c util/keys.o \
 
 testing/helper/test-seal: testing/helper/test-seal.c util/seal.o util/io.o \
                           util/log.o util/string.o util/malloc.o \
-                          util/config.o util/image_config.o util/hex.o
+                          util/image_config.o util/hex.o $(RUST_LIB)
 	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) -o $@ $^
+	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(RUST_TEST_LDLIBS)
 
 testing/helper/test-eventlog: testing/helper/test-eventlog.c $(REGISTER_OBJS)
 	@printf '  CC      $@\n'
@@ -957,10 +956,10 @@ testing/helper/test-tpm-session: testing/helper/test-tpm-session.c \
 	$(Q)$(CC) $(CFLAGS) -o $@ $(filter-out %.h,$^) $(REGISTER_LIBS) \
 		-Wl,--wrap=enforcement_active,--wrap=identity_read
 
-testing/helper/test-config: testing/helper/test-config.c util/config.o util/io.o util/seal.o util/log.o util/hex.o \
-                            util/image_config.o util/string.o util/malloc.o
+testing/helper/test-config: testing/helper/test-config.c util/io.o util/seal.o util/log.o util/hex.o \
+                            util/image_config.o util/string.o util/malloc.o $(RUST_LIB)
 	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) -o $@ $^
+	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(RUST_TEST_LDLIBS)
 
 testing/helper/test-bpm-source: testing/helper/test-bpm-source.c util/bpm_source_config.o \
                                 util/string.o
@@ -1009,7 +1008,7 @@ testing/helper/test-signed-load: testing/helper/test-signed-load.c
 testing/helper/test-otel-map: testing/helper/test-otel-map.c util/upatch_maps.o \
                         util/upatch_maps_otel.o util/curl.o util/crypto_openssl.o \
                         util/tls_openssl.o util/serializer.o util/seal.o \
-                        util/config.o util/image_config.o \
+                        util/image_config.o \
                         util/upatch_decode.o util/upatch_pins.o \
                         util/upatch_resolve.o \
                         util/upatch.o util/string.o util/log.o \
@@ -1033,7 +1032,7 @@ testing/helper/test-upatch-serializer-pages: testing/helper/test-upatch-serializ
                                        util/upatch_maps.o util/upatch_pins.o util/upatch_resolve.o \
                                        util/serializer.o util/seal.o \
                                        util/string.o \
-                                       util/config.o util/image_config.o \
+                                       util/image_config.o \
                                        util/malloc.o util/io.o util/paths.o \
                                        util/log.o util/hex.o util/timefmt.o \
                                        $(RUST_LIB)
@@ -1096,11 +1095,12 @@ testing/helper/test-image-keys: testing/helper/test-image-keys.c \
 
 testing/helper/test-image-config: testing/helper/test-image-config.c \
 		util/image_bootstrap.o util/hex.o util/config_measure.o \
-		util/crypto_openssl.o util/config.o util/image_config.o \
+		util/crypto_openssl.o util/image_config.o \
 		util/io.o util/seal.o util/log.o util/malloc.o \
-		util/string.o
+		util/string.o $(RUST_LIB)
 	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(LIBCRYPTO_LIBS) $(LIBSSL_LIBS)
+	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(LIBCRYPTO_LIBS) $(LIBSSL_LIBS) $(ZLIB_LIBS) \
+		$(RUST_TEST_LDLIBS)
 
 testing/helper/test-image-cli: testing/helper/test-image-cli.c \
 		testing/helper/image-cli.h builtin-bpm.c \
@@ -1240,12 +1240,12 @@ FUZZ_LIBS := $(RUST_FUZZ_LIB) $(LIBCRYPTO_LIBS) $(LIBSSL_LIBS) \
              $(LIBCURL_LIBS) $(ZLIB_LIBS) $(RUST_TEST_LDLIBS)
 # The coverage tables of the Rust library hold on to every function in
 # it, so each target links the C those functions call.
-FUZZ_RUST_C := util/io.c util/seal.c util/config.c util/image_config.c \
+FUZZ_RUST_C := util/io.c util/seal.c util/image_config.c \
                util/crypto_openssl.c util/tls_openssl.c util/bpm_tree.c \
                util/upatch.c util/timefmt.c
 FUZZ_BASE := util/string.c util/hex.c util/malloc.c testing/fuzz/log.c \
              $(FUZZ_RUST_C)
-FUZZ_CONFIG := util/config.c util/image_config.c
+FUZZ_CONFIG := util/image_config.c
 FUZZ_SEAL := util/seal.c $(FUZZ_CONFIG)
 FUZZ_OCI := util/curl.c util/io.c $(FUZZ_SEAL) \
             util/crypto_openssl.c util/tls_openssl.c

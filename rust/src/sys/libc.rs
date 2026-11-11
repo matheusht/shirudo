@@ -15,10 +15,16 @@ pub const O_WRONLY: c_int = 0o1;
 pub const O_CREAT: c_int = 0o100;
 pub const O_EXCL: c_int = 0o200;
 pub const O_CLOEXEC: c_int = 0o2000000;
+/// setvbuf()'s full buffering, and the size of a stdio buffer.
+pub const IOFBF: c_int = 0;
+pub const BUFSIZ: usize = 8192;
 pub const STATX_TYPE: u32 = 0x1;
 pub const STATX_SIZE: u32 = 0x200;
 pub const S_IFMT: u16 = 0o170000;
 pub const S_IFREG: u16 = 0o100000;
+
+/// A stdio `FILE`.
+pub enum File {}
 
 /// `struct statx`, which unlike `struct stat` has one layout on every
 /// architecture: the fields read here, and the rest of its 256 bytes.
@@ -81,6 +87,12 @@ unsafe extern "C" {
     pub fn access(path: *const c_char, mode: c_int) -> c_int;
     pub fn time(t: *mut i64) -> i64;
     pub fn strerror(errnum: c_int) -> *const c_char;
+    pub fn fopen(path: *const c_char, mode: *const c_char) -> *mut File;
+    pub fn fdopen(fd: c_int, mode: *const c_char) -> *mut File;
+    pub fn setvbuf(f: *mut File, buf: *mut c_char, mode: c_int, size: usize) -> c_int;
+    pub fn ferror(f: *mut File) -> c_int;
+    pub fn fclose(f: *mut File) -> c_int;
+    pub fn fileno(f: *mut File) -> c_int;
     pub fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64;
     fn __errno_location() -> *mut c_int;
 }
