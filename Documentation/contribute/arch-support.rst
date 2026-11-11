@@ -45,9 +45,9 @@ Comparison
      - Not built in CI
    * - Toolchain hardening beyond the common flags
      - Stack-clash protection, call-used register zeroing,
-       ``-fcf-protection=full``
+       ``-fcf-protection=full``, in the C code
      - Stack-clash protection, call-used register zeroing,
-       ``-mbranch-protection=standard``
+       ``-mbranch-protection=standard``, in the C code
      - None
    * - Kernel project patch set
      - Included in the external kernel build
@@ -99,6 +99,11 @@ x86-64
   kernels need it.
 - The ``kernel-cve`` detectors define ``__TARGET_ARCH_x86`` for their
   ``kprobe`` programs and load on x86-64 only.
+- Stable Rust has no ``-fcf-protection``, and neither the Rust library
+  nor the Rust standard library it links carries the IBT and SHSTK
+  properties. The linker keeps a property only when every object has
+  it, so a binary that links Rust code is marked compatible with
+  neither indirect branch tracking nor shadow stacks.
 
 arm64
 -----
@@ -110,6 +115,10 @@ arm64
   Cortex-A72.
 - A ``kprobe`` on a function's entry goes through a breakpoint exception
   rather than ftrace, because arm64 has no kprobes on ftrace.
+- Stable Rust has no ``-mbranch-protection``, and neither the Rust
+  library nor the Rust standard library it links carries the BTI and PAC
+  properties, so a binary that links Rust code is not marked for branch
+  target identification.
 
 riscv64
 -------

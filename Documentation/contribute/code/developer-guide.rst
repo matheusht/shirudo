@@ -23,6 +23,10 @@ Before you begin
   ``llvm`` 23 with the BPF target, the release CI builds and tests with.
   :src:`.github/scripts/install-clang.sh` installs them on Debian, Ubuntu
   and Fedora.
+- Rust 1.85 or newer, with ``cargo``, and ``rustfmt`` and ``clippy`` for
+  the checks. The library under ``rust/`` replaces C modules one at a
+  time, and every binary links it. It takes Rust's ``core`` and
+  ``alloc`` alone, no crates, so cargo builds it offline.
 - The development files that :src:`Makefile.config` probes for with
   ``pkg-config``:
 

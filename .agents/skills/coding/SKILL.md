@@ -1,6 +1,6 @@
 ---
 name: coding
-description: Write or change shirudo's C code, userspace or BPF, in the tree's style. Covers the kernel coding style it follows, when and where to split a function that grew too long, how to shape interfaces, resources, errors, types, shared state and hot paths so that a mistake has nowhere to hide, what to delete, where a comment belongs and where it is clutter, the helpers in util/ and include/shirudo/ to use instead of libc or open code, moving code two places need into util/, memory, secrets, JSON and logging, the commit message that carries the change, with a chart where one explains it faster, and the checks a change passes. Use whenever writing, changing or reviewing C in shirudo.
+description: Write or change shirudo's C code, userspace or BPF, and the Rust that replaces its C modules, in the tree's style. Covers the kernel coding style it follows, when and where to split a function that grew too long, how to shape interfaces, resources, errors, types, shared state and hot paths so that a mistake has nowhere to hide, what to delete, where a comment belongs and where it is clutter, the helpers in util/ and include/shirudo/ to use instead of libc or open code, moving code two places need into util/, memory, secrets, JSON and logging, porting a C module to rust/, the commit message that carries the change, with a chart where one explains it faster, and the checks a change passes. Use whenever writing, changing or reviewing C or Rust in shirudo.
 ---
 
 # Coding
@@ -579,6 +579,39 @@ its point of no return:
      Unlinks the core_pattern path with that authority.
 ```
 
+## Rust
+
+The Rust library under `rust/` replaces C modules one at a time, and a
+module's C interface stays its contract while any C caller or test uses
+it.
+
+- The port of `util/<m>.c` is `rust/src/util/<m>.rs`: safe code over
+  slices and Rust types, and a `capi` submodule whose
+  `#[unsafe(no_mangle)] pub unsafe extern "C"` functions keep the names,
+  types and behavior `util/<m>.h` declares, down to what one returns
+  for an empty buffer. The header stays and names the Rust file. The C
+  file goes in the same commit, and every link in `Makefile.shirudo`
+  that took its object takes `$(RUST_LIB)` after the objects and
+  `$(RUST_LDLIBS)` after the libraries.
+- `rust/src/ffi.rs` turns what C hands over into Rust views: `c_str()`
+  for a C string, `slice()` for an array that may be NULL when empty,
+  `zeroed_slice_mut()` for room C has not initialised. Every `unsafe`
+  block says in a `// SAFETY:` comment what part of the C contract makes
+  it sound.
+- Before the C file goes, compare the two: build the old file from git
+  with its functions renamed, link it beside the archive and run both on
+  the same random and corpus inputs until they agree on every result and
+  every byte written. The tests then hold the port to the rest.
+- No crates and no std: core and alloc, so that cargo builds offline
+  from `rust/Cargo.lock` and the target carries no runtime it does not
+  use. What the C library offers comes through `extern` declarations, as
+  the C uses it. A panic reports through `pr_err()` and aborts.
+  `panic = "abort"`, overflow checks and LTO hold in every release build,
+  and arithmetic that input can overflow is checked.
+- `rustfmt` sets the layout. Comments follow the rules above with `//`
+  and `///`, and `//!` holds the lines of purpose under the SPDX line
+  and the copyright.
+
 ## Check
 
 A warning fails the build, so fix it rather than silence it. Build with
@@ -587,4 +620,5 @@ every `util/` file the change touches, adapt and run the proofs under
 `testing/proofs/` that reach the code (the `proofs` skill), and run the
 `pre-submit` skill's checks before handing the change over: checkpatch
 in strict mode, Coccinelle, sparse and both sanitizers find what review
-misses.
+misses, and `cargo fmt --check` and `cargo clippy` keep `rust/` to its
+style and its `// SAFETY:` comments.

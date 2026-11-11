@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026 Authors of shirudo
+
+[package]
+name = "shirudo"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+license = "BSD-2-Clause"
+publish = false
+
+# The C binaries link this archive; the crate takes core and alloc alone.
+[lib]
+name = "shirudo_rs"
+path = "src/lib.rs"
+crate-type = ["staticlib"]
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+
+[profile.dev]
+panic = "abort"
+
+# LTO keeps of core and alloc only what the exported functions reach,
+# where the prebuilt objects would bring all of themselves.
+[profile.release]
+panic = "abort"
+overflow-checks = true
+codegen-units = 1
+lto = true
+debug = true

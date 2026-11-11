@@ -2,7 +2,8 @@
 /*
  * Copyright (c) 2026 Authors of shirudo
  *
- * The did-you-mean helpers of the dispatchers, allocation-free.
+ * The did-you-mean helpers of the dispatchers, allocation-free, which
+ * rust/src/util/similar.rs implements.
  */
 
 #ifndef SHIRUDO_SIMILAR_H

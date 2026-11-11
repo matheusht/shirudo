@@ -55,6 +55,9 @@ signs off.
 .github/scripts/check-spdx.sh
 .github/scripts/check-unused.sh
 scan-build-23 --status-bugs --exclude vendor make ANALYZE=1  # from a clean tree
+cargo fmt --check --manifest-path rust/Cargo.toml
+cargo clippy --release --offline --locked --manifest-path rust/Cargo.toml \
+	--target-dir build/rust -- -D warnings
 make -C Documentation check         # DOCS_CONTAINER=0 without podman or docker
 make -B && make -B shirudo-build && make -B quote-check &&
 	make -B -f Makefile.shirudo test-helpers

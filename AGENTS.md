@@ -21,8 +21,9 @@ as well.
 
 A BPF security platform that locks down the `bpf()` syscall so only signed in-kernel
 BPF loader programs can install BPF code, create maps or attach links,
-even for `CAP_SYS_ADMIN`. One plain-C binary serves two roles, chosen by
-what is present on the machine, never by separate builds:
+even for `CAP_SYS_ADMIN`. One binary serves two roles, chosen by what is
+present on the machine, never by separate builds. It is written in C,
+with a Rust library under `rust/` taking over its modules one at a time:
 
 - the *operator* holds the private ML-DSA-87 signing key and produces
   signed `.upatch` artifacts (`shirudo build`, `shirudo bpm build`), and
@@ -110,11 +111,21 @@ package for `bpm info`.
 
 C follows the kernel coding style,
 `Documentation/contribute/code/coding-style.rst`, in userspace and BPF
-alike; the `coding` skill, which the section above has you load first,
-gives these conventions with their reasons, the helpers to use and the
-commit message that carries a change.
+alike, and Rust the style `rustfmt` gives it, as the kernel's Rust does;
+the `coding` skill, which the section above has you load first, gives
+these conventions with their reasons, the helpers to use and the commit
+message that carries a change.
 
-- Plain C, no C++. Zero-initialise with `= {}`. Integers are `__u8` to
+- Rust under `rust/` replaces a C module whole: the module that ports
+  `util/<m>.c` is `rust/src/util/<m>.rs`, keeps the C interface of
+  `util/<m>.h` in a `capi` submodule of `#[unsafe(no_mangle)]`
+  functions, so that the C callers and the tests stay as they are, and
+  the C file goes in the same commit. The crate is `no_std`: core and
+  alloc alone, no crates, and the C library through `extern` declarations
+  as the C uses it. It builds with `panic = "abort"`, overflow checks and
+  LTO, and every `unsafe` block says why it is sound in a `// SAFETY:`
+  comment, which clippy enforces. The BPF side stays in C.
+- C, no C++. Zero-initialise with `= {}`. Integers are `__u8` to
   `__u64` and `__s8` to `__s64`; a system header that uses `uint8_t` and
   its kin goes above the first shirudo header, which poisons them.
 - Use the helpers of `util/` and `include/shirudo/` over libc and open
@@ -152,7 +163,7 @@ commit message that carries a change.
   file starts with its SPDX line, the copyright and at most five lines of
   purpose; in code a comment says only the why the code cannot, never
   what it does or how it came to be. Block comments follow section 8 of
-  the style, and `//` is for SPDX alone.
+  the style, and in C `//` is for SPDX alone.
 - Userspace is BSD-2-Clause. Every file compiled into a BPF object, and
   every Lua decoder, is `GPL-2.0 OR BSD-2-Clause`, and a BPF program
   declares `char _license[] SEC("license") = "Dual BSD/GPL";`. No emojis.
@@ -338,7 +349,8 @@ one usually still compiles and passes tests.
 - The binary links exactly `libc`, `libcrypto`/`libssl` (OpenSSL >= 3.5;
   ML-DSA-87 is the only signing algorithm, TLS is 1.3 with hybrid ML-KEM
   only), `libcurl`, `libtss2-esys` + `libtss2-tctildr`, `libelf`,
-  `zlib`, `libluajit` and the vendored `libbpf`. A new library must be
+  `zlib`, `libluajit`, the vendored `libbpf` and, linked in, Rust's
+  `core` and `alloc` with the unwinder from `libgcc_eh`. A new library must be
   absolutely necessary, universally available, actively maintained,
   BSD-2-Clause compatible and load-bearing for one thing. `libsystemd`,
   `libsubcmd`, `libkeyutils`, `libcap` and any JSON/YAML/TOML parser
@@ -358,9 +370,10 @@ one usually still compiles and passes tests.
   `make quote-check` the backend's quote checker `shirudo-quote-check`,
   a static PIE in either profile,
   and `make target` the fully static PIE target profile (`make target-deps`
-  builds OpenSSL, libcurl and tpm2-tss from source first). A checkout
-  used in place of an installed operator package names the helper with
-  `SHIRUDO_BUILD=<path>`.
+  builds OpenSSL, libcurl and tpm2-tss from source first). Each builds
+  the Rust library with cargo first, offline, into `build/rust/`; it
+  takes Rust 1.85 or newer. A checkout used in place of an installed
+  operator package names the helper with `SHIRUDO_BUILD=<path>`.
 - A compiler warning fails every build; fix it rather than silence it.
   Validate C changes, test code included, with GCC and with clang 23,
   `make -B` when switching `CC`.
