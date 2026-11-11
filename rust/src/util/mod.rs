@@ -21,6 +21,7 @@ mod initrd;
 mod json;
 mod kernel_build_id;
 mod kernel_release;
+mod keyring;
 mod nv_writer;
 mod report;
 mod serializer;

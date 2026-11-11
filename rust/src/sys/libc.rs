@@ -21,6 +21,16 @@ pub const O_CLOEXEC: c_int = 0o2000000;
 pub const O_NOFOLLOW: c_int = 0o400000;
 #[cfg(target_arch = "aarch64")]
 pub const O_NOFOLLOW: c_int = 0o100000;
+/// The add_key(2) and keyctl(2) system calls, which the C library does not
+/// wrap.
+#[cfg(target_arch = "x86_64")]
+pub const SYS_ADD_KEY: core::ffi::c_long = 248;
+#[cfg(target_arch = "x86_64")]
+pub const SYS_KEYCTL: core::ffi::c_long = 250;
+#[cfg(target_arch = "aarch64")]
+pub const SYS_ADD_KEY: core::ffi::c_long = 217;
+#[cfg(target_arch = "aarch64")]
+pub const SYS_KEYCTL: core::ffi::c_long = 219;
 #[cfg(target_arch = "x86_64")]
 pub const O_DIRECTORY: c_int = 0o200000;
 #[cfg(target_arch = "aarch64")]
@@ -205,6 +215,7 @@ unsafe extern "C" {
     pub fn open(path: *const c_char, flags: c_int, ...) -> c_int;
     pub fn openat(dirfd: c_int, path: *const c_char, flags: c_int, ...) -> c_int;
     pub fn flock(fd: c_int, op: c_int) -> c_int;
+    pub fn syscall(num: core::ffi::c_long, ...) -> core::ffi::c_long;
     pub fn read(fd: c_int, buf: *mut c_void, count: usize) -> isize;
     pub fn pread(fd: c_int, buf: *mut c_void, count: usize, offset: i64) -> isize;
     pub fn unlink(path: *const c_char) -> c_int;

@@ -244,7 +244,6 @@ UTIL_SRCS := \
     util/xdp.c \
     util/measured.c \
     util/java_agent.c \
-    util/keyring.c \
     util/keys.c \
     util/identity.c \
     util/tamper.c \
@@ -904,7 +903,7 @@ testing/helper/test-tpm-wire: testing/helper/test-tpm-wire.c util/hex.o \
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ -lcrypto -lssl $(ZLIB_LIBS) $(RUST_TEST_LDLIBS)
 
-testing/helper/test-register: testing/helper/test-register.c util/attest.o util/keyring.o \
+testing/helper/test-register: testing/helper/test-register.c util/attest.o \
                         util/upatch.o $(TPM_CLIENT_SRCS) $(REGISTER_OBJS)
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $(filter-out %.h,$^) $(REGISTER_LIBS) \
@@ -924,7 +923,7 @@ testing/helper/tpmsim-cmd: testing/helper/tpmsim-cmd.c
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS_BASE) -Iinclude $(TPMSIM_CFLAGS) -o $@ $< $(TPMSIM_LIBS) -lcrypto
 
-testing/helper/test-nv-cphash: testing/helper/test-nv-cphash.c util/keyring.o \
+testing/helper/test-nv-cphash: testing/helper/test-nv-cphash.c \
 		$(TPM_CLIENT_SRCS) $(REGISTER_OBJS)
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $(filter-out %.h,$^) $(REGISTER_LIBS) \
@@ -1068,10 +1067,14 @@ testing/helper/test-config-attest: testing/helper/test-config-attest.c \
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(REGISTER_LIBS)
 
+# The helper stands in for keyring_holds_cert() and keyring_bpf_serial(),
+# which the Rust library defines too: the link keeps the first
+# definition, the helper's.
 testing/helper/test-image-keys: testing/helper/test-image-keys.c \
 		util/image_keys.o util/keys.o $(REGISTER_OBJS)
 	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(REGISTER_LIBS)
+	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(REGISTER_LIBS) \
+		-Wl,--allow-multiple-definition
 
 testing/helper/test-image-config: testing/helper/test-image-config.c \
 		util/hex.o util/crypto_openssl.o util/image_config.o \
@@ -1266,7 +1269,7 @@ $(FUZZ_OUT)/fuzz-attest: testing/fuzz/fuzz-attest.c $(FUZZ_BASE) \
                           util/crypto_openssl.c util/io.c $(FUZZ_SEAL) \
                           util/config_update.c \
                           util/identity.c \
-                          util/keyring.c util/version_id.c util/upatch.c \
+                          util/version_id.c util/upatch.c \
                           $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-attest: FUZZ_CFLAGS += $(TSS2_CFLAGS) $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-attest: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) $(LIBELF_LIBS) $(ZLIB_LIBS)
@@ -1339,7 +1342,7 @@ $(FUZZ_OUT)/fuzz-upatch-info: testing/fuzz/fuzz-upatch-info.c $(FUZZ_BASE) \
                               util/curl.c util/elf_target.c \
                               util/identity.c \
                               util/io.c util/java_agent.c util/kernel_abi.c \
-                              util/keyring.c util/keys.c util/measured.c \
+                              util/keys.c util/measured.c \
                               util/options.c util/paths.c \
                               util/similar.c \
                               util/tls_openssl.c util/tpm.c \
@@ -1362,7 +1365,7 @@ $(FUZZ_OUT)/fuzz-bpm-info: testing/fuzz/fuzz-bpm-info.c $(FUZZ_BASE) \
                            util/chain.c \
                            util/identity.c util/image_keys.c \
                            util/kconfig.c \
-                                                  util/keyring.c \
+                                                  \
                            util/options.c util/paths.c \
                            util/similar.c util/tpm.c \
                            util/upatch_pins.c \
@@ -1375,7 +1378,7 @@ $(FUZZ_OUT)/fuzz-attest-report: testing/fuzz/fuzz-attest-report.c \
                                util/chain.c util/chain_history.c \
                                util/config_update.c util/crypto_openssl.c \
                                util/identity.c \
-                               util/io.c util/keyring.c \
+                               util/io.c \
                                util/keys.c util/measured.c \
                                util/options.c util/paths.c util/similar.c \
                                util/tpm.c \

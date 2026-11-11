@@ -11,7 +11,7 @@
  * BPF_PROG_LOAD; the bpftool struct is incidental). The
  * register_session_key() helper, which adds a cert to the calling
  * task's session keyring, is dropped -- shirudo's operator side
- * doesn't need it; the target side uses util/keyring.c against
+ * doesn't need it; the target side uses rust/src/util/keyring.rs against
  * the named "shirudo" keyring.
  */
 

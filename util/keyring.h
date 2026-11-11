@@ -2,7 +2,8 @@
 /*
  * Copyright (c) 2026 Authors of shirudo
  *
- * Raw add_key(2)/keyctl(2) wrappers; no libkeyutils.
+ * Raw add_key(2)/keyctl(2) wrappers; no libkeyutils. They are
+ * rust/src/util/keyring.rs.
  */
 
 #ifndef SHIRUDO_KEYRING_H
