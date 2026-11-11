@@ -3,7 +3,8 @@
  * Copyright (c) 2026 Authors of shirudo
  *
  * Shared local security-health conditions block. `shirudo status`
- * feeds the flat input shape and receives the verdict and human output.
+ * feeds the flat input shape and receives the verdict and human output,
+ * which rust/src/util/conditions.rs gives.
  */
 
 #ifndef SHIRUDO_CONDITIONS_H

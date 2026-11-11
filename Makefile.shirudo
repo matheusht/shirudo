@@ -278,7 +278,6 @@ UTIL_SRCS := \
     util/malloc.c \
     util/sysinfo.c \
     util/options.c \
-    util/conditions.c \
     util/keepalive.c \
     util/keepalive_quote.c \
     util/seal.c \
@@ -841,10 +840,10 @@ TEST_HELPERS += testing/helper/test-keyring-seal
 TEST_HELPERS += testing/helper/test-tpm-preopened
 TEST_HELPERS += testing/helper/test-keepalive-quote
 
-testing/helper/test-conditions: testing/helper/test-conditions.c util/conditions.o \
-                                util/string.o util/malloc.o
+testing/helper/test-conditions: testing/helper/test-conditions.c util/log.o \
+                                util/string.o util/malloc.o $(RUST_LIB)
 	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) -o $@ $^
+	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(RUST_TEST_LDLIBS)
 
 testing/helper/test-harden: testing/helper/test-harden.c util/log.o \
 		util/string.o util/malloc.o $(RUST_LIB)
