@@ -30,5 +30,6 @@ mod serializer;
 mod similar;
 mod sysinfo;
 mod timefmt;
+mod tls_openssl;
 mod tpm_wire;
 mod upatch_table;

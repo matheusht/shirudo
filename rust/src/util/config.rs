@@ -6,6 +6,7 @@
 //! carries, and the TPM settings the environment overrides.
 
 use core::ffi::{CStr, c_char, c_int};
+use core::mem::MaybeUninit;
 use core::ptr;
 
 use crate::errno::{EINVAL, EIO, ENOENT, EPERM};
@@ -53,6 +54,23 @@ pub struct Config {
 }
 
 const _: () = assert!(size_of::<Config>() == 9888);
+
+/// A configuration scrubbed when it goes, as `__cleanup(config_clear)`
+/// left the C's.
+pub(crate) struct Scrubbed(pub(crate) MaybeUninit<Config>);
+
+impl Scrubbed {
+    pub(crate) fn ptr(&mut self) -> *mut Config {
+        self.0.as_mut_ptr()
+    }
+}
+
+impl Drop for Scrubbed {
+    fn drop(&mut self) {
+        // SAFETY: the bytes of the configuration.
+        unsafe { explicit_bzero(self.0.as_mut_ptr().cast(), size_of::<Config>()) };
+    }
+}
 
 /// A tenant ID: 1 to 128 of `[A-Za-z0-9._-]`.
 fn tenant_id_valid(id: &[u8]) -> bool {
@@ -405,7 +423,7 @@ unsafe fn load_path(cfg: *mut Config, path: *const c_char) -> c_int {
 /// # Safety
 ///
 /// `cfg` is a configuration.
-unsafe fn load(cfg: *mut Config) -> c_int {
+pub(crate) unsafe fn load(cfg: *mut Config) -> c_int {
     // SAFETY: the caller's configuration.
     unsafe {
         if crate::util::image_config::get(cfg) != 0 {

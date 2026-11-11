@@ -19,7 +19,7 @@ use crate::sys::libc::{
     fclose, fcntl, fdopen, fdopendir, ferror, free, getline, openat, readdir, set_errno, statx,
 };
 use crate::text::parse_u64;
-use crate::util::config::{Config, load_fd};
+use crate::util::config::{Config, Scrubbed, load_fd};
 
 /// `enum image_path`: the entries of the image, by their paths under its
 /// root.
@@ -77,23 +77,6 @@ pub(crate) unsafe fn get(out: *mut Config) -> c_int {
     // room.
     unsafe { core::ptr::copy_nonoverlapping(STATE.effective.get().cast::<Config>(), out, 1) };
     1
-}
-
-/// A configuration scrubbed when it goes, as `__cleanup(config_clear)`
-/// left the C's.
-struct Candidate(MaybeUninit<Config>);
-
-impl Candidate {
-    fn ptr(&mut self) -> *mut Config {
-        self.0.as_mut_ptr()
-    }
-}
-
-impl Drop for Candidate {
-    fn drop(&mut self) {
-        // SAFETY: the bytes of the candidate.
-        unsafe { explicit_bzero(self.0.as_mut_ptr().cast(), size_of::<Config>()) };
-    }
 }
 
 /// The image's shirudo.conf into `cfg`, read through its root.
@@ -308,7 +291,7 @@ fn validate_settings(root_fd: c_int) -> c_int {
 /// Whether the tree under `root_fd` is a config image this target may
 /// run from: 0 or -errno.
 pub(crate) fn validate(root_fd: c_int) -> c_int {
-    let mut candidate = Candidate(MaybeUninit::zeroed());
+    let mut candidate = Scrubbed(MaybeUninit::zeroed());
     let mut entries = 0u32;
     let mut st = Statx::zeroed();
 
@@ -345,7 +328,7 @@ pub(crate) fn validate(root_fd: c_int) -> c_int {
 ///
 /// `bootstrap` points to a configuration.
 unsafe fn set(bootstrap: *const Config, root_fd: c_int) -> c_int {
-    let mut candidate = Candidate(MaybeUninit::uninit());
+    let mut candidate = Scrubbed(MaybeUninit::uninit());
     let mut fd = -1;
 
     // SAFETY: the bootstrap configuration, every byte of it, into the

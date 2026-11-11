@@ -18,9 +18,9 @@ pub(crate) use manifest::{emit_descriptor, parse_manifest};
 pub(crate) use refs::url;
 
 use crate::errno::E2BIG;
-use crate::sys::crypto::TlsCa;
 use crate::sys::libc::PATH_MAX;
 use crate::text::{at, contains, cstr, find, strscpy, strsprintf};
+use crate::util::tls_openssl::TlsCa;
 
 pub(crate) const MAX_NAME: usize = 128;
 pub(crate) const MAX_ENDPOINT: usize = 512;

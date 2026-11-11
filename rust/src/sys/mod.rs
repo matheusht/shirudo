@@ -8,7 +8,6 @@
 pub mod bpm_tree;
 pub mod chain;
 pub mod config_update;
-pub mod crypto;
 pub mod curl;
 pub mod hex;
 pub mod identity;
@@ -18,6 +17,7 @@ pub mod log;
 pub mod malloc;
 pub mod openssl;
 pub mod seal;
+pub mod ssl;
 pub mod string;
 pub mod tpm;
 pub mod upatch;

@@ -23,7 +23,6 @@ CONFIG_MK_DEP := $(wildcard $(CONFIG_MK))
 # CMS, libssl behind libcurl for TLS. The operator links the system
 # shared libraries; the target links static dependencies staged by
 # make target-deps and the compiler's static C and compiler runtimes.
-TLS_SRC := util/tls_openssl.c
 ifeq ($(PROFILE),target)
 OBJ_PREFIX := build/target/
 CRYPTO_CFLAGS := $(TARGET_TLS_CFLAGS)
@@ -235,9 +234,8 @@ CLANG_BPF := $(CLANG) -target bpf -mcpu=v4 -fno-jump-tables -O2 -g -Wall -Wextra
 # ----- source manifests -------------------------------------------
 
 UTIL_SRCS := \
-    util/sysinfo_image.c \
-	$(TLS_SRC) \
     util/loader.c \
+    util/sysinfo_image.c \
     util/upatch.c \
     util/xdp.c \
     util/measured.c \
@@ -565,7 +563,6 @@ tools/shirudo-build/shirudo-build: $(BUILD_OBJS) $(SIGN_OBJ) \
                                    util/upatch.o \
                                    util/elf_target.o util/hex.o util/keys.o \
                                    util/seal.o util/string.o \
-                                   util/tls_openssl.o \
                                    util/curl.o \
                                    util/upatch_rodata.o \
                                    util/bpm_tree.o util/bpm_tree_overlap.o \
@@ -983,7 +980,7 @@ testing/helper/test-signed-load: testing/helper/test-signed-load.c
 
 testing/helper/test-otel-map: testing/helper/test-otel-map.c util/upatch_maps.o \
                         util/upatch_maps_otel.o util/curl.o \
-                        util/tls_openssl.o util/seal.o \
+                        util/seal.o \
                         util/upatch_decode.o util/upatch_pins.o \
                         util/upatch_resolve.o \
                         util/upatch.o util/string.o util/log.o \
@@ -1222,8 +1219,7 @@ FUZZ_LIBS := $(RUST_FUZZ_LIB) $(LIBCRYPTO_LIBS) $(LIBSSL_LIBS) \
              -Wl,-z,start-stop-gc
 FUZZ_BASE := util/string.c util/hex.c util/malloc.c testing/fuzz/log.c
 FUZZ_SEAL := util/seal.c
-FUZZ_OCI := util/curl.c util/io.c $(FUZZ_SEAL) \
-            util/tls_openssl.c
+FUZZ_OCI := util/curl.c util/io.c $(FUZZ_SEAL)
 FUZZ_PACKAGE := util/bpm_tree.c util/chain_history.c \
                 util/upatch.c util/keys.c $(FUZZ_OCI)
 
@@ -1294,7 +1290,7 @@ $(FUZZ_OUT)/fuzz-decoder: FUZZ_CFLAGS += $(LUAJIT_CFLAGS) -DHAVE_LUAJIT \
 $(FUZZ_OUT)/fuzz-decoder: FUZZ_LIBS += $(LUAJIT_LIBS)
 $(FUZZ_OUT)/fuzz-otel: testing/fuzz/fuzz-otel.c $(FUZZ_BASE) \
                         util/upatch_maps_otel.c util/curl.c \
-                        util/tls_openssl.c util/io.c util/version_id.c \
+                        util/io.c util/version_id.c \
                         $(FUZZ_SEAL)
 $(FUZZ_OUT)/fuzz-beefile: testing/fuzz/fuzz-beefile.c $(FUZZ_BASE) \
                            tools/shirudo-build/bpm-build.c $(FUZZ_PACKAGE) \
@@ -1336,7 +1332,7 @@ $(FUZZ_OUT)/fuzz-upatch-info: testing/fuzz/fuzz-upatch-info.c $(FUZZ_BASE) \
                               util/keys.c util/measured.c \
                               util/options.c util/paths.c \
                               util/similar.c \
-                              util/tls_openssl.c util/tpm.c \
+                              util/tpm.c \
                               util/upatch.c \
                               util/upatch_decode.c util/upatch_maps.c \
                               util/upatch_maps_otel.c util/upatch_pins.c \
