@@ -8,10 +8,12 @@
  */
 
 #include "fuzz.h"
-#include "bpm_tree_state.c"
+
+#include <shirudo/string.h>
+
+#include "bpm_tree.h"
 
 static struct tree_selector sel;
-static int slots[TREE_SELECTOR_HASH_SIZE];
 
 int LLVMFuzzerInitialize(int *argc, char ***argv)
 {
@@ -28,7 +30,6 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
 		    strscpy(kv->key, keys[i], sizeof(kv->key)) < 0)
 			abort();
 	}
-	selector_hash_build(&sel, slots);
 	return 0;
 }
 
@@ -43,11 +44,11 @@ int LLVMFuzzerTestOneInput(const __u8 *data, size_t size)
 	fd = fuzz_file(data, size, path, sizeof(path));
 	if (fd < 0)
 		return 0;
-	if (!read_selector_config_file(path, &sel, slots, values, found,
+	if (!tree_kconfig_read(path, &sel, values, found,
 				       false) && memchr(data, '\0', size))
 		abort();
-	read_selector_config_file(path, &sel, slots, values, found, true);
-	read_config_file(path, labels, &n, ARRAY_SIZE(labels));
+	tree_kconfig_read(path, &sel, values, found, true);
+	tree_labels_read(path, labels, &n, ARRAY_SIZE(labels));
 	close(fd);
 	return 0;
 }

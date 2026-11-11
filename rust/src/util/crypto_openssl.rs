@@ -205,6 +205,18 @@ pub(crate) unsafe fn sha256_free(ctx: *mut Sha256Ctx) {
     }
 }
 
+/// SHA-256 of `data` into `out`, zeros when it fails: the sha256_calc()
+/// of util/chain.c.
+pub(crate) fn sha256_calc(data: &[u8], out: &mut [u8; 32]) -> c_int {
+    // SAFETY: data.len() bytes, and room for the digest.
+    let ret = unsafe { sha256_buffer(data.as_ptr().cast(), data.len(), out.as_mut_ptr()) };
+
+    if ret != 0 {
+        *out = [0; 32];
+    }
+    ret
+}
+
 /// # Safety
 ///
 /// `data` holds `len` bytes, and `out` is NULL or has room for 32.

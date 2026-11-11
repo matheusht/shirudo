@@ -13,4 +13,7 @@ unsafe extern "C" {
     /// a name upatch_name_valid() takes and the 64 hex digits of its
     /// payload's SHA-256.
     pub fn upatch_member_valid(name: *const c_char, payload_hex: *const c_char) -> bool;
+    /// An upatch name: [A-Za-z0-9._-]+ not starting with '.', short
+    /// enough for its pin directory.
+    pub fn upatch_name_valid(name: *const c_char) -> bool;
 }

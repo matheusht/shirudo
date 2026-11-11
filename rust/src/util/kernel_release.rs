@@ -8,7 +8,7 @@ use crate::text::at;
 /// Whether `release` is `prefix` or goes on from it at a `.` or a `-`:
 /// 6.12 matches 6.12, 6.12.3 and 6.12-rc1, not 6.120. Every release
 /// matches an empty prefix.
-fn prefix_matches(release: &[u8], prefix: &[u8]) -> bool {
+pub(crate) fn prefix_matches(release: &[u8], prefix: &[u8]) -> bool {
     prefix.is_empty()
         || (release.starts_with(prefix) && matches!(at(release, prefix.len()), 0 | b'.' | b'-'))
 }

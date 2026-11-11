@@ -23,7 +23,7 @@ use crate::sys::log::pr_err;
 use crate::sys::malloc::{xfree, xmalloc};
 use crate::sys::seal::{seal_append_line, seal_lock};
 use crate::text::{cstr, strsprintf};
-use crate::util::crypto_openssl::sha256_buffer;
+use crate::util::crypto_openssl::sha256_calc;
 use crate::util::image_config;
 use crate::util::json::{JsonEmit, JsonField, MAX_BYTES, parse_schema};
 use crate::util::timefmt::iso8601;
@@ -51,17 +51,6 @@ fn path() -> &'static CStr {
 
 fn pending_path() -> &'static CStr {
     path_from(c"SHIRUDO_EVENTLOG_PENDING_PATH", DEFAULT_PENDING_PATH)
-}
-
-/// SHA-256 of `data` into `out`, zeros when it fails.
-fn sha256_calc(data: &[u8], out: &mut [u8; 32]) -> c_int {
-    // SAFETY: data.len() bytes, and room for the digest.
-    let ret = unsafe { sha256_buffer(data.as_ptr().cast(), data.len(), out.as_mut_ptr()) };
-
-    if ret != 0 {
-        *out = [0; 32];
-    }
-    ret
 }
 
 /// `line` appended to the log at `path` whole, or nothing of it: a line

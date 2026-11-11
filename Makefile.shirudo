@@ -257,8 +257,8 @@ UTIL_SRCS := \
     util/hex.c \
     util/string.c \
     util/bpm_tree.c \
+    util/bpm_tree_outcomes.c \
     util/bpm_tree_overlap.c \
-    util/bpm_tree_state.c \
     util/curl.c \
     util/kconfig.c \
     util/image_cache.c \
@@ -1311,7 +1311,7 @@ $(FUZZ_OUT)/fuzz-config-update: testing/fuzz/fuzz-config-update.c \
                                  $(FUZZ_BASE) util/config_update.c \
                                  testing/fuzz/chain.c \
                                  util/io.c $(FUZZ_SEAL)
-FUZZ_TREE_STATE := util/bpm_tree_state.c util/bpm_tree.c \
+FUZZ_TREE_STATE := util/bpm_tree.c \
                    util/chain_history.c util/upatch.c $(FUZZ_OCI) \
                    util/kconfig.c \
                                   testing/fuzz/chain.c
@@ -1347,7 +1347,7 @@ $(FUZZ_OUT)/fuzz-upatch-info: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) \
 $(FUZZ_OUT)/fuzz-bpm-info: testing/fuzz/fuzz-bpm-info.c $(FUZZ_BASE) \
                            testing/fuzz/output.c builtin-bpm.c builtin.h \
                            $(FUZZ_PACKAGE) \
-                           util/bpm_tree_state.c \
+                           \
                            util/chain.c \
                            util/identity.c util/image_keys.c \
                            util/kconfig.c \
@@ -1375,8 +1375,6 @@ $(FUZZ_OUT)/fuzz-attest-report: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) \
 
 # A target that reaches static parsers or printers includes their source,
 # which it then depends on without linking it a second time.
-$(FUZZ_OUT)/fuzz-tree-state $(FUZZ_OUT)/fuzz-kconfig: \
-	FUZZ_INCLUDED := util/bpm_tree_state.c
 $(FUZZ_OUT)/fuzz-otel: FUZZ_INCLUDED := util/upatch_maps_otel.c
 $(FUZZ_OUT)/fuzz-serializer: FUZZ_INCLUDED := util/upatch_maps.c
 $(FUZZ_OUT)/fuzz-decoder: FUZZ_INCLUDED := util/upatch_decode.c

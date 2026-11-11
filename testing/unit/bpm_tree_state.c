@@ -1,23 +1,20 @@
 // SPDX-License-Identifier: BSD-2-Clause
 /* Copyright (c) 2026 Authors of shirudo */
 
-#include "../../util/paths.h"
+#include <errno.h>
+#include <fcntl.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <zlib.h>
 
+#include <shirudo/string.h>
+
+#include "../../util/bpm_tree.h"
+#include "../../util/io.h"
 static char tree_dir[4200], state_path[4300], outcomes_path[4300];
 static char events_path[4300], pending_path[4300];
-
-#undef BPM_TREE_VAR_DIR
-#define BPM_TREE_VAR_DIR tree_dir
-#undef BPM_TREE_STATE_PATH
-#define BPM_TREE_STATE_PATH state_path
-#undef BPM_TREE_EVENTLOG_PATH
-#define BPM_TREE_EVENTLOG_PATH events_path
-#undef BPM_TREE_PENDING_PATH
-#define BPM_TREE_PENDING_PATH pending_path
-#undef BPM_TREE_OUTCOMES_PATH
-#define BPM_TREE_OUTCOMES_PATH outcomes_path
-
-#include "../../util/bpm_tree_state.c"
 
 #include "unit.h"
 
@@ -54,7 +51,6 @@ static int modules_read(const char *text, size_t len, bool gz,
 			const char **value)
 {
 	static char values[TREE_MAX_KCONFIG][TREE_STRING_MAX];
-	static int slots[TREE_SELECTOR_HASH_SIZE];
 	static struct tree_selector sel;
 	bool found[TREE_MAX_KCONFIG] = {};
 	struct tree_selector_kv *kv;
@@ -64,10 +60,9 @@ static int modules_read(const char *text, size_t len, bool gz,
 	memset(values, 0, sizeof(values));
 	ASSERT_EQ(tree_selector_kv_add(&sel.kconfig, &sel.n_kconfig,
 				       TREE_MAX_KCONFIG, &kv), 0);
-	strscpy_literal(kv->key, "CONFIG_MODULES");
-	selector_hash_build(&sel, slots);
+	strscpy(kv->key, "CONFIG_MODULES", sizeof(kv->key));
 	write_config_bytes(text, len, gz);
-	ret = read_selector_config_file(path, &sel, slots, values, found, gz);
+	ret = tree_kconfig_read(path, &sel, values, found, gz);
 	tree_selector_free(&sel);
 	unlink(path);
 	*value = found[0] ? values[0] : "-";
@@ -122,7 +117,6 @@ static void config_with_a_nul_is_no_config(void)
 static int read_gz(bool gz, off_t cut, const char *extra)
 {
 	static char values[TREE_MAX_KCONFIG][TREE_STRING_MAX];
-	static int slots[TREE_SELECTOR_HASH_SIZE];
 	bool found[TREE_MAX_KCONFIG] = {};
 	struct tree_selector sel = {};
 	struct tree_selector_kv *kv;
@@ -131,8 +125,7 @@ static int read_gz(bool gz, off_t cut, const char *extra)
 
 	ASSERT_EQ(tree_selector_kv_add(&sel.kconfig, &sel.n_kconfig,
 				       TREE_MAX_KCONFIG, &kv), 0);
-	strscpy_literal(kv->key, "CONFIG_MODULES");
-	selector_hash_build(&sel, slots);
+	strscpy(kv->key, "CONFIG_MODULES", sizeof(kv->key));
 	write_config("CONFIG_MODULES=y\n", gz);
 	ASSERT_EQ(stat(path, &st), 0);
 	ASSERT_EQ(truncate(path, st.st_size - cut), 0);
@@ -142,7 +135,7 @@ static int read_gz(bool gz, off_t cut, const char *extra)
 		ASSERT_EQ(write_complete(fd, extra, strlen(extra)), 0);
 		ASSERT_EQ(close(fd), 0);
 	}
-	ret = read_selector_config_file(path, &sel, slots, values, found, true);
+	ret = tree_kconfig_read(path, &sel, values, found, true);
 	tree_selector_free(&sel);
 	unlink(path);
 	if (!ret && (!found[0] || strcmp(values[0], "y")))
@@ -196,7 +189,7 @@ static void labels_are_cut_at_the_first_equals(void)
 
 	write_config("# site=x\n  site = a \t\nzone=b=c\njunk\nempty=\t\n",
 		     false);
-	ASSERT_EQ(read_config_file(path, labels, &n, ARRAY_SIZE(labels)), 0);
+	ASSERT_EQ(tree_labels_read(path, labels, &n, ARRAY_SIZE(labels)), 0);
 	unlink(path);
 	ASSERT_EQ(n, 3);
 	EXPECT_STREQ(labels[0].key, "site ");
@@ -205,7 +198,7 @@ static void labels_are_cut_at_the_first_equals(void)
 	EXPECT_STREQ(labels[1].value, "b=c");
 	EXPECT_STREQ(labels[2].key, "empty");
 	EXPECT_STREQ(labels[2].value, "");
-	EXPECT_EQ(read_config_file("/nonexistent/node.labels", labels, &n,
+	EXPECT_EQ(tree_labels_read("/nonexistent/node.labels", labels, &n,
 				   ARRAY_SIZE(labels)), -ENOENT);
 	EXPECT_EQ(n, 0);
 }

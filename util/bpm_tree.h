@@ -204,6 +204,9 @@ int tree_history_at(const struct tree_publication *pub, __s64 seq,
 		    __u8 out[32]) __must_check;
 
 /*
+ * The selector match and the state below are
+ * rust/src/util/bpm_tree_state.rs.
+ *
  * Evaluate a publication selector against the running node.  An empty
  * selector is an unconstrained wildcard and matches every node.  1 on a
  * match, 0 without one, -errno when the node's labels or kernel config
@@ -269,5 +272,21 @@ void tree_emit_status(struct json_emit *e);
 
 /* Whether a tree is configured, in the config image when one is active. */
 bool tree_configured(void);
+
+/*
+ * For the unit test and fuzz targets, which reached these by including
+ * the C once: the values the kernel config at path, gzip'd or not,
+ * gives the selector's kconfig keys, as the selector match reads
+ * /proc/config.gz and /boot/config-*, 0 with found[i] and values[i]
+ * for each key i the config sets, or -errno; the key = value lines of
+ * a node.labels at path into the max pairs at labels, *n of them; and
+ * tree_state_read() and tree_event_replay() on the file at path.
+ */
+int tree_kconfig_read(const char *path, const struct tree_selector *s,
+		      char values[][TREE_STRING_MAX], bool found[], bool gz);
+int tree_labels_read(const char *path, struct tree_kv *labels, int *n,
+		     int max);
+int tree_state_read_path(const char *path, struct tree_state *out);
+int tree_event_replay_path(const char *path, __u8 out[32]);
 
 #endif /* SHIRUDO_BPM_TREE_H */

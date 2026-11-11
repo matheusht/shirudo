@@ -8,10 +8,10 @@
 //! included, is root's to mount over before the exec.
 
 use core::cell::UnsafeCell;
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_char, c_int, c_uint};
 use core::mem::MaybeUninit;
 
-use crate::errno::{E2BIG, EINVAL, EIO, ELOOP, ENOTDIR, EPERM};
+use crate::errno::{E2BIG, EINVAL, EIO, ELOOP, ENOENT, ENOTDIR, EPERM};
 use crate::sys::io::open_beneath;
 use crate::sys::libc::{
     AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW, F_DUPFD_CLOEXEC, O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW,
@@ -32,6 +32,10 @@ const RELATIVE: [&CStr; 7] = [
     c"keys/trusted",
     c"keys/revoked",
 ];
+
+/// IMAGE_TREE_CONF and IMAGE_NODE_LABELS of `enum image_path`.
+pub(crate) const TREE_CONF: c_uint = 3;
+pub(crate) const NODE_LABELS: c_uint = 4;
 
 const SHIRUDO_CONF: &CStr = c"etc/shirudo/shirudo.conf";
 
@@ -56,6 +60,18 @@ static STATE: Global = Global {
 pub(crate) fn active() -> bool {
     // SAFETY: a read of the state, which only startup writes.
     unsafe { *STATE.active.get() }
+}
+
+/// An entry of the image, opened from its verified root: an fd, or
+/// -errno.
+pub(crate) fn open(which: c_uint, flags: c_int) -> c_int {
+    let fd = root_fd();
+
+    if which as usize >= RELATIVE.len() || fd < 0 {
+        return -ENOENT;
+    }
+    // SAFETY: the root, a relative path and the caller's flags.
+    unsafe { open_beneath(fd, RELATIVE[which as usize].as_ptr(), flags) }
 }
 
 pub(crate) fn root_fd() -> c_int {
@@ -397,8 +413,7 @@ fn clear() {
 mod capi {
     use core::ffi::{CStr, c_char, c_int, c_uint};
 
-    use super::RELATIVE;
-    use crate::errno::{EINVAL, ENOENT};
+    use crate::errno::EINVAL;
     use crate::sys::io::open_beneath;
     use crate::util::config::Config;
 
@@ -425,13 +440,7 @@ mod capi {
     /// -errno.
     #[unsafe(no_mangle)]
     pub extern "C" fn image_open(which: c_uint, flags: c_int) -> c_int {
-        let fd = super::root_fd();
-
-        if which as usize >= RELATIVE.len() || fd < 0 {
-            return -ENOENT;
-        }
-        // SAFETY: the root, a relative path and the caller's flags.
-        unsafe { open_beneath(fd, RELATIVE[which as usize].as_ptr(), flags) }
+        super::open(which, flags)
     }
 
     /// # Safety

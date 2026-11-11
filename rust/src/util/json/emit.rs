@@ -326,7 +326,7 @@ impl JsonEmit {
         self.raw_value(digits);
     }
 
-    fn kv_bool(&mut self, key: &[u8], val: bool) {
+    pub(crate) fn kv_bool(&mut self, key: &[u8], val: bool) {
         self.member(key);
         self.put_raw(if val { b"true" } else { b"false" });
     }
