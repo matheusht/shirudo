@@ -2,7 +2,8 @@
 /*
  * Copyright (c) 2026 Authors of shirudo
  *
- * In-tree JSON emitter and schema-callback parser.
+ * In-tree JSON emitter and schema-callback parser, which
+ * rust/src/util/json/ implements.
  */
 
 #ifndef SHIRUDO_JSON_H

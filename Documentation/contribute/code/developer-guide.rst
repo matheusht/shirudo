@@ -634,7 +634,7 @@ can rewrite what it finds does so with ``-D patch``:
 .. code-block:: console
 
    $ spatch -D patch --sp-file testing/coccinelle/zero_init.cocci \
-         --in-place --include-headers util/json.c
+         --in-place --include-headers util/string.c
 
 .. list-table::
    :header-rows: 1

@@ -288,7 +288,6 @@ UTIL_SRCS := \
     util/config_attest.c \
     util/bpm_source_config.c \
     util/eventlog.c \
-    util/json.c \
     util/report.c \
     util/malloc.c \
     util/sysinfo.c \
@@ -584,7 +583,7 @@ build/target/util/loader.o: $(BPF_OBJS)
 # operator-only `bpm build|push|tree append|tree show`. Not linked into
 # the core shirudo binary.
 tools/shirudo-build/shirudo-build: $(BUILD_OBJS) $(SIGN_OBJ) util/config_image.o \
-                                   util/log.o util/json.o util/loader.o \
+                                   util/log.o util/loader.o \
                                    util/io.o util/malloc.o util/paths.o util/config.o \
                                    util/image_config.o util/upatch.o util/timefmt.o \
                                    util/elf_target.o util/hex.o util/keys.o \
@@ -606,7 +605,7 @@ tools/shirudo-build/shirudo-build: $(BUILD_OBJS) $(SIGN_OBJ) util/config_image.o
 # whatever the profile. The sanitizer runtimes do not link statically.
 PKG_CONFIG ?= pkg-config
 QUOTE_CHECK_UTIL_SRCS := util/tpm_wire.c util/crypto_openssl.c util/hex.c \
-                         util/json.c util/io.c util/seal.c util/log.c \
+                         util/io.c util/seal.c util/log.c \
                          util/malloc.c util/string.c util/options.c \
                          util/help.c
 
@@ -876,13 +875,13 @@ testing/helper/test-harden: testing/helper/test-harden.c util/harden.o util/log.
 REGISTER_OBJS := util/config_attest.o util/config_update.o util/config_measure.o util/config_image.o \
                  util/chain.o util/tpm.o util/tpm_wire.o util/eventlog.o \
                  util/measured.o util/paths.o util/timefmt.o util/upatch.o \
-                 util/hex.o util/crypto_openssl.o util/json.o util/string.o \
+                 util/hex.o util/crypto_openssl.o util/string.o \
                  util/io.o util/seal.o util/config.o util/image_config.o \
                  util/log.o util/malloc.o \
                  util/initrd.o util/nv_writer.o util/identity.o \
-                 $(VERSION_OBJ) $(LIBBPF_A)
+                 $(VERSION_OBJ) $(LIBBPF_A) $(RUST_LIB)
 REGISTER_LIBS := $(LIBCRYPTO_LIBS) $(LIBSSL_LIBS) $(TSS2_LIBS) \
-                 $(LIBBPF_A) $(LIBELF_LIBS) $(ZLIB_LIBS)
+                 $(LIBBPF_A) $(LIBELF_LIBS) $(ZLIB_LIBS) $(RUST_LDLIBS)
 
 TPM_CLIENT_SRCS := testing/helper/tpm-client.c testing/helper/tpm-session.h
 
@@ -1014,11 +1013,12 @@ testing/helper/test-otel-map: testing/helper/test-otel-map.c util/upatch_maps.o 
                         util/config.o util/image_config.o \
                         util/upatch_decode.o util/upatch_pins.o \
                         util/upatch_resolve.o \
-                        util/upatch.o util/json.o util/string.o util/log.o \
+                        util/upatch.o util/string.o util/log.o \
                         util/paths.o \
-                        util/io.o util/malloc.o $(LIBBPF_A) util/hex.o util/timefmt.o
+                        util/io.o util/malloc.o $(LIBBPF_A) util/hex.o util/timefmt.o \
+                        $(RUST_LIB)
 	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(DYNAMIC_LIBS)
+	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(DYNAMIC_LIBS) $(RUST_LDLIBS)
 
 testing/helper/test-upatch-map-types: testing/helper/test-upatch-map-types.c
 	@printf '  CC      $@\n'
@@ -1033,26 +1033,27 @@ testing/helper/test-upatch-prog-metadata: testing/helper/test-upatch-prog-metada
 testing/helper/test-upatch-serializer-pages: testing/helper/test-upatch-serializer-pages.c \
                                        util/upatch_maps.o util/upatch_pins.o util/upatch_resolve.o \
                                        util/serializer.o util/seal.o \
-                                       util/json.o util/string.o \
+                                       util/string.o \
                                        util/config.o util/image_config.o \
                                        util/malloc.o util/io.o util/paths.o \
-                                       util/log.o util/hex.o util/timefmt.o
+                                       util/log.o util/hex.o util/timefmt.o \
+                                       $(RUST_LIB)
 	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(STATIC_LIBS) $(DYNAMIC_LIBS)
+	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_LDLIBS)
 
 testing/helper/test-upatch-rodata: testing/helper/test-upatch-rodata.c \
-                               util/upatch.o util/seal.o util/json.o \
+                               util/upatch.o util/seal.o \
                                util/string.o util/malloc.o util/io.o \
-                               util/log.o util/hex.o util/format.o
+                               util/log.o util/hex.o util/format.o $(RUST_LIB)
 	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(STATIC_LIBS) $(DYNAMIC_LIBS)
+	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_LDLIBS)
 
 testing/helper/test-upatch-decode: testing/helper/test-upatch-decode.c \
 			      util/upatch_decode.o util/upatch.o util/malloc.o util/hex.o \
-			      util/string.o util/seal.o util/io.o util/log.o util/json.o \
-			      util/crypto_openssl.o
+			      util/string.o util/seal.o util/io.o util/log.o \
+			      util/crypto_openssl.o $(RUST_LIB)
 	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(DYNAMIC_LIBS)
+	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(DYNAMIC_LIBS) $(RUST_LDLIBS)
 
 testing/helper/test-exec-churn: testing/helper/test-exec-churn.c util/io.o util/seal.o util/malloc.o \
                                  util/log.o util/string.o
@@ -1218,9 +1219,27 @@ FUZZ_CFLAGS := -O1 -g -std=gnu11 -fno-omit-frame-pointer $(LANG_CFLAGS) \
                -fno-sanitize-recover=all $(WARNINGS) $(FUZZ_WARNINGS) \
                -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE $(INCLUDES) \
                $(LIBCRYPTO_CFLAGS) $(LIBCURL_CFLAGS) $(ZLIB_CFLAGS)
-FUZZ_LIBS := $(LIBCRYPTO_LIBS) $(LIBSSL_LIBS) $(LIBCURL_LIBS) $(ZLIB_LIBS)
-FUZZ_BASE := util/json.c util/string.c util/hex.c util/malloc.c \
-             testing/fuzz/log.c
+
+# The targets link a copy of the Rust library that carries libFuzzer's
+# coverage instrumentation, so that the fuzzer sees the Rust code too.
+RUST_FUZZ_TARGET := build/rust-fuzz
+RUST_FUZZ_LIB    := $(RUST_FUZZ_TARGET)/release/libshirudo_rs.a
+RUST_FUZZ_FLAGS  := -Cpasses=sancov-module \
+                    -Cllvm-args=-sanitizer-coverage-level=4 \
+                    -Cllvm-args=-sanitizer-coverage-inline-8bit-counters \
+                    -Cllvm-args=-sanitizer-coverage-pc-table \
+                    -Cllvm-args=-sanitizer-coverage-trace-compares
+
+$(RUST_FUZZ_LIB): $(RUST_SRCS)
+	@printf '  CARGO   $@\n'
+	$(Q)RUSTFLAGS="$(RUSTFLAGS_WERROR) $(RUST_FUZZ_FLAGS)" \
+	    $(CARGO) build --quiet --release --locked --offline \
+	    --manifest-path $(RUST_DIR)/Cargo.toml --target-dir $(RUST_FUZZ_TARGET)
+	$(Q)touch $@
+
+FUZZ_LIBS := $(RUST_FUZZ_LIB) $(LIBCRYPTO_LIBS) $(LIBSSL_LIBS) \
+             $(LIBCURL_LIBS) $(ZLIB_LIBS) $(RUST_LDLIBS)
+FUZZ_BASE := util/string.c util/hex.c util/malloc.c testing/fuzz/log.c
 FUZZ_CONFIG := util/config.c util/image_config.c
 FUZZ_SEAL := util/seal.c $(FUZZ_CONFIG)
 FUZZ_OCI := util/bpm_oci.c util/curl.c util/io.c $(FUZZ_SEAL) \
@@ -1422,7 +1441,7 @@ $(FUZZ_STAMP): FORCE_FUZZ_FLAGS
 	    cmp -s - $@ 2>/dev/null || \
 	    printf '%s\n' '$(subst ','\'',$(FUZZ_SIGNATURE))' > $@
 
-$(FUZZ_TARGETS): $(FUZZ_HEADERS) $(FUZZ_STAMP)
+$(FUZZ_TARGETS): $(FUZZ_HEADERS) $(FUZZ_STAMP) $(RUST_FUZZ_LIB)
 	@printf '  FUZZ    $@\n'
 	$(Q)$(FUZZ_CC) $(FUZZ_CFLAGS) $(LDFLAGS) -o $@ \
 		$(filter-out $(FUZZ_INCLUDED),$(filter %.c,$^)) $(FUZZ_LIBS)
@@ -1438,7 +1457,7 @@ clean:
 	          $(BUILD_OBJS) $(SIGN_OBJ) $(QUOTE_CHECK_OBJS) $(VERSION_OBJ) \
 	          util/version_id.c
 	$(Q)rm -rf build/target build/unit build/quote-check build/fuzz-afl \
-	    build/fuzz-afl-cmplog $(RUST_TARGET)
+	    build/fuzz-afl-cmplog $(RUST_TARGET) $(RUST_FUZZ_TARGET)
 	$(Q)rm -f $(DEPS) testing/helper/*.d
 	$(Q)rm -f $(BPF_OBJS) $(VMLINUX_H) systemd/shirudo.service \
 	    systemd/shirudo-initrd.service \

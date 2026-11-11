@@ -65,20 +65,11 @@ dm-names		--unwind 10 --unwindset dm_name_ok.0:129,name_valid.0:129,long_name.1:
 kernel-notes		--unwind 1 --unwindset kernel_build_id_from_notes.0:8,hex_encode.0:65,strnlen.0:130,harness.0:130,first_note.0:65,any_notes.0:85,memcmp.0:5 LEN=0-24,28,32,36,40,80,84
 kernel-release		--unwind 10
 log-escape		--unwind 7 LEN=0-5
-json-emit-string	--unwind 5 --unwindset json_string.0:27,put_string_n.0:5,put_raw.0:7,well_formed.0:27,replaced.0:5,memchr.0:9,memcmp.0:13 LEN=0-4
-json-emit-buffer	--unwind 1 --unwindset json_raw_value.0:5,harness.0:5 --malloc-may-fail --malloc-fail-null LEN=0-4
-json-emit-nest		--object-bits 12 --unwind 1 --unwindset json_text.0:57,sequences.0:4,sequences.1:5,any_depth.0:4,any_depth.1:4,strcmp.0:12,memchr.0:9,put_string_n.0:2,put_string_n.1:2,put_raw.0:8,json_kv_raw.0:3,json_raw_value.0:3,json_raw.0:5,strlen.0:3,vsnprintf.2:5,vsnprintf.0:2,format_number.0:3,format_number.2:5,format_number.3:3
 keepalive-emit		--object-bits 12 --max-field-sensitivity-array-size 960 --unwind 1 --unwindset json_members.0:961,power_of_ten.0:6,put_string_n.0:5,put_string_n.1:66,put_raw.0:7,strlen.0:66,hex_is_lower.0:66,kv_counters.0:44,kv_no_tree.0:8,json_raw_value.0:21,vsnprintf.2:4,vsnprintf.0:2,format_number.0:21,format_number.2:5,format_number.3:21,ends_in_any_number.0:6,ends_in_any_number.1:961,ends_in_any_number.2:5 LEN=0-3
 keepalive-snapshot	--unwind 4 --unwindset strcmp.0:2
 keepalive-quote		--unwind 24 LEN=1,19,20,21
-json-string		--unwind 5 --unwindset json_string.0:7,parse_string.0:5,parse_string.1:7,memchr.0:9,memcmp.0:7,harness.0:8 LEN=0-6
-json-escape		--unwind 5 --unwindset parse_string.0:4,memcmp.0:9
-json-roundtrip		--unwind 1 --unwindset put_string_n.0:5,put_string_n.1:5,put_raw.0:7,vsnprintf.2:4,vsnprintf.0:2,format_number.0:3,format_number.2:5,format_number.3:3,parse_string.1:6,parse_string.0:4,hex4.0:5,utf8_width.0:4,memcmp.0:5 LEN=0-4
 otel-header-fields	-D__NO_CTYPE --unwind 34 --unwindset strchr.0:17 LEN=32
 otel-retry-after	-D__NO_CTYPE --unwind 1 --unwindset response_header.0:33,response_header.1:33,otel_retry_after.0:131,otel_retry_after.1:131,delay.0:33,strlen.0:131,strncasecmp.0:13,long_line.0:143 LEN=32,142
-json-walk		-DJSON_MAX_DEPTH=2 --unwind 3 --unwindset string_end.0:2,code_unit.0:0,hex4.0:0,parse_string.0:1,parse_string.1:2,literal_end.0:4,json_text.0:3,json_text.1:3,utf8_width.0:1,parse_array.0:1,parse_object.0:1,parse_object.1:1,digits_end.0:3,digits.0:3,skip_ws.0:3,strlen.0:6,memcmp.0:1,memchr.0:3,strnlen.0:4 LEN=0-2
-json-limits		-DJSON_MAX_DEPTH=2 -DJSON_MAX_BYTES=24 --unwind 8
-json-field		--unwind 1 --unwindset digits_end.0:7,decimal.0:7,harness.0:7,skip_ws.0:7,parse_string.1:7,parse_string.0:4,hex4.0:0,utf8_width.0:4,parse_base.0:7,parse_base.1:7,digits.0:7,strnlen.0:4,strlen.0:6,memcmp.0:6 LEN=0-6
 bpm-tar-octal		--unwind 13 LEN=8,12
 bpm-tar-header		--unwind 9 --unwindset bpm_tar_header_ok.0:513,windowed_header.0:513 --max-field-sensitivity-array-size 512 LEN=0,116,448
 bpm-archive-path	--unwind 12 LEN=0-10
@@ -102,9 +93,6 @@ bpm-semver-model	--slice-formula --unwind 1 --unwindset strlen.0:10,strcmp.0:10,
 chain-events		--unwind 258 LEN=0-8,255-257
 hex-model		--unwind 20
 paths-bpffs-name-model	--unwind 20
-json-emit-string-model	--unwind 5 --unwindset put_string_n.0:5,put_string_n.1:5,put_raw.0:7,model_write.0:5,model_write.1:5,memcmp.0:27 LEN=0-4
-json-string-model	--unwind 5 --unwindset parse_string.0:7,parse_string.1:7,model_read.0:7,memcmp.0:7 LEN=0-6
-json-escape-model	--unwind 5 --unwindset parse_string.0:4,parse_string.1:4,model_read.0:4,memcmp.0:9
 bpm-archive-path-model	--unwind 12 LEN=0-10
 hex-digest		--unwind 74 LEN=0,6-8,70-72
 serializer-chunk	--unwind 1

@@ -480,7 +480,7 @@ without a body.
   compare it with `memneq_explicit()`. Mark a struct member that holds
   one `__sensitive`: a check then wants every local of that struct
   scrubbed the same way, member filled by a parser and all.
-- All JSON goes through `util/json.c`; text from outside is written
+- All JSON goes through `util/json.h`; text from outside is written
   with its lossy writers. All logging goes through `pr_*()` to syslog;
   shirudo writes no log file of its own.
 - Fields of a little- or big-endian format are read and written with
@@ -605,9 +605,12 @@ it.
 - No crates and no std: core and alloc, so that cargo builds offline
   from `rust/Cargo.lock` and the target carries no runtime it does not
   use. What the C library offers comes through `extern` declarations, as
-  the C uses it. A panic reports through `pr_err()` and aborts.
-  `panic = "abort"`, overflow checks and LTO hold in every release build,
-  and arithmetic that input can overflow is checked.
+  the C uses it. Rust allocations go through the allocator of
+  `rust/src/heap.rs`, which zeroes and scrubs as `util/malloc.c` does; a
+  buffer C frees with `xfree()` comes from `rust/src/malloc.rs`. A panic
+  reports through `pr_err()` and aborts. `panic = "abort"`, overflow
+  checks and LTO hold in every release build, and arithmetic that input
+  can overflow is checked.
 - `rustfmt` sets the layout. Comments follow the rules above with `//`
   and `///`, and `//!` holds the lines of purpose under the SPDX line
   and the copyright.

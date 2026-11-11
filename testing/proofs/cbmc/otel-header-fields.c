@@ -12,7 +12,6 @@
 #include "../../../util/malloc.c"
 #include "../../../util/string.c"
 #include "../../../util/hex.c"
-#include "../../../util/json.c"
 #include "../../../util/upatch_maps_otel.c"
 
 /* RFC 9110, 5.6.2. */

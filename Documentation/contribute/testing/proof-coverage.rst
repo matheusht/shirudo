@@ -818,73 +818,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
        the certificate; the vouch admits that certificate under the
        member that signed it, and no other certificate of its length or
        longer; without memory nothing is written
-   * - ``json-string``
-     - ``parse_string()`` of :src:`util/json.c`
-     - Lengths 0 to 6, every room up to one byte more
-     - Accepts exactly the ECMA-404 strings without ``\u0000``, a lone
-       surrogate or bytes that are not UTF-8, decoded as a reference
-       decoder does; ``-ENOSPC`` exactly when the value does not fit;
-       nothing written past its room
-   * - ``json-escape``
-     - ``\u`` escapes and surrogate pairs
-     - Every pair of code units
-     - A pair is its 4-byte UTF-8, a code unit its own; ``\u0000`` and
-       a lone surrogate refused
-   * - ``json-field``
-     - ``parse_value()`` into an integer, string or boolean field
-     - Values of 0 to 6 bytes
-     - An integer field takes exactly an ECMA-404 integer at its value; a
-       string fits its room; a boolean takes ``true`` or ``false``;
-       ``null`` gives no value
-   * - ``json-string-model``
-     - ``parse_string()``
-     - Lengths 0 to 6, every buffer up to 7 bytes or none, a
-       ``JSON_MAX_STRING_BYTES`` of 3
-     - The result, end and bytes of the Lean model ``Shirudo.JsonString``
-   * - ``json-escape-model``
-     - ``parse_string()``
-     - Every pair of ``\u`` escapes in either case, every buffer up to 8
-       bytes or none
-     - The result, end and bytes of the Lean model ``Shirudo.JsonString``,
-       surrogate pairs, ``\u0000`` and lone surrogates included
-   * - ``json-walk``
-     - ``json_walk()``
-     - Every document of up to 2 bytes, depth 2
-     - Agrees with an independent ECMA-404 recognizer; containers in
-       pairs, numbers whole with their integer flag
-   * - ``json-limits``
-     - The bounds of ``json_walk()`` and ``json_parse()``
-     - Fixed documents at small bounds
-     - Past the size or depth limit ``-E2BIG`` before any read; a
-       callback's error ends the walk; a declared key named twice,
-       null or not, refused
-   * - ``json-emit-string``
-     - ``put_string_n()`` of the JSON writer, strict and lossy
-     - Strings of 0 to 4 bytes
-     - Refuses exactly a NUL or bytes that are not UTF-8; writes one
-       ECMA-404 string that decodes back to the input, or with U+FFFD in
-       place of each NUL and stray byte
-   * - ``json-roundtrip``
-     - The writer and ``parse_string()``
-     - Strings of 0 to 4 bytes
-     - Every string the strict writer takes reads back whole
-   * - ``json-emit-string-model``
-     - ``put_string_n()``, strict
-     - Lengths 0 to 4
-     - Refuses exactly where the Lean model ``Shirudo.JsonString`` does,
-       and otherwise writes the same bytes
-   * - ``json-emit-buffer``
-     - ``put()``, ``grow()``
-     - Texts of 0 to 4 bytes, every room and limit, allocations allowed
-       to fail
-     - Grows only up to its limit; fails exactly when the text does not
-       fit, keeping the longest prefix that does, terminated
-   * - ``json-emit-nest``
-     - Every container and key writer, ``json_kv_u64()`` and
-       ``json_u64_value()`` among them
-     - Every sequence of up to 4 calls, every depth
-     - Valid JSON by a byte-level recognizer; a comma only after a
-       member; ``-E2BIG`` past the deepest level
    * - ``keepalive-emit``
      - ``keepalive_emit()``
      - Three fixed bodies, without a tree, with a tree and nothing else
@@ -1419,8 +1352,9 @@ the model follows the C.
        the even runs of at most ``2 * cap``; ``encode_injective``
      - A string is shorter than ``SIZE_MAX``
      - CBMC, ``hex-model``, up to 8 bytes and 17 digits
-   * - ``Shirudo.JsonString``, the strict ``put_string_n()`` that
-       ``json_str()`` calls and ``parse_string()`` of :src:`util/json.c`
+   * - ``Shirudo.JsonString``, the strict ``put_string()`` that
+       ``json_str()`` calls and ``Cursor::string()`` of
+       :src:`rust/src/util/json/`
      - ``read_write``: the reader returns exactly every string the writer
        takes and stops at its closing quote; ``write_isSome``: the writer
        takes exactly well-formed UTF-8 without NUL; ``write_string``: it
@@ -1430,10 +1364,9 @@ the model follows the C.
        without NUL
      - The emitter has room; for ``read_write``, the string fits
        ``JSON_MAX_STRING_BYTES`` and the buffer; well-formed UTF-8 is
-       Table 3-7, which ``string-utf8`` proves ``utf8_width()`` computes
-     - CBMC, ``json-emit-string-model`` up to 4 bytes,
-       ``json-string-model`` lengths 0 to 6, ``json-escape-model`` every
-       pair of ``\u`` escapes
+       Table 3-7, which the Rust core checks
+     - None since the port to Rust; the CBMC models went with
+       ``util/json.c``
    * - ``Shirudo.ConfigActivation``, the config activation of
        :src:`util/config_update.c` as ``image update``, ``image stage``,
        ``status`` and ``init`` drive it
@@ -1673,9 +1606,11 @@ Not covered yet
 ---------------
 
 The fuzz targets in :doc:`test-coverage` cover these parsers; no proof
-does: how ``json_parse()`` dispatches objects, arrays and maps to their
+does: the JSON reader and writer of :src:`rust/src/util/json/`, whose
+CBMC proofs went with the C they proved when the module moved to Rust,
+how ``json_parse()`` dispatches objects, arrays and maps to their
 schemas, and the members and elements of a JSON document longer than
-the two bytes ``json-walk`` takes, the OTLP headers a configuration adds
+two bytes, the OTLP headers a configuration adds
 and the collector's reply to an export, the walk over a package's tar
 members, the registry references and URLs and the registry credentials
 file, the lines a tree selector cuts a kernel configuration into and

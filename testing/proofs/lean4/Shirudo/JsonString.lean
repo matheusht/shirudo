@@ -4,20 +4,21 @@
 import Shirudo.Hex
 
 /-!
-The JSON strings of util/json.c. The strict writer, `put_string_n()` with
-`lossy` false as `json_str()` calls it on the bytes of a C string, writes
+The JSON strings of rust/src/util/json/, ported step by step from
+util/json.c. The strict writer, `put_string()` with `lossy` false as
+`json_str()` calls it on the bytes of a C string, writes
 a quote, then `"` and `\` escaped, `\n`, `\r` and `\t` by name, every
 other control byte as `\u00XX`, the other ASCII bytes as they are and
 each sequence of Table 3-7 of the Unicode Standard as it is, and a quote;
 it refuses a NUL or a byte that starts no such sequence with `-EILSEQ`.
-The reader, `parse_string()`, takes the escapes of one letter and
+The reader, `Cursor::string()`, takes the escapes of one letter and
 `\uXXXX`, joining a high and a low surrogate into one code point and
 refusing `\u0000` and a lone surrogate, refuses an unescaped control
 byte, and copies each sequence of Table 3-7; `emit_byte()` refuses with
 `-E2BIG` past `JSON_MAX_STRING_BYTES` and with `-ENOSPC` when `dst` has no
 room for a byte and the NUL.
 
-The models follow the C step by step on byte lists, each byte its value.
+The models follow the code step by step on byte lists, each byte its value.
 Well-formed UTF-8 is Table 3-7, as `table_width()` of
 testing/proofs/cbmc/string-utf8.c states it, which proves that
 `utf8_width()` computes it for every input; `%04x` writes four lowercase
@@ -31,12 +32,9 @@ outside an escape, in well-formed UTF-8, and a quote; and the reader,
 with room for it, returns exactly the bytes it was written from and stops
 at the closing quote, whatever follows. Whatever the reader returns, from
 any input, is well-formed UTF-8 without NUL.
-testing/proofs/cbmc/json-emit-string-model.c checks the writer against
-the model on every string of up to 4 bytes,
-testing/proofs/cbmc/json-string-model.c the reader on every input of up
-to 6 bytes, every buffer and a `JSON_MAX_STRING_BYTES` of 3, and
-testing/proofs/cbmc/json-escape-model.c the reader on every pair of
-`\u` escapes in either case.
+CBMC checked the C writer and reader against the model until the module
+moved to Rust; nothing ties the Rust port to it but the review that it
+follows the same steps.
 -/
 
 namespace Shirudo.JsonString
@@ -95,8 +93,7 @@ def rowWidth (n b0 b1 b2 b3 : Nat) : Nat :=
 def width (s : List Nat) : Nat :=
   rowWidth s.length (s.getD 0 0) (s.getD 1 0) (s.getD 2 0) (s.getD 3 0)
 
-/-- Well-formed UTF-8: the bytes are a sequence of rows of Table 3-7, as
-`well_formed()` of testing/proofs/cbmc/json-emit-string.c reads them. -/
+/-- Well-formed UTF-8: the bytes are a sequence of rows of Table 3-7. -/
 def wellFormed (s : List Nat) : Bool :=
   match s with
   | [] => true
