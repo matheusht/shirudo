@@ -7,7 +7,7 @@
 mod emit;
 mod parse;
 
-pub(crate) use emit::JsonEmit;
+pub(crate) use emit::{JsonEmit, emit_fixed};
 pub(crate) use parse::{JsonArray, JsonField, parse_schema};
 
 /// `JSON_MAX_BYTES`: the largest document either reader takes.

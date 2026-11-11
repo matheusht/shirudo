@@ -169,55 +169,10 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
      - The pin directory, the pin name and each part after one slash,
        terminated, exactly when they fit, else ``-ENAMETOOLONG`` with an
        empty string
-   * - ``bpm-tar-octal``
-     - ``bpm_tar_octal()``
-     - Every field of 8 and 12 bytes
-     - Accepted exactly as octal digits with blanks or NULs around them,
-       at their value; nothing written on refusal
    * - ``paths-bpffs-name-model``
      - ``upatch_bpffs_name()``, ``upatch_name_from_bpffs()``
      - Up to 8 bytes, buffers up to 18
      - The result and the string of the Lean model ``Shirudo.PinName``
-   * - ``bpm-tar-header``
-     - ``bpm_tar_header_ok()``
-     - Every header without an octal checksum; the checksum against
-       headers with 64 free bytes at three places
-     - Holds exactly when the field is the byte sum with its own bytes as
-       blanks
-   * - ``bpm-archive-path``
-     - ``bpm_archive_rel_ok()``, ``package_member_name_ok()``
-     - Names of 0 to 10 bytes
-     - A name passes exactly when it cannot leave its directory; a member
-       exactly when it is the path below the one top directory
-   * - ``bpm-archive-path-model``
-     - ``bpm_archive_rel_ok()``, ``package_member_name_ok()``
-     - Names of lengths 0 to 10, members up to 3 bytes
-     - The decision of the Lean model ``Shirudo.ArchivePath``
-   * - ``bpm-semver-valid``
-     - ``bpm_semver_valid()``
-     - Up to 11 bytes
-     - Valid exactly by the SemVer 2.0.0 grammar; the pre-release parsed
-       is the text between the core and ``+``
-   * - ``bpm-semver-order``
-     - ``bpm_semver_compare()``
-     - Every pair of strings up to 7 bytes
-     - Antisymmetric; equal exactly up to build metadata; every version
-       above every invalid string; the core by number; a pre-release
-       below its release
-   * - ``bpm-semver-transitive``
-     - ``bpm_semver_compare()``
-     - Every three strings up to 7 bytes
-     - Transitive, valid versions or not
-   * - ``bpm-semver-prerelease``
-     - ``prerelease_compare()``
-     - Identifiers up to 3 bytes, lists up to 5
-     - Numeric by value and below alphanumeric, alphanumeric by bytes;
-       the first difference decides, else the longer list
-   * - ``bpm-semver-model``
-     - ``bpm_semver_compare()``, ``semver_parse()``,
-       ``prerelease_compare()``
-     - Every pair of strings up to 9 bytes
-     - The sign of the Lean model ``Shirudo.SemVer``
    * - ``bpm-source-config``
      - ``bpm_parse_source_line()``, ``bpm_parse_tree_line()``
      - Lines up to 22 bytes, settings of 4 bytes with their NUL
@@ -429,14 +384,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
      - Each whole line read once and in order, nothing of a last line
        without its newline; a log with a NUL refused unread; the log
        released once
-   * - ``bpm-upatch-member``
-     - ``bpm_upatch_member()``, ``bpm_upatch_pair()``
-     - Lengths 0 to 18
-     - What install loads and uninstall unloads goes by the suffix alone;
-       a pair refused exactly for a name that is neither and for a room
-       short of what its kind needs, 8 bytes more than the name for a
-       load and 6 fewer for an unload; else terminated, the other half,
-       and pairing back to the name
    * - ``bpm-tar-writer``
      - ``tar_entry()``, ``tar_octal()``, ``tar_write()`` of
        :src:`tools/shirudo-build/bpm-build.c`, against
@@ -1257,8 +1204,8 @@ the model follows the C.
        ``Shirudo.Events`` takes it for ``verify_history``
      - CBMC, ``attest-replay-model``, for ``on_record()`` up to three
        records; the checks after it by review
-   * - ``Shirudo.SemVer``, ``bpm_semver_compare()`` of
-       :src:`util/bpm_package.c`
+   * - ``Shirudo.SemVer``, ``semver::compare()`` of
+       :src:`rust/src/util/bpm_package/`
      - ``compareStrings_refl``, ``compareStrings_swap``,
        ``compareStrings_trans``: a total order on strings of every
        length; ``compareStrings_eq_iff``, ``compareStrings_invalid``,
@@ -1268,7 +1215,8 @@ the model follows the C.
        precedence
      - None; numeric identifiers compare by value only without a leading
        zero, which ``semverParse_wellFormed`` shows the parser ensures
-     - CBMC, ``bpm-semver-model``, up to 9 bytes
+     - None since the port to Rust; the CBMC model went with
+       ``util/bpm_package.c``
    * - ``Shirudo.PinName``, ``upatch_bpffs_name()`` and
        ``upatch_name_from_bpffs()`` of :src:`util/paths.h`
      - ``decode_encode``: a name without ``~`` decodes back from its
@@ -1281,9 +1229,9 @@ the model follows the C.
        refuses
      - A C string is shorter than 2^63 bytes
      - CBMC, ``paths-bpffs-name-model``, up to 8 bytes
-   * - ``Shirudo.ArchivePath``, ``bpm_archive_rel_ok()``,
+   * - ``Shirudo.ArchivePath``, ``archive_rel_ok()``,
        ``package_member_name_ok()`` and the member checks of
-       ``bpm_pkg_extract()`` of :src:`util/bpm_package.c`
+       ``extract()`` of :src:`rust/src/util/bpm_package/`
      - ``relOk_iff``, ``relOk_plain``: the check takes exactly the relative
        paths of plain components, with or without a final ``/``;
        ``relOk_contained``: every name it takes, resolved below any
@@ -1295,8 +1243,8 @@ the model follows the C.
      - Resolution as the kernel walks a path, ``.`` staying, ``..`` going
        up and an empty component refused; the extraction's limits on
        count, size and path length are left out
-     - CBMC, ``bpm-archive-path-model``, names of lengths 0 to 10; review
-       for ``bpm_pkg_extract()``
+     - Review; the CBMC model of the two checks went with
+       ``util/bpm_package.c`` in the port to Rust
    * - ``Shirudo.Hex``, :src:`util/hex.c`
      - ``decode_encode``, ``length_encode``, ``encode_lower``: an encoding
        is lowercase hex twice its length that decodes back;
@@ -1560,15 +1508,13 @@ Not covered yet
 ---------------
 
 The fuzz targets in :doc:`test-coverage` cover these parsers; no proof
-does: the JSON reader and writer of :src:`rust/src/util/json/` and the
-OCI client of :src:`rust/src/util/bpm_oci/`, whose CBMC proofs went
-with the C they proved when the modules moved to Rust, among them the
-one that also held ``on_index_entry()`` of :src:`util/bpm_package.c`,
-how ``json_parse()`` dispatches objects, arrays and maps to their
+does: the JSON reader and writer of :src:`rust/src/util/json/`, the
+OCI client of :src:`rust/src/util/bpm_oci/` and the package reader of
+:src:`rust/src/util/bpm_package/`, whose CBMC proofs went
+with the C they proved when those modules moved to Rust; how ``json_parse()`` dispatches objects, arrays and maps to their
 schemas, and the members and elements of a JSON document longer than
 two bytes, the OTLP headers a configuration adds
-and the collector's reply to an export, the walk over a package's tar
-members, the registry references and URLs and the registry credentials
+and the collector's reply to an export, the registry references and URLs and the registry credentials
 file, the lines a tree selector cuts a kernel configuration into and
 the labels it reads,
 the tree's ``state.json`` and its outcomes record, the evidence document
@@ -1580,8 +1526,7 @@ config image's settings and tree and the fields of a
 ``json_parse()`` returns, by review; the parse of a line itself, as the
 replay and the walk of a boot read it, has the ``eventlog`` fuzz target
 alone.
-The ``.upatch`` reader, the TPM structures and the package, index and
-tree readers are covered part by part, as the table shows; what joins
+The ``.upatch`` reader, the TPM structures and the index and tree readers are covered part by part, as the table shows; what joins
 those parts has no proof. So it is with the package state:
 ``bpm_state_parse()`` hands ``on_state_entry()`` to ``json_parse()``,
 and neither that nor reading back what ``bpm_state_emit()`` writes has a

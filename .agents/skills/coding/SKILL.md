@@ -585,8 +585,9 @@ The Rust library under `rust/` replaces C modules one at a time, and a
 module's C interface stays its contract while any C caller or test uses
 it.
 
-- The port of `util/<m>.c` is `rust/src/util/<m>.rs`: safe code over
-  slices and Rust types, and a `capi` submodule whose
+- The port of `util/<m>.c` is `rust/src/util/<m>.rs`, or the directory
+  `rust/src/util/<m>/` for one that takes more than a file: safe code
+  over slices and Rust types, and a `capi` submodule whose
   `#[unsafe(no_mangle)] pub unsafe extern "C"` functions keep the names,
   types and behavior `util/<m>.h` declares, down to what one returns
   for an empty buffer. The header stays and names the Rust file. The C
@@ -600,14 +601,16 @@ it.
 - `rust/src/ffi.rs` turns what C hands over into Rust views: `c_str()`
   for a C string, `slice()` for an array that may be NULL when empty,
   `bytes_mut()` for a C buffer to write into as it is,
-  `zeroed_slice_mut()` for room C has not initialised. Every `unsafe`
-  block says in a `// SAFETY:` comment what part of the C contract makes
-  it sound.
-- What the Rust code still calls in C, the C library, libcurl and the
-  `util/` modules not ported yet, is declared in `rust/src/sys/`, one
-  module for each header, which goes when the C it declares does. A
-  message goes through `pr_err()` with the format and arguments the C
-  passed, so that it reads as before.
+  `zeroed_slice_mut()` for room C has not initialised, and
+  `rust/src/text.rs` gives Rust code the string rules of
+  `include/shirudo/string.h` and the C library, `strscpy()` to
+  `parse_u64()`, over byte slices. Every `unsafe` block says in a
+  `// SAFETY:` comment what part of the C contract makes it sound.
+- What the Rust code still calls in C, the C library, libcurl, zlib,
+  OpenSSL past `util/crypto.h` and the `util/` modules not ported yet,
+  is declared in `rust/src/sys/`, one module for each header, which goes
+  when the C it declares does. A message goes through `pr_err()` with
+  the format and arguments the C passed, so that it reads as before.
 - Before the C file goes, compare the two: build the old file from git
   with its functions renamed, link it beside the archive and run both on
   the same random and corpus inputs until they agree on every result and
@@ -617,10 +620,10 @@ it.
   use. What the C library offers comes through `extern` declarations, as
   the C uses it. Rust allocations go through the allocator of
   `rust/src/heap.rs`, which zeroes and scrubs as `util/malloc.c` does; a
-  buffer C frees with `xfree()` comes from `rust/src/malloc.rs`. A panic
-  reports through `pr_err()` and aborts. `panic = "abort"`, overflow
-  checks and LTO hold in every release build, and arithmetic that input
-  can overflow is checked.
+  buffer C frees with `xfree()` comes from the xmalloc family
+  `rust/src/sys/malloc.rs` declares. A panic reports through `pr_err()`
+  and aborts. `panic = "abort"`, overflow checks and LTO hold in every
+  release build, and arithmetic that input can overflow is checked.
 - `rustfmt` sets the layout. Comments follow the rules above with `//`
   and `///`, and `//!` holds the lines of purpose under the SPDX line
   and the copyright.

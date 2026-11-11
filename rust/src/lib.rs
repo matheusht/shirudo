@@ -14,4 +14,5 @@ mod ffi;
 mod heap;
 mod panic;
 mod sys;
+mod text;
 mod util;

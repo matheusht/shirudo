@@ -2,9 +2,10 @@
 // Copyright (c) 2026 Authors of shirudo
 
 //! Declarations of what the Rust modules call in C: the C library,
-//! libcurl, and the util/ modules not ported yet, one module for each
-//! header, each to go when what it declares is Rust.
+//! libcurl, zlib, OpenSSL, and the util/ modules not ported yet, one
+//! module for each header, each to go when what it declares is Rust.
 
+pub mod bpm_tree;
 pub mod crypto;
 pub mod curl;
 pub mod hex;
@@ -12,3 +13,6 @@ pub mod io;
 pub mod libc;
 pub mod log;
 pub mod malloc;
+pub mod openssl;
+pub mod seal;
+pub mod zlib;

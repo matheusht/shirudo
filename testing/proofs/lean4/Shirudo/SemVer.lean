@@ -4,16 +4,19 @@
 import Shirudo.Number
 
 /-!
-The version order of util/bpm_package.c. `bpm_semver_compare()` orders
-version strings by SemVer 2.0.0 precedence: major, minor and patch by
-value, a version with a prerelease below the same version without one,
-prerelease identifiers left to right, numeric ones by value and below
-alphanumeric ones, which compare by their bytes, and a list of them below
-a longer list it begins. Build metadata is ignored. A string that is not
-SemVer sorts below every one that is, and such strings sort among
-themselves by `strcmp()`. `bpm upgrade` installs the highest version an
-index offers, so the order has to be total, or an upgrade could go
-backwards or depend on the order of the index.
+The version order of rust/src/util/bpm_package/, ported step by step from
+util/bpm_package.c, whose names the model keeps: the C below is that code,
+and its `semver_parse()`, `semver_identifiers()` and `strcmp()` are the
+port's `parse()`, `identifiers()` and order of byte slices.
+`bpm_semver_compare()` orders version strings by SemVer 2.0.0 precedence:
+major, minor and patch by value, a version with a prerelease below the
+same version without one, prerelease identifiers left to right, numeric
+ones by value and below alphanumeric ones, which compare by their bytes,
+and a list of them below a longer list it begins. Build metadata is
+ignored. A string that is not SemVer sorts below every one that is, and
+such strings sort among themselves by `strcmp()`. `bpm upgrade` installs
+the highest version an index offers, so the order has to be total, or an
+upgrade could go backwards or depend on the order of the index.
 
 The model follows the C function by function: `semverParse` is
 `semver_parse()` with `semver_identifiers()`, `identCmp` the body of the
@@ -31,8 +34,9 @@ of them, a prerelease and a version. The C compares two numeric
 identifiers by length and then by bytes, which is their order by value
 because no leading zero gets through `semver_identifiers()`; that, and
 the other rules of SemVer's precedence, are proved of the model too.
-testing/proofs/cbmc/bpm-semver-model.c checks the C against the model on
-every pair of strings of up to 9 bytes.
+CBMC checked the C against the model on every pair of strings of up to 9
+bytes until the module moved to Rust; nothing ties the Rust port to it
+but the review that it follows the same steps.
 -/
 
 namespace Shirudo.SemVer

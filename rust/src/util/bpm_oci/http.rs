@@ -11,8 +11,8 @@ use super::auth::{encode_basic, parse_challenge, token_from_body};
 use super::refs::{upload_location, url};
 use super::{
     AUTH_VALUE_SIZE, BASIC_ENCODED_SIZE, BASIC_HEADER_SIZE, BpmBuffer, Descriptor, HttpResponse,
-    MAX_HTTP_BODY, MAX_PACKAGE_BYTES, OciClient, PATH_MAX, c_ptr, copy_string, cstr,
-    digest_matches, is_space, strscpy, strsprintf,
+    MANIFEST_MEDIA, MAX_HTTP_BODY, MAX_PACKAGE_BYTES, OciClient, PATH_MAX, c_ptr, copy_string,
+    cstr, digest_matches, is_space, strscpy, strsprintf,
 };
 use crate::errno::{
     E2BIG, EACCES, EFBIG, EHOSTUNREACH, EINVAL, EKEYREJECTED, ENAMETOOLONG, ENOENT, ENOMEM,
@@ -40,7 +40,7 @@ pub(super) fn buffer_bytes(b: &BpmBuffer) -> &[u8] {
     unsafe { ffi::slice(b.data, if b.data.is_null() { 0 } else { b.len }) }
 }
 
-pub(super) fn buffer_free(b: &mut BpmBuffer) {
+pub(crate) fn buffer_free(b: &mut BpmBuffer) {
     // SAFETY: data is NULL or the cap bytes the xmalloc family gave.
     unsafe { xfree(b.data.cast(), b.cap) };
     *b = BpmBuffer::new();
@@ -580,7 +580,7 @@ fn status_errno(status: c_long) -> c_int {
     if status == 404 { -ENOENT } else { -EACCES }
 }
 
-pub(super) fn get_memory(
+pub(crate) fn get_memory(
     c: &mut OciClient,
     url: &CStr,
     accept: Option<&CStr>,
@@ -775,7 +775,7 @@ fn request(c: &mut OciClient, req: &Request, r: &mut HttpResponse) -> c_int {
 }
 
 /// The SHA-256 of `len` bytes at `data` in lowercase hex.
-pub(super) fn sha256_hex(data: *const u8, len: usize, hex: &mut [u8]) -> c_int {
+pub(crate) fn sha256_hex(data: *const u8, len: usize, hex: &mut [u8]) -> c_int {
     let mut digest = [0u8; SHA256_LEN];
 
     // SAFETY: the caller's len bytes at data, NULL only for none.
@@ -789,7 +789,7 @@ pub(super) fn sha256_hex(data: *const u8, len: usize, hex: &mut [u8]) -> c_int {
 
 /// The one payload and the one signature among a manifest's layers, each
 /// matching its descriptor's digest and declared size.
-pub(super) fn get_signed(
+pub(crate) fn get_signed(
     c: &mut OciClient,
     repository: &[u8],
     layers: &[Descriptor],
@@ -973,12 +973,11 @@ pub(super) fn put_manifest(
     if ret != 0 {
         return ret;
     }
-    let media = c"application/vnd.oci.image.manifest.v1+json";
     let put = Request {
         method: c"PUT",
         url: as_cstr(&manifest_url),
-        accept: Some(media),
-        content_type: Some(media),
+        accept: Some(MANIFEST_MEDIA),
+        content_type: Some(MANIFEST_MEDIA),
         body: Some(body),
     };
     let ret = request(c, &put, &mut r);

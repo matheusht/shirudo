@@ -2,17 +2,20 @@
 -- Copyright (c) 2026 Authors of shirudo
 
 /-!
-The member paths of util/bpm_package.c. `bpm_archive_rel_ok()` takes a
-name from a .bee archive when it is not empty, does not start with `/`,
-and none of the components `strchr()` finds between its slashes is empty,
-`.` or `..`; a final `/`, as tar ends a directory member with, leaves no
-component after it. `package_member_name_ok()` matches a member only as
-the whole path below the archive's top directory. `bpm_pkg_extract()`
-takes the top directory from the first member, refuses a member whose
-name fails the check, lies outside that directory, or, below it, is empty
-for anything but a directory or fails the check, and refuses every
-member but a regular file (`0`) and a directory (`5`) before it writes.
-It then creates `<dest>/<rel>`.
+The member paths of rust/src/util/bpm_package/, ported step by step from
+util/bpm_package.c, whose names the model keeps: the C below is that code,
+and its `bpm_archive_rel_ok()` and `bpm_pkg_extract()` are the port's
+`archive_rel_ok()` and `extract()`. `bpm_archive_rel_ok()` takes a name
+from a .bee archive when it is not empty, does not start with `/`, and
+none of the components between its slashes is empty, `.` or `..`; a final
+`/`, as tar ends a directory member with, leaves no component after it.
+`package_member_name_ok()` matches a member only as the whole path below
+the archive's top directory. `bpm_pkg_extract()` takes the top directory
+from the first member, refuses a member whose name fails the check, lies
+outside that directory, or, below it, is empty for anything but a
+directory or fails the check, and refuses every member but a regular file
+(`0`) and a directory (`5`) before it writes. It then creates
+`<dest>/<rel>`.
 
 Path resolution is modelled as the kernel walks a path: a path splits
 into the components between its slashes, one that starts with `/` starts
@@ -32,9 +35,10 @@ when it is one plain component, a `/` and the member; and every member
 `bpm_pkg_extract()` writes is a regular file or a directory strictly
 below `dest`, or `dest` itself for the top directory. A string is its
 bytes before the NUL, each byte its value.
-testing/proofs/cbmc/bpm-archive-path-model.c checks the two checks of
-the C against the model on every name of up to 10 bytes and member of up
-to 3; the model of `bpm_pkg_extract()` follows the C by review.
+CBMC checked the two checks of the C against the model on every name of
+up to 10 bytes and member of up to 3 until the module moved to Rust;
+nothing ties the Rust port to it but the review that it follows the same
+steps, as the model of `bpm_pkg_extract()` always followed the C.
 -/
 
 namespace Shirudo.ArchivePath
@@ -54,7 +58,7 @@ def dirType : Nat := 0x35
 /-- Not a `/`, what `strchr(p, '/')` skips. -/
 def notSlash (c : Nat) : Bool := c != slash
 
-/-- A component `bpm_archive_rel_ok()` refuses: `q == p`, or `.` or `..`. -/
+/-- A component `bpm_archive_rel_ok()` refuses: an empty one, `.` or `..`. -/
 def bad (comp : List Nat) : Bool := comp == [] || comp == [dot] || comp == [dot, dot]
 
 theorem length_dropWhile_lt (p : List Nat) (r : List Nat) (c : Nat)

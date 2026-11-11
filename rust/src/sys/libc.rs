@@ -5,8 +5,13 @@
 
 use core::ffi::{CStr, c_char, c_int, c_void};
 
+pub const PATH_MAX: usize = 4096;
 pub const AT_FDCWD: c_int = -100;
+pub const F_DUPFD_CLOEXEC: c_int = 1030;
 pub const SEEK_SET: c_int = 0;
+pub const O_WRONLY: c_int = 0o1;
+pub const O_CREAT: c_int = 0o100;
+pub const O_EXCL: c_int = 0o200;
 pub const STATX_TYPE: u32 = 0x1;
 pub const STATX_SIZE: u32 = 0x200;
 pub const S_IFMT: u16 = 0o170000;
@@ -64,6 +69,9 @@ unsafe extern "C" {
         buf: *mut Statx,
     ) -> c_int;
     pub fn ftruncate(fd: c_int, length: i64) -> c_int;
+    pub fn fchmod(fd: c_int, mode: u32) -> c_int;
+    pub fn close(fd: c_int) -> c_int;
+    pub fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
     pub fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64;
     fn __errno_location() -> *mut c_int;
 }

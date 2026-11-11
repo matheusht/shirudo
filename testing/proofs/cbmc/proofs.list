@@ -41,7 +41,6 @@ bpm-tree-sync-pending	--object-bits 10 --unwind 8 --unwindset memcmp.0:33,memneq
 bpm-tree-sync-walk	--object-bits 10 --unwind 8 --unwindset memcmp.0:33,memneq_explicit.0:33,hex_encode.0:33,hex_decode.0:33,model_hash.0:33,model_history.0:33,want_outcome.0:33,want_outcome.1:33,same_history.0:33,any_node.0:33,run.0:33,same_digest.0:33,history_ok.0:33,want_write.0:33,want_write.1:33,strcmp.0:66,strlen.0:66,run.1:3,run.2:3,tree_walk_back.0:3,tree_walk_forward.0:2 --max-field-sensitivity-array-size 257 --slice-formula LEN=1
 bpm-tree-recovery-model	--object-bits 10 --unwind 8 --unwindset memcmp.0:33,memneq_explicit.0:33,hex_encode.0:33,hex_decode.0:33,model_hash.0:33,model_history.0:33,want_outcome.0:33,want_outcome.1:33,same_history.0:33,any_node.0:33,same_digest.0:33,history_ok.0:33,want_write.0:33,want_write.1:33,strcmp.0:66,strlen.0:66,recovery_start.0:33,recovery_state_matches.0:33 --max-field-sensitivity-array-size 257 --slice-formula LEN=0-2
 bpm-tree-signers	--unwind 8
-bpm-upatch-member	--unwind 30 LEN=0-18
 tpm-reader		--unwind 1
 tpm-signature		--unwind 1 --unwindset bytes_at.0:33
 tpm-attest		--unwind 1 --unwindset memcpy.0:35,bytes_at.0:35
@@ -70,23 +69,14 @@ keepalive-snapshot	--unwind 4 --unwindset strcmp.0:2
 keepalive-quote		--unwind 24 LEN=1,19,20,21
 otel-header-fields	-D__NO_CTYPE --unwind 34 --unwindset strchr.0:17 LEN=32
 otel-retry-after	-D__NO_CTYPE --unwind 1 --unwindset response_header.0:33,response_header.1:33,otel_retry_after.0:131,otel_retry_after.1:131,delay.0:33,strlen.0:131,strncasecmp.0:13,long_line.0:143 LEN=32,142
-bpm-tar-octal		--unwind 13 LEN=8,12
-bpm-tar-header		--unwind 9 --unwindset bpm_tar_header_ok.0:513,windowed_header.0:513 --max-field-sensitivity-array-size 512 LEN=0,116,448
-bpm-archive-path	--unwind 12 LEN=0-10
-bpm-semver-valid	--unwind 13
-bpm-semver-order	--unwind 9 --unwindset prerelease_compare.0:2,memchr.0:2,memcmp.0:2,span_until.1:2
-bpm-semver-transitive	--unwind 9 --unwindset prerelease_compare.0:2,memchr.0:2,memcmp.0:2,span_until.1:2
-bpm-semver-prerelease	--unwind 7
 bpm-tree-selector	--unwind 10 --malloc-may-fail --malloc-fail-null LEN=0,1
 bpm-tree-reader		--unwind 6 --unwindset hex_digits.0:65,hex_decode.0:33,strlen.0:129,strncmp.0:8 --malloc-may-fail --malloc-fail-null LEN=0,1
 bpm-tree-reserve	--unwind 1
 bpm-tree-manifest	--max-field-sensitivity-array-size 768 --unwind 80 --unwindset memcmp.0:770 LEN=0-2
 bpm-source-config	--unwind 24
-bpm-semver-model	--slice-formula --unwind 1 --unwindset strlen.0:10,strcmp.0:10,span_until.0:2,span_until.1:4,digits.0:10,parse_base.0:10,parse_base.1:10,semver_parse.0:4,semver_identifiers.0:4,semver_identifiers.1:3,prerelease_compare.0:3,memchr.0:4,memcmp.0:4,bpm_semver_compare.0:4,strnlen.0:10,any_string.0:10,break_at.0:10,split_on.0:10,next_ident.0:4,numeral.0:8,numeric.0:8,ident_ok.0:4,identifiers.0:3,lex_bytes.0:10,memcmp_model.0:4,lex_idents.0:3,semver_model_compare.0:4 LEN=9
 chain-events		--unwind 258 LEN=0-8,255-257
 hex-model		--unwind 20
 paths-bpffs-name-model	--unwind 20
-bpm-archive-path-model	--unwind 12 LEN=0-10
 hex-digest		--unwind 74 LEN=0,6-8,70-72
 serializer-chunk	--unwind 1
 paths-join		--unwind 12

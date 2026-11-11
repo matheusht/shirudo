@@ -234,7 +234,7 @@ pub(super) fn parse_tree_repo(raw: &[u8], c: &mut OciClient, repository: &mut [u
 }
 
 /// `<base_url>/v2/<repo>/<kind>/<reference>` into `out`.
-pub(super) fn url(
+pub(crate) fn url(
     c: &OciClient,
     repo: &[u8],
     kind: &[u8],

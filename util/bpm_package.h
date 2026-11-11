@@ -2,7 +2,8 @@
 /*
  * Copyright (c) 2026 Authors of shirudo
  *
- * .bee archives, signed repository indexes and tree publications.
+ * .bee archives, signed repository indexes and tree publications, which
+ * rust/src/util/bpm_package/ implements.
  */
 
 #ifndef SHIRUDO_BPM_PACKAGE_H

@@ -181,7 +181,7 @@ determining its events.
   nor its destination, from a literal chosen by symbolic data, is CBMC
   5.95's `memcpy()` model, not the code: rerun the input as a constant
   to confirm, then define `PROOF_MEMCPY_BYTEWISE` before including
-  `proof.h` (as `bpm-upatch-member.c` does). Such a copy is also
+  `proof.h` (as `config-hosts.c` does). Such a copy is also
   pathologically slow, wrong bytes or not: when a proof stalls in
   `memcpy()`, look for a literal source chosen by symbolic data first.
 - CBMC 5.95 also reads wrong bytes at a symbolic offset from a heap

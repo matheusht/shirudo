@@ -1267,9 +1267,7 @@ and tree signatures accept algorithms other than ML-DSA (U4).
 :Counters: none
 :Tests: ``t7005``, ``t7101``, ``t7102``, ``t7103``, ``t7104``,
    ``t7105``, ``t7106``, ``t7107``, ``t7108``, ``t7111``, ``t8005``
-:Proofs: ``bpm-tar-header``, ``bpm-tar-octal``, ``bpm-archive-path``,
-   ``bpm-semver-model``, ``Shirudo.SemVer``,
-   ``Shirudo.ArchivePath``, ``bpm-archive-path-model``,
+:Proofs: ``Shirudo.SemVer``, ``Shirudo.ArchivePath``,
    ``Shirudo.JsonString``, ``Shirudo.TreeSync``, ``bpm-tree-follows``,
    ``bpm-tree-sync-model``, ``bpm-tree-sync-application``,
    ``bpm-tree-sync-pending``, ``bpm-tree-recovery-model``,

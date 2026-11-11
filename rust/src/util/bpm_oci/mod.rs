@@ -11,18 +11,30 @@ mod http;
 mod manifest;
 mod refs;
 
-use core::ffi::{c_char, c_long};
+use core::ffi::{CStr, c_char, c_long};
+
+pub(crate) use http::{buffer_free, get_memory, get_signed, sha256_hex};
+pub(crate) use manifest::{emit_descriptor, parse_manifest};
+pub(crate) use refs::url;
 
 use crate::errno::E2BIG;
 use crate::sys::crypto::TlsCa;
+use crate::sys::libc::PATH_MAX;
+use crate::text::{at, contains, cstr, find, strscpy, strsprintf};
 
-const PATH_MAX: usize = 4096;
-const MAX_NAME: usize = 128;
-const MAX_ENDPOINT: usize = 512;
+pub(crate) const MAX_NAME: usize = 128;
+pub(crate) const MAX_ENDPOINT: usize = 512;
 const MAX_MEDIA: usize = 192;
-const MAX_DIGEST: usize = 128;
+pub(crate) const MAX_DIGEST: usize = 128;
+pub(crate) const MAX_ENTRIES: usize = 512;
 const MAX_HTTP_BODY: usize = 256 * 1024 * 1024;
-const MAX_PACKAGE_BYTES: u64 = 256 * 1024 * 1024;
+pub(crate) const MAX_PACKAGE_BYTES: u64 = 256 * 1024 * 1024;
+pub(crate) const MAX_PACKAGE_ENTRIES: u32 = 4096;
+pub(crate) const MANIFEST_MEDIA: &CStr = c"application/vnd.oci.image.manifest.v1+json";
+pub(crate) const TREE_MEDIA: &[u8] = b"application/vnd.shirudo.upatch.tree.v1+json";
+pub(crate) const TREE_SIG_MEDIA: &[u8] = b"application/vnd.shirudo.upatch.tree.signature.v1";
+pub(crate) const TREE_ARTIFACT: &[u8] = b"application/vnd.shirudo.upatch.tree.v1";
+pub(crate) const EMPTY_CONFIG_MEDIA: &[u8] = b"application/vnd.oci.empty.v1+json";
 const USERNAME_SIZE: usize = 256;
 const PASSWORD_SIZE: usize = 4096;
 const TOKEN_SIZE: usize = 4096;
@@ -35,8 +47,8 @@ const BASIC_HEADER_SIZE: usize = AUTH_VALUE_SIZE + "Authorization: ".len();
 /// family allocates and `bpm_buffer_free()` releases.
 #[repr(C)]
 pub struct BpmBuffer {
-    data: *mut u8,
-    len: usize,
+    pub(crate) data: *mut u8,
+    pub(crate) len: usize,
     cap: usize,
 }
 
@@ -78,7 +90,7 @@ const _: () = assert!(size_of::<OciClient>() == 13584);
 const _: () = assert!(size_of::<Descriptor>() == 4424);
 
 impl BpmBuffer {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         BpmBuffer {
             data: core::ptr::null_mut(),
             len: 0,
@@ -110,16 +122,21 @@ impl Descriptor {
     }
 }
 
-/// The C string a buffer holds: its bytes up to the first NUL.
-fn cstr(buf: &[u8]) -> &[u8] {
-    let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-
-    &buf[..n]
+pub(crate) fn descriptor(media: &[u8], digest: &[u8], size: i64) -> Option<Descriptor> {
+    if media.len() >= MAX_MEDIA || digest.len() >= MAX_DIGEST {
+        return None;
+    }
+    let mut d = Descriptor::new();
+    copy_string(&mut d.media, media);
+    copy_string(&mut d.digest, digest);
+    d.size = size;
+    Some(d)
 }
 
-/// The byte at `i` of a C string, and the NUL past its end.
-fn at(s: &[u8], i: usize) -> u8 {
-    s.get(i).copied().unwrap_or(0)
+impl Descriptor {
+    pub(crate) fn media_bytes(&self) -> &[u8] {
+        cstr(&self.media)
+    }
 }
 
 /// isspace() in the C locale, vertical tab included.
@@ -127,20 +144,8 @@ fn is_space(c: u8) -> bool {
     matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
 }
 
-/// strstr(): where `needle` first starts in `s`.
-fn find(s: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() {
-        return Some(0);
-    }
-    s.windows(needle.len()).position(|w| w == needle)
-}
-
-fn contains(s: &[u8], needle: &[u8]) -> bool {
-    find(s, needle).is_some()
-}
-
 /// bpm_copy_string(): `src` cut to the room of `dst`, terminated.
-fn copy_string(dst: &mut [u8], src: &[u8]) {
+pub(crate) fn copy_string(dst: &mut [u8], src: &[u8]) {
     let Some(room) = dst.len().checked_sub(1) else {
         return;
     };
@@ -148,42 +153,6 @@ fn copy_string(dst: &mut [u8], src: &[u8]) {
 
     dst[..n].copy_from_slice(&src[..n]);
     dst[n] = 0;
-}
-
-/// strscpy(): -E2BIG, with `src` cut and terminated, when it does not fit.
-fn strscpy(dst: &mut [u8], src: &[u8]) -> Result<usize, i32> {
-    if dst.is_empty() {
-        return Err(-E2BIG);
-    }
-    if src.len() >= dst.len() {
-        copy_string(dst, src);
-        return Err(-E2BIG);
-    }
-    copy_string(dst, src);
-    Ok(src.len())
-}
-
-/// strsprintf() of a format of `%s` conversions alone: the parts one
-/// after another, or -E2BIG and an empty buffer when they do not fit.
-fn strsprintf(dst: &mut [u8], parts: &[&[u8]]) -> Result<usize, i32> {
-    let total: usize = parts.iter().map(|p| p.len()).sum();
-    let Some(room) = dst.len().checked_sub(1) else {
-        return Err(-E2BIG);
-    };
-    let mut pos = 0;
-
-    for part in parts {
-        let n = part.len().min(room - pos);
-
-        dst[pos..pos + n].copy_from_slice(&part[..n]);
-        pos += n;
-    }
-    dst[pos] = 0;
-    if total > room {
-        dst[0] = 0;
-        return Err(-E2BIG);
-    }
-    Ok(total)
 }
 
 /// A name or version: alphanumerics, `-`, `_`, `.` and with `plus` `+`,
@@ -197,15 +166,15 @@ fn component_ok(s: &[u8], plus: bool) -> bool {
     })
 }
 
-fn name_ok(s: &[u8]) -> bool {
+pub(crate) fn name_ok(s: &[u8]) -> bool {
     component_ok(s, false)
 }
 
-fn version_ok(s: &[u8]) -> bool {
+pub(crate) fn version_ok(s: &[u8]) -> bool {
     component_ok(s, true)
 }
 
-fn package_name_ok(s: &[u8]) -> bool {
+pub(crate) fn package_name_ok(s: &[u8]) -> bool {
     if !s.first().is_some_and(u8::is_ascii_alphanumeric) {
         return false;
     }

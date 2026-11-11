@@ -50,7 +50,7 @@ unsafe extern "C" fn on_descriptor(ud: *mut c_void) -> c_int {
 
 /// The layers of an image manifest of schema 2, at most `max_layers` of
 /// them into `layers`, and the package name its annotations give.
-pub(super) fn parse_manifest(
+pub(crate) fn parse_manifest(
     body: &[u8],
     layers: *mut Descriptor,
     max_layers: c_int,
@@ -116,7 +116,7 @@ pub(super) fn parse_manifest(
     0
 }
 
-pub(super) fn emit_descriptor(
+pub(crate) fn emit_descriptor(
     e: &mut JsonEmit,
     key: Option<&[u8]>,
     d: &Descriptor,
