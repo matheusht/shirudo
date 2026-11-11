@@ -595,7 +595,10 @@ it.
   that took its object takes `$(RUST_LIB)` after the objects and
   `$(RUST_LDLIBS)` after the libraries, `$(RUST_TEST_LDLIBS)` in a
   helper, unit or fuzz link, which lets the link drop the Rust it does
-  not reach and the C that Rust calls. A test or fuzz target that
+  not reach and the C that Rust calls. A helper that links few libraries
+  also names one the archive calls that it would find only behind
+  another, zlib behind libcrypto: ld refuses such a symbol before
+  `--gc-sections` drops the call. A test or fuzz target that
   included the C file to reach a static function calls an export of the
   port instead, which the header declares as one for it.
 - `rust/src/ffi.rs` turns what C hands over into Rust views: `c_str()`

@@ -7,3 +7,4 @@ mod bpm_oci;
 mod bpm_package;
 mod json;
 mod similar;
+mod tpm_wire;

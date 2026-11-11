@@ -403,7 +403,7 @@ Project layout
        ``tree append``, ``tree show`` and ``config update``.
    * - :src:`tools/quote-check/`
      - ``shirudo-quote-check``, a program of its own that checks
-       keepalive quotes with the TPM parsers of :src:`util/tpm_wire.c`.
+       keepalive quotes with the TPM parsers of :src:`rust/src/util/tpm_wire/`.
        No other binary links it.
    * - :src:`tools/gen-image/`
      - ``shirudo-gen-image``, ``shirudo-gen-runtime`` and

@@ -3,7 +3,8 @@
  * Copyright (c) 2026 Authors of shirudo
  *
  * TPM 2.0 wire-format helpers that need no TPM: policy digests, NV and
- * object names, and the attestation structures a verifier parses.
+ * object names, and the attestation structures a verifier parses, which
+ * rust/src/util/tpm_wire/ implements.
  */
 
 #ifndef SHIRUDO_TPM_WIRE_H

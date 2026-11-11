@@ -20,5 +20,6 @@ pub const ENAMETOOLONG: c_int = 36;
 pub const EBADMSG: c_int = 74;
 pub const EOVERFLOW: c_int = 75;
 pub const EILSEQ: c_int = 84;
+pub const EPROTONOSUPPORT: c_int = 93;
 pub const EHOSTUNREACH: c_int = 113;
 pub const EKEYREJECTED: c_int = 129;

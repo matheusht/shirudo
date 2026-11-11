@@ -41,13 +41,7 @@ bpm-tree-sync-pending	--object-bits 10 --unwind 8 --unwindset memcmp.0:33,memneq
 bpm-tree-sync-walk	--object-bits 10 --unwind 8 --unwindset memcmp.0:33,memneq_explicit.0:33,hex_encode.0:33,hex_decode.0:33,model_hash.0:33,model_history.0:33,want_outcome.0:33,want_outcome.1:33,same_history.0:33,any_node.0:33,run.0:33,same_digest.0:33,history_ok.0:33,want_write.0:33,want_write.1:33,strcmp.0:66,strlen.0:66,run.1:3,run.2:3,tree_walk_back.0:3,tree_walk_forward.0:2 --max-field-sensitivity-array-size 257 --slice-formula LEN=1
 bpm-tree-recovery-model	--object-bits 10 --unwind 8 --unwindset memcmp.0:33,memneq_explicit.0:33,hex_encode.0:33,hex_decode.0:33,model_hash.0:33,model_history.0:33,want_outcome.0:33,want_outcome.1:33,same_history.0:33,any_node.0:33,same_digest.0:33,history_ok.0:33,want_write.0:33,want_write.1:33,strcmp.0:66,strlen.0:66,recovery_start.0:33,recovery_state_matches.0:33 --max-field-sensitivity-array-size 257 --slice-formula LEN=0-2
 bpm-tree-signers	--unwind 8
-tpm-reader		--unwind 1
-tpm-signature		--unwind 1 --unwindset bytes_at.0:33
-tpm-attest		--unwind 1 --unwindset memcpy.0:35,bytes_at.0:35
 tpm-signer		--unwind 35
-tpm-public		--slice-formula --unwind 1 LEN=0-1
-tpm-digest		--unwind 2 --object-bits 12
-tpm-kdf			--unwind 3 --unwindset strlen.0:68 --object-bits 12 -DLABEL_MAX=66 -DOUT_MAX=64
 attest-fields		--unwind 18 LEN=0-16
 attest-replay-model	--slice-formula --unwind 20 --unwindset memneq_explicit.0:33,strlen.0:70 LEN=1-3
 attest-pcr		--unwind 1 --unwindset harness.0:65,harness.1:33,harness.2:33,hex_decode.0:33,strlen.0:66 --no-array-field-sensitivity

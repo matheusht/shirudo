@@ -28,6 +28,21 @@ impl Cert {
     }
 }
 
+/// `struct sha256_ctx`: a digest under way, which `sha256_final()` or
+/// `sha256_free()` releases.
+#[repr(C)]
+pub struct Sha256Ctx {
+    imp: *mut c_void,
+}
+
+impl Sha256Ctx {
+    pub const fn new() -> Self {
+        Sha256Ctx {
+            imp: core::ptr::null_mut(),
+        }
+    }
+}
+
 /// `struct tls_ca`: the CA file a client trusts, and what the TLS policy
 /// made of it.
 #[repr(C)]
@@ -37,7 +52,20 @@ pub struct TlsCa {
 }
 
 unsafe extern "C" {
+    pub fn sha256_init(ctx: *mut Sha256Ctx) -> c_int;
+    pub fn sha256_update(ctx: *mut Sha256Ctx, data: *const c_void, len: usize) -> c_int;
+    pub fn sha256_final(ctx: *mut Sha256Ctx, out: *mut u8) -> c_int;
+    pub fn sha256_free(ctx: *mut Sha256Ctx);
     pub fn sha256_buffer(data: *const c_void, len: usize, out: *mut u8) -> c_int;
+    pub fn hmac_sha256(
+        key: *const u8,
+        key_len: usize,
+        data: *const c_void,
+        len: usize,
+        out: *mut u8,
+    ) -> c_int;
+    /// AES-128 in CFB mode with a zero IV and no padding.
+    pub fn aes128_cfb_encrypt(key: *const u8, inp: *const u8, len: usize, out: *mut u8) -> c_int;
     pub fn cert_read_file(path: *const c_char, cert: *mut Cert) -> c_int;
     pub fn cert_read_fd(fd: c_int, cert: *mut Cert) -> c_int;
     pub fn cert_free(cert: *mut Cert);

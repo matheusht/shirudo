@@ -1146,7 +1146,7 @@ tree operations run without it.
    ``t6122``, ``t6128``, ``t6143``, ``t6144``, ``t6147``
 :Proofs: ``Shirudo.Chain``, ``Shirudo.Events``, ``Shirudo.Measured``,
    ``Shirudo.UpatchLoad``, ``chain-events``, ``measured-fold-model``,
-   ``eventlog-records``, ``tpm-digest``
+   ``eventlog-records``
 :Residual: R4, R12, R20, U6, U9
 
 T6 Boot window
@@ -1350,8 +1350,7 @@ document can carry a software key's signatures (U1).
    failed check named
 :Counters: none
 :Tests: ``t4003``, ``t4004``, ``t4102``
-:Proofs: ``tpm-reader``, ``tpm-attest``, ``tpm-signature``,
-   ``tpm-public``, ``attest-pcr``, ``attest-fields``,
+:Proofs: ``attest-pcr``, ``attest-fields``,
    ``attest-name-digest``, ``config-evidence-parse``,
    ``config-evidence-verify``, ``Shirudo.Chain``, ``Shirudo.Events``
 :Residual: R10, R11, U1, U9
@@ -1552,7 +1551,6 @@ driver; sessions do not prevent denial of service by dropping requests.
 :Counters: ``TpmExtend`` for a refused extension, ``TpmWrite`` for any
    refused command; none for a substituted device
 :Tests: ``t4005``, ``t4103``, ``t6125``
-:Proofs: ``tpm-public``, ``tpm-kdf``
 :Residual: trusted bootstrap (A1, A6, A8); denial of service
 
 T15 Installing an unsigned Java agent

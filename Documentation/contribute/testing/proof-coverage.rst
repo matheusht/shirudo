@@ -764,28 +764,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
      - A delay is at most 30 seconds, the value itself when shorter; a
        header line read only within itself, its value copied only when
        it fits
-   * - ``tpm-reader``
-     - The TPM reader primitives of :src:`util/tpm_wire.c`: ``get8()``
-       to ``get64()``, ``get2b()``, ``get2b_fixed()``, ``get_name()``
-     - Every reader state over an input of any size
-     - Every read stays inside what is left, and what is left still ends
-       at the input's end; a sized field lies inside the input and its
-       bound; a name is at most 34 bytes
-   * - ``tpm-signature``
-     - ``tpm_ecdsa_signature_parse()``
-     - Every input
-     - Accepts exactly ECDSA over SHA-256 with 32-byte r and s, in 72
-       bytes, and returns those bytes
-   * - ``tpm-attest``
-     - ``tpm_attest_parse()``
-     - Every input; takes about 27 minutes
-     - Starts with ``TPM_GENERATED``; names fit 34 bytes; extra data of
-       at most 64 bytes inside the input; a quote spans the input with a
-       24-bit PCR mask; an NV certification ends with its data, at most
-       2048 bytes; every field the bytes at its place: the type, the
-       signer's and the index's names, the clock, the counts, the
-       firmware, the PCRs a quote selects, the digest it signs and the
-       offset certified
    * - ``tpm-signer``
      - ``tpm_attest_signer()``, ``tpm_attest_verify()``
      - Every signer of up to 34 bytes and key name; attestations of up
@@ -796,24 +774,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
        a signature passes only on the digest of the whole attestation,
        an unparseable one is ``-EBADMSG`` and checks nothing, a rejection
        ``-EKEYREJECTED``
-   * - ``tpm-public``
-     - ``tpm_public_parse()``, ``tpm_ecc_public_parse()``
-     - Every input
-     - Accepts only the key shapes shirudo uses, P-256 or RSA-2048 with a
-       256-byte modulus, each spanning exactly the input
-   * - ``tpm-digest``
-     - The policy, name and cpHash digests of :src:`util/tpm_wire.c`,
-       the register's policy, ``tpm_writer_auth_hash()``
-     - Names of any length, every PCR mask, up to 24 PCR values, SHA-256
-       as any result
-     - Each reads only whole inputs and writes only its output; an object
-       name has a public area of 4 bytes or more; a writer's
-       authorization takes a nonce of 1 to 64 bytes
-   * - ``tpm-kdf``
-     - ``tpm_kdfa()``, ``tpm_kdfe()``, ``tpm_credential_protect()``
-     - Labels up to 66 bytes, outputs up to 64, any context
-     - Reads and writes only what it is given; an oversized context or
-       party is refused
    * - ``attest-fields``
      - ``record_word()``
      - Up to 16 characters
@@ -1510,7 +1470,8 @@ Not covered yet
 The fuzz targets in :doc:`test-coverage` cover these parsers; no proof
 does: the JSON reader and writer of :src:`rust/src/util/json/`, the
 OCI client of :src:`rust/src/util/bpm_oci/` and the package reader of
-:src:`rust/src/util/bpm_package/`, whose CBMC proofs went
+:src:`rust/src/util/bpm_package/` and the TPM wire module of
+:src:`rust/src/util/tpm_wire/`, whose CBMC proofs went
 with the C they proved when those modules moved to Rust; how ``json_parse()`` dispatches objects, arrays and maps to their
 schemas, and the members and elements of a JSON document longer than
 two bytes, the OTLP headers a configuration adds
@@ -1579,7 +1540,7 @@ Of the other files the proofs read in part, these functions have no
 proof: ``dns_name_valid()`` of :src:`util/string.c` at its limits of a
 63-byte label and a 253-byte name, as names that long take CBMC past
 8 GB; ``tpm_public_marshal()`` and ``tpm_writer_public()`` of
-:src:`util/tpm_wire.c`, the first of which the ``tpm-wire`` fuzz target
+:src:`rust/src/util/tpm_wire/`, the first of which the ``tpm-wire`` fuzz target
 round-trips; ``upatch_rodata_symbol_range()`` of
 :src:`util/upatch_rodata.c`, the range of ``.rodata`` the builder
 rewrites; ``chain_init_event()`` of :src:`util/chain.c` on a set that is
