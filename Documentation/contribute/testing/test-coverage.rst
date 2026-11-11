@@ -1485,9 +1485,11 @@ Platforms
 Parsers and units
 ~~~~~~~~~~~~~~~~~
 
-- The dm-verity superblock check in :src:`util/config_image.c` has no
-  fuzz target. ``t5001`` covers truncation and unsupported fields.
-- 37 of the 76 modules in :src:`util/` have no unit suite of their own.
+- The dm-verity superblock check in
+  :src:`rust/src/util/config_image.rs` has no fuzz target. ``t5001``
+  covers truncation and unsupported fields.
+- Some of the remaining C modules in :src:`util/` have no unit suite
+  of their own.
 
 Related
 -------
