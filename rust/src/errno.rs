@@ -8,6 +8,7 @@ use core::ffi::c_int;
 
 pub const EPERM: c_int = 1;
 pub const ENOENT: c_int = 2;
+pub const EINTR: c_int = 4;
 pub const EIO: c_int = 5;
 pub const E2BIG: c_int = 7;
 pub const ENOMEM: c_int = 12;

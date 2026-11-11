@@ -1,5 +1,10 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
-/* Copyright (c) 2026 Authors of shirudo */
+/*
+ * Copyright (c) 2026 Authors of shirudo
+ *
+ * The config image and its dm-verity hash tree, which
+ * rust/src/util/config_image.rs implements.
+ */
 
 #ifndef SHIRUDO_CONFIG_IMAGE_H
 #define SHIRUDO_CONFIG_IMAGE_H

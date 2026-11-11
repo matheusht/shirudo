@@ -7,6 +7,7 @@ mod bpm_oci;
 mod bpm_package;
 mod bpm_source_config;
 mod config;
+mod config_image;
 mod config_measure;
 mod eventlog;
 mod image_bootstrap;

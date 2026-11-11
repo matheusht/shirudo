@@ -14,7 +14,13 @@ pub const O_RDONLY: c_int = 0;
 pub const O_WRONLY: c_int = 0o1;
 pub const O_CREAT: c_int = 0o100;
 pub const O_EXCL: c_int = 0o200;
+pub const O_NONBLOCK: c_int = 0o4000;
 pub const O_CLOEXEC: c_int = 0o2000000;
+#[cfg(target_arch = "x86_64")]
+pub const O_NOFOLLOW: c_int = 0o400000;
+#[cfg(target_arch = "aarch64")]
+pub const O_NOFOLLOW: c_int = 0o100000;
+pub const AT_EMPTY_PATH: c_int = 0x1000;
 /// setvbuf()'s full buffering, and the size of a stdio buffer.
 pub const IOFBF: c_int = 0;
 pub const BUFSIZ: usize = 8192;
@@ -83,6 +89,7 @@ unsafe extern "C" {
     pub fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
     pub fn open(path: *const c_char, flags: c_int, ...) -> c_int;
     pub fn read(fd: c_int, buf: *mut c_void, count: usize) -> isize;
+    pub fn pread(fd: c_int, buf: *mut c_void, count: usize, offset: i64) -> isize;
     pub fn unlink(path: *const c_char) -> c_int;
     pub fn access(path: *const c_char, mode: c_int) -> c_int;
     pub fn time(t: *mut i64) -> i64;

@@ -1444,7 +1444,7 @@ The configured certificate set determines which keys can sign a config (A7).
    refusals move none
 :Tests: ``t5101``, ``t5102``, ``t5103``, ``t5104``, ``t6101``,
    ``t6113``, ``t6127``, ``t6130``, ``t6131``, ``t6132``
-:Proofs: ``config-image``, ``dm-names``
+:Proofs: ``dm-names``
 :Residual: R5, R14
 
 T12 Interrupted image activation

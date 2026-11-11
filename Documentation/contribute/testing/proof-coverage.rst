@@ -805,12 +805,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
      - The set holds a name with a payload exactly as the Lean model
        ``Shirudo.UpatchLoad`` folds the records, and never with the empty
        payload of a missing xattr
-   * - ``config-image``
-     - ``config_image_read_header()``
-     - Hash files of 0, 511, 512 and 4096 bytes
-     - Accepts exactly the version 1 SHA-256 layout with 4096-byte blocks,
-       a 32-byte salt and 1 to 2^28 data blocks; the hash tree's size
-       by dm-verity's own formula; nothing changed on refusal
    * - ``config-update-follows``
      - ``event_follows()`` and ``same_event()`` of :src:`util/config_update.c`
      - Every record ``record_decode()`` accepts, and the zeroed one before
@@ -1413,7 +1407,8 @@ OCI client of :src:`rust/src/util/bpm_oci/` and the package reader of
 :src:`rust/src/util/kernel_release.rs` and the registry source
 and tree line parser in :src:`rust/src/util/bpm_source_config.rs`, plus the bootstrap file
 and config root event in :src:`rust/src/util/image_bootstrap.rs` and
-:src:`rust/src/util/config_measure.rs`, whose CBMC proofs went with the C
+:src:`rust/src/util/config_measure.rs`, and config image parts in
+:src:`rust/src/util/config_image.rs`, whose CBMC proofs went with the C
 they proved when those modules moved to Rust; how ``json_parse()`` dispatches objects, arrays and maps to their
 schemas, and the members and elements of a JSON document longer than
 two bytes, the OTLP headers a configuration adds
