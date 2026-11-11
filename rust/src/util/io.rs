@@ -107,7 +107,7 @@ fn last_line_end(fd: c_int, size: i64, end: &mut i64) -> c_int {
 }
 
 /// The status of the open `fd`, as fstat() gave it: 0 or -errno.
-fn stat_fd(fd: c_int, st: &mut Statx) -> c_int {
+pub(crate) fn stat_fd(fd: c_int, st: &mut Statx) -> c_int {
     // SAFETY: the caller's fd, an empty path, and room for its status.
     if unsafe { statx(fd, c"".as_ptr(), AT_EMPTY_PATH, STATX_BASIC_STATS, st) } != 0 {
         return -errno();

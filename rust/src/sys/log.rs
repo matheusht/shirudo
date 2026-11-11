@@ -11,4 +11,5 @@ unsafe extern "C" {
     pub fn pr_err(fmt: *const c_char, ...);
     pub fn pr_warn(fmt: *const c_char, ...);
     pub fn pr_info(fmt: *const c_char, ...);
+    pub fn pr_audit(fmt: *const c_char, ...);
 }

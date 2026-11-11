@@ -336,6 +336,7 @@ unsafe extern "C" {
     pub fn pread(fd: c_int, buf: *mut c_void, count: usize, offset: i64) -> isize;
     pub fn unlink(path: *const c_char) -> c_int;
     pub fn link(from: *const c_char, to: *const c_char) -> c_int;
+    pub fn rename(from: *const c_char, to: *const c_char) -> c_int;
     pub fn rmdir(path: *const c_char) -> c_int;
     pub fn mkdtemp(template: *mut c_char) -> *mut c_char;
     pub fn ioctl(fd: c_int, request: core::ffi::c_ulong, ...) -> c_int;

@@ -17,6 +17,7 @@ pub mod loader;
 pub mod log;
 pub mod malloc;
 pub mod openssl;
+pub mod paths;
 pub mod seal;
 pub mod ssl;
 pub mod string;

@@ -1205,7 +1205,7 @@ pub(crate) unsafe fn cert_verify_chain(
 /// # Safety
 ///
 /// `where_` is a C string.
-unsafe fn openssl_complain(where_: *const c_char) {
+pub(crate) unsafe fn openssl_complain(where_: *const c_char) {
     let mut buf = [0u8; 256];
 
     // SAFETY: the room of buf, and a format of two C strings with the

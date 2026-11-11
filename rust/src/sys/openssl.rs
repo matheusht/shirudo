@@ -13,6 +13,42 @@ pub enum Bio {}
 
 /// An `X509` certificate.
 pub enum X509 {}
+/// An `X509_EXTENSION`.
+pub enum X509Extension {}
+/// An `ASN1_INTEGER`.
+pub enum Asn1Integer {}
+
+/// `X509V3_CTX`, `struct v3_ext_ctx` of OpenSSL 3's x509v3.h, which
+/// callers keep on their stacks.
+#[repr(C)]
+pub struct X509v3Ctx {
+    pub flags: c_int,
+    pub issuer_cert: *mut X509,
+    pub subject_cert: *mut X509,
+    pub subject_req: *mut c_void,
+    pub crl: *mut c_void,
+    pub db_meth: *mut c_void,
+    pub db: *mut c_void,
+    pub issuer_pkey: *mut EvpPkey,
+}
+
+const _: () = assert!(size_of::<X509v3Ctx>() == 64);
+const _: () = assert!(core::mem::offset_of!(X509v3Ctx, db) == 48);
+
+impl X509v3Ctx {
+    pub const fn zeroed() -> Self {
+        X509v3Ctx {
+            flags: 0,
+            issuer_cert: core::ptr::null_mut(),
+            subject_cert: core::ptr::null_mut(),
+            subject_req: core::ptr::null_mut(),
+            crl: core::ptr::null_mut(),
+            db_meth: core::ptr::null_mut(),
+            db: core::ptr::null_mut(),
+            issuer_pkey: core::ptr::null_mut(),
+        }
+    }
+}
 
 /// The `pem_password_cb` of a PEM read.
 pub type PemPasswordCb =
@@ -82,6 +118,13 @@ pub struct OsslParam {
 const _: () = assert!(size_of::<OsslParam>() == 40);
 
 pub const BIO_CLOSE: c_int = 1;
+pub const BIO_NOCLOSE: c_int = 0;
+pub const MBSTRING_UTF8: c_int = 0x1000;
+pub const NID_SUBJECT_KEY_IDENTIFIER: c_int = 82;
+pub const NID_KEY_USAGE: c_int = 83;
+pub const NID_BASIC_CONSTRAINTS: c_int = 87;
+pub const NID_AUTHORITY_KEY_IDENTIFIER: c_int = 90;
+pub const OPENSSL_VERSION: c_int = 0;
 pub const BIO_CTRL_INFO: c_int = 3;
 /// `EVP_PKEY_PUBLIC_KEY`: the parameters and the public key.
 pub const EVP_PKEY_PUBLIC_KEY: c_int = 0x86;
@@ -333,4 +376,56 @@ unsafe extern "C" {
     pub fn X509_STORE_CTX_get_error(ctx: *const X509StoreCtx) -> c_int;
     pub fn X509_verify_cert(ctx: *mut X509StoreCtx) -> c_int;
     pub fn X509_verify_cert_error_string(n: c_long) -> *const c_char;
+    pub fn OPENSSL_version_major() -> c_uint;
+    pub fn OPENSSL_version_minor() -> c_uint;
+    pub fn OpenSSL_version(ty: c_int) -> *const c_char;
+    pub fn X509_new() -> *mut X509;
+    pub fn X509_set_version(x: *mut X509, version: c_long) -> c_int;
+    pub fn X509_get_serialNumber(x: *mut X509) -> *mut Asn1Integer;
+    pub fn ASN1_INTEGER_set(a: *mut Asn1Integer, v: c_long) -> c_int;
+    pub fn X509_getm_notBefore(x: *const X509) -> *mut Asn1Time;
+    pub fn X509_getm_notAfter(x: *const X509) -> *mut Asn1Time;
+    pub fn X509_gmtime_adj(s: *mut Asn1Time, adj: c_long) -> *mut Asn1Time;
+    pub fn ASN1_TIME_set_string_X509(s: *mut Asn1Time, text: *const c_char) -> c_int;
+    pub fn X509_set_pubkey(x: *mut X509, pkey: *mut EvpPkey) -> c_int;
+    pub fn X509_NAME_new() -> *mut X509Name;
+    pub fn X509_NAME_free(name: *mut X509Name);
+    pub fn X509_NAME_add_entry_by_txt(
+        name: *mut X509Name,
+        field: *const c_char,
+        ty: c_int,
+        bytes: *const u8,
+        len: c_int,
+        loc: c_int,
+        set: c_int,
+    ) -> c_int;
+    pub fn X509_set_subject_name(x: *mut X509, name: *const X509Name) -> c_int;
+    pub fn X509_set_issuer_name(x: *mut X509, name: *const X509Name) -> c_int;
+    pub fn X509V3_set_ctx(
+        ctx: *mut X509v3Ctx,
+        issuer: *mut X509,
+        subject: *mut X509,
+        req: *mut c_void,
+        crl: *mut c_void,
+        flags: c_int,
+    );
+    pub fn X509V3_EXT_conf_nid(
+        conf: *mut c_void,
+        ctx: *mut X509v3Ctx,
+        nid: c_int,
+        value: *const c_char,
+    ) -> *mut X509Extension;
+    pub fn X509_add_ext(x: *mut X509, ex: *mut X509Extension, loc: c_int) -> c_int;
+    pub fn X509_EXTENSION_free(ex: *mut X509Extension);
+    pub fn X509_sign(x: *mut X509, pkey: *mut EvpPkey, md: *const EvpMd) -> c_int;
+    pub fn PEM_write_bio_PrivateKey(
+        bio: *mut Bio,
+        pkey: *const EvpPkey,
+        enc: *const EvpCipher,
+        kstr: *const u8,
+        klen: c_int,
+        cb: Option<PemPasswordCb>,
+        u: *mut c_void,
+    ) -> c_int;
+    pub fn i2d_X509_bio(bio: *mut Bio, x: *const X509) -> c_int;
 }

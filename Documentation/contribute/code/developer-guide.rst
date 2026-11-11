@@ -379,8 +379,8 @@ Project layout
      - The command dispatch table.
    * - ``builtin-*.c``, :src:`builtin.h`
      - One file per top-level command: ``attest``, ``bpm``,
-       ``genkey``, ``image``, ``init``, ``keys``, ``status`` and
-       ``upatch``, and ``build``, ``config`` and ``version`` in
+       ``image``, ``init``, ``keys``, ``status`` and ``upatch``, and
+       ``build``, ``config``, ``genkey`` and ``version`` in
        :src:`rust/src/builtin/`.
    * - :src:`util/`
      - The userspace library both binaries link. :src:`util/sign.c` is

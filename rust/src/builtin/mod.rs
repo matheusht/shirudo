@@ -11,6 +11,7 @@ use crate::ffi;
 
 mod build;
 mod config;
+mod genkey;
 mod version;
 
 /// The `argc` words of a command line at `argv`.
