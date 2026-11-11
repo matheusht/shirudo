@@ -15,7 +15,7 @@ use crate::sys::libc::{
 };
 use crate::text::strsprintf;
 
-const BLOCK_SIZE: u64 = 4096;
+pub(crate) const BLOCK_SIZE: u64 = 4096;
 const SALT_SIZE: usize = 32;
 pub(crate) const SIG_MAX: u64 = 16384;
 pub(crate) const MAX_BYTES: u64 = 1 << 40;
@@ -26,10 +26,10 @@ const SUPERBLOCK_SIZE: usize = 512;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ConfigImage {
-    data_blocks: u64,
-    hash_blocks: u64,
-    signed_root: bool,
-    salt: [u8; SALT_SIZE],
+    pub(crate) data_blocks: u64,
+    pub(crate) hash_blocks: u64,
+    pub(crate) signed_root: bool,
+    pub(crate) salt: [u8; SALT_SIZE],
     pub(crate) root_hash: [u8; 32],
 }
 
@@ -38,9 +38,9 @@ pub struct ConfigImage {
 #[repr(C)]
 pub struct ConfigImageOpen {
     pub(crate) image: ConfigImage,
-    data_fd: c_int,
-    hash_fd: c_int,
-    signature_fd: c_int,
+    pub(crate) data_fd: c_int,
+    pub(crate) hash_fd: c_int,
+    pub(crate) signature_fd: c_int,
 }
 
 const _: () = assert!(size_of::<ConfigImage>() == 88);
@@ -192,7 +192,7 @@ fn read_header(hash_fd: c_int) -> Result<ConfigImage, c_int> {
 }
 
 /// Whether the data and hash files are the sizes `image` gives them.
-fn check_files(data_fd: c_int, hash_fd: c_int, image: &ConfigImage) -> c_int {
+pub(crate) fn check_files(data_fd: c_int, hash_fd: c_int, image: &ConfigImage) -> c_int {
     let blocks = match hash_blocks(image.data_blocks) {
         Ok(blocks) => blocks,
         Err(e) => return e,

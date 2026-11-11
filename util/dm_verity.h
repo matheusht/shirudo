@@ -1,5 +1,10 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
-/* Copyright (c) 2026 Authors of shirudo */
+/*
+ * Copyright (c) 2026 Authors of shirudo
+ *
+ * dm-verity mappings of config images, which rust/src/util/dm_verity.rs
+ * implements.
+ */
 
 #ifndef SHIRUDO_DM_VERITY_H
 #define SHIRUDO_DM_VERITY_H

@@ -36,6 +36,10 @@ pub const SYS_ADD_KEY: core::ffi::c_long = 217;
 pub const SYS_KEYCTL: core::ffi::c_long = 219;
 #[cfg(target_arch = "x86_64")]
 pub const O_DIRECTORY: c_int = 0o200000;
+#[cfg(target_arch = "x86_64")]
+pub const O_DIRECT: c_int = 0o40000;
+#[cfg(target_arch = "aarch64")]
+pub const O_DIRECT: c_int = 0o200000;
 #[cfg(target_arch = "aarch64")]
 pub const O_DIRECTORY: c_int = 0o40000;
 pub const AT_EMPTY_PATH: c_int = 0x1000;
@@ -54,6 +58,8 @@ pub const S_ISVTX: u16 = 0o1000;
 pub const S_IFMT: u16 = 0o170000;
 pub const S_IFREG: u16 = 0o100000;
 pub const S_IFDIR: u16 = 0o040000;
+pub const S_IFCHR: u16 = 0o020000;
+pub const S_IFBLK: u16 = 0o060000;
 pub const PR_SET_DUMPABLE: c_int = 4;
 pub const PR_SET_NO_NEW_PRIVS: c_int = 38;
 /// Yama's PR_SET_PTRACER, "Yama" in ASCII.
@@ -222,8 +228,8 @@ pub struct Statx {
     blocks: u64,
     pub attributes_mask: u64,
     times: [u64; 8],
-    rdev_major: u32,
-    rdev_minor: u32,
+    pub rdev_major: u32,
+    pub rdev_minor: u32,
     pub dev_major: u32,
     pub dev_minor: u32,
     rest: [u64; 14],
@@ -331,6 +337,16 @@ unsafe extern "C" {
     pub fn link(from: *const c_char, to: *const c_char) -> c_int;
     pub fn rmdir(path: *const c_char) -> c_int;
     pub fn mkdtemp(template: *mut c_char) -> *mut c_char;
+    pub fn ioctl(fd: c_int, request: core::ffi::c_ulong, ...) -> c_int;
+    pub fn mknod(path: *const c_char, mode: u32, dev: u64) -> c_int;
+    pub fn mount(
+        source: *const c_char,
+        target: *const c_char,
+        fstype: *const c_char,
+        flags: core::ffi::c_ulong,
+        data: *const c_void,
+    ) -> c_int;
+    pub fn umount2(target: *const c_char, flags: c_int) -> c_int;
     pub fn access(path: *const c_char, mode: c_int) -> c_int;
     pub fn geteuid() -> u32;
     pub fn faccessat(dirfd: c_int, path: *const c_char, mode: c_int, flags: c_int) -> c_int;

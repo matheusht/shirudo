@@ -442,6 +442,8 @@ unsafe fn add_cert(spec: i32, cert: *const u8, cert_len: usize) -> i32 {
     if ret < 0 { -errno() } else { ret as i32 }
 }
 
+pub(crate) use capi::keyring_unlink_key;
+
 mod capi {
     use core::ffi::{c_char, c_int, c_long, c_void};
 

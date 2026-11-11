@@ -796,12 +796,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
        when they are on its PCR from its initial value, one boot event
        then updates in sequence, and end at the selection; a refusal
        returns nothing, with nothing left allocated
-   * - ``dm-names``
-     - ``dm_name_ok()``, ``dm_device()``
-     - Up to 7 bytes; names of 127 and 128 bytes, any 7 and then
-       letters
-     - A name exactly when 1 to 127 of ``[A-Za-z0-9._-]``, not ``.`` or
-       ``..``; a device as decimal major and minor
    * - ``log-escape``
      - ``escape()`` of :src:`util/log.c`
      - Messages of 0 to 5 bytes, every buffer size
@@ -1422,7 +1416,7 @@ the eventlog behind boot restore in :src:`rust/src/util/measured.rs`,
 ``record_event()`` hashes, as no fuzz target reaches them and a proof
 over one record of the two readers, ``json_parse()`` modelled, runs out
 of 8 GB; ``check_table()`` of
-:src:`util/dm_verity.c`, which takes or refuses the kernel's table of a
+:src:`rust/src/util/dm_verity.rs`, which takes or refuses the kernel's table of a
 config image's mapping, as CBMC 5.95 keeps the parameters of the
 4096-byte reply symbolic even where a harness writes them and runs out
 of 8 GB on a whole table, and no fuzz target reaches it either; the

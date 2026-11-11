@@ -17,9 +17,6 @@ use crate::sys::curl::{
     CURLOPT_REDIR_PROTOCOLS_STR, CURLOPT_URL, CURLOPT_WRITEDATA, CURLOPT_WRITEFUNCTION,
     WriteCallback, curl_easy_cleanup, curl_easy_init, curl_easy_perform, curl_easy_setopt,
 };
-use crate::sys::dm_verity::{
-    DmVerity, dm_verity_close, dm_verity_create, dm_verity_remove, dm_verity_verify,
-};
 use crate::sys::hex::hex_encode;
 use crate::sys::libc::{
     AT_EMPTY_PATH, O_CLOEXEC, O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_NONBLOCK, O_RDONLY,
@@ -33,6 +30,9 @@ use crate::util::config_image::{
     ConfigImageOpen, MAX_BYTES, SIG_MAX, config_image_close, config_image_open,
 };
 use crate::util::config_update::ConfigUpdateTarget;
+use crate::util::dm_verity::{
+    DmVerity, dm_verity_close, dm_verity_create, dm_verity_remove, dm_verity_verify,
+};
 use crate::util::io::write_complete;
 use crate::util::tls_openssl::tls_curl_policy;
 
@@ -280,14 +280,13 @@ unsafe fn verify_incoming(opened: &ConfigImageOpen, staging: *const c_char) -> c
     {
         return -ENAMETOOLONG;
     }
-    let image = ptr::from_ref(opened).cast::<c_void>();
     // SAFETY: the image, a C string, and the mapping to fill.
-    let ret = unsafe { dm_verity_create(image, name.as_ptr().cast(), &mut device) };
+    let ret = unsafe { dm_verity_create(opened, name.as_ptr().cast(), &mut device) };
     if ret != 0 {
         return ret;
     }
     // SAFETY: the mapping made, and the image.
-    let ret = unsafe { dm_verity_verify(&device, image) };
+    let ret = unsafe { dm_verity_verify(&device, opened) };
     // SAFETY: as above.
     let cleanup = unsafe { dm_verity_remove(&mut device, true) };
     if cleanup != 0 {

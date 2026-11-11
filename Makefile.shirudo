@@ -261,7 +261,6 @@ UTIL_SRCS := \
     util/image_runtime.c \
     util/image_guards.c \
     util/image_keys.c \
-    util/dm_verity.c \
     util/malloc.c \
     util/options.c \
     util/keepalive.c \
