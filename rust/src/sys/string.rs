@@ -10,4 +10,7 @@ unsafe extern "C" {
     /// 63 bytes each and 253 in all, not all of them decimal or 0x
     /// numbers, which an IPv4 parser would read as an address.
     pub fn dns_name_valid(name: *const c_char) -> bool;
+    /// The `len` bytes at `s` made safe to print on a terminal, their
+    /// length unchanged; with `lines`, tabs and line feeds kept.
+    pub fn text_sanitize(s: *mut c_char, len: usize, lines: bool);
 }

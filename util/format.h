@@ -2,7 +2,8 @@
 /*
  * Copyright (c) 2026 Authors of shirudo
  *
- * Human-readable formatters shared across status and keys renderers.
+ * Human-readable formatters shared across status and keys renderers,
+ * which rust/src/util/format.rs implements.
  */
 
 #ifndef SHIRUDO_UTIL_FORMAT_H

@@ -89,6 +89,20 @@ pub fn trim_blanks(buf: &mut [u8], start: usize, end: usize) -> (usize, usize) {
     (s, e)
 }
 
+/// The decimal digits of `v` in `buf`, as `%llu` prints them.
+pub fn decimal(mut v: u64, buf: &mut [u8; 20]) -> &[u8] {
+    let mut i = buf.len();
+
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            return &buf[i..];
+        }
+    }
+}
+
 /// digits(): how many of the bytes of `s`, from the first, are decimal
 /// digits.
 pub fn digits(s: &[u8]) -> usize {

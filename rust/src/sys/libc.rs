@@ -32,6 +32,26 @@ pub const S_IFREG: u16 = 0o100000;
 /// A stdio `FILE`.
 pub enum File {}
 
+/// glibc's `struct tm`.
+#[repr(C)]
+pub struct Tm {
+    fields: [c_int; 9],
+    gmtoff: core::ffi::c_long,
+    zone: *const c_char,
+}
+
+const _: () = assert!(size_of::<Tm>() == 56);
+
+impl Tm {
+    pub const fn zeroed() -> Self {
+        Tm {
+            fields: [0; 9],
+            gmtoff: 0,
+            zone: core::ptr::null(),
+        }
+    }
+}
+
 /// `struct statx`, which unlike `struct stat` has one layout on every
 /// architecture: the fields read here, and the rest of its 256 bytes.
 #[repr(C)]
@@ -100,6 +120,10 @@ unsafe extern "C" {
     pub fn ferror(f: *mut File) -> c_int;
     pub fn fclose(f: *mut File) -> c_int;
     pub fn fileno(f: *mut File) -> c_int;
+    pub fn fputs(s: *const c_char, f: *mut File) -> c_int;
+    pub fn snprintf(buf: *mut c_char, size: usize, fmt: *const c_char, ...) -> c_int;
+    pub fn gmtime_r(t: *const i64, tm: *mut Tm) -> *mut Tm;
+    pub fn strftime(out: *mut c_char, max: usize, fmt: *const c_char, tm: *const Tm) -> usize;
     pub fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64;
     fn __errno_location() -> *mut c_int;
 }

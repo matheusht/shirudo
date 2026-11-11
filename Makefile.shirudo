@@ -282,11 +282,9 @@ UTIL_SRCS := \
     util/sysinfo.c \
     util/help.c \
     util/options.c \
-    util/timefmt.c \
     util/conditions.c \
     util/keepalive.c \
     util/keepalive_quote.c \
-    util/format.c \
     util/seal.c \
     util/serializer.c \
     util/upatch_maps.c \
@@ -578,12 +576,12 @@ build/target/util/loader.o: $(BPF_OBJS)
 tools/shirudo-build/shirudo-build: $(BUILD_OBJS) $(SIGN_OBJ) \
                                    util/log.o util/loader.o \
                                    util/io.o util/malloc.o util/paths.o \
-                                   util/image_config.o util/upatch.o util/timefmt.o \
+                                   util/image_config.o util/upatch.o \
                                    util/elf_target.o util/hex.o util/keys.o \
                                    util/seal.o util/harden.o util/string.o \
                                    util/crypto_openssl.o util/tls_openssl.o \
                                    util/curl.o \
-                                   util/upatch_rodata.o util/format.o \
+                                   util/upatch_rodata.o \
                                    util/bpm_tree.o util/bpm_tree_overlap.o \
                                    util/chain_history.o util/options.o \
                                    util/help.o \
@@ -866,7 +864,7 @@ testing/helper/test-harden: testing/helper/test-harden.c util/harden.o util/log.
 # The register code pulls in the Rust eventlog, seal label writer and JSON codec.
 REGISTER_OBJS := util/config_attest.o util/config_update.o \
                  util/chain.o util/tpm.o \
-                 util/timefmt.o util/upatch.o \
+                 util/upatch.o \
                  util/hex.o util/crypto_openssl.o util/string.o \
                  util/io.o util/seal.o util/image_config.o \
                  util/log.o util/malloc.o \
@@ -1007,7 +1005,7 @@ testing/helper/test-otel-map: testing/helper/test-otel-map.c util/upatch_maps.o 
                         util/upatch_resolve.o \
                         util/upatch.o util/string.o util/log.o \
                         util/paths.o \
-                        util/io.o util/malloc.o $(LIBBPF_A) util/hex.o util/timefmt.o \
+                        util/io.o util/malloc.o $(LIBBPF_A) util/hex.o \
                         $(RUST_LIB)
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
@@ -1028,7 +1026,7 @@ testing/helper/test-upatch-serializer-pages: testing/helper/test-upatch-serializ
                                        util/string.o \
                                        util/image_config.o \
                                        util/malloc.o util/io.o util/paths.o \
-                                       util/log.o util/hex.o util/timefmt.o \
+                                       util/log.o util/hex.o \
                                        $(RUST_LIB)
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
@@ -1036,7 +1034,7 @@ testing/helper/test-upatch-serializer-pages: testing/helper/test-upatch-serializ
 testing/helper/test-upatch-rodata: testing/helper/test-upatch-rodata.c \
                                util/upatch.o util/seal.o \
                                util/string.o util/malloc.o util/io.o \
-                               util/log.o util/hex.o util/format.o $(RUST_LIB)
+                               util/log.o util/hex.o $(RUST_LIB)
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
@@ -1235,7 +1233,7 @@ FUZZ_LIBS := $(RUST_FUZZ_LIB) $(LIBCRYPTO_LIBS) $(LIBSSL_LIBS) \
 # it, so each target links the C those functions call.
 FUZZ_RUST_C := util/io.c util/seal.c util/image_config.c \
                util/crypto_openssl.c util/tls_openssl.c util/bpm_tree.c \
-               util/upatch.c util/timefmt.c
+               util/upatch.c
 FUZZ_BASE := util/string.c util/hex.c util/malloc.c testing/fuzz/log.c \
              $(FUZZ_RUST_C)
 FUZZ_CONFIG := util/image_config.c
@@ -1264,7 +1262,7 @@ $(FUZZ_OUT)/fuzz-upatch: testing/fuzz/fuzz-upatch.c $(FUZZ_BASE) \
 $(FUZZ_OUT)/fuzz-prog-metadata: testing/fuzz/fuzz-prog-metadata.c \
                                  $(FUZZ_BASE) util/upatch.c
 $(FUZZ_OUT)/fuzz-rodata: testing/fuzz/fuzz-rodata.c $(FUZZ_BASE) \
-                          util/upatch.c util/upatch_rodata.c util/format.c \
+                          util/upatch.c util/upatch_rodata.c \
                           util/io.c $(FUZZ_SEAL) $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-rodata: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-rodata: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS) $(ZLIB_LIBS)
@@ -1277,7 +1275,7 @@ $(FUZZ_OUT)/fuzz-tpm-wire: testing/fuzz/fuzz-tpm-wire.c $(FUZZ_BASE) \
                             $(FUZZ_SEAL)
 $(FUZZ_OUT)/fuzz-attest: testing/fuzz/fuzz-attest.c $(FUZZ_BASE) \
                           util/attest.c util/chain.c util/chain_history.c \
-                          util/nv_writer.c util/tpm.c util/timefmt.c \
+                          util/nv_writer.c util/tpm.c \
                           util/crypto_openssl.c util/io.c $(FUZZ_SEAL) \
                           util/config_attest.c util/config_update.c \
                           util/initrd.c util/identity.c \
@@ -1286,7 +1284,7 @@ $(FUZZ_OUT)/fuzz-attest: testing/fuzz/fuzz-attest.c $(FUZZ_BASE) \
 $(FUZZ_OUT)/fuzz-attest: FUZZ_CFLAGS += $(TSS2_CFLAGS) $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-attest: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) $(LIBELF_LIBS) $(ZLIB_LIBS)
 $(FUZZ_OUT)/fuzz-eventlog: testing/fuzz/fuzz-eventlog.c $(FUZZ_BASE) \
-                            util/timefmt.c util/upatch.c \
+                            util/upatch.c \
                             $(FUZZ_SEAL) util/io.c util/crypto_openssl.c \
                             util/identity.c testing/fuzz/chain.c $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-eventlog: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
@@ -1299,7 +1297,7 @@ $(FUZZ_OUT)/fuzz-elf: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS)
 $(FUZZ_OUT)/fuzz-serializer: testing/fuzz/fuzz-serializer.c $(FUZZ_BASE) \
                               util/upatch_maps.c util/upatch_pins.c \
                               util/upatch_resolve.c util/serializer.c $(FUZZ_SEAL) util/io.c util/paths.c \
-                              util/timefmt.c $(LIBBPF_A)
+                              $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-serializer: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-serializer: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS)
 $(FUZZ_OUT)/fuzz-cms: testing/fuzz/fuzz-cms.c $(FUZZ_BASE) util/keys.c \
@@ -1317,7 +1315,7 @@ $(FUZZ_OUT)/fuzz-otel: testing/fuzz/fuzz-otel.c $(FUZZ_BASE) \
                         $(FUZZ_SEAL)
 $(FUZZ_OUT)/fuzz-beefile: testing/fuzz/fuzz-beefile.c $(FUZZ_BASE) \
                            tools/shirudo-build/bpm-build.c $(FUZZ_PACKAGE) \
-                           util/upatch.c util/timefmt.c util/paths.c \
+                           util/upatch.c util/paths.c \
                            util/version_id.c util/options.c util/help.c \
                            util/similar.c
 $(FUZZ_OUT)/fuzz-oci-http: testing/fuzz/fuzz-oci-http.c $(FUZZ_BASE) \
@@ -1358,7 +1356,7 @@ $(FUZZ_OUT)/fuzz-upatch-info: testing/fuzz/fuzz-upatch-info.c $(FUZZ_BASE) \
                               util/nv_writer.c \
                               util/options.c util/paths.c util/report.c \
                               util/serializer.c util/similar.c \
-                              util/timefmt.c util/tls_openssl.c util/tpm.c \
+                              util/tls_openssl.c util/tpm.c \
                               util/upatch.c \
                               util/upatch_decode.c util/upatch_maps.c \
                               util/upatch_maps_otel.c util/upatch_pins.c \
@@ -1380,9 +1378,9 @@ $(FUZZ_OUT)/fuzz-bpm-info: testing/fuzz/fuzz-bpm-info.c $(FUZZ_BASE) \
                            util/initrd.c util/kconfig.c \
                                                   util/keyring.c \
                            util/nv_writer.c util/options.c util/paths.c \
-                           util/similar.c util/timefmt.c util/tpm.c \
+                           util/similar.c util/tpm.c \
                            util/upatch_pins.c \
-                           util/upatch_rodata.c util/format.c $(LIBBPF_A)
+                           util/upatch_rodata.c $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-bpm-info: FUZZ_CFLAGS += $(TSS2_CFLAGS) $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-bpm-info: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) $(LIBELF_LIBS)
 $(FUZZ_OUT)/fuzz-attest-report: testing/fuzz/fuzz-attest-report.c \
@@ -1395,7 +1393,7 @@ $(FUZZ_OUT)/fuzz-attest-report: testing/fuzz/fuzz-attest-report.c \
                                util/initrd.c util/io.c util/keyring.c \
                                util/keys.c util/measured.c util/nv_writer.c \
                                util/options.c util/paths.c util/similar.c \
-                               util/timefmt.c util/tpm.c \
+                               util/tpm.c \
                                util/upatch.c util/version_id.c $(FUZZ_SEAL) \
                                $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-attest-report: FUZZ_CFLAGS += $(TSS2_CFLAGS) $(LIBELF_CFLAGS)

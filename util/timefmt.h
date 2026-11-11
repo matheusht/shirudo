@@ -2,7 +2,8 @@
 /*
  * Copyright (c) 2026 Authors of shirudo
  *
- * Compact durations: 12s, 5m, 3h, 7d.
+ * Compact durations, 12s, 5m, 3h, 7d, and ISO-8601 times, which
+ * rust/src/util/timefmt.rs implements.
  */
 
 #ifndef SHIRUDO_TIMEFMT_H

@@ -24,9 +24,9 @@ use crate::sys::libc::{
 use crate::sys::log::pr_err;
 use crate::sys::malloc::{xfree, xmalloc};
 use crate::sys::seal::{seal_append_line, seal_lock};
-use crate::sys::timefmt::iso8601;
 use crate::text::{cstr, strsprintf};
 use crate::util::json::{JsonEmit, JsonField, MAX_BYTES, parse_schema};
+use crate::util::timefmt::iso8601;
 
 /// The most bytes one record takes.
 const LINE_MAX: u64 = 4096;
@@ -436,14 +436,8 @@ fn adopt_pending_locked() -> c_int {
 
 /// The time now as ISO-8601 UTC into `out`.
 fn timestamp(out: &mut [u8]) {
-    // SAFETY: the room at out, and a call that takes no pointer.
-    unsafe {
-        iso8601(
-            time(core::ptr::null_mut()),
-            out.as_mut_ptr().cast(),
-            out.len(),
-        )
-    };
+    // SAFETY: time() with no pointer to fill.
+    iso8601(unsafe { time(core::ptr::null_mut()) }, out);
 }
 
 /// This boot's ID from /proc, without its newline, or empty.
