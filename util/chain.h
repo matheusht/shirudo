@@ -3,7 +3,8 @@
  * Copyright (c) 2026 Authors of shirudo
  *
  * The measurement register: a per-boot NV extend index anchored in a
- * PCR, plus the digest helpers every measuring path shares.
+ * PCR, plus the digest helpers every measuring path shares, which
+ * rust/src/util/chain.rs implements.
  */
 
 #ifndef SHIRUDO_CHAIN_H

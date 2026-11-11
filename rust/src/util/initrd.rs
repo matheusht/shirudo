@@ -30,7 +30,7 @@ fn test_override(name: &CStr) -> Option<&'static CStr> {
 
 /// Whether the process runs in the initrd, which marks itself with
 /// /etc/initrd-release.
-fn in_initrd() -> bool {
+pub(crate) fn in_initrd() -> bool {
     let release = test_override(c"SHIRUDO_INITRD_RELEASE").unwrap_or(c"/etc/initrd-release");
 
     // SAFETY: a C string.

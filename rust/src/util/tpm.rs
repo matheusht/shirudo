@@ -46,7 +46,7 @@ const TCTI_MAX: usize = 256;
 
 /// The measurement register's NV attributes, the NV writer's object
 /// attributes and the TCG endorsement key's, of util/tpm_wire.h.
-const REGISTER_ATTRS: u32 = 0x0e06_0048;
+pub(crate) const REGISTER_ATTRS: u32 = 0x0e06_0048;
 const WRITER_ATTRS: u32 = 0x0004_0072;
 const EK_ATTRS: u32 = 0x0003_00b2;
 /// TPM_NV_POLICY_REF, without the NUL sizeof() counts.
@@ -93,13 +93,13 @@ pub struct Tpm {
 /// `struct tpm_nv_info`.
 #[repr(C)]
 pub struct TpmNvInfo {
-    defined: bool,
-    written: bool,
+    pub(crate) defined: bool,
+    pub(crate) written: bool,
     attrs: u32,
     data_size: u16,
-    policy: [u8; DIGEST_LEN],
-    name: [u8; NAME_LEN],
-    name_len: usize,
+    pub(crate) policy: [u8; DIGEST_LEN],
+    pub(crate) name: [u8; NAME_LEN],
+    pub(crate) name_len: usize,
 }
 
 /// `struct tpm_attestation`.
@@ -2117,7 +2117,11 @@ fn ek_certificate(t: &Tpm, out: &mut [u8], len: &mut usize, rsa: &mut bool) -> c
 }
 
 /// For Rust callers.
-pub(crate) use capi::{tpm_close, tpm_open, tpm_writer_create};
+pub(crate) use capi::{
+    tpm_close, tpm_nv_define, tpm_nv_extend, tpm_nv_extend_first, tpm_nv_info, tpm_nv_read,
+    tpm_nv_set_writer, tpm_nv_undefine, tpm_open, tpm_open_quiet, tpm_pcr_extend, tpm_pcr_read,
+    tpm_reset_count, tpm_writer_create,
+};
 
 mod capi {
     use core::ffi::{c_char, c_int, c_void};

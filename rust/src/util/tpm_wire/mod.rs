@@ -11,7 +11,7 @@ mod kdf;
 mod parse;
 mod policy;
 
-pub(crate) use capi::shirudo_tpm_ek_policy;
+pub(crate) use capi::{shirudo_tpm_ek_policy, tpm_nv_name, tpm_register_policy};
 pub(crate) use parse::public_marshal;
 pub(crate) use policy::{
     nv_extend_cphash, object_name, policy_nv_written, policy_or, register_policy_final,
@@ -24,7 +24,7 @@ use crate::errno::EINVAL;
 
 pub(crate) const DIGEST_LEN: usize = 32;
 /// nameAlg and a SHA-256.
-const NAME_LEN: usize = 2 + DIGEST_LEN;
+pub(crate) const NAME_LEN: usize = 2 + DIGEST_LEN;
 pub(crate) const NV_RSA_BYTES: usize = 384;
 const NV_RSA_PUBLIC_AREA_LEN: usize = 24 + NV_RSA_BYTES;
 const CREDENTIAL_LEN: usize = 32;

@@ -241,13 +241,12 @@ one usually still compiles and passes tests.
   are gone. `init` restores only an
   archive whose load the eventlog records without a later unload; a
   labeled archive root brings back is reported and removed, never
-  restored. The register follows
-  systemd's NvPCR construction (`util/chain.c`): an NV extend index that
-  clears at TPM reset, a first write only possible while PCRs 9 and 11
-  hold the values the policy was computed from, which is why `init`
-  runs from the initrd before `leave-initrd` moves PCR 11, and the
-  index name extended into PCR 9 right after it. Do not reintroduce a
-  persistent index or
+  restored. The register follows systemd's NvPCR construction
+  (`rust/src/util/chain.rs`): an NV extend index that clears at TPM
+  reset, a first write only possible while PCRs 9 and 11 hold the values
+  the policy was computed from, which is why `init` runs from the initrd
+  before `leave-initrd` moves PCR 11, and the index name extended into
+  PCR 9 right after it. Do not reintroduce a persistent index or
   an auth value derived from the certificate; the upatch tree measures
   into the same register. A TPM 2.0 is mandatory; there is no
   unmeasured mode. Image config activation extends the separate PCR

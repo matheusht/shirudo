@@ -292,6 +292,8 @@ unsafe extern "C" {
     pub fn fgets(s: *mut c_char, n: c_int, f: *mut File) -> *mut c_char;
     pub fn sscanf(s: *const c_char, fmt: *const c_char, ...) -> c_int;
     pub fn strcmp(a: *const c_char, b: *const c_char) -> c_int;
+    pub fn strlen(s: *const c_char) -> usize;
+    pub fn strnlen(s: *const c_char, max: usize) -> usize;
     pub fn strcasecmp(a: *const c_char, b: *const c_char) -> c_int;
     pub fn strncasecmp(a: *const c_char, b: *const c_char, n: usize) -> c_int;
     pub fn qsort(

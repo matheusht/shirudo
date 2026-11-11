@@ -5,8 +5,9 @@ import Shirudo.Chain
 import Shirudo.SemVer
 
 /-!
-The events of the measurement register, byte for byte as util/chain.c
-hashes them. Every event is SHA-256 of a tag, its NUL and fixed fields:
+The events of the measurement register, byte for byte as
+rust/src/util/chain.rs hashes them. Every event is SHA-256 of a tag, its
+NUL and fixed fields:
 
 - `chain_init_event()`: `"shirudo-init"`, the certificate set's digest,
   the digest of the listing of the restored set, one
@@ -27,15 +28,16 @@ the register and the event, from 32 zero bytes before the first extend.
 tree's history root and an operation's digest into the next history
 root (`historyBytes`), a chain beside the register.
 
-The model follows each function's buffer: `Fields.bytes` is what the C
-hands SHA-256 for an event whose set is already hashed, `listing` the
-string `chain_init_event()` builds, and `Event.digest` the event digest.
-A byte is a `UInt8`, a digest 32 of them, a C string the bytes before its
-NUL. testing/proofs/cbmc/chain-events.c checks that the C hashes exactly
+The model follows each function's buffer: `Fields.bytes` is what the
+code hands SHA-256 for an event whose set is already hashed, `listing`
+the string `chain_init_event()` builds, and `Event.digest` the event
+digest. A byte is a `UInt8`, a digest 32 of them, a C string the bytes
+before its NUL. A CBMC harness checked that util/chain.c hashed exactly
 `Fields.bytes` for every name of up to 8 bytes and of 255 to 257, every
 payload, digest and sequence number, the init event of an empty set
 included, `fold` for every register and event and `historyBytes` for
 every root and digest.
+The event encoding harness was removed when util/chain.c moved to Rust.
 
 On the domain the callers admit, upatch names that `upatch_name_valid()`
 accepts of at most `UPATCH_NAME_MAX` bytes and sequence numbers a
@@ -115,7 +117,7 @@ with `s`. -/
 def strnlen (s : List UInt8) (max : Nat) : Nat :=
   min (s.takeWhile (· != 0)).length max
 
-/-! ### What util/chain.c hashes -/
+/-! ### What rust/src/util/chain.rs hashes -/
 
 /-- An event as `chain_*_event()` hashes it: the init event's set is in
 it as the digest of its listing. -/
@@ -162,7 +164,7 @@ It is no register event: a tree's history root is a chain of its own. -/
 def historyBytes (prev operation : Digest) : List UInt8 :=
   tagHistory ++ [0] ++ prev.bytes ++ operation.bytes
 
-/-- What the C hands SHA-256 for an event. -/
+/-- What the implementation hands SHA-256 for an event. -/
 def Fields.bytes : Fields → List UInt8
   | .init c s r => initBytes c s r
   | .upatch n p => upatchBytes tagUpatch n p
@@ -733,7 +735,7 @@ theorem Event.Admitted.predicted {e : Event} (h : e.Admitted) :
 
 variable (sha : List UInt8 → Digest)
 
-/-- What the C hashes for `e`, the init event's listing hashed into its
+/-- What the code hashes for `e`, the init event's listing hashed into its
 set digest. -/
 def Event.fields : Event → Fields
   | .init c s r => .init c (sha (listing s)) r

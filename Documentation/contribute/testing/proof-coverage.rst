@@ -787,17 +787,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
      - Stores only PCRs 0 to 23, the value its 64 hex digits spell under
        its index, and marks exactly that one; the other PCRs stay as they
        were; a refusal marks nothing
-   * - ``chain-events``
-     - ``chain_upatch_tag()``, ``chain_upatch_event()``,
-       ``chain_key_event()``, ``chain_tree_event()``, ``chain_fold()``,
-       ``chain_history_step()``, ``chain_init_event()`` of an empty set
-     - Names of 0 to 8 and 255 to 257 bytes; every payload, digest,
-       sequence number, register and history root
-     - SHA-256 is given exactly the bytes of the Lean model
-       ``Shirudo.Events``: the tag and its NUL, then the fixed fields, the
-       name cut at 256 bytes and the sequence number most significant byte
-       first; the event, or the next history root, is the digest, or zeros
-       with the error; a BPF or Java load or unload takes the model's tag
    * - ``measured-fold-model``
      - ``measured_event()``, ``measured_holds()``
      - Every sequence of up to six init, load and unload records over two
@@ -1003,7 +992,7 @@ the model follows the C.
        spell, or ``-ERANGE`` exactly when it passes ``max``
      - ``max`` fits a ``__u64``
      - CBMC, ``string-number-model``, up to 4 bytes
-   * - ``Shirudo.Chain``, the register of :src:`util/chain.c`
+   * - ``Shirudo.Chain``, the register of :src:`rust/src/util/chain.rs`
      - ``register_injective``, ``register_tagged_injective``: for an
        idealized hash, equal registers come from the same events, tagged
        the same, in the same order; ``register_injective_on``: the same
@@ -1021,10 +1010,9 @@ the model follows the C.
        ``register_injective_on``. ``register_tagged_injective`` also
        takes the tagged encoding as injective, which ``Shirudo.Events``
        proves; none for the history root
-     - Review; the bytes of the history root's step are
-       ``historyBytes`` of ``Shirudo.Events``, which CBMC,
-       ``chain-events``, checks
-   * - ``Shirudo.Events``, the event encodings of :src:`util/chain.c`
+     - Review; the history root's step is modeled by
+       ``historyBytes`` of ``Shirudo.Events``.
+   * - ``Shirudo.Events``, the event encodings of :src:`rust/src/util/chain.rs`
        and the history root's step of :src:`util/chain_history.c`
      - ``bytes_injective``: two admitted events hash the same bytes only
        when they are the same event, a Java load or unload never a BPF
@@ -1045,8 +1033,8 @@ the model follows the C.
        64-byte strings of the folds; names ``upatch_name_valid()``
        accepts, and for a load or an unload ``attest predict`` expects
        any name of 1 to 256 bytes; sequence numbers of a ``__s64``
-     - CBMC, ``chain-events``, names of up to 8 and of 255 to 257 bytes;
-       the listing of a non-empty set and the NV extend by review
+     - Review; the C harness for event encoding was removed with the
+       C implementation
    * - ``Shirudo.Measured``, ``measured_event()`` of :src:`util/measured.c`
      - ``holds_iff``: ``measured_holds()`` finds a name and payload exactly
        when the last init, load or unload bearing on the name is its load
@@ -1480,7 +1468,7 @@ proof: ``dns_name_valid()`` of :src:`util/string.c` at its limits of a
 :src:`rust/src/util/tpm_wire/`, the first of which the ``tpm-wire`` fuzz target
 round-trips; ``upatch_rodata_symbol_range()`` of
 :src:`util/upatch_rodata.c`, the range of ``.rodata`` the builder
-rewrites; ``chain_init_event()`` of :src:`util/chain.c` on a set that is
+rewrites; ``chain_init_event()`` of :src:`rust/src/util/chain.rs` on a set that is
 not empty; ``upatch_name_signed()``, ``upatch_member_valid()`` and
 ``prog_specs_xdp_classes()`` of :src:`util/upatch.c`; the reading of
 the eventlog behind boot restore in :src:`util/measured.c`,

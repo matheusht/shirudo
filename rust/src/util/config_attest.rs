@@ -9,13 +9,13 @@
 use core::ffi::{CStr, c_int, c_void};
 
 use crate::errno::{E2BIG, EINVAL, EKEYREJECTED, ENOMEM, EOVERFLOW, EUCLEAN};
-use crate::sys::chain::chain_fold;
 use crate::sys::config_update::{
     ConfigUpdate, ConfigUpdateRecord, config_update_check, config_update_events,
 };
 use crate::sys::hex::{hex_decode, hex_encode};
 use crate::sys::malloc::{xfree, xreallocarray};
 use crate::text::cstr;
+use crate::util::chain::chain_fold;
 use crate::util::config_measure::{EVENT_BOOT, EVENT_UPDATE, event as measure_event, pcr_valid};
 use crate::util::json::{JsonArray, JsonEmit, JsonField, parse_schema};
 

@@ -249,7 +249,6 @@ UTIL_SRCS := \
     util/log.c \
     util/io.c \
     util/attest.c \
-    util/chain.c \
     util/chain_history.c \
     util/hex.c \
     util/string.c \
@@ -835,11 +834,10 @@ testing/helper/test-harden: testing/helper/test-harden.c util/log.o \
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(LIBCRYPTO_LIBS) $(ZLIB_LIBS) $(RUST_TEST_LDLIBS)
 
-# chain.o's read/extend paths use the TPM client (libtss2) in Rust.
-# util/malloc.o brings in x*/libc_free used by chain.o.
-# The Rust library supplies config_load(), the eventlog and JSON codec.
+# The measurement register and TPM client live in Rust. Their symbols
+# must resolve even for a helper that never extends.
+# util/malloc.o provides x*/libc_free used by the Rust library.
 REGISTER_OBJS := util/config_update.o \
-                 util/chain.o \
                  util/upatch.o \
                  util/hex.o util/string.o \
                  util/io.o util/seal.o \
@@ -1249,7 +1247,7 @@ $(FUZZ_OUT)/fuzz-tpm-wire: testing/fuzz/fuzz-tpm-wire.c $(FUZZ_BASE) \
                             util/io.c \
                             $(FUZZ_SEAL)
 $(FUZZ_OUT)/fuzz-attest: testing/fuzz/fuzz-attest.c $(FUZZ_BASE) \
-                          util/attest.c util/chain.c util/chain_history.c \
+                          util/attest.c util/chain_history.c \
                           util/io.c $(FUZZ_SEAL) \
                           util/config_update.c \
                           util/identity.c \
@@ -1260,7 +1258,7 @@ $(FUZZ_OUT)/fuzz-attest: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) $(LIBELF_LIBS) $(
 $(FUZZ_OUT)/fuzz-eventlog: testing/fuzz/fuzz-eventlog.c $(FUZZ_BASE) \
                             util/upatch.c \
                             $(FUZZ_SEAL) util/io.c \
-                            util/identity.c testing/fuzz/chain.c $(LIBBPF_A)
+                            util/identity.c $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-eventlog: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-eventlog: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS) $(ZLIB_LIBS)
 $(FUZZ_OUT)/fuzz-kernel: testing/fuzz/fuzz-kernel.c $(FUZZ_BASE)
@@ -1303,12 +1301,10 @@ $(FUZZ_OUT)/fuzz-image: testing/fuzz/fuzz-image.c $(FUZZ_BASE) \
                          $(FUZZ_SEAL)
 $(FUZZ_OUT)/fuzz-config-update: testing/fuzz/fuzz-config-update.c \
                                  $(FUZZ_BASE) util/config_update.c \
-                                 testing/fuzz/chain.c \
                                  util/io.c $(FUZZ_SEAL)
 FUZZ_TREE_STATE := util/bpm_tree.c \
                    util/chain_history.c util/upatch.c $(FUZZ_OCI) \
-                   util/kconfig.c \
-                                  testing/fuzz/chain.c
+                   util/kconfig.c
 $(FUZZ_OUT)/fuzz-tree-state: testing/fuzz/fuzz-tree-state.c $(FUZZ_BASE) \
                               $(FUZZ_TREE_STATE)
 $(FUZZ_OUT)/fuzz-kconfig: testing/fuzz/fuzz-kconfig.c $(FUZZ_BASE) \
@@ -1318,14 +1314,13 @@ $(FUZZ_OUT)/fuzz-quote-check: testing/fuzz/fuzz-quote-check.c $(FUZZ_BASE) \
                                util/io.c util/seal.c
 $(FUZZ_OUT)/fuzz-upatch-info: testing/fuzz/fuzz-upatch-info.c $(FUZZ_BASE) \
                               testing/fuzz/output.c builtin-upatch.c \
-                              builtin.h util/chain.c \
+                              builtin.h \
                               util/curl.c \
                               util/identity.c \
                               util/io.c util/java_agent.c util/kernel_abi.c \
                               util/measured.c \
                               util/options.c util/paths.c \
                               util/similar.c \
-                              \
                               util/upatch.c \
                               util/upatch_decode.c util/upatch_maps.c \
                               util/upatch_maps_otel.c util/upatch_pins.c \
@@ -1341,8 +1336,6 @@ $(FUZZ_OUT)/fuzz-upatch-info: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) \
 $(FUZZ_OUT)/fuzz-bpm-info: testing/fuzz/fuzz-bpm-info.c $(FUZZ_BASE) \
                            testing/fuzz/output.c builtin-bpm.c builtin.h \
                            $(FUZZ_PACKAGE) \
-                           \
-                           util/chain.c \
                            util/identity.c util/image_keys.c \
                            util/kconfig.c \
                                                      util/options.c util/paths.c \
@@ -1354,13 +1347,12 @@ $(FUZZ_OUT)/fuzz-bpm-info: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) $(LIBELF_LIBS)
 $(FUZZ_OUT)/fuzz-attest-report: testing/fuzz/fuzz-attest-report.c \
                                $(FUZZ_BASE) testing/fuzz/output.c \
                                builtin-attest.c builtin.h util/attest.c \
-                               util/chain.c util/chain_history.c \
+                               util/chain_history.c \
                                util/config_update.c \
                                util/identity.c \
                                util/io.c \
                                util/measured.c \
                                util/options.c util/paths.c util/similar.c \
-                               \
                                util/upatch.c util/version_id.c $(FUZZ_SEAL) \
                                $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-attest-report: FUZZ_CFLAGS += $(TSS2_CFLAGS) $(LIBELF_CFLAGS)

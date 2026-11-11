@@ -38,18 +38,18 @@ pub(super) type UpatchFn = unsafe extern "C" fn(
 /// `struct eventlog_init`: this boot's last init record.
 #[repr(C)]
 pub struct EventlogInit {
-    writer_public: [u8; NV_RSA_BYTES],
+    pub(crate) writer_public: [u8; NV_RSA_BYTES],
     pcr: u32,
-    initrd: bool,
-    pcr_before: [u8; 32],
-    phase_before: [u8; 32],
-    name: [u8; NAME_LEN],
+    pub(crate) initrd: bool,
+    pub(crate) pcr_before: [u8; 32],
+    pub(crate) phase_before: [u8; 32],
+    pub(crate) name: [u8; NAME_LEN],
     name_len: usize,
-    anchor_digest: [u8; 32],
-    have_reset_count: bool,
-    reset_count: u32,
+    pub(crate) anchor_digest: [u8; 32],
+    pub(crate) have_reset_count: bool,
+    pub(crate) reset_count: u32,
     records: u32,
-    records_epoch: u32,
+    pub(crate) records_epoch: u32,
 }
 
 const _: () = assert!(size_of::<EventlogInit>() == 544);

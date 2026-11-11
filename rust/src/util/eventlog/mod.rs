@@ -10,6 +10,9 @@
 mod capi;
 mod records;
 
+pub(crate) use capi::{eventlog_boot_init, eventlog_path};
+pub(crate) use records::EventlogInit;
+
 use core::ffi::{CStr, c_int};
 
 use crate::errno::{EFBIG, EINVAL, ENAMETOOLONG, ENOENT, ENOMEM};

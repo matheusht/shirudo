@@ -37,3 +37,4 @@ pub const EKEYREJECTED: c_int = 129;
 pub const ENODEV: c_int = 19;
 pub const ENODATA: c_int = 61;
 pub const EPROTO: c_int = 71;
+pub const EEXIST: c_int = 17;

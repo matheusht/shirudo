@@ -63,7 +63,7 @@ fn failed(err: c_int, seed: &mut [u8; DIGEST_LEN], public: &mut [u8; NV_RSA_BYTE
 
 /// The writer's seed and modulus as init froze them in the identity map;
 /// -EKEYREJECTED when the modulus there is not one, its top bit clear.
-fn read(seed: &mut [u8; DIGEST_LEN], public: &mut [u8; NV_RSA_BYTES]) -> c_int {
+pub(crate) fn read(seed: &mut [u8; DIGEST_LEN], public: &mut [u8; NV_RSA_BYTES]) -> c_int {
     let mut id = Identity::zeroed();
     // SAFETY: an identity to fill.
     let mut err = unsafe { identity_read(&mut id) };

@@ -2,7 +2,7 @@
 -- Copyright (c) 2026 Authors of shirudo
 
 /-!
-The measurement register of util/chain.c. Each upatch state change
+The measurement register of rust/src/util/chain.rs. Each upatch state change
 extends it as `H(register ‖ event)`, the way a TPM extends a PCR, with an
 event that hashes a domain-separating tag and its payload. `attest verify`
 replays the eventlog and compares the result with the register the TPM
@@ -13,7 +13,7 @@ that order (`register_injective`, `register_tagged_injective`). No hash
 onto a fixed width is injective on every pair, so those two hold of an
 idealized hash only. `register_injective_on` asks the same of `H` only on
 the pairs the two sequences fold, which SHA-256 can meet;
-`Shirudo.Events` proves the encodings of util/chain.c injective and
+`Shirudo.Events` proves the encodings of rust/src/util/chain.rs injective and
 builds the end theorem on it.
 
 A upatch tree has two roots of its own. A node's projection root folds

@@ -13,7 +13,7 @@ that root on the target cannot rewrite or append to, and the TPM signs
 that register on request. This page explains the register, its write
 policy and binding, the events and the eventlog, the evidence, what the
 operator's verifier computes, the separate config PCR, and the limits.
-:src:`util/chain.c`, :src:`rust/src/util/tpm.rs`,
+:src:`rust/src/util/chain.rs`, :src:`rust/src/util/tpm.rs`,
 :src:`rust/src/util/tpm_wire/`, :src:`rust/src/util/eventlog/` and
 :src:`util/attest.c` are the reference.
 
@@ -298,8 +298,9 @@ unless SHA-256 collides among the strings the two histories hash. For
 ``attest verify`` it proves more: whatever extended the register, the
 values it folded in were the digests of the events the verifier
 expects, unless SHA-256 collides among the strings of the two folds.
-CBMC shows that :src:`util/chain.c` hashes exactly the bytes the model
-encodes. The proofs are in :doc:`/contribute/testing/proof-coverage`.
+A CBMC harness checked the C implementation before it moved to
+:src:`rust/src/util/chain.rs`; that harness was removed with the C file.
+The proofs are in :doc:`/contribute/testing/proof-coverage`.
 
 Eventlog
 --------
