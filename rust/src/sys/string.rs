@@ -13,4 +13,7 @@ unsafe extern "C" {
     /// The `len` bytes at `s` made safe to print on a terminal, their
     /// length unchanged; with `lines`, tabs and line feeds kept.
     pub fn text_sanitize(s: *mut c_char, len: usize, lines: bool);
+    /// Whether the `len` bytes of `name` end in `suffix` after at least
+    /// one byte of their own.
+    pub fn name_has_suffix(name: *const c_char, len: usize, suffix: *const c_char) -> bool;
 }

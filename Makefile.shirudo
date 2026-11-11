@@ -240,7 +240,6 @@ UTIL_SRCS := \
     util/xdp.c \
     util/measured.c \
     util/java_agent.c \
-    util/keys.c \
     util/identity.c \
     util/tamper.c \
     util/integrity.c \
@@ -561,7 +560,7 @@ tools/shirudo-build/shirudo-build: $(BUILD_OBJS) $(SIGN_OBJ) \
                                    util/log.o util/loader.o \
                                    util/io.o util/malloc.o util/paths.o \
                                    util/upatch.o \
-                                   util/hex.o util/keys.o \
+                                   util/hex.o \
                                    util/seal.o util/string.o \
                                    util/curl.o \
                                    util/upatch_rodata.o \
@@ -876,7 +875,7 @@ testing/helper/test-tpm-preopened: testing/helper/test-tpm-preopened.c \
 	$(Q)$(CC) $(CFLAGS) -o $@ $(filter-out %.h,$^) $(REGISTER_LIBS) \
 		-Wl,--wrap=enforcement_active
 
-testing/helper/test-keys: testing/helper/test-keys.c util/keys.o \
+testing/helper/test-keys: testing/helper/test-keys.c \
                           util/upatch.o $(REGISTER_OBJS)
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(REGISTER_LIBS)
@@ -1063,7 +1062,7 @@ testing/helper/test-config-attest: testing/helper/test-config-attest.c \
 # which the Rust library defines too: the link keeps the first
 # definition, the helper's.
 testing/helper/test-image-keys: testing/helper/test-image-keys.c \
-		util/image_keys.o util/keys.o $(REGISTER_OBJS)
+		util/image_keys.o $(REGISTER_OBJS)
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(REGISTER_LIBS) \
 		-Wl,--allow-multiple-definition
@@ -1221,7 +1220,7 @@ FUZZ_BASE := util/string.c util/hex.c util/malloc.c testing/fuzz/log.c
 FUZZ_SEAL := util/seal.c
 FUZZ_OCI := util/curl.c util/io.c $(FUZZ_SEAL)
 FUZZ_PACKAGE := util/bpm_tree.c util/chain_history.c \
-                util/upatch.c util/keys.c $(FUZZ_OCI)
+                util/upatch.c $(FUZZ_OCI)
 
 FUZZ_TARGETS := $(patsubst testing/fuzz/%.c,$(FUZZ_OUT)/%, \
                 $(wildcard testing/fuzz/fuzz-*.c))
@@ -1279,7 +1278,7 @@ $(FUZZ_OUT)/fuzz-serializer: testing/fuzz/fuzz-serializer.c $(FUZZ_BASE) \
                               $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-serializer: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-serializer: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS)
-$(FUZZ_OUT)/fuzz-cms: testing/fuzz/fuzz-cms.c $(FUZZ_BASE) util/keys.c \
+$(FUZZ_OUT)/fuzz-cms: testing/fuzz/fuzz-cms.c $(FUZZ_BASE) \
                        util/io.c $(FUZZ_SEAL)
 $(FUZZ_OUT)/fuzz-decoder: testing/fuzz/fuzz-decoder.c $(FUZZ_BASE) \
                            util/upatch_decode.c util/upatch.c util/io.c \
@@ -1328,7 +1327,7 @@ $(FUZZ_OUT)/fuzz-upatch-info: testing/fuzz/fuzz-upatch-info.c $(FUZZ_BASE) \
                               util/curl.c \
                               util/identity.c \
                               util/io.c util/java_agent.c util/kernel_abi.c \
-                              util/keys.c util/measured.c \
+                              util/measured.c \
                               util/options.c util/paths.c \
                               util/similar.c \
                               util/tpm.c \
@@ -1364,7 +1363,7 @@ $(FUZZ_OUT)/fuzz-attest-report: testing/fuzz/fuzz-attest-report.c \
                                util/config_update.c \
                                util/identity.c \
                                util/io.c \
-                               util/keys.c util/measured.c \
+                               util/measured.c \
                                util/options.c util/paths.c util/similar.c \
                                util/tpm.c \
                                util/upatch.c util/version_id.c $(FUZZ_SEAL) \

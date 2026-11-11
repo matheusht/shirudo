@@ -217,6 +217,12 @@ impl Statx {
     }
 }
 
+/// The filter of scandir(), which keeps the entries it is not 0 for.
+pub type DirentFilter = unsafe extern "C" fn(e: *const Dirent) -> c_int;
+/// The order of scandir(), alphasort() for one.
+pub type DirentCompare =
+    unsafe extern "C" fn(a: *mut *const Dirent, b: *mut *const Dirent) -> c_int;
+
 unsafe extern "C" {
     pub fn calloc(nmemb: usize, size: usize) -> *mut c_void;
     pub fn posix_memalign(memptr: *mut *mut c_void, alignment: usize, size: usize) -> c_int;
@@ -246,6 +252,22 @@ unsafe extern "C" {
     pub fn flock(fd: c_int, op: c_int) -> c_int;
     pub fn fdopendir(fd: c_int) -> *mut Dir;
     pub fn readdir(dir: *mut Dir) -> *mut Dirent;
+    /// The entries of `dir` the filter takes, sorted by `compar`, in an
+    /// array of allocations free() takes: how many, or -1.
+    pub fn scandir(
+        dir: *const c_char,
+        namelist: *mut *mut *mut Dirent,
+        filter: Option<DirentFilter>,
+        compar: Option<DirentCompare>,
+    ) -> c_int;
+    pub fn scandirat(
+        dirfd: c_int,
+        dir: *const c_char,
+        namelist: *mut *mut *mut Dirent,
+        filter: Option<DirentFilter>,
+        compar: Option<DirentCompare>,
+    ) -> c_int;
+    pub fn alphasort(a: *mut *const Dirent, b: *mut *const Dirent) -> c_int;
     pub fn closedir(dir: *mut Dir) -> c_int;
     pub fn getline(line: *mut *mut c_char, cap: *mut usize, f: *mut File) -> isize;
     pub fn syscall(num: core::ffi::c_long, ...) -> core::ffi::c_long;
@@ -253,6 +275,7 @@ unsafe extern "C" {
     pub fn pread(fd: c_int, buf: *mut c_void, count: usize, offset: i64) -> isize;
     pub fn unlink(path: *const c_char) -> c_int;
     pub fn access(path: *const c_char, mode: c_int) -> c_int;
+    pub fn faccessat(dirfd: c_int, path: *const c_char, mode: c_int, flags: c_int) -> c_int;
     pub fn time(t: *mut i64) -> i64;
     pub fn strerror(errnum: c_int) -> *const c_char;
     /// The name of an errno number, "ENOENT", or NULL for one it does not

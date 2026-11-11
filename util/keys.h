@@ -2,7 +2,8 @@
 /*
  * Copyright (c) 2026 Authors of shirudo
  *
- * The certificates a target trusts: the primary one and the trusted set.
+ * The certificates a target trusts: the primary one and the trusted set,
+ * which rust/src/util/keys.rs reads.
  */
 
 #ifndef SHIRUDO_UTIL_KEYS_H
