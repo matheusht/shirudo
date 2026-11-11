@@ -11,6 +11,7 @@ mod config_image;
 mod config_measure;
 mod eventlog;
 mod format;
+mod harden;
 mod image_bootstrap;
 mod json;
 mod kernel_build_id;

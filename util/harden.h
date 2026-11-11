@@ -2,7 +2,8 @@
 /*
  * Copyright (c) 2026 Authors of shirudo
  *
- * Process-hardening primitives applied at startup.
+ * Process-hardening primitives applied at startup, which
+ * rust/src/util/harden.rs implements.
  */
 
 #ifndef SHIRUDO_HARDEN_H

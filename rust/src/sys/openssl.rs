@@ -18,6 +18,9 @@ pub type PemPasswordCb =
 /// The `BIO_ctrl()` command `BIO_reset()` sends.
 pub const BIO_CTRL_RESET: c_int = 1;
 
+/// The option of `OPENSSL_init_crypto()` that leaves openssl.cnf unread.
+pub const OPENSSL_INIT_NO_LOAD_CONFIG: u64 = 0x80;
+
 unsafe extern "C" {
     pub fn BIO_new_mem_buf(buf: *const c_void, len: c_int) -> *mut Bio;
     pub fn BIO_ctrl(bio: *mut Bio, cmd: c_int, larg: c_long, parg: *mut c_void) -> c_long;
@@ -30,4 +33,5 @@ unsafe extern "C" {
         u: *mut c_void,
     ) -> *mut X509;
     pub fn X509_free(x509: *mut X509);
+    pub fn OPENSSL_init_crypto(opts: u64, settings: *const c_void) -> c_int;
 }

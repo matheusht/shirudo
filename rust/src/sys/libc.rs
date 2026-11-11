@@ -12,6 +12,7 @@ pub const SEEK_SET: c_int = 0;
 pub const F_OK: c_int = 0;
 pub const O_RDONLY: c_int = 0;
 pub const O_WRONLY: c_int = 0o1;
+pub const O_RDWR: c_int = 0o2;
 pub const O_CREAT: c_int = 0o100;
 pub const O_EXCL: c_int = 0o200;
 pub const O_NONBLOCK: c_int = 0o4000;
@@ -21,6 +22,7 @@ pub const O_NOFOLLOW: c_int = 0o400000;
 #[cfg(target_arch = "aarch64")]
 pub const O_NOFOLLOW: c_int = 0o100000;
 pub const AT_EMPTY_PATH: c_int = 0x1000;
+pub const F_GETFD: c_int = 1;
 /// setvbuf()'s full buffering, and the size of a stdio buffer.
 pub const IOFBF: c_int = 0;
 pub const BUFSIZ: usize = 8192;
@@ -28,9 +30,23 @@ pub const STATX_TYPE: u32 = 0x1;
 pub const STATX_SIZE: u32 = 0x200;
 pub const S_IFMT: u16 = 0o170000;
 pub const S_IFREG: u16 = 0o100000;
+pub const PR_SET_DUMPABLE: c_int = 4;
+pub const PR_SET_NO_NEW_PRIVS: c_int = 38;
+/// Yama's PR_SET_PTRACER, "Yama" in ASCII.
+pub const PR_SET_PTRACER: c_int = 0x59616d61;
+pub const RLIMIT_CORE: c_int = 4;
+pub const MCL_CURRENT: c_int = 1;
+pub const MCL_FUTURE: c_int = 2;
 
 /// A stdio `FILE`.
 pub enum File {}
+
+/// `struct rlimit`.
+#[repr(C)]
+pub struct Rlimit {
+    pub cur: u64,
+    pub max: u64,
+}
 
 /// glibc's `struct tm`.
 #[repr(C)]
@@ -95,6 +111,11 @@ unsafe extern "C" {
     pub fn free(ptr: *mut c_void);
     pub fn explicit_bzero(s: *mut c_void, n: usize);
     pub fn abort() -> !;
+    pub fn _exit(status: c_int) -> !;
+    pub fn prctl(option: c_int, ...) -> c_int;
+    pub fn setrlimit(resource: c_int, rlim: *const Rlimit) -> c_int;
+    pub fn mlockall(flags: c_int) -> c_int;
+    pub fn __nss_configure_lookup(db: *const c_char, service: *const c_char) -> c_int;
     pub fn getenv(name: *const c_char) -> *mut c_char;
     pub fn statx(
         dirfd: c_int,

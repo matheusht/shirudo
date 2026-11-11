@@ -251,7 +251,6 @@ UTIL_SRCS := \
     util/integrity.c \
     util/initrd.c \
     util/paths.c \
-    util/harden.c \
     util/preflight.c \
     util/kernel_abi.c \
     util/kernel_prereq.c \
@@ -578,7 +577,7 @@ tools/shirudo-build/shirudo-build: $(BUILD_OBJS) $(SIGN_OBJ) \
                                    util/io.o util/malloc.o util/paths.o \
                                    util/image_config.o util/upatch.o \
                                    util/elf_target.o util/hex.o util/keys.o \
-                                   util/seal.o util/harden.o util/string.o \
+                                   util/seal.o util/string.o \
                                    util/crypto_openssl.o util/tls_openssl.o \
                                    util/curl.o \
                                    util/upatch_rodata.o \
@@ -852,10 +851,10 @@ testing/helper/test-conditions: testing/helper/test-conditions.c util/conditions
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^
 
-testing/helper/test-harden: testing/helper/test-harden.c util/harden.o util/log.o \
-		util/string.o util/malloc.o
+testing/helper/test-harden: testing/helper/test-harden.c util/log.o \
+		util/string.o util/malloc.o $(RUST_LIB)
 	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(LIBCRYPTO_LIBS)
+	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(LIBCRYPTO_LIBS) $(ZLIB_LIBS) $(RUST_TEST_LDLIBS)
 
 # chain.o's read/extend paths reference util/tpm (libtss2), so the
 # symbols must resolve even for a helper that never extends.
