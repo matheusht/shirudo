@@ -37,6 +37,7 @@ pub const PR_SET_PTRACER: c_int = 0x59616d61;
 pub const RLIMIT_CORE: c_int = 4;
 pub const MCL_CURRENT: c_int = 1;
 pub const MCL_FUTURE: c_int = 2;
+pub const SC_NPROCESSORS_ONLN: c_int = 84;
 
 /// A stdio `FILE`.
 pub enum File {}
@@ -45,12 +46,12 @@ pub enum File {}
 /// lays them out.
 #[repr(C)]
 pub struct Utsname {
-    sysname: [c_char; 65],
-    nodename: [c_char; 65],
-    pub release: [c_char; 65],
-    version: [c_char; 65],
-    machine: [c_char; 65],
-    domainname: [c_char; 65],
+    sysname: [u8; 65],
+    pub nodename: [u8; 65],
+    pub release: [u8; 65],
+    pub version: [u8; 65],
+    pub machine: [u8; 65],
+    domainname: [u8; 65],
 }
 
 const _: () = assert!(size_of::<Utsname>() == 390);
@@ -64,6 +65,45 @@ impl Utsname {
             version: [0; 65],
             machine: [0; 65],
             domainname: [0; 65],
+        }
+    }
+}
+
+/// `struct statvfs` of the 64-bit ABIs: the fields read here, and the rest
+/// as the C library lays them out.
+#[repr(C)]
+pub struct Statvfs {
+    f_bsize: core::ffi::c_ulong,
+    pub f_frsize: core::ffi::c_ulong,
+    pub f_blocks: u64,
+    pub f_bfree: u64,
+    f_bavail: u64,
+    f_files: u64,
+    f_ffree: u64,
+    f_favail: u64,
+    f_fsid: core::ffi::c_ulong,
+    f_flag: core::ffi::c_ulong,
+    f_namemax: core::ffi::c_ulong,
+    f_spare: [c_int; 6],
+}
+
+const _: () = assert!(size_of::<Statvfs>() == 112);
+
+impl Statvfs {
+    pub const fn zeroed() -> Self {
+        Statvfs {
+            f_bsize: 0,
+            f_frsize: 0,
+            f_blocks: 0,
+            f_bfree: 0,
+            f_bavail: 0,
+            f_files: 0,
+            f_ffree: 0,
+            f_favail: 0,
+            f_fsid: 0,
+            f_flag: 0,
+            f_namemax: 0,
+            f_spare: [0; 6],
         }
     }
 }
@@ -167,6 +207,18 @@ unsafe extern "C" {
     /// know.
     pub fn strerrorname_np(errnum: c_int) -> *const c_char;
     pub fn uname(buf: *mut Utsname) -> c_int;
+    pub fn gethostname(name: *mut c_char, len: usize) -> c_int;
+    pub fn sysconf(name: c_int) -> core::ffi::c_long;
+    pub fn statvfs(path: *const c_char, buf: *mut Statvfs) -> c_int;
+    pub fn fgets(s: *mut c_char, n: c_int, f: *mut File) -> *mut c_char;
+    pub fn sscanf(s: *const c_char, fmt: *const c_char, ...) -> c_int;
+    pub fn strcmp(a: *const c_char, b: *const c_char) -> c_int;
+    pub fn qsort(
+        base: *mut c_void,
+        n: usize,
+        size: usize,
+        cmp: Option<unsafe extern "C" fn(*const c_void, *const c_void) -> c_int>,
+    );
     pub fn fopen(path: *const c_char, mode: *const c_char) -> *mut File;
     pub fn fdopen(fd: c_int, mode: *const c_char) -> *mut File;
     pub fn setvbuf(f: *mut File, buf: *mut c_char, mode: c_int, size: usize) -> c_int;

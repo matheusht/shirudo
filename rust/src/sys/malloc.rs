@@ -24,6 +24,9 @@ unsafe extern "C" {
     ) -> *mut c_void;
     /// Scrubs `size` bytes at `ptr` and frees them; nothing for NULL.
     pub fn xfree(ptr: *mut c_void, size: usize);
+    /// A copy of the C string `s`, which it trusts to end, for
+    /// xstrfree(); NULL when the allocation fails.
+    pub fn xstrdup(s: *const c_char) -> *mut c_char;
     /// A copy of at most `n` bytes of the C string `s`, NUL-terminated,
     /// for xstrfree(); NULL when the allocation fails.
     pub fn xstrndup(s: *const c_char, n: usize) -> *mut c_char;

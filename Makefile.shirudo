@@ -236,6 +236,7 @@ CLANG_BPF := $(CLANG) -target bpf -mcpu=v4 -fno-jump-tables -O2 -g -Wall -Wextra
 # ----- source manifests -------------------------------------------
 
 UTIL_SRCS := \
+    util/sysinfo_image.c \
 	$(CRYPTO_SRC) \
 	$(TLS_SRC) \
     util/loader.c \
@@ -274,7 +275,6 @@ UTIL_SRCS := \
     util/config_update.c \
     util/config_attest.c \
     util/malloc.c \
-    util/sysinfo.c \
     util/options.c \
     util/keepalive.c \
     util/keepalive_quote.c \

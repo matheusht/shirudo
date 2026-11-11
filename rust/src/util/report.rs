@@ -12,7 +12,7 @@ use crate::sys::libc::{Utsname, printf, strerror, strerrorname_np, uname};
 use crate::sys::log::pr_err;
 use crate::sys::malloc::{xfree, xmalloc, xstrfree, xstrndup};
 use crate::sys::seal::{SealOutput, seal_output_commit, seal_output_create};
-use crate::text::strsprintf;
+use crate::text::{cstr, strsprintf};
 use crate::util::eventlog::NV_INDEX;
 use crate::util::json::JsonEmit;
 
@@ -112,7 +112,7 @@ unsafe fn encode(e: &mut JsonEmit, r: &OpReport, vlog: &[u8], nv_index: &[u8]) {
     e.obj_open_key(b"kernel");
     // SAFETY: a struct utsname to fill.
     let release = if unsafe { uname(&mut uts) } == 0 {
-        in_array(&uts.release)
+        cstr(&uts.release)
     } else {
         b""
     };

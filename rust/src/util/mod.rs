@@ -23,6 +23,7 @@ mod kernel_release;
 mod nv_writer;
 mod report;
 mod similar;
+mod sysinfo;
 mod timefmt;
 mod tpm_wire;
 mod upatch_table;

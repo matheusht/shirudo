@@ -71,7 +71,7 @@ unsafe fn from_notes(mut notes: &[u8], out: *mut c_char) -> c_int {
 /// # Safety
 ///
 /// `out` has room for `2 * BUILD_ID_MAX + 1` bytes.
-unsafe fn read_build_id(out: *mut c_char) -> c_int {
+pub(crate) unsafe fn read_build_id(out: *mut c_char) -> c_int {
     let mut notes = [0u8; NOTES_MAX];
     let mut len = 0;
 

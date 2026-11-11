@@ -2,8 +2,8 @@
 /*
  * Copyright (c) 2026 Authors of shirudo
  *
- * The host overview of `status --include-system` and the identity of the
- * booted image, without a subprocess.
+ * Rust gathers the host overview of `status --include-system` and the
+ * identity of the booted image without a subprocess.
  */
 
 #ifndef SHIRUDO_SYSINFO_H
