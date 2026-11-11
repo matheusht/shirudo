@@ -14,7 +14,7 @@ that register on request. This page explains the register, its write
 policy and binding, the events and the eventlog, the evidence, what the
 operator's verifier computes, the separate config PCR, and the limits.
 :src:`util/chain.c`, :src:`util/tpm.c`, :src:`rust/src/util/tpm_wire/`,
-:src:`util/eventlog.c` and :src:`util/attest.c` are the reference.
+:src:`rust/src/util/eventlog/` and :src:`util/attest.c` are the reference.
 
 Problem
 -------

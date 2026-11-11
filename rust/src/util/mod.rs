@@ -5,6 +5,7 @@
 
 mod bpm_oci;
 mod bpm_package;
+mod eventlog;
 mod json;
 mod similar;
 mod tpm_wire;

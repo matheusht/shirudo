@@ -2,7 +2,8 @@
 /*
  * Copyright (c) 2026 Authors of shirudo
  *
- * /var/lib/shirudo/eventlog appender and per-boot replay.
+ * /var/lib/shirudo/eventlog appender and per-boot replay, which
+ * rust/src/util/eventlog/ implements.
  */
 
 #ifndef SHIRUDO_EVENTLOG_H

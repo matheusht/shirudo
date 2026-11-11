@@ -11,7 +11,7 @@ pub(crate) use emit::{JsonEmit, emit_fixed};
 pub(crate) use parse::{JsonArray, JsonField, parse_schema};
 
 /// `JSON_MAX_BYTES`: the largest document either reader takes.
-const MAX_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_BYTES: usize = 8 * 1024 * 1024;
 /// `JSON_MAX_DEPTH`: the deepest nesting either reader takes.
 const MAX_DEPTH: u32 = 32;
 /// `JSON_MAX_FIELDS`: the most declared keys one object tells apart.

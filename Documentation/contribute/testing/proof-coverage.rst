@@ -813,11 +813,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
      - The set holds a name with a payload exactly as the Lean model
        ``Shirudo.UpatchLoad`` folds the records, and never with the empty
        payload of a missing xattr
-   * - ``eventlog-records``
-     - ``log_records()``
-     - Logs of 0 to 32 bytes
-     - Refuses exactly a log with a NUL; keeps whole lines unchanged up
-       to the last newline, cutting only a torn last line
    * - ``config-image``
      - ``config_image_read_header()``
      - Hash files of 0, 511, 512 and 4096 bytes
@@ -1127,7 +1122,7 @@ the model follows the C.
      - None
      - Review
    * - ``Shirudo.EventlogRecord``, ``walk_lines()`` and
-       ``upatches_line()`` of :src:`util/eventlog.c` on the records
+       ``upatches_line()`` of :src:`rust/src/util/eventlog/` on the records
        :src:`builtin-upatch.c`, :src:`builtin-init.c`,
        :src:`builtin-keys.c` and :src:`builtin-bpm.c` write
      - ``read_upatch``, ``read_init``, ``read_key``, ``read_tree``: every
@@ -1471,8 +1466,9 @@ The fuzz targets in :doc:`test-coverage` cover these parsers; no proof
 does: the JSON reader and writer of :src:`rust/src/util/json/`, the
 OCI client of :src:`rust/src/util/bpm_oci/` and the package reader of
 :src:`rust/src/util/bpm_package/` and the TPM wire module of
-:src:`rust/src/util/tpm_wire/`, whose CBMC proofs went
-with the C they proved when those modules moved to Rust; how ``json_parse()`` dispatches objects, arrays and maps to their
+:src:`rust/src/util/tpm_wire/` and the eventlog of
+:src:`rust/src/util/eventlog/`, whose CBMC proofs went with the C
+they proved when those modules moved to Rust; how ``json_parse()`` dispatches objects, arrays and maps to their
 schemas, and the members and elements of a JSON document longer than
 two bytes, the OTLP headers a configuration adds
 and the collector's reply to an export, the registry references and URLs and the registry credentials
@@ -1549,7 +1545,7 @@ not empty; ``upatch_name_signed()``, ``upatch_member_valid()`` and
 the eventlog behind boot restore in :src:`util/measured.c`,
 ``init_of_live()``, ``record_event()`` and the walk of
 ``verified_upatches()``, and that ``upatches_line()`` of
-:src:`util/eventlog.c` hands init the names and payloads whose events
+:src:`rust/src/util/eventlog/` hands init the names and payloads whose events
 ``record_event()`` hashes, as no fuzz target reaches them and a proof
 over one record of the two readers, ``json_parse()`` modelled, runs out
 of 8 GB; ``check_table()`` of

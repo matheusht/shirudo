@@ -9,9 +9,12 @@ pub const PATH_MAX: usize = 4096;
 pub const AT_FDCWD: c_int = -100;
 pub const F_DUPFD_CLOEXEC: c_int = 1030;
 pub const SEEK_SET: c_int = 0;
+pub const F_OK: c_int = 0;
+pub const O_RDONLY: c_int = 0;
 pub const O_WRONLY: c_int = 0o1;
 pub const O_CREAT: c_int = 0o100;
 pub const O_EXCL: c_int = 0o200;
+pub const O_CLOEXEC: c_int = 0o2000000;
 pub const STATX_TYPE: u32 = 0x1;
 pub const STATX_SIZE: u32 = 0x200;
 pub const S_IFMT: u16 = 0o170000;
@@ -72,6 +75,12 @@ unsafe extern "C" {
     pub fn fchmod(fd: c_int, mode: u32) -> c_int;
     pub fn close(fd: c_int) -> c_int;
     pub fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
+    pub fn open(path: *const c_char, flags: c_int, ...) -> c_int;
+    pub fn read(fd: c_int, buf: *mut c_void, count: usize) -> isize;
+    pub fn unlink(path: *const c_char) -> c_int;
+    pub fn access(path: *const c_char, mode: c_int) -> c_int;
+    pub fn time(t: *mut i64) -> i64;
+    pub fn strerror(errnum: c_int) -> *const c_char;
     pub fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64;
     fn __errno_location() -> *mut c_int;
 }

@@ -59,6 +59,12 @@ impl JsonField {
     }
 
     /// A string, decoded into the `cap` bytes at `dst`.
+    /// This field without its key, which no member of an object matches.
+    pub(crate) const fn keyless(mut self) -> Self {
+        self.key = ptr::null();
+        self
+    }
+
     pub(crate) const fn string(key: &'static CStr, dst: *mut u8, cap: usize) -> Self {
         Self::new(key, T_STRING, dst.cast(), cap)
     }

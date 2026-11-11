@@ -284,7 +284,6 @@ UTIL_SRCS := \
     util/config_measure.c \
     util/config_attest.c \
     util/bpm_source_config.c \
-    util/eventlog.c \
     util/report.c \
     util/malloc.c \
     util/sysinfo.c \
@@ -871,11 +870,10 @@ testing/helper/test-harden: testing/helper/test-harden.c util/harden.o util/log.
 # symbols must resolve even for a helper that never extends.
 # util/malloc.o brings in x*/libc_free that chain.o/tpm.o use.
 # util/config.o resolves config_load(), called by tpm.o.
-# The register code pulls in the eventlog, which pulls in the seal
-# label writer, the JSON codec and the measured set it folds.
+# The register code pulls in the Rust eventlog, seal label writer and JSON codec.
 REGISTER_OBJS := util/config_attest.o util/config_update.o util/config_measure.o util/config_image.o \
-                 util/chain.o util/tpm.o util/eventlog.o \
-                 util/measured.o util/paths.o util/timefmt.o util/upatch.o \
+                 util/chain.o util/tpm.o \
+                 util/timefmt.o util/upatch.o \
                  util/hex.o util/crypto_openssl.o util/string.o \
                  util/io.o util/seal.o util/config.o util/image_config.o \
                  util/log.o util/malloc.o \
@@ -1244,7 +1242,7 @@ FUZZ_LIBS := $(RUST_FUZZ_LIB) $(LIBCRYPTO_LIBS) $(LIBSSL_LIBS) \
 # it, so each target links the C those functions call.
 FUZZ_RUST_C := util/io.c util/seal.c util/config.c util/image_config.c \
                util/crypto_openssl.c util/tls_openssl.c util/bpm_tree.c \
-               util/upatch.c
+               util/upatch.c util/timefmt.c
 FUZZ_BASE := util/string.c util/hex.c util/malloc.c testing/fuzz/log.c \
              $(FUZZ_RUST_C)
 FUZZ_CONFIG := util/config.c util/image_config.c
@@ -1286,8 +1284,7 @@ $(FUZZ_OUT)/fuzz-tpm-wire: testing/fuzz/fuzz-tpm-wire.c $(FUZZ_BASE) \
                             $(FUZZ_SEAL)
 $(FUZZ_OUT)/fuzz-attest: testing/fuzz/fuzz-attest.c $(FUZZ_BASE) \
                           util/attest.c util/chain.c util/chain_history.c \
-                          util/nv_writer.c util/tpm.c \
-                          util/eventlog.c util/timefmt.c \
+                          util/nv_writer.c util/tpm.c util/timefmt.c \
                           util/crypto_openssl.c util/io.c $(FUZZ_SEAL) \
                           util/config_attest.c util/config_update.c \
                           util/config_measure.c util/initrd.c util/identity.c \
@@ -1296,7 +1293,7 @@ $(FUZZ_OUT)/fuzz-attest: testing/fuzz/fuzz-attest.c $(FUZZ_BASE) \
 $(FUZZ_OUT)/fuzz-attest: FUZZ_CFLAGS += $(TSS2_CFLAGS) $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-attest: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) $(LIBELF_LIBS) $(ZLIB_LIBS)
 $(FUZZ_OUT)/fuzz-eventlog: testing/fuzz/fuzz-eventlog.c $(FUZZ_BASE) \
-                            util/eventlog.c util/timefmt.c util/upatch.c \
+                            util/timefmt.c util/upatch.c \
                             $(FUZZ_SEAL) util/io.c util/crypto_openssl.c \
                             util/identity.c testing/fuzz/chain.c $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-eventlog: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
@@ -1364,7 +1361,7 @@ $(FUZZ_OUT)/fuzz-quote-check: testing/fuzz/fuzz-quote-check.c $(FUZZ_BASE) \
 $(FUZZ_OUT)/fuzz-upatch-info: testing/fuzz/fuzz-upatch-info.c $(FUZZ_BASE) \
                               testing/fuzz/output.c builtin-upatch.c \
                               builtin.h util/chain.c util/crypto_openssl.c \
-                              util/curl.c util/elf_target.c util/eventlog.c \
+                              util/curl.c util/elf_target.c \
                               util/help.c util/identity.c util/initrd.c \
                               util/io.c util/java_agent.c util/kernel_abi.c \
                               util/keyring.c util/keys.c util/measured.c \
@@ -1388,7 +1385,7 @@ $(FUZZ_OUT)/fuzz-bpm-info: testing/fuzz/fuzz-bpm-info.c $(FUZZ_BASE) \
                            testing/fuzz/output.c builtin-bpm.c builtin.h \
                            $(FUZZ_PACKAGE) util/bpm_source_config.c \
                            util/bpm_state.c util/bpm_tree_state.c \
-                           util/chain.c util/eventlog.c util/help.c \
+                           util/chain.c util/help.c \
                            util/identity.c util/image_keys.c \
                            util/initrd.c util/kconfig.c \
                            util/kernel_build_id.c \
@@ -1405,7 +1402,7 @@ $(FUZZ_OUT)/fuzz-attest-report: testing/fuzz/fuzz-attest-report.c \
                                util/chain.c util/chain_history.c \
                                util/config_attest.c util/config_measure.c \
                                util/config_update.c util/crypto_openssl.c \
-                               util/eventlog.c util/help.c util/identity.c \
+                               util/help.c util/identity.c \
                                util/initrd.c util/io.c util/keyring.c \
                                util/keys.c util/measured.c util/nv_writer.c \
                                util/options.c util/paths.c util/similar.c \
