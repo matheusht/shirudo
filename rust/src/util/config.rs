@@ -19,7 +19,7 @@ use crate::sys::libc::{
 };
 use crate::sys::log::{pr_err, pr_warn};
 use crate::sys::string::dns_name_valid;
-use crate::text::{parse_u64, strscpy};
+use crate::text::{parse_u64, strscpy, trim_blanks};
 use crate::util::json::MAX_BYTES;
 
 const OWNER_AUTH_MAX: usize = 256;
@@ -174,23 +174,6 @@ fn set_string(dst: &mut [u8], val: &CStr) -> bool {
     strscpy(dst, val.to_bytes()).is_ok()
 }
 
-/// The text from `start` to `end` of the line in `buf`, without blanks
-/// before it or blanks and line ends after it, which become NULs as the
-/// C's trim() made them: where it starts and ends.
-fn trim(buf: &mut [u8], start: usize, end: usize) -> (usize, usize) {
-    let mut s = start;
-    let mut e = end;
-
-    while s < e && matches!(buf[s], b' ' | b'\t') {
-        s += 1;
-    }
-    while e > s && matches!(buf[e - 1], b' ' | b'\t' | b'\n' | b'\r') {
-        e -= 1;
-        buf[e] = 0;
-    }
-    (s, e)
-}
-
 /// The terminated text at `start` of `buf`.
 fn text_at(buf: &[u8], start: usize) -> &CStr {
     CStr::from_bytes_until_nul(&buf[start..]).unwrap_or(c"")
@@ -340,7 +323,7 @@ unsafe fn parse(cfg: &mut Config, f: *mut File, path: *const c_char) -> c_int {
             }
             let len = CStr::from_ptr(line).to_bytes().len();
             let buf = ffi::bytes_mut(line.cast(), len + 1);
-            let (ps, pe) = trim(buf, 0, len);
+            let (ps, pe) = trim_blanks(buf, 0, len);
             if ps == pe || buf[ps] == b'#' {
                 continue;
             }
@@ -348,8 +331,8 @@ unsafe fn parse(cfg: &mut Config, f: *mut File, path: *const c_char) -> c_int {
                 continue;
             };
             buf[eq] = 0;
-            let (ks, _) = trim(buf, ps, eq);
-            let (vs, _) = trim(buf, eq + 1, pe);
+            let (ks, _) = trim_blanks(buf, ps, eq);
+            let (vs, _) = trim_blanks(buf, eq + 1, pe);
             apply(cfg, text_at(buf, ks), text_at(buf, vs));
         }
         if ferror(f) != 0 && ret == 0 {

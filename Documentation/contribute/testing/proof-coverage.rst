@@ -869,27 +869,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
        when they are on its PCR from its initial value, one boot event
        then updates in sequence, and end at the selection; a refusal
        returns nothing, with nothing left allocated
-   * - ``image-bootstrap``
-     - ``bootstrap_parse()`` with ``read_text_line()``
-     - One settings line of 0 to 8 bytes, failed reads and allocations,
-       and an initially empty state with the root flag and runtime
-       presence varied. These lines cannot contain a complete setting.
-     - A short line cannot add a certificate or set a PCR; the runtime
-       and root presence flags stay unchanged
-   * - ``image-bootstrap-certificates``
-     - ``bootstrap_add_certificate()``
-     - Every earlier key count through capacity, each of the runtime's
-       ``key-A`` to ``key-Q`` there or not, and two fixed paths that
-       escape the runtime: one outside it, one through ``..``
-     - Only a distinct runtime path joins a non-full set; duplicates,
-       those two paths and overflow leave the count unchanged; earlier
-       paths keep their order
-   * - ``image-path``
-     - ``image_path_valid()``
-     - Up to 8 bytes
-     - An accepted path is absolute, not ``/``, with no ``..`` component
-       and no empty one but the last; every absolute path of plain
-       components is accepted
    * - ``dm-names``
      - ``dm_name_ok()``, ``dm_device()``
      - Up to 7 bytes; names of 127 and 128 bytes, any 7 and then
@@ -1432,8 +1411,9 @@ OCI client of :src:`rust/src/util/bpm_oci/` and the package reader of
 :src:`rust/src/util/config.rs`, plus the kernel build ID and release readers in
 :src:`rust/src/util/kernel_build_id.rs` and
 :src:`rust/src/util/kernel_release.rs` and the registry source
-and tree line parser in :src:`rust/src/util/bpm_source_config.rs`,
-whose CBMC proofs went with the C
+and tree line parser in :src:`rust/src/util/bpm_source_config.rs`, plus the bootstrap file
+and config root event in :src:`rust/src/util/image_bootstrap.rs` and
+:src:`rust/src/util/config_measure.rs`, whose CBMC proofs went with the C
 they proved when those modules moved to Rust; how ``json_parse()`` dispatches objects, arrays and maps to their
 schemas, and the members and elements of a JSON document longer than
 two bytes, the OTLP headers a configuration adds

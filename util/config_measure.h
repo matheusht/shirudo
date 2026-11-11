@@ -1,5 +1,10 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
-/* Copyright (c) 2026 Authors of shirudo */
+/*
+ * Copyright (c) 2026 Authors of shirudo
+ *
+ * The measurement of a config root, which rust/src/util/config_measure.rs
+ * implements.
+ */
 
 #ifndef SHIRUDO_CONFIG_MEASURE_H
 #define SHIRUDO_CONFIG_MEASURE_H

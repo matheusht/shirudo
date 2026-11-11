@@ -1,5 +1,10 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
-/* Copyright (c) 2026 Authors of shirudo */
+/*
+ * Copyright (c) 2026 Authors of shirudo
+ *
+ * The bootstrap file of the runtime and config images, which
+ * rust/src/util/image_bootstrap.rs implements.
+ */
 
 #ifndef SHIRUDO_IMAGE_BOOTSTRAP_H
 #define SHIRUDO_IMAGE_BOOTSTRAP_H

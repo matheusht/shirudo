@@ -47,9 +47,6 @@ attest-replay-model	--slice-formula --unwind 20 --unwindset memneq_explicit.0:33
 attest-pcr		--unwind 1 --unwindset harness.0:65,harness.1:33,harness.2:33,hex_decode.0:33,strlen.0:66 --no-array-field-sensitivity
 config-image		--unwind 6 --unwindset memcmp.0:89,harness.0:33 LEN=0,511,512,4096
 config-update-follows	--unwind 33
-image-bootstrap-certificates --unwind 64 --max-field-sensitivity-array-size 32 LEN=0-16
-image-bootstrap		--unwind 10 --unwindset bootstrap_parse.0:2,hex_decode.0:1 --max-field-sensitivity-array-size 32 --slice-formula LEN=0-8
-image-path		--unwind 11
 dm-names		--unwind 10 --unwindset dm_name_ok.0:129,name_valid.0:129,long_name.1:129
 log-escape		--unwind 7 LEN=0-5
 keepalive-emit		--object-bits 12 --max-field-sensitivity-array-size 960 --unwind 1 --unwindset json_members.0:961,power_of_ten.0:6,put_string_n.0:5,put_string_n.1:66,put_raw.0:7,strlen.0:66,hex_is_lower.0:66,kv_counters.0:44,kv_no_tree.0:8,json_raw_value.0:21,vsnprintf.2:4,vsnprintf.0:2,format_number.0:21,format_number.2:5,format_number.3:21,ends_in_any_number.0:6,ends_in_any_number.1:961,ends_in_any_number.2:5 LEN=0-3

@@ -72,6 +72,23 @@ pub fn strsprintf(dst: &mut [u8], parts: &[&[u8]]) -> Result<usize, c_int> {
     Ok(total)
 }
 
+/// The text from `start` to `end` of the line in `buf`, without blanks
+/// before it or blanks and line ends after it, which become NULs, as the
+/// trim() of the C line readers made them: where it starts and ends.
+pub fn trim_blanks(buf: &mut [u8], start: usize, end: usize) -> (usize, usize) {
+    let mut s = start;
+    let mut e = end;
+
+    while s < e && matches!(buf[s], b' ' | b'\t') {
+        s += 1;
+    }
+    while e > s && matches!(buf[e - 1], b' ' | b'\t' | b'\n' | b'\r') {
+        e -= 1;
+        buf[e] = 0;
+    }
+    (s, e)
+}
+
 /// digits(): how many of the bytes of `s`, from the first, are decimal
 /// digits.
 pub fn digits(s: &[u8]) -> usize {
