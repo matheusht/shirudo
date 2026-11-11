@@ -11,22 +11,9 @@ string-search		--unwind 8 LEN=0-5
 string-sanitize		--unwind 8 LEN=0-6
 hex			--unwind 12
 paths-bpffs-name	--unwind 18
-upatch-header		--unwind 2 --unwindset memchr.0:257
-upatch-decoders		--unwind 2 --unwindset memchr.0:65,parse_decoders.0:3,harness.0:3
-upatch-policy-labels	--unwind 3 --unwindset policy_path_valid.0:257,path_valid.0:257 LEN=0,19,20,4187,4188,4189,8356
-upatch-name		--unwind 33 --unwindset upatch_name_valid.0:251,long_name_valid.1:251
-upatch-signed-sections	--refine-arithmetic --unwind 2 --unwindset parse_signed_sections.0:4,directory_broken.0:4,parse_decoders.0:0,parse_policy_labels.0:0 LEN=15,16,40,64
-upatch-signed-name	--refine-arithmetic --unwind 2 --unwindset parse_signed_sections.0:2,directory_broken.0:2,parse_decoders.0:2,parse_policy_labels.0:0 LEN=288
-upatch-prog-specs	--refine-arithmetic --memory-leak-check --malloc-may-fail --malloc-fail-null --unwind 3 --unwindset memchr.0:129,memcmp.0:129,strchr.0:129,strnlen.0:1,strlen.0:1,parse_uprobe_targets.0:0,parse_uprobe_targets.1:0,parse_kprobe_targets.0:0,parse_kprobe_syms.0:0,uprobe_valid.0:1,kprobe_multi_valid.0:1,strcmp.0:1 LEN=3,15,16,176
-upatch-prog-count	--unwind 2 LEN=3,16,176,336
-upatch-prog-uprobes	--refine-arithmetic --max-field-sensitivity-array-size 226 --memory-leak-check --malloc-may-fail --malloc-fail-null --unwind 2 --unwindset memchr.0:129,memcmp.0:129,strchr.0:129,strnlen.0:3,strlen.0:3,parse_uprobe_targets.0:3,parse_kprobe_targets.0:2,parse_kprobe_syms.0:0,kprobe_sym_valid.0:0,kprobe_multi_valid.0:0,strcmp.0:1 LEN=226
-upatch-uprobe-targets	--memory-leak-check --malloc-may-fail --malloc-fail-null --unwind 2 --unwindset parse_uprobe_targets.0:3,memchr.0:10,strnlen.0:11,strlen.0:11,memcmp.0:129 LEN=50
-upatch-prog-kprobes	--refine-arithmetic --max-field-sensitivity-array-size 210 --memory-leak-check --malloc-may-fail --malloc-fail-null --unwind 3 --unwindset memchr.0:129,memcmp.0:129,strchr.0:129,strnlen.0:12,strlen.0:12,parse_uprobe_targets.0:1,parse_uprobe_targets.1:0,uprobe_valid.0:1,parse_kprobe_targets.0:2,parse_kprobe_syms.0:4,kprobe_sym_valid.0:7,kprobe_multi_valid.0:4,strcmp.0:7 --slice-formula LEN=206-210
 upatch-loader		--unwind 50 LEN=4,5,25,49
-upatch-rodata-btf	--refine-arithmetic --object-bits 10 --unwind 16 LEN=4,10,15
 upatch-btf		--unwind 6 --unwindset btf_decl_printable.0:33,btf_name_printable.0:7,btf_unwrap.0:9
 upatch-btf-int		--unwind 2 --unwindset btf_integer.0:65,value_of_bits.0:65
-upatch-rodata		--refine-arithmetic --object-bits 12 --max-field-sensitivity-array-size 32 --unwind 25 --unwindset memcpy.0:49,strlen.0:18,strcmp.0:18 LEN=6,8,24
 string-number-model	--unwind 6
 bpm-tree-follows	--unwind 4
 bpm-tree-sync-model	--object-bits 10 --unwind 8 --unwindset memcmp.0:33,memneq_explicit.0:33,hex_encode.0:33,hex_decode.0:33,model_hash.0:33,model_history.0:33,want_outcome.0:33,want_outcome.1:33,same_history.0:33,any_node.0:33,run.0:33,same_digest.0:33,history_ok.0:33,want_write.0:33,want_write.1:33,strcmp.0:66,strlen.0:66,run.1:2,run.2:2,tree_walk_back.0:2,tree_walk_forward.0:1 --max-field-sensitivity-array-size 257 --slice-formula LEN=0-1

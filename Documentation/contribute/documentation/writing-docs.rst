@@ -91,7 +91,7 @@ the ``facts`` class:
    :Refusal: ``EACCES`` from the denied system call
    :Counters: ``BpfCommand``, ``PinUnlink``, ``BpffsUmount``
    :Tests: ``t6106``, ``t6107``, ``t6120``
-   :Proofs: ``upatch-header``, ``Shirudo.Chain``
+   :Proofs: ``Shirudo.Chain``, ``Shirudo.Events``
    :Residual: R3
 
 Name only hooks, counters, tests and proofs that exist, a hook by the

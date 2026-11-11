@@ -12,9 +12,9 @@ use super::{sha256_calc, walk_boot, walk_log};
 use crate::errno::{EINVAL, ENOENT};
 use crate::sys::hex::hex_decode;
 use crate::sys::libc::abort;
-use crate::sys::upatch::{NAME_MAX, PAYLOAD_HASH_LEN, upatch_member_valid};
 use crate::text::cstr;
 use crate::util::json::{JsonArray, JsonField, parse_schema};
+use crate::util::upatch::{NAME_MAX, PAYLOAD_HASH_LEN, upatch_member_valid};
 
 const NAME_LEN: usize = 34;
 const NV_RSA_BYTES: usize = 384;

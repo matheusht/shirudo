@@ -832,6 +832,16 @@ static int tree_upload_artifact(struct bpm_oci_client *c, const char *repository
  * The classes of a load upatch, none for one without an XDP program or
  * one that is not BPF.
  */
+__u32 prog_specs_xdp_classes(const struct prog_spec *specs, __u32 nr_progs)
+{
+	__u32 i, classes = 0;
+
+	for (i = 0; i < nr_progs; i++)
+		if (specs[i].kind == UPATCH_ATTACH_XDP)
+			classes |= specs[i].device_classes;
+	return classes;
+}
+
 static int upatch_xdp_classes(const void *body, size_t len, __u32 *classes)
 {
 	struct prog_spec *specs = NULL;
@@ -843,7 +853,7 @@ static int upatch_xdp_classes(const void *body, size_t len, __u32 *classes)
 	ret = upatch_open_memory(body, len, &u);
 	if (ret)
 		return ret;
-	if (upatch_signed_type(&u) != UPATCH_TYPE_BPF) {
+	if (u.hdr.type != UPATCH_TYPE_BPF) {
 		*classes = 0;
 		upatch_close(&u);
 		return 0;

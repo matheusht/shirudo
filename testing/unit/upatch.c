@@ -162,56 +162,6 @@ static void kprobe_multi_block_is_exact(void)
 	EXPECT_EQ(parse_one(buf, len), -EINVAL);
 }
 
-static bool path_valid(const char *path)
-{
-	return policy_path_valid(path, strlen(path) + 1);
-}
-
-static void policy_path_takes_a_wildcard_in_its_last_component(void)
-{
-	EXPECT_TRUE(path_valid("/usr/sbin/httpd"));
-	EXPECT_TRUE(path_valid("/httpd"));
-	EXPECT_TRUE(path_valid("/usr/sbin/php-fpm*"));
-	EXPECT_TRUE(path_valid("/usr/sbin/*fpm?.?"));
-	EXPECT_TRUE(path_valid("/*"));
-	EXPECT_FALSE(path_valid(""));
-	EXPECT_FALSE(path_valid("usr/sbin/httpd"));
-	EXPECT_FALSE(path_valid("/"));
-	EXPECT_FALSE(path_valid("/usr/sbin/"));
-	EXPECT_FALSE(path_valid("/usr/sbin/php-fpm*/"));
-	EXPECT_FALSE(path_valid("/opt/*/bin/app"));
-	EXPECT_FALSE(path_valid("/opt/app?/bin/app"));
-	EXPECT_FALSE(path_valid("/*/*"));
-}
-
-static void policy_path_ends_within_its_field_and_its_limit(void)
-{
-	char path[UPATCH_POLICY_PATH_MAX];
-
-	memset(path, 'a', sizeof(path));
-	path[0] = '/';
-	EXPECT_FALSE(policy_path_valid(path, sizeof(path)));
-	EXPECT_FALSE(policy_path_valid(path, 0));
-	path[UPATCH_POLICY_PATH_LEN_MAX] = '\0';
-	EXPECT_TRUE(policy_path_valid(path, sizeof(path)));
-	EXPECT_FALSE(policy_path_valid(path, UPATCH_POLICY_PATH_LEN_MAX));
-	path[UPATCH_POLICY_PATH_LEN_MAX] = 'a';
-	path[UPATCH_POLICY_PATH_LEN_MAX + 1] = '\0';
-	EXPECT_FALSE(policy_path_valid(path, sizeof(path)));
-}
-
-static void policy_path_pattern_is_the_last_component_with_a_wildcard(void)
-{
-	static const char literal[] = "/usr/sbin/httpd";
-	static const char pattern[] = "/usr/sbin/php-fpm*";
-	static const char in_root[] = "/v?";
-
-	EXPECT_TRUE(!policy_path_pattern(literal));
-	EXPECT_STREQ(policy_path_pattern(pattern), "php-fpm*");
-	EXPECT_TRUE(policy_path_pattern(pattern) == pattern + 10);
-	EXPECT_STREQ(policy_path_pattern(in_root), "v?");
-}
-
 static void kprobe_sym_is_one_plain_name(void)
 {
 	char name[UPATCH_KPROBE_SYM_MAX + 1];
@@ -396,105 +346,6 @@ static void xdp_programs_select_disjoint_classes(void)
 	EXPECT_FALSE(specs);
 }
 
-struct java_fixture {
-	struct upatch_header header;
-	__u8 signature[8];
-	__u8 jar[8];
-	char name[UPATCH_NAME_MAX];
-	__le32 type;
-	__u8 pad[4];
-	struct upatch_signed_section dir[3];
-	struct upatch_signed_trailer trailer;
-};
-
-#define JAVA_DATA_OFF	offsetof(struct java_fixture, jar)
-
-static void java_section(struct java_fixture *f, __u32 i, __u32 tag,
-			 size_t off, __u32 len)
-{
-	f->dir[i].tag = cpu_to_le32(tag);
-	f->dir[i].off = cpu_to_le32(off - JAVA_DATA_OFF);
-	f->dir[i].len = cpu_to_le32(len);
-}
-
-static void java_load(struct java_fixture *f, __u32 signed_type)
-{
-	memset(f, 0, sizeof(*f));
-	f->header.magic = cpu_to_le64(UPATCH_MAGIC);
-	f->header.version = cpu_to_le32(UPATCH_VERSION);
-	f->header.type = cpu_to_le32(UPATCH_TYPE_JAVA);
-	memcpy(f->header.name, "agent", sizeof("agent"));
-	f->header.signature_off =
-		cpu_to_le32(offsetof(struct java_fixture, signature));
-	f->header.signature_len = cpu_to_le32(sizeof(f->signature));
-	f->header.data_off = cpu_to_le32(JAVA_DATA_OFF);
-	f->header.data_len = cpu_to_le32(sizeof(*f) - JAVA_DATA_OFF);
-	memcpy(f->jar, "PK\x03\x04jar", sizeof(f->jar));
-	memcpy(f->name, "agent", sizeof("agent"));
-	f->type = cpu_to_le32(signed_type);
-	java_section(f, 0, UPATCH_SECTION_NAME,
-		     offsetof(struct java_fixture, name), sizeof(f->name));
-	java_section(f, 1, UPATCH_SECTION_JAR,
-		     offsetof(struct java_fixture, jar), sizeof(f->jar));
-	java_section(f, 2, UPATCH_SECTION_TYPE,
-		     offsetof(struct java_fixture, type), sizeof(f->type));
-	f->trailer.magic = cpu_to_le32(UPATCH_SIGNED_TRAILER_MAGIC);
-	f->trailer.version = cpu_to_le32(UPATCH_SIGNED_VERSION);
-	f->trailer.dir_off =
-		cpu_to_le32(offsetof(struct java_fixture, dir) - JAVA_DATA_OFF);
-	f->trailer.nr_sections = cpu_to_le32(3);
-}
-
-static void java_load_opens_with_its_jar(void)
-{
-	struct java_fixture f;
-	struct upatch u;
-	const void *jar;
-	__u32 len;
-
-	java_load(&f, UPATCH_TYPE_JAVA);
-	ASSERT_EQ(upatch_open_memory(&f, sizeof(f), &u), 0);
-	EXPECT_STREQ(upatch_type_str(&u), "java");
-	EXPECT_UEQ(upatch_signed_type(&u), UPATCH_TYPE_JAVA);
-	EXPECT_TRUE(upatch_name_signed(&u));
-	jar = upatch_signed_jar(&u, &len);
-	EXPECT_UEQ(len, sizeof(f.jar));
-	EXPECT_TRUE(jar && !memcmp(jar, f.jar, sizeof(f.jar)));
-	upatch_close(&u);
-}
-
-static void java_header_needs_the_signed_type(void)
-{
-	struct java_fixture f;
-	struct upatch u;
-
-	java_load(&f, UPATCH_TYPE_BPF);
-	EXPECT_EQ(upatch_open_memory(&f, sizeof(f), &u), -EINVAL);
-	java_load(&f, UPATCH_TYPE_JAVA);
-	f.trailer.nr_sections = cpu_to_le32(2);
-	EXPECT_EQ(upatch_open_memory(&f, sizeof(f), &u), -EINVAL);
-	java_load(&f, UPATCH_TYPE_JAVA);
-	f.header.type = cpu_to_le32(3);
-	EXPECT_EQ(upatch_open_memory(&f, sizeof(f), &u), -EINVAL);
-}
-
-static void java_header_carries_no_loader(void)
-{
-	struct java_fixture f;
-	struct upatch u;
-
-	java_load(&f, UPATCH_TYPE_JAVA);
-	f.header.loader_insns_off = f.header.signature_off;
-	f.header.loader_insns_len = cpu_to_le32(8);
-	EXPECT_EQ(upatch_open_memory(&f, sizeof(f), &u), -EINVAL);
-	java_load(&f, UPATCH_TYPE_JAVA);
-	f.header.nr_progs = cpu_to_le32(1);
-	EXPECT_EQ(upatch_open_memory(&f, sizeof(f), &u), -EINVAL);
-	java_load(&f, UPATCH_TYPE_JAVA);
-	f.header.signature_len = 0;
-	EXPECT_EQ(upatch_open_memory(&f, sizeof(f), &u), -EINVAL);
-}
-
 /*
  * A BPF upatch whose signed bytes, the loader and then the data, hold a
  * second directory where a split 16 bytes earlier looks for one.
@@ -560,9 +411,6 @@ static const struct unit_case cases[] = {
 	UNIT_CASE(kprobe_multi_names_are_parsed_in_order),
 	UNIT_CASE(kprobe_multi_refuses_a_malformed_list),
 	UNIT_CASE(kprobe_multi_block_is_exact),
-	UNIT_CASE(policy_path_takes_a_wildcard_in_its_last_component),
-	UNIT_CASE(policy_path_ends_within_its_field_and_its_limit),
-	UNIT_CASE(policy_path_pattern_is_the_last_component_with_a_wildcard),
 	UNIT_CASE(kprobe_sym_is_one_plain_name),
 	UNIT_CASE(header_name_is_terminated),
 	UNIT_CASE(prog_name_is_what_the_kernel_takes),
@@ -572,9 +420,6 @@ static const struct unit_case cases[] = {
 	UNIT_CASE(xdp_classes_come_from_xdp_programs_alone),
 	UNIT_CASE(xdp_masks_are_signed_and_bounded),
 	UNIT_CASE(xdp_programs_select_disjoint_classes),
-	UNIT_CASE(java_load_opens_with_its_jar),
-	UNIT_CASE(java_header_needs_the_signed_type),
-	UNIT_CASE(java_header_carries_no_loader),
 	UNIT_CASE(one_signature_keeps_its_sections_in_one_split),
 	{}
 };

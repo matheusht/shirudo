@@ -1040,11 +1040,6 @@ test makes the two differ, which takes runtime authority.
 :Counters: ``PinXattr`` for a forged payload binding; none for a
    modified loader, which the kernel refuses first
 :Tests: ``t2002``, ``t3104``, ``t6117``, ``t6138``
-:Proofs: ``upatch-header``, ``upatch-signed-sections``,
-   ``upatch-signed-name``, ``upatch-name``, ``upatch-prog-specs``,
-   ``upatch-prog-uprobes``, ``upatch-uprobe-targets``,
-   ``upatch-prog-kprobes``, ``upatch-decoders``,
-   ``upatch-policy-labels``
 :Residual: R1, R16
 
 .. _tm-t5:
@@ -1601,8 +1596,7 @@ load and unload are measured as ``java_load`` and
 :Counters: ``SealWrite``, ``SealUnlink``, ``SealRename``, ``SealSetattr``,
    ``SealXattr`` for the jar; none for a refused load
 :Tests: ``t3014``, ``t3114``
-:Proofs: ``upatch-header``, ``upatch-signed-sections``, ``chain-events``,
-   ``Shirudo.Events``
+:Proofs: ``chain-events``, ``Shirudo.Events``
 :Residual: R2, R24
 
 Residual risks

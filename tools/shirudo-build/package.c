@@ -1025,6 +1025,21 @@ static int sym_cmp(const void *a, const void *b)
  * nothing: -EOPNOTSUPP for a glob, -EEXIST for a name given twice, -E2BIG
  * for too many names, -EINVAL for an invalid one.
  */
+bool kprobe_sym_valid(const char *sym, size_t len)
+{
+	size_t i;
+
+	if (!len || len >= UPATCH_KPROBE_SYM_MAX)
+		return false;
+	for (i = 0; i < len; i++) {
+		__u8 c = (__u8)sym[i];
+
+		if (c <= ' ' || c >= 0x7f || c == ',' || c == '*' || c == '?' || c == '|')
+			return false;
+	}
+	return true;
+}
+
 static int split_kprobe_multi_target(const char *list, struct build_kprobe_target *kt)
 {
 	size_t list_len = strlen(list), buf_len;

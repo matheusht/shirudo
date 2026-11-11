@@ -189,8 +189,9 @@ dot in two bytes. -/
 def pinLength (n : List UInt8) : Nat :=
   (n.map fun c => if c == 46 then 2 else 1).sum
 
-/-- `upatch_name_valid()` of util/upatch.c: not empty, not starting with a
-dot, only bytes of `nameChar`, and a pin directory name that fits. -/
+/-- `upatch_name_valid()` of rust/src/util/upatch.rs: not empty, not
+starting with a dot, only bytes of `nameChar`, and a pin directory name
+that fits. -/
 def nameValid : List UInt8 → Bool
   | [] => false
   | c :: cs => c != 46 && (c :: cs).all nameChar &&

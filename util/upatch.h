@@ -2,7 +2,8 @@
 /*
  * Copyright (c) 2026 Authors of shirudo
  *
- * .upatch container parser. On-disk layout in <shirudo/upatch.h>.
+ * .upatch container parser, which rust/src/util/upatch.rs implements.
+ * On-disk layout in <shirudo/upatch.h>.
  */
 
 #ifndef SHIRUDO_UTIL_UPATCH_H
@@ -57,9 +58,6 @@ struct upatch {
 	__u32				signed_policy_labels_len;
 	__u32				signed_policy_map_idx;
 	__u32				signed_socket_policy_map_idx;
-	const __u8			*signed_type;	/* __le32 */
-	const __u8			*signed_jar;
-	__u32				signed_jar_len;
 };
 
 struct upatch_decoder_view {
@@ -136,13 +134,6 @@ const __u8 *upatch_signed_unload_payload(const struct upatch *u);
 
 const void *upatch_signed_policy_labels(const struct upatch *u,
 					__u32 *len);
-/*
- * The payload type the signed sections carry, UPATCH_TYPE_BPF where they
- * carry none. A file opens only when it equals the header's type.
- */
-__u32 upatch_signed_type(const struct upatch *u);
-/* The agent .jar of a Java load, NULL where there is none. */
-const void *upatch_signed_jar(const struct upatch *u, __u32 *len);
 
 /*
  * An upatch name: [A-Za-z0-9._-]+ not starting with '.', so nothing that
@@ -194,20 +185,6 @@ static inline bool kind_is_kprobe_multi(__u32 kind)
 {
 	return kind == UPATCH_ATTACH_KPROBE_MULTI || kind == UPATCH_ATTACH_KRETPROBE_MULTI;
 }
-
-/*
- * Whether the size bytes at path hold a string that a policy label can
- * name files with: an absolute path of at most UPATCH_POLICY_PATH_LEN_MAX
- * bytes that does not end in '/', with '*' and '?' in its last component
- * alone.
- */
-bool policy_path_valid(const char *path, size_t size);
-
-/*
- * The last component of a path policy_path_valid() took where it is a
- * pattern for name_glob_match(), else NULL: the path then names one file.
- */
-const char *policy_path_pattern(const char *path);
 
 /*
  * Whether the len bytes at sym can be one name of a kprobe multi target:

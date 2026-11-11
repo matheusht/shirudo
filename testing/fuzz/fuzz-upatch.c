@@ -13,7 +13,7 @@ int LLVMFuzzerTestOneInput(const __u8 *data, size_t size)
 	struct prog_spec *specs;
 	struct upatch u;
 	const void *attach;
-	__u32 attach_len, jar_len;
+	__u32 attach_len;
 	char path[64];
 	int fd;
 
@@ -29,8 +29,6 @@ int LLVMFuzzerTestOneInput(const __u8 *data, size_t size)
 		upatch_signed_name(&u);
 		upatch_signed_unload_payload(&u);
 		upatch_is_unload(&u);
-		upatch_signed_type(&u);
-		upatch_signed_jar(&u, &jar_len);
 		if (upatch_has_decoders(&u)) {
 			struct upatch_decoder_view d;
 

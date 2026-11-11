@@ -13,7 +13,7 @@ writes and that :doc:`/reference/cli/upatch-load` and
 :doc:`/reference/cli/upatch-unload` consume. One layout serves both a load
 artifact and an unload directive. The structures are defined in
 :src:`include/shirudo/upatch.h`. The writer is :src:`tools/shirudo-build/package.c`
-and the reader is :src:`util/upatch.c`.
+and the reader is :src:`rust/src/util/upatch.rs`.
 
 Conventions
 -----------
@@ -779,8 +779,8 @@ signed bytes and trusts others as they are.
 Reader validation
 -----------------
 
-:src:`util/upatch.c` applies these checks in order. Any failure rejects the
-file.
+:src:`rust/src/util/upatch.rs` applies these checks in order. Any failure
+rejects the file.
 
 #. The file is a regular file, not empty and at most 16 MiB.
 #. The file is at least 360 bytes long.

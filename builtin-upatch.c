@@ -46,7 +46,6 @@
 #include "util/format.h"
 #include "util/help.h"
 #include "util/io.h"
-#include "util/java_agent.h"
 #include "util/json.h"
 #include "util/kernel_abi.h"
 #include "util/identity.h"
@@ -457,7 +456,7 @@ static int cmd_upatch_info(int argc, const char **argv)
 	struct opt_parser p;
 	int opt, err, ret = 1;
 	bool json = false;
-	__u32 attach_len, jar_len;
+	__u32 attach_len;
 
 	OPT_INIT(&p, "upatch info", upatch_info_opts, &upatch_info_help, argc,
 		 argv, 1);
@@ -493,7 +492,6 @@ static int cmd_upatch_info(int argc, const char **argv)
 
 	upatch_header_name(&u, name);
 	upatch_signed_attach(&u, &attach_len);
-	upatch_signed_jar(&u, &jar_len);
 	unload_payload = upatch_signed_unload_payload(&u);
 
 	if (json) {
@@ -526,7 +524,6 @@ static int cmd_upatch_info(int argc, const char **argv)
 			json_kv_null(&e, "signed_name");
 		}
 		json_kv_int(&e, "attach_metadata_len", attach_len);
-		json_kv_int(&e, "jar_len", jar_len);
 		if (unload_payload) {
 			hex_encode(unload_payload, 32, payload_hex);
 			json_kv_string(&e, "unload_payload_sha256", payload_hex);
@@ -608,8 +605,6 @@ static int cmd_upatch_info(int argc, const char **argv)
 		printf("  %-22s %u bytes\n", "Attach metadata:", attach_len);
 	else
 		printf("  %-22s (none)\n", "Attach metadata:");
-	if (jar_len)
-		printf("  %-22s %u bytes\n", "Java agent jar:", jar_len);
 	if (unload_payload) {
 		printf("  %-22s ", "Unload payload:");
 		print_sha256_hex(unload_payload);
@@ -784,8 +779,7 @@ static int cmd_upatch_list(int argc, const char **argv)
 		hex_encode(u.hdr.payload_sha256, 32, payload_hex);
 		type = upatch_is_unload(&u) ? "unload" : "load";
 		payload_type = upatch_type_str(&u);
-		loaded = u.hdr.type == UPATCH_TYPE_JAVA ?
-			 java_agent_loaded(name) : upatch_is_loaded(name);
+		loaded = upatch_is_loaded(name);
 		upatch_close(&u);
 
 		if (json) {
@@ -2147,114 +2141,6 @@ static void close_loader_fds(const struct loader_ctx *cx,
 	}
 }
 
-/* OR the entry's bit into the policy label of the file fd is open on. */
-static void label_fd(int fd, const char *path,
-		     const struct upatch_policy_label_entry *entry)
-{
-	__u64 current = 0;
-	ssize_t n;
-
-	n = fgetxattr(fd, XATTR_POLICY, &current, sizeof(current));
-	if (n < 0 && (errno == ENODATA || errno == EOPNOTSUPP)) {
-		current = 0;
-	} else if (n != (ssize_t)sizeof(current)) {
-		pr_warn("upatch: cannot read policy label on %s: %s", path,
-			n < 0 ? strerror(errno) : "invalid length");
-		return;
-	}
-	current |= le64_to_cpu(entry->bit);
-	if (fsetxattr(fd, XATTR_POLICY, &current, sizeof(current), 0))
-		pr_warn("upatch: cannot set policy label on %s: %s", path,
-			strerror(errno));
-}
-
-static void label_path(const struct upatch_policy_label_entry *entry)
-{
-	int fd;
-
-	fd = open(entry->path, O_RDONLY | O_CLOEXEC);
-	if (fd < 0) {
-		pr_warn("upatch: cannot label %s for policy %s: %s",
-			entry->path, entry->policy, strerror(errno));
-		return;
-	}
-	label_fd(fd, entry->path, entry);
-	close(fd);
-}
-
-/*
- * Root owns the directory and can put a symbolic link under a name the
- * pattern matches, to a file the signed pattern does not name: a match
- * is labeled only where it is a regular file itself.
- */
-static bool label_match(int dir_fd, const char *name,
-			const struct upatch_policy_label_entry *entry)
-{
-	struct stat st;
-	bool regular;
-	int fd;
-
-	fd = openat(dir_fd, name,
-		    O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
-	if (fd < 0)
-		return false;
-	regular = !fstat(fd, &st) && S_ISREG(st.st_mode);
-	if (regular)
-		label_fd(fd, name, entry);
-	close(fd);
-	return regular;
-}
-
-/*
- * Returns how many of the entries of dir, which reads dir_fd, the
- * pattern labeled, or a negative errno.
- */
-static int label_matches(DIR *dir, int dir_fd, const char *pattern,
-			 const struct upatch_policy_label_entry *entry)
-{
-	struct dirent *de;
-	int nr_labeled = 0;
-
-	for (;;) {
-		errno = 0;
-		de = readdir(dir);
-		if (!de)
-			return errno ? -errno : nr_labeled;
-		if (name_glob_match(pattern, de->d_name, strlen(de->d_name)) &&
-		    label_match(dir_fd, de->d_name, entry))
-			nr_labeled++;
-	}
-}
-
-static void label_pattern(const struct upatch_policy_label_entry *entry,
-			  const char *pattern)
-{
-	char dir_path[UPATCH_POLICY_PATH_MAX];
-	int dir_fd, nr_labeled;
-	DIR *dir;
-
-	/* The directory with its '/', which a pattern in the root keeps. */
-	memcpy(dir_path, entry->path, pattern - entry->path);
-	dir_path[pattern - entry->path] = '\0';
-	dir_fd = open(dir_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-	dir = dir_fd < 0 ? NULL : fdopendir(dir_fd);
-	if (!dir) {
-		pr_warn("upatch: cannot label %s for policy %s: %s",
-			entry->path, entry->policy, strerror(errno));
-		if (dir_fd >= 0)
-			close(dir_fd);
-		return;
-	}
-	nr_labeled = label_matches(dir, dir_fd, pattern, entry);
-	closedir(dir);
-	if (nr_labeled < 0)
-		pr_warn("upatch: cannot label %s for policy %s: %s",
-			entry->path, entry->policy, strerror(-nr_labeled));
-	else if (!nr_labeled)
-		pr_warn("upatch: cannot label %s for policy %s: no regular file matches",
-			entry->path, entry->policy);
-}
-
 /*
  * From the copy the kernel's signature check covered, not from the file
  * again, which may hold other labels by now.
@@ -2263,7 +2149,6 @@ static void apply_policy_labels(const struct upatch *u)
 {
 	struct upatch_policy_label_header header;
 	struct upatch_policy_label_entry entry;
-	const char *pattern;
 	const __u8 *labels;
 	__u32 len, count;
 
@@ -2273,13 +2158,33 @@ static void apply_policy_labels(const struct upatch *u)
 	memcpy(&header, labels, sizeof(header));
 	count = le32_to_cpu(header.count);
 	for (__u32 i = 0; i < count; i++) {
+		__u64 current = 0;
+		ssize_t n;
+		int fd;
+
 		memcpy(&entry, labels + sizeof(header) + i * sizeof(entry),
 		       sizeof(entry));
-		pattern = policy_path_pattern(entry.path);
-		if (pattern)
-			label_pattern(&entry, pattern);
-		else
-			label_path(&entry);
+		fd = open(entry.path, O_RDONLY | O_CLOEXEC);
+		if (fd < 0) {
+			pr_warn("upatch: cannot label %s for policy %s: %s",
+				entry.path, entry.policy, strerror(errno));
+			continue;
+		}
+		n = fgetxattr(fd, XATTR_POLICY, &current, sizeof(current));
+		if (n < 0 && (errno == ENODATA || errno == EOPNOTSUPP)) {
+			current = 0;
+		} else if (n != (ssize_t)sizeof(current)) {
+			pr_warn("upatch: cannot read policy label on %s: %s",
+				entry.path,
+				n < 0 ? strerror(errno) : "invalid length");
+			close(fd);
+			continue;
+		}
+		current |= le64_to_cpu(entry.bit);
+		if (fsetxattr(fd, XATTR_POLICY, &current, sizeof(current), 0))
+			pr_warn("upatch: cannot set policy label on %s: %s",
+				entry.path, strerror(errno));
+		close(fd);
 	}
 }
 
@@ -2322,6 +2227,18 @@ static int refuse_unload_directive(const struct signed_load *sl)
 		return 1;
 	}
 	return 0;
+}
+
+/* Only a BPF payload has a loader for the kernel to verify and run. */
+static int refuse_foreign_payload(const struct signed_load *sl)
+{
+	if (sl->u->hdr.type == UPATCH_TYPE_BPF)
+		return 0;
+	pr_err("upatch load: %s carries a %s payload, not BPF", sl->label,
+	       upatch_type_str(sl->u));
+	rep_fail(sl->rep, "parse", "parser_rejected", 0,
+		 "not a BPF payload");
+	return 1;
 }
 
 /*
@@ -2698,7 +2615,7 @@ static int signed_load_run(struct signed_load *sl)
 	const struct upatch *u = sl->u;
 	int ret;
 
-	if (refuse_unload_directive(sl) ||
+	if (refuse_unload_directive(sl) || refuse_foreign_payload(sl) ||
 	    trust_anchor_keyring(&sl->keyring, &sl->serial, sl->rep) ||
 	    upatch_signed_name_check(sl) || upatch_payload_check(sl) ||
 	    upatch_attach_prepare(sl) || loader_map_prepare(sl) ||
@@ -2744,75 +2661,12 @@ static void signed_load_release(struct signed_load *sl)
 		close(sl->map_fd);
 }
 
-static int java_verify(const struct upatch *u, const char *label,
-		       struct op_report *rep)
-{
-	int ret = java_upatch_verify(u);
-
-	if (!ret)
-		return 0;
-	pr_err("upatch: %s: the Java upatch %s (%s)", label,
-	       ret == -EKEYREJECTED ? "is not signed by an enrolled key" :
-	       ret == -EBADMSG ? "is malformed or its payload digest differs" :
-	       "cannot be verified", strerror(-ret));
-	rep_fail(rep, "java_verify",
-		 ret == -EKEYREJECTED ? "signature_rejected" :
-		 ret == -EBADMSG ? "parser_rejected" : "unknown", -ret,
-		 "Java upatch verification failed");
-	return 1;
-}
-
-/*
- * A Java upatch has no loader for the kernel to verify: its signature
- * is checked here, against the keys the .bpf keyring holds, and a load
- * installs its jar, sealed, from the bytes checked.
- */
-static int java_apply(const struct upatch *u, const char *label,
-		      bool verify_only, struct op_report *rep)
-{
-	char name[UPATCH_NAME_MAX + 1];
-	const void *jar;
-	__u32 len;
-	int ret;
-
-	if (!verify_only && upatch_is_unload(u)) {
-		pr_err("upatch load: %s is an UNLOAD directive; "
-		       "use `shirudo upatch unload`", label);
-		rep_fail(rep, "parse", "parser_rejected", 0,
-			 "is an UNLOAD directive");
-		return 1;
-	}
-	upatch_header_name(u, name);
-	if (!upatch_name_valid(name)) {
-		pr_err("upatch: %s: refusing unsafe upatch name '%s'", label,
-		       name);
-		rep_fail(rep, "parse", "parser_rejected", 0,
-			 "unsafe upatch name");
-		return 1;
-	}
-	if (java_verify(u, label, rep))
-		return 1;
-	if (verify_only)
-		return 0;
-	jar = upatch_signed_jar(u, &len);
-	ret = java_agent_install(name, jar, len);
-	if (ret) {
-		pr_err("upatch load: cannot install the jar of %s: %s", name,
-		       strerror(-ret));
-		rep_fail(rep, "java_install", "unknown", -ret,
-			 "cannot install the jar");
-		return 1;
-	}
-	pr_audit("upatch load: %s installed, Java agent %u bytes", name, len);
-	return 0;
-}
-
 /* Shared by `upatch load` and boot restore: one signature-verified path. */
 /*
  * Load and run the signed loader of u, which the caller read once and
  * closes: the name the signature covers, the loader the kernel verifies
  * and what the caller then measures and archives are all those bytes.
- * label names them in messages. A Java upatch takes java_apply().
+ * label names them in messages.
  */
 static int upatch_apply(struct upatch *u, const char *label, bool verify_only,
 			struct op_report *rep)
@@ -2831,8 +2685,6 @@ static int upatch_apply(struct upatch *u, const char *label, bool verify_only,
 	};
 	int ret;
 
-	if (u->hdr.type == UPATCH_TYPE_JAVA)
-		return java_apply(u, label, verify_only, rep);
 	sl.vlog = xmalloc(VERIFIER_LOG_MAX);
 	if (!sl.vlog) {
 		rep_fail(rep, "parse", "unknown", ENOMEM, "out of memory");
@@ -3022,13 +2874,12 @@ static int format_upatch_event(const char *type, const char *name,
  * unmeasured success: init guarantees the register exists. *measured
  * tells a failure after the register moved from one before it.
  */
-static int upatch_chain_event_locked(__u32 payload_type, bool load,
+static int upatch_chain_event_locked(const char *tag, const char *type,
 				     const char *op, const char *name,
 				     const __u8 payload[32],
 				     const char *reason, char out_chain[65],
 				     bool *measured)
 {
-	const char *type = eventlog_upatch_record(payload_type, load);
 	char record[4096], chain_hex[65];
 	__u8 event[32], chain[32];
 	int ret;
@@ -3037,8 +2888,7 @@ static int upatch_chain_event_locked(__u32 payload_type, bool load,
 		out_chain[0] = '\0';
 	if (measured)
 		*measured = false;
-	ret = chain_upatch_event(chain_upatch_tag(payload_type, load), name,
-				 payload, event);
+	ret = chain_upatch_event(tag, name, payload, event);
 	if (ret) {
 		pr_err("upatch %s: cannot hash the event (category: tpm_error)",
 		       op);
@@ -3348,32 +3198,13 @@ static int read_upatch(const char *src, __u8 **buf, size_t *len,
 	return ret;
 }
 
-/*
- * A failure here leaves the jars or the options a JVM started next reads
- * out of step with the agents loaded, which the next upatch command and
- * init bring back in line. It refuses nothing: a jar it keeps by mistake
- * belongs to no archive, and one it cannot account for it keeps.
- */
-static void java_options_sync(const char *op)
-{
-	int ret = java_agents_sync();
-
-	if (ret)
-		pr_warn("upatch %s: cannot update %s: %s; JVMs started now do not see the change",
-			op, JAVA_ENV_PATH, strerror(-ret));
-}
-
-/*
- * Take a load the register did not record back out: pins or jar, then
- * archive. A Java upatch has no pins and a BPF one no jar.
- */
-static int undo_load(const char *name, __u32 type)
+/* Take a load the register did not record back out: pins, then archive. */
+static int undo_load(const char *name)
 {
 	char persisted[PATH_MAX];
 	int ret;
 
-	ret = type == UPATCH_TYPE_JAVA ? java_agent_retire(name) :
-					 remove_pin_dir(name);
+	ret = remove_pin_dir(name);
 	if (!ret && strsprintf(persisted, sizeof(persisted), "%s/%s.upatch",
 			       UPATCHES_DIR, name) >= 0 &&
 	    unlink(persisted) != 0 && errno != ENOENT)
@@ -3381,9 +3212,9 @@ static int undo_load(const char *name, __u32 type)
 	return ret;
 }
 
-static void unload_unmeasured(const char *name, __u32 type)
+static void unload_unmeasured(const char *name)
 {
-	int ret = undo_load(name, type);
+	int ret = undo_load(name);
 
 	if (ret)
 		pr_err("upatch load: %s is loaded but not measured and could "
@@ -3397,7 +3228,7 @@ static void unload_unmeasured(const char *name, __u32 type)
 /* The rest are still undone when one fails; *ctx keeps the first error. */
 static int undo_unmeasured_pin(const char *name, void *ctx)
 {
-	int *failed = ctx, ret = undo_load(name, UPATCH_TYPE_BPF);
+	int *failed = ctx, ret = undo_load(name);
 
 	if (ret) {
 		pr_err("upatch: %s is pinned without a record of this boot and could not be undone: %s; operator must reconcile",
@@ -3469,12 +3300,9 @@ static int undo_unmeasured(struct op_report *rep, const char *op)
 		ret = measured_unmeasured_archives(set, undo_unmeasured_archive,
 						   &failed);
 	measured_set_free(set);
-	if (ret >= 0)
-		ret = failed;
-	if (!ret) {
-		java_options_sync(op);
+	if (ret >= 0 && !failed)
 		return 0;
-	}
+	ret = ret < 0 ? ret : failed;
 	pr_err("upatch %s: cannot undo what this boot's records do not cover: %s; refused",
 	       op, strerror(-ret));
 	rep_fail(rep, "tpm_extend", "tpm_error", ret,
@@ -3559,28 +3387,20 @@ static int upatch_load(const struct load_args *args)
 	 * it. An install of the very payload loaded is done: bpm retries one
 	 * that a stop cut off between this load and its own record.
 	 */
-	err = upatch_loaded_payload(name, live);
-	if (!err && args->loaded_is_done &&
-	    !memcmp(live, payload, sizeof(live))) {
-		pr_info("upatch load: %s is already loaded with this payload",
-			name);
-		rep.ok = true;
-		rep.category = "already_loaded";
-		ret = 0;
-		goto done;
-	}
-	if (!err || err == -ESTALE) {
-		pr_err("upatch load: %s is already loaded%s; unload it with its signed directive first",
-		       name, err ? ", without the jar it archived" : "");
+	if (!upatch_pin_payload(name, live)) {
+		if (args->loaded_is_done &&
+		    !memcmp(live, payload, sizeof(live))) {
+			pr_info("upatch load: %s is already loaded with this payload",
+				name);
+			rep.ok = true;
+			rep.category = "already_loaded";
+			ret = 0;
+			goto done;
+		}
+		pr_err("upatch load: %s is already loaded; unload it with its signed directive first",
+		       name);
 		rep_fail(&rep, "pin", "already_loaded", EEXIST,
 			 "upatch already loaded");
-		goto done;
-	}
-	if (err != -ENOENT) {
-		pr_err("upatch load: cannot tell whether %s is loaded: %s; nothing loaded",
-		       name, strerror(-err));
-		rep_fail(&rep, "pin", "unknown", -err,
-			 "cannot tell whether the upatch is loaded");
 		goto done;
 	}
 
@@ -3601,26 +3421,24 @@ static int upatch_load(const struct load_args *args)
 	if (err) {
 		pr_err("upatch load: loaded but not archived under %s: %s; "
 		       "not measured", UPATCHES_DIR, strerror(-err));
-		unload_unmeasured(name, u.hdr.type);
+		unload_unmeasured(name);
 		rep_fail(&rep, "persist", "unknown", -err,
 			 "persist failed; the load was undone");
 		goto done;
 	}
 
-	err = upatch_chain_event_locked(u.hdr.type, true, "load", name,
-					payload, NULL, rep.chain_after,
-					&measured);
+	err = upatch_chain_event_locked("shirudo-upatch", "upatch_load",
+					"load", name, payload, NULL,
+					rep.chain_after, &measured);
 	if (err) {
 		if (!measured)
-			unload_unmeasured(name, u.hdr.type);
+			unload_unmeasured(name);
 		rep_fail(&rep, "tpm_extend", chain_event_category(err, measured),
 			 err, measured ?
 			 "eventlog append failed after the extend" :
 			 "chain extend failed; the load was undone");
 		goto done;
 	}
-	if (u.hdr.type == UPATCH_TYPE_JAVA)
-		java_options_sync("load");
 	rep.ok = true;
 	rep.phase = "done";
 	rep.tpm_present = rep.chain_after[0] != '\0';
@@ -3650,69 +3468,6 @@ static int cmd_upatch_load(int argc, const char **argv)
 	if (err)
 		return err == OPT_DONE ? 0 : err;
 	return upatch_load(&args);
-}
-
-/*
- * The unload of a Java upatch, under the register lock and past the
- * directive's verification: the archive must be the Java load the
- * directive names, then the event, then the jar and the archive go and
- * the options follow. 0 on success, 1 refused or failed.
- */
-static int java_unload_locked(const char *name,
-			      const __u8 payload[UPATCH_PAYLOAD_HASH_LEN],
-			      const char *persisted, struct op_report *rep)
-{
-	struct upatch archived;
-	__u32 type;
-	int err;
-
-	err = upatch_archive_verify(name, payload, &archived);
-	if (err == -ESTALE && access(persisted, F_OK)) {
-		pr_info("upatch unload: %s already unloaded (no archive)", name);
-		java_options_sync("unload");
-		rep->ok = true;
-		rep->category = "already_unloaded";
-		strscpy_literal(rep->message, "already unloaded");
-		return 0;
-	}
-	if (!err) {
-		type = archived.hdr.type;
-		upatch_close(&archived);
-		if (type != UPATCH_TYPE_JAVA)
-			err = -ESTALE;
-	}
-	if (err) {
-		pr_err("upatch unload: payload_mismatch, %s is not the Java "
-		       "upatch the directive expects; refused", persisted);
-		rep_fail(rep, "pin", "payload_mismatch",
-			 err == -ESTALE ? EPERM : -err,
-			 "archived payload does not match directive");
-		return 1;
-	}
-	err = upatch_chain_event_locked(UPATCH_TYPE_JAVA, false, "unload",
-					name, payload, NULL, rep->chain_after,
-					NULL);
-	if (err) {
-		rep_fail(rep, "tpm_extend", chain_event_category(err, false),
-			 err, "chain extend failed; nothing removed");
-		return 1;
-	}
-	err = java_agent_retire(name);
-	if (!err && unlink(persisted) && errno != ENOENT)
-		err = -errno;
-	if (err) {
-		pr_err("upatch unload: measured, but failed to remove %s: %s; repeat the unload",
-		       name, strerror(-err));
-		rep_fail(rep, "pin", "detach_failed", -err,
-			 "removal failed after the event was measured");
-		return 1;
-	}
-	java_options_sync("unload");
-	pr_info("upatch unload: %s removed", name);
-	rep->ok = true;
-	rep->phase = "done";
-	rep->tpm_present = rep->chain_after[0] != '\0';
-	return 0;
 }
 
 static int cmd_upatch_unload(int argc, const char **argv)
@@ -3814,10 +3569,6 @@ static int cmd_upatch_unload(int argc, const char **argv)
 		pr_err("upatch unload: signature verification failed; refusing");
 		goto done;
 	}
-	if (u.hdr.type == UPATCH_TYPE_JAVA) {
-		ret = java_unload_locked(name, payload, persisted, &rep);
-		goto done;
-	}
 
 	/*
 	 * The live value is the xattr bpf2 guards; the expected one is
@@ -3869,12 +3620,7 @@ static int cmd_upatch_unload(int argc, const char **argv)
 
 		err = upatch_archive_verify(name, payload, &archived);
 		if (!err) {
-			/* Only its own signed directive unloads a Java upatch. */
-			if (archived.hdr.type != UPATCH_TYPE_BPF)
-				err = -ESTALE;
 			upatch_close(&archived);
-		}
-		if (!err) {
 			if (unlink(persisted) != 0 && errno != ENOENT)
 				pr_warn("upatch unload: could not remove %s: %s",
 					persisted, strerror(errno));
@@ -3904,8 +3650,9 @@ static int cmd_upatch_unload(int argc, const char **argv)
 	 * fails after the event leaves a shield the register says is gone,
 	 * which the next status reports and the operator can repeat.
 	 */
-	err = upatch_chain_event_locked(UPATCH_TYPE_BPF, false, "unload", name,
-					payload, NULL, rep.chain_after, NULL);
+	err = upatch_chain_event_locked("shirudo-unload", "upatch_unload",
+					"unload", name, payload, NULL,
+					rep.chain_after, NULL);
 	if (err) {
 		rep_fail(&rep, "tpm_extend", chain_event_category(err, false),
 			 err, "chain extend failed; nothing detached");
@@ -3948,24 +3695,6 @@ done:
 	return ret;
 }
 
-/*
- * 1 when name runs: its pins, or the jar of its Java archive installed as
- * archived. A Java archive whose jar is missing or another is purged as an
- * archive alone, as a BPF one without pins is.
- */
-static int purge_is_loaded(const char *name, __u32 type)
-{
-	__u8 payload[UPATCH_PAYLOAD_HASH_LEN];
-	int ret;
-
-	if (type != UPATCH_TYPE_JAVA)
-		return upatch_pinned(name);
-	ret = java_agent_payload(name, payload);
-	if (ret == -ESTALE || ret == -ENOENT)
-		return 0;
-	return ret ? ret : 1;
-}
-
 static int upatch_purge_locked(const char *name, const struct cert *signer,
 			       const char *reason)
 {
@@ -3973,7 +3702,6 @@ static int upatch_purge_locked(const char *name, const struct cert *signer,
 	char persisted[PATH_MAX];
 	int fd, loaded, ret;
 	struct upatch u;
-	__u32 type;
 
 	if (strsprintf(persisted, sizeof(persisted), "%s/%s.upatch",
 		       UPATCHES_DIR, name) < 0)
@@ -3988,25 +3716,24 @@ static int upatch_purge_locked(const char *name, const struct cert *signer,
 		return ret;
 	ret = cms_signed_by(upatch_signature(&u), u.hdr.signature_len, signer);
 	memcpy(payload, u.hdr.payload_sha256, sizeof(payload));
-	type = u.hdr.type;
 	upatch_close(&u);
 	if (ret != 1)
 		return ret < 0 ? ret : -ESTALE;
 
 	/* As for unload: the event first, then the detach it describes. */
-	loaded = purge_is_loaded(name, type);
+	loaded = upatch_pinned(name);
 	if (loaded < 0)
 		return loaded;
 	if (loaded) {
-		ret = upatch_chain_event_locked(type, false, "purge", name,
+		ret = upatch_chain_event_locked("shirudo-unload",
+						"upatch_unload", "purge", name,
 						payload, reason, NULL, NULL);
 		if (ret)
 			return ret;
-		ret = type == UPATCH_TYPE_JAVA ? java_agent_retire(name) :
-						 remove_pin_dir(name);
+		ret = remove_pin_dir(name);
 		if (ret) {
 			pr_err("upatch purge: measured, but failed to remove "
-			       "%s: %s", name, strerror(-ret));
+			       "the pin for %s: %s", name, strerror(-ret));
 			return ret;
 		}
 	}
@@ -4015,8 +3742,6 @@ static int upatch_purge_locked(const char *name, const struct cert *signer,
 		       strerror(errno));
 		return -errno;
 	}
-	if (type == UPATCH_TYPE_JAVA)
-		java_options_sync("purge");
 	pr_audit("upatch purge: name=%s reason=%s %s", name, reason,
 		 loaded ? "detached" : "archive_only");
 	return loaded ? 1 : 0;

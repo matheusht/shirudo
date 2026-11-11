@@ -236,9 +236,7 @@ UTIL_SRCS := \
     util/loader.c \
     util/sysinfo_image.c \
     util/io_trusted.c \
-    util/upatch.c \
     util/xdp.c \
-    util/java_agent.c \
     util/identity.c \
     util/tamper.c \
     util/integrity.c \
@@ -557,7 +555,7 @@ build/target/util/loader.o: $(BPF_OBJS)
 tools/shirudo-build/shirudo-build: $(BUILD_OBJS) $(SIGN_OBJ) \
                                    util/log.o util/loader.o \
                                     util/malloc.o util/paths.o \
-                                   util/upatch.o \
+                                    \
                                    util/hex.o \
                                    util/seal.o util/string.o \
                                    util/curl.o \
@@ -839,7 +837,7 @@ testing/helper/test-harden: testing/helper/test-harden.c util/log.o \
 # must resolve even for a helper that never extends.
 # util/malloc.o provides x*/libc_free used by the Rust library.
 REGISTER_OBJS := \
-                 util/upatch.o \
+                  \
                  util/hex.o util/string.o \
                   util/seal.o \
                  util/log.o util/malloc.o \
@@ -871,7 +869,7 @@ testing/helper/test-tpm-preopened: testing/helper/test-tpm-preopened.c \
 		-Wl,--wrap=enforcement_active
 
 testing/helper/test-keys: testing/helper/test-keys.c \
-                          util/upatch.o $(REGISTER_OBJS)
+                           $(REGISTER_OBJS)
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(REGISTER_LIBS)
 
@@ -892,7 +890,7 @@ testing/helper/test-tpm-wire: testing/helper/test-tpm-wire.c util/hex.o \
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ -lcrypto -lssl $(ZLIB_LIBS) $(RUST_TEST_LDLIBS)
 
 testing/helper/test-register: testing/helper/test-register.c  \
-                        util/upatch.o $(TPM_CLIENT_SRCS) $(REGISTER_OBJS)
+                         $(TPM_CLIENT_SRCS) $(REGISTER_OBJS)
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $(filter-out %.h,$^) $(REGISTER_LIBS) \
 		-Wl,--wrap=enforcement_active
@@ -918,7 +916,7 @@ testing/helper/test-nv-cphash: testing/helper/test-nv-cphash.c \
 		-Wl,--wrap=enforcement_active
 
 testing/helper/test-tpm-session: testing/helper/test-tpm-session.c \
-		 util/upatch.o $(TPM_CLIENT_SRCS) $(REGISTER_OBJS) $(RUST_LIB)
+		  $(TPM_CLIENT_SRCS) $(REGISTER_OBJS) $(RUST_LIB)
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $(filter-out %.h,$^) $(REGISTER_LIBS) \
 		-Wl,--wrap=enforcement_active,--wrap=identity_read
@@ -977,7 +975,7 @@ testing/helper/test-otel-map: testing/helper/test-otel-map.c util/upatch_maps.o 
                         util/seal.o \
                         util/upatch_decode.o util/upatch_pins.o \
                         util/upatch_resolve.o \
-                        util/upatch.o util/string.o util/log.o \
+                         util/string.o util/log.o \
                         util/paths.o \
                          util/malloc.o $(LIBBPF_A) util/hex.o \
                         $(RUST_LIB)
@@ -989,10 +987,11 @@ testing/helper/test-upatch-map-types: testing/helper/test-upatch-map-types.c
 	$(Q)$(CC) $(CFLAGS) -o $@ $^
 
 testing/helper/test-upatch-prog-metadata: testing/helper/test-upatch-prog-metadata.c \
-                                    util/upatch.o util/malloc.o util/string.o \
-                                    util/hex.o
+                                     util/malloc.o util/string.o \
+                                    util/hex.o util/log.o $(RUST_LIB)
 	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) -o $@ $^
+	$(Q)$(CC) $(CFLAGS) -o $@ $^ \
+		$(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
 testing/helper/test-upatch-serializer-pages: testing/helper/test-upatch-serializer-pages.c \
                                        util/upatch_maps.o util/upatch_pins.o util/upatch_resolve.o \
@@ -1005,14 +1004,14 @@ testing/helper/test-upatch-serializer-pages: testing/helper/test-upatch-serializ
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
 testing/helper/test-upatch-rodata: testing/helper/test-upatch-rodata.c \
-                               util/upatch.o util/seal.o \
+                                util/seal.o \
                                util/string.o util/malloc.o  \
                                util/log.o util/hex.o $(RUST_LIB)
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
 testing/helper/test-upatch-decode: testing/helper/test-upatch-decode.c \
-			      util/upatch_decode.o util/upatch.o util/malloc.o util/hex.o \
+			      util/upatch_decode.o  util/malloc.o util/hex.o \
 			      util/string.o util/seal.o  util/log.o \
 			      $(RUST_LIB)
 	@printf '  CC      $@\n'
@@ -1048,7 +1047,7 @@ testing/helper/test-tpm-command: testing/helper/test-tpm-command.c include/shiru
 	$(Q)$(CC) $(CFLAGS) -o $@ $<
 
 testing/helper/test-config-attest: testing/helper/test-config-attest.c \
-		 util/upatch.o $(REGISTER_OBJS)
+		  $(REGISTER_OBJS)
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(REGISTER_LIBS)
 
@@ -1215,7 +1214,7 @@ FUZZ_BASE := util/string.c util/hex.c util/malloc.c testing/fuzz/log.c
 FUZZ_SEAL := util/seal.c
 FUZZ_OCI := util/curl.c  $(FUZZ_SEAL)
 FUZZ_PACKAGE := util/bpm_tree.c util/chain_history.c \
-                util/upatch.c $(FUZZ_OCI)
+                 $(FUZZ_OCI)
 
 FUZZ_TARGETS := $(patsubst testing/fuzz/%.c,$(FUZZ_OUT)/%, \
                 $(wildcard testing/fuzz/fuzz-*.c))
@@ -1230,13 +1229,13 @@ $(FUZZ_OUT)/fuzz-bpm-index: testing/fuzz/fuzz-bpm-index.c \
                              $(FUZZ_BASE) $(FUZZ_PACKAGE)
 $(FUZZ_OUT)/fuzz-tree: testing/fuzz/fuzz-tree.c $(FUZZ_BASE) \
                         util/bpm_tree.c util/chain_history.c \
-                        util/upatch.c $(FUZZ_OCI)
+                         $(FUZZ_OCI)
 $(FUZZ_OUT)/fuzz-upatch: testing/fuzz/fuzz-upatch.c $(FUZZ_BASE) \
-                          util/upatch.c
+
 $(FUZZ_OUT)/fuzz-prog-metadata: testing/fuzz/fuzz-prog-metadata.c \
-                                 $(FUZZ_BASE) util/upatch.c
+                                 $(FUZZ_BASE)
 $(FUZZ_OUT)/fuzz-rodata: testing/fuzz/fuzz-rodata.c $(FUZZ_BASE) \
-                          util/upatch.c util/upatch_rodata.c \
+                           util/upatch_rodata.c \
                            $(FUZZ_SEAL) $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-rodata: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-rodata: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS) $(ZLIB_LIBS)
@@ -1251,12 +1250,12 @@ $(FUZZ_OUT)/fuzz-attest: testing/fuzz/fuzz-attest.c $(FUZZ_BASE) \
                            util/chain_history.c \
                            $(FUZZ_SEAL) \
                           util/identity.c \
-                          util/version_id.c util/upatch.c \
+                          util/version_id.c  \
                           $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-attest: FUZZ_CFLAGS += $(TSS2_CFLAGS) $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-attest: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) $(LIBELF_LIBS) $(ZLIB_LIBS)
 $(FUZZ_OUT)/fuzz-eventlog: testing/fuzz/fuzz-eventlog.c $(FUZZ_BASE) \
-                            util/upatch.c \
+                             \
                             $(FUZZ_SEAL)  \
                             util/identity.c $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-eventlog: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
@@ -1274,7 +1273,7 @@ $(FUZZ_OUT)/fuzz-serializer: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS)
 $(FUZZ_OUT)/fuzz-cms: testing/fuzz/fuzz-cms.c $(FUZZ_BASE) \
                         $(FUZZ_SEAL)
 $(FUZZ_OUT)/fuzz-decoder: testing/fuzz/fuzz-decoder.c $(FUZZ_BASE) \
-                           util/upatch_decode.c util/upatch.c  \
+                           util/upatch_decode.c   \
                            $(FUZZ_SEAL)
 $(FUZZ_OUT)/fuzz-decoder: FUZZ_CFLAGS += $(LUAJIT_CFLAGS) -DHAVE_LUAJIT \
 	-DFUZZ_SOURCE_TREE='"$(CURDIR)"'
@@ -1285,7 +1284,7 @@ $(FUZZ_OUT)/fuzz-otel: testing/fuzz/fuzz-otel.c $(FUZZ_BASE) \
                         $(FUZZ_SEAL)
 $(FUZZ_OUT)/fuzz-beefile: testing/fuzz/fuzz-beefile.c $(FUZZ_BASE) \
                            tools/shirudo-build/bpm-build.c $(FUZZ_PACKAGE) \
-                           util/upatch.c util/paths.c \
+                            util/paths.c \
                            util/version_id.c util/options.c \
                            util/similar.c
 $(FUZZ_OUT)/fuzz-oci-http: testing/fuzz/fuzz-oci-http.c $(FUZZ_BASE) \
@@ -1303,7 +1302,7 @@ $(FUZZ_OUT)/fuzz-config-update: testing/fuzz/fuzz-config-update.c \
                                  $(FUZZ_BASE) \
                                   $(FUZZ_SEAL)
 FUZZ_TREE_STATE := util/bpm_tree.c \
-                   util/chain_history.c util/upatch.c $(FUZZ_OCI) \
+                   util/chain_history.c  $(FUZZ_OCI) \
                    util/kconfig.c
 $(FUZZ_OUT)/fuzz-tree-state: testing/fuzz/fuzz-tree-state.c $(FUZZ_BASE) \
                               $(FUZZ_TREE_STATE)
@@ -1317,11 +1316,10 @@ $(FUZZ_OUT)/fuzz-upatch-info: testing/fuzz/fuzz-upatch-info.c $(FUZZ_BASE) \
                               builtin.h \
                               util/curl.c \
                               util/identity.c \
-                               util/java_agent.c  \
                               \
                               util/options.c util/paths.c \
                               util/similar.c \
-                              util/upatch.c \
+                               \
                               util/upatch_decode.c util/upatch_maps.c \
                               util/upatch_maps_otel.c util/upatch_pins.c \
                               util/upatch_resolve.c \
@@ -1352,7 +1350,7 @@ $(FUZZ_OUT)/fuzz-attest-report: testing/fuzz/fuzz-attest-report.c \
                                util/identity.c \
                                \
                                util/options.c util/paths.c util/similar.c \
-                               util/upatch.c util/version_id.c $(FUZZ_SEAL) \
+                                util/version_id.c $(FUZZ_SEAL) \
                                $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-attest-report: FUZZ_CFLAGS += $(TSS2_CFLAGS) $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-attest-report: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) \

@@ -15,7 +15,6 @@ use crate::sys::libc::{qsort, strcmp, strerror, strlen, strnlen};
 use crate::sys::log::{pr_err, pr_warn};
 use crate::sys::malloc::{xfree, xmalloc};
 use crate::sys::tss2::NV_WRITTEN;
-use crate::sys::upatch::{NAME_MAX, PAYLOAD_HASH_LEN};
 use crate::text::{cstr, strsprintf};
 use crate::util::config::{self, Scrubbed};
 use crate::util::crypto_openssl::{
@@ -30,6 +29,7 @@ use crate::util::tpm::{
     tpm_pcr_extend, tpm_pcr_read, tpm_reset_count,
 };
 use crate::util::tpm_wire::{DIGEST_LEN, NAME_LEN, NV_RSA_BYTES, tpm_nv_name, tpm_register_policy};
+use crate::util::upatch::{NAME_MAX, PAYLOAD_HASH_LEN};
 
 /// `CHAIN_NAME`, the register's name in its anchor.
 const CHAIN_NAME: &[u8] = b"shirudo";

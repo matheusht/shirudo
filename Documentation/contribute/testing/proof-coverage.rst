@@ -465,99 +465,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
        the target reads up to generation and sequence number
        2\ :sup:`63` - 2 and refuses the three ``bpm tree append`` does
        not write
-   * - ``upatch-header``
-     - ``parse_header()``, ``validate_bounds()`` of the ``.upatch``
-       reader
-     - Every file: the header is read from a buffer of exactly its size
-       for files of any size
-     - Reads nothing past the header; an accepted header has its magic,
-       version, zero reserved field and a terminated name, a BPF or Java
-       payload, a signature, every section inside the file and behind
-       the header; a BPF payload has a loader of whole aligned
-       instructions and a ``.rodata`` offset inside the data, a Java
-       payload data and none of the loader's fields
-   * - ``upatch-signed-sections``
-     - ``parse_signed_sections()``
-     - Data of 15, 16, 40 and 64 bytes
-     - Sections kept only behind a valid trailer, the directory ending
-       where the trailer begins, so that the signed trailer gives the
-       length of the data, each section inside the data below the
-       directory; none of a directory with a reserved word set or a tag
-       unknown or repeated; nothing kept on refusal
-   * - ``upatch-signed-name``
-     - The ``NAME`` and ``DECODERS`` sections of
-       ``parse_signed_sections()``
-     - A one-section directory in 288 bytes
-     - A kept name is terminated within 256 bytes; a refusal keeps
-       neither
-   * - ``upatch-decoders``
-     - ``parse_decoders()``, ``upatch_decoder_view()``,
-       ``upatch_has_decoders()``
-     - Sections of every length declaring up to 2 decoders, and any
-       count in a section too short for 3 entries
-     - Names terminated, each source non-empty and inside the section
-       behind the entries, every kind set, nothing kept on refusal,
-       ``-ENOENT`` past the last decoder
-   * - ``upatch-policy-labels``
-     - ``parse_policy_labels()``
-     - Sections of 0, 1 and 2 labels and the lengths around them
-     - An accepted section fills its length exactly, with its magic and
-       version, two distinct map indexes below the map count, one bit
-       per label, a terminated name and an absolute path of at most 255
-       bytes that does not end in ``/`` and has no wildcard before its
-       last component; a refusal writes nothing
-   * - ``upatch-name``
-     - ``upatch_name_valid()``, ``upatch_select()``,
-       ``upatch_prog_name()``
-     - Names up to 24 bytes; names of 250 bytes, any 8 and then
-       letters; archive names up to 31
-     - Valid exactly for ``[A-Za-z0-9._-]+`` not starting with a dot
-       whose pin directory name, each dot two bytes, fits ``NAME_MAX``;
-       an archive entry exactly for a name and ``.upatch``; a program
-       name zero-padded, of the header's bytes or ``_`` in their place
-   * - ``upatch-prog-specs``
-     - ``prog_specs_parse()``, ``prog_specs_free()``
-     - Tables of 3, 15, 16 and 176 bytes, as many programs as fit, every
-       allocation allowed to fail
-     - A refusal leaves nothing allocated and ``*out`` NULL; an accepted
-       program has a known role and kind, a terminated target and map,
-       uprobe fields only on a uprobe, kprobe names only on a kprobe
-       multi program, and device classes, set and within the known
-       mask, only on XDP
-   * - ``upatch-prog-count``
-     - The program count ``prog_specs_parse()`` takes from the header
-     - Tables of 3, 16, 176 and 336 bytes, any count larger than they
-       hold
-     - Refused before the program table is allocated or an entry read,
-       with nothing returned
-   * - ``upatch-prog-uprobes``
-     - What ``prog_specs_parse()`` makes of a uprobe target block
-     - One program and one record in 226 bytes, the table's program
-       count and the record's lengths fixed: a path and a build ID of one
-       byte, 1 or 2 offsets
-     - A uprobe program accepted with its entry valid, a glob without
-       ``,`` or ``|``, and the uprobe fields of the record; a refusal of
-       the block, or a block that ends before the table, leaves nothing
-       allocated
-   * - ``upatch-uprobe-targets``
-     - ``parse_uprobe_targets()``
-     - The 50 bytes after one program in a 226-byte table, path and
-       build ID up to 9 bytes, up to 2 offsets, the program's entry any
-       uprobe one
-     - Reads only the block and changes only the uprobe fields; an
-       absolute path of its stated length without a NUL, one offset for a
-       single uprobe, a build ID of 1 to 64 bytes, offsets non-empty and
-       strictly rising, everything freed
-   * - ``upatch-prog-kprobes``
-     - The kprobe multi target records of ``prog_specs_parse()``
-     - Arbitrary tables of 206 to 210 bytes, one program, 2 to 6 bytes
-       of names, every allocation allowed to fail. Allocation requests
-       dispatch to the original allocator at the same constant extent:
-       one program, a buffer of 2 to 6 bytes or 1 to 3 symbol pointers;
-       a request outside those bounds fails an assertion, as does an
-       attempt to allocate a uprobe path, whose payload cannot fit
-     - At least one name, each terminated inside the record's buffer,
-       the names strictly rising, everything freed
    * - ``upatch-loader``
      - ``loader_lddw()``, ``sys_bpf_call()``, ``map_create_slot()``,
        ``map_update_slot()``, ``loader_store_source()``
@@ -565,16 +472,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
      - Reads only the loader, and only instructions before the call it
        looks back from; reports exactly what it matched; every slot
        below the table's size
-   * - ``upatch-rodata-btf``
-     - ``loader_btf()``
-     - Loaders of 4, 10 and 15 instructions and 24 bytes of data
-     - The BTF it locates lies inside the data
-   * - ``upatch-rodata``
-     - ``find_rodata_data()``, ``map_name_rodata()``
-     - Any loader of 6 or 8 instructions; at 24, the shape the loader
-       generator emits with every other field free; 48 bytes of data
-     - The value it locates lies inside the data, with the size and type
-       its section declares
    * - ``upatch-btf``
      - ``btf_name_printable()``, ``btf_decl_printable()``,
        ``btf_unwrap()``
@@ -1408,7 +1305,7 @@ round-trips; ``upatch_rodata_symbol_range()`` of
 :src:`util/upatch_rodata.c`, the range of ``.rodata`` the builder
 rewrites; ``chain_init_event()`` of :src:`rust/src/util/chain.rs` on a set that is
 not empty; ``upatch_name_signed()``, ``upatch_member_valid()`` and
-``prog_specs_xdp_classes()`` of :src:`util/upatch.c`; the reading of
+``prog_specs_xdp_classes()`` of :src:`rust/src/util/upatch.rs`; the reading of
 the eventlog behind boot restore in :src:`rust/src/util/measured.rs`,
 ``init_of_live()``, ``record_event()`` and the walk of
 ``verified_upatches()``, and that ``upatches_line()`` of

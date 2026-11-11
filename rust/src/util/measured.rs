@@ -14,14 +14,14 @@ use crate::sys::hex::hex_encode;
 use crate::sys::libc::{Dirent, PATH_MAX, alphasort, errno, getxattr, scandir, strcmp, strnlen};
 use crate::sys::malloc::{libc_free, xcalloc, xfree, xmalloc};
 use crate::sys::seal::seal_owns;
-use crate::sys::upatch::{
-    NAME_MAX, PAYLOAD_HASH_LEN, Upatch, upatch_close, upatch_header_name, upatch_member_valid,
-    upatch_open, upatch_select,
-};
 use crate::text::{at, strscpy, strsprintf};
 use crate::util::chain::MeasuredUpatch;
 use crate::util::eventlog::{
     UPATCH_INIT, UPATCH_UNLOAD, eventlog_boot_upatches, eventlog_upatches,
+};
+use crate::util::upatch::{
+    NAME_MAX, PAYLOAD_HASH_LEN, Upatch, upatch_close, upatch_header_name, upatch_member_valid,
+    upatch_open, upatch_select,
 };
 
 /// `MEASURED_MAX`: the most upatches a set holds.
@@ -508,8 +508,8 @@ mod capi {
     use core::ffi::{c_char, c_int, c_void};
 
     use super::{ArchiveFn, EachFn, MeasuredSet, PinFn};
-    use crate::sys::upatch::Upatch;
     use crate::util::chain::MeasuredUpatch;
+    use crate::util::upatch::Upatch;
 
     /// # Safety
     ///

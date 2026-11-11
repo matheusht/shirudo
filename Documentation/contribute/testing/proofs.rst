@@ -74,7 +74,7 @@ Run the proofs
    .. code-block:: console
 
       $ make proofs-lean4
-      $ make proofs-cbmc PROOFS="string-number upatch-header"
+      $ make proofs-cbmc PROOFS="string-number log-escape"
       $ make proofs-cbmc CHANGED=origin/main..HEAD
 
    ``CHANGED`` takes what ``git diff`` takes, a range of commits or one

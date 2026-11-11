@@ -22,7 +22,6 @@ use crate::sys::log::pr_err;
 use crate::sys::malloc::{xcalloc, xfree, xmalloc};
 use crate::sys::string::{digits, parse_u64, parse_x64, strscpy as c_strscpy, strsprintf};
 use crate::sys::tss2::NV_WRITTEN;
-use crate::sys::upatch::{NAME_MAX as UPATCH_NAME_MAX, upatch_name_valid};
 use crate::sys::version::shirudo_version_id;
 use crate::text::{cstr, strscpy};
 use crate::util::chain::{
@@ -59,6 +58,7 @@ use crate::util::tpm_wire::{
     tpm_credential_protect, tpm_ecc_public_parse, tpm_ecdsa_signature_parse, tpm_kdfe, tpm_nv_name,
     tpm_object_name, tpm_public_parse, tpm_qualified_name, tpm_register_policy,
 };
+use crate::util::upatch::{NAME_MAX as UPATCH_NAME_MAX, upatch_name_valid};
 
 const FIRMWARE_LOG_PATH: &CStr = c"/sys/kernel/security/tpm0/binary_bios_measurements";
 const SYSTEMD_LOG_PATH: &CStr = c"/run/log/systemd/tpm2-measure.log";
