@@ -269,8 +269,6 @@ UTIL_SRCS := \
     util/curl.c \
     util/bpm_state.c \
     util/kconfig.c \
-    util/kernel_build_id.c \
-    util/kernel_release.c \
     util/image_bootstrap.c \
     util/image_cache.c \
     util/image_config.c \
@@ -593,7 +591,7 @@ tools/shirudo-build/shirudo-build: $(BUILD_OBJS) $(SIGN_OBJ) util/config_image.o
                                    util/bpm_tree.o util/bpm_tree_overlap.o \
                                    util/chain_history.o util/options.o \
                                    util/help.o \
-                                   util/kernel_release.o $(VERSION_OBJ) \
+                                   $(VERSION_OBJ) \
                                    $(LIBBPF_A) $(RUST_LIB)
 	@printf '  LD      $@\n'
 	$(Q)$(LD) $(CFLAGS) $(HARDEN_LDFLAGS) $(LDFLAGS) $(RPATH_LDFLAGS) -o $@ $^ \
@@ -1298,8 +1296,7 @@ $(FUZZ_OUT)/fuzz-eventlog: testing/fuzz/fuzz-eventlog.c $(FUZZ_BASE) \
                             util/identity.c testing/fuzz/chain.c $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-eventlog: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-eventlog: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS) $(ZLIB_LIBS)
-$(FUZZ_OUT)/fuzz-kernel: testing/fuzz/fuzz-kernel.c $(FUZZ_BASE) \
-                          util/kernel_build_id.c
+$(FUZZ_OUT)/fuzz-kernel: testing/fuzz/fuzz-kernel.c $(FUZZ_BASE)
 $(FUZZ_OUT)/fuzz-elf: testing/fuzz/fuzz-elf.c $(FUZZ_BASE) \
                        util/elf_target.c $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-elf: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
@@ -1348,9 +1345,8 @@ $(FUZZ_OUT)/fuzz-config-update: testing/fuzz/fuzz-config-update.c \
                                  util/crypto_openssl.c util/io.c $(FUZZ_SEAL)
 FUZZ_TREE_STATE := util/bpm_tree_state.c util/bpm_tree.c \
                    util/chain_history.c util/upatch.c $(FUZZ_OCI) \
-                   util/kconfig.c util/kernel_build_id.c \
-                   util/kernel_release.c \
-                   testing/fuzz/chain.c
+                   util/kconfig.c \
+                                  testing/fuzz/chain.c
 $(FUZZ_OUT)/fuzz-tree-state: testing/fuzz/fuzz-tree-state.c $(FUZZ_BASE) \
                               $(FUZZ_TREE_STATE)
 $(FUZZ_OUT)/fuzz-kconfig: testing/fuzz/fuzz-kconfig.c $(FUZZ_BASE) \
@@ -1388,8 +1384,7 @@ $(FUZZ_OUT)/fuzz-bpm-info: testing/fuzz/fuzz-bpm-info.c $(FUZZ_BASE) \
                            util/chain.c util/help.c \
                            util/identity.c util/image_keys.c \
                            util/initrd.c util/kconfig.c \
-                           util/kernel_build_id.c \
-                           util/kernel_release.c util/keyring.c \
+                                                  util/keyring.c \
                            util/nv_writer.c util/options.c util/paths.c \
                            util/similar.c util/timefmt.c util/tpm.c \
                            util/upatch_pins.c \

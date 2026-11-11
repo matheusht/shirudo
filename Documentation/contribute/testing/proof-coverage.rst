@@ -904,19 +904,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
        letters
      - A name exactly when 1 to 127 of ``[A-Za-z0-9._-]``, not ``.`` or
        ``..``; a device as decimal major and minor
-   * - ``kernel-notes``
-     - ``kernel_build_id_from_notes()``
-     - Notes of 0 to 24, 28, 32, 36 and 40 bytes; of 80 and 84 bytes
-       with any first note header and name and fixed bytes after them
-     - Reads nothing past the notes; a build ID of 1 to 64 bytes, in 2 to
-       128 lowercase hex digits, that is the first GNU build ID note's,
-       or empty, none from a section whose one note is another, and none
-       from a first GNU build ID of more than 64 bytes
-   * - ``kernel-release``
-     - ``kernel_release_prefix_matches()``
-     - Releases and prefixes up to 8 bytes
-     - Matches exactly where the prefix ends with the release or before a
-       ``.`` or ``-``
    * - ``log-escape``
      - ``escape()`` of :src:`util/log.c`
      - Messages of 0 to 5 bytes, every buffer size
@@ -1450,7 +1437,9 @@ OCI client of :src:`rust/src/util/bpm_oci/` and the package reader of
 :src:`rust/src/util/bpm_package/` and the TPM wire module of
 :src:`rust/src/util/tpm_wire/` the eventlog of
 :src:`rust/src/util/eventlog/` and site configuration in
-:src:`rust/src/util/config.rs`, whose CBMC proofs went with the C
+:src:`rust/src/util/config.rs`, plus the kernel build ID and release readers in
+:src:`rust/src/util/kernel_build_id.rs` and
+:src:`rust/src/util/kernel_release.rs`, whose CBMC proofs went with the C
 they proved when those modules moved to Rust; how ``json_parse()`` dispatches objects, arrays and maps to their
 schemas, and the members and elements of a JSON document longer than
 two bytes, the OTLP headers a configuration adds

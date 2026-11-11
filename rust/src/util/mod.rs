@@ -8,5 +8,7 @@ mod bpm_package;
 mod config;
 mod eventlog;
 mod json;
+mod kernel_build_id;
+mod kernel_release;
 mod similar;
 mod tpm_wire;
