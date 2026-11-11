@@ -12,7 +12,7 @@ use crate::text::{decimal, strscpy, strsprintf};
 
 /// `seconds` in the largest whole unit it reaches, `42s`, `5m`, `3h` or
 /// `2d`, or `?` for a negative count.
-fn format_duration(seconds: c_long, buf: &mut [u8]) -> c_int {
+pub(crate) fn format_duration(seconds: c_long, buf: &mut [u8]) -> c_int {
     let mut digits = [0u8; 20];
 
     if seconds < 0 {

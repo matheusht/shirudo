@@ -41,6 +41,33 @@ pub const MCL_FUTURE: c_int = 2;
 /// A stdio `FILE`.
 pub enum File {}
 
+/// `struct utsname`: the fields read here, and the rest as the C library
+/// lays them out.
+#[repr(C)]
+pub struct Utsname {
+    sysname: [c_char; 65],
+    nodename: [c_char; 65],
+    pub release: [c_char; 65],
+    version: [c_char; 65],
+    machine: [c_char; 65],
+    domainname: [c_char; 65],
+}
+
+const _: () = assert!(size_of::<Utsname>() == 390);
+
+impl Utsname {
+    pub const fn zeroed() -> Self {
+        Utsname {
+            sysname: [0; 65],
+            nodename: [0; 65],
+            release: [0; 65],
+            version: [0; 65],
+            machine: [0; 65],
+            domainname: [0; 65],
+        }
+    }
+}
+
 /// `struct rlimit`.
 #[repr(C)]
 pub struct Rlimit {
@@ -136,6 +163,10 @@ unsafe extern "C" {
     pub fn access(path: *const c_char, mode: c_int) -> c_int;
     pub fn time(t: *mut i64) -> i64;
     pub fn strerror(errnum: c_int) -> *const c_char;
+    /// The name of an errno number, "ENOENT", or NULL for one it does not
+    /// know.
+    pub fn strerrorname_np(errnum: c_int) -> *const c_char;
+    pub fn uname(buf: *mut Utsname) -> c_int;
     pub fn fopen(path: *const c_char, mode: *const c_char) -> *mut File;
     pub fn fdopen(fd: c_int, mode: *const c_char) -> *mut File;
     pub fn setvbuf(f: *mut File, buf: *mut c_char, mode: c_int, size: usize) -> c_int;

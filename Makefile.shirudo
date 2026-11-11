@@ -274,7 +274,6 @@ UTIL_SRCS := \
     util/dm_verity.c \
     util/config_update.c \
     util/config_attest.c \
-    util/report.c \
     util/malloc.c \
     util/sysinfo.c \
     util/options.c \
@@ -1345,7 +1344,7 @@ $(FUZZ_OUT)/fuzz-upatch-info: testing/fuzz/fuzz-upatch-info.c $(FUZZ_BASE) \
                               util/identity.c \
                               util/io.c util/java_agent.c util/kernel_abi.c \
                               util/keyring.c util/keys.c util/measured.c \
-                              util/options.c util/paths.c util/report.c \
+                              util/options.c util/paths.c \
                               util/serializer.c util/similar.c \
                               util/tls_openssl.c util/tpm.c \
                               util/upatch.c \

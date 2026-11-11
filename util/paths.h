@@ -150,7 +150,8 @@
 
 /*
  * TPM2 NV index of the measurement register (owner-defined range).
- * Override at build time if it collides with site policy. An NV
+ * A build that changes it, where it collides with site policy, changes
+ * the Rust copy too, as the assertion below insists. An NV
  * extend index rather than a PCR, as systemd's NvPCRs: no free PCR
  * exists on a stock Linux + grub + IMA system and PCR 23 is
  * application-resettable; PCR 15 only anchors the index name.
@@ -163,6 +164,9 @@
  */
 #define CONFIG_NVPCR_AUTH_PATH	"/run/systemd/nvpcr/shirudo-config.auth"
 #endif
+/* The Rust code has NV_INDEX in rust/src/util/eventlog/mod.rs. */
+_Static_assert(NV_INDEX == 0x01818E00u,
+	       "NV_INDEX: change it in rust/src/util/eventlog/mod.rs too");
 
 /* Site config. */
 #define CONF_PATH		"/etc/shirudo/shirudo.conf"

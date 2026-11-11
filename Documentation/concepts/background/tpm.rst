@@ -238,8 +238,9 @@ with the same policy cannot be initialized since the policy requires
 the old PCR 9 value which shirudo extended with the anchor.
 
 shirudo's register is the index ``0x01818E00``, which a build can
-change with ``NV_INDEX`` in :src:`util/paths.h`. It holds one SHA-256
-digest and has the attributes ``0x0E060048``: ``TPM2_NT_EXTEND``,
+change with ``NV_INDEX`` in :src:`util/paths.h` and its Rust copy in
+:src:`rust/src/util/eventlog/mod.rs`. It holds one SHA-256 digest and
+has the attributes ``0x0E060048``: ``TPM2_NT_EXTEND``,
 ``TPMA_NV_POLICYWRITE``, ``TPMA_NV_OWNERREAD``, ``TPMA_NV_AUTHREAD``,
 ``TPMA_NV_NO_DA``, ``TPMA_NV_ORDERLY`` and ``TPMA_NV_CLEAR_STCLEAR``.
 Its authorization value is empty, so anyone can read it, and only a

@@ -92,6 +92,26 @@ pub(crate) fn emit_fixed(buf: &mut [u8], emit: impl FnOnce(&mut JsonEmit)) -> Re
 }
 
 impl JsonEmit {
+    /// An emitter into the `cap` bytes at `buf`, which it does not grow,
+    /// as a C caller sets one up.
+    pub(crate) fn fixed(buf: *mut c_char, cap: usize) -> Self {
+        JsonEmit {
+            buf,
+            cap,
+            len: 0,
+            max: 0,
+            err: 0,
+            depth: 0,
+            nonempty: [0; EMIT_MAX_DEPTH as usize / 64],
+            value_pending: false,
+        }
+    }
+
+    /// The first error, which stopped the emitter, or 0.
+    pub(crate) fn err(&self) -> c_int {
+        self.err
+    }
+
     fn grow(&mut self) -> bool {
         let cap = if self.cap != 0 {
             self.cap.saturating_mul(2)
@@ -306,7 +326,7 @@ impl JsonEmit {
         self.put_raw(if val { b"true" } else { b"false" });
     }
 
-    fn kv_null(&mut self, key: &[u8]) {
+    pub(crate) fn kv_null(&mut self, key: &[u8]) {
         self.member(key);
         self.put_raw(b"null");
     }

@@ -32,8 +32,9 @@ use crate::util::timefmt::iso8601;
 const LINE_MAX: u64 = 4096;
 const DEFAULT_PATH: &CStr = c"/var/lib/shirudo/eventlog";
 const DEFAULT_PENDING_PATH: &CStr = c"/run/shirudo/eventlog.pending";
-/// The register's NV index.
-const NV_INDEX: u32 = 0x0181_8E00;
+/// The register's NV index, `NV_INDEX` of util/paths.h, which asserts
+/// that the two agree.
+pub(crate) const NV_INDEX: u32 = 0x0181_8E00;
 
 /// The path `var` names, unless a config image fixes the paths, or
 /// `default`.

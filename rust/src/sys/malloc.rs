@@ -4,7 +4,7 @@
 //! The allocator of `util/malloc.h`, for memory that C code frees or
 //! hands over.
 
-use core::ffi::c_void;
+use core::ffi::{c_char, c_void};
 
 unsafe extern "C" {
     /// A zeroed block of `size` bytes, of one for 0; NULL when the
@@ -24,4 +24,9 @@ unsafe extern "C" {
     ) -> *mut c_void;
     /// Scrubs `size` bytes at `ptr` and frees them; nothing for NULL.
     pub fn xfree(ptr: *mut c_void, size: usize);
+    /// A copy of at most `n` bytes of the C string `s`, NUL-terminated,
+    /// for xstrfree(); NULL when the allocation fails.
+    pub fn xstrndup(s: *const c_char, n: usize) -> *mut c_char;
+    /// Scrubs and frees what xstrndup() gave; NULL is nothing to free.
+    pub fn xstrfree(s: *mut c_char);
 }

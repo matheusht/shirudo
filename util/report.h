@@ -4,7 +4,7 @@
  *
  * The JSON report of `upatch load` and `unload --report`: category and
  * phase tell a policy problem from a code problem, and the verifier
- * log comes verbatim.
+ * log comes verbatim. rust/src/util/report.rs writes it.
  */
 
 #ifndef SHIRUDO_REPORT_H

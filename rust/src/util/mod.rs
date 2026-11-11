@@ -20,6 +20,7 @@ mod json;
 mod kernel_build_id;
 mod kernel_release;
 mod nv_writer;
+mod report;
 mod similar;
 mod timefmt;
 mod tpm_wire;
