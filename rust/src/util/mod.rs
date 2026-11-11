@@ -14,6 +14,7 @@ mod config;
 mod config_attest;
 mod config_image;
 mod config_measure;
+mod config_update;
 mod crypto_openssl;
 mod elf_target;
 mod eventlog;

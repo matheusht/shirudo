@@ -261,7 +261,6 @@ UTIL_SRCS := \
     util/image_guards.c \
     util/image_keys.c \
     util/dm_verity.c \
-    util/config_update.c \
     util/malloc.c \
     util/options.c \
     util/keepalive.c \
@@ -836,7 +835,7 @@ testing/helper/test-harden: testing/helper/test-harden.c util/log.o \
 # The measurement register and TPM client live in Rust. Their symbols
 # must resolve even for a helper that never extends.
 # util/malloc.o provides x*/libc_free used by the Rust library.
-REGISTER_OBJS := util/config_update.o \
+REGISTER_OBJS := \
                  util/upatch.o \
                  util/hex.o util/string.o \
                  util/io.o util/seal.o \
@@ -1037,7 +1036,6 @@ testing/helper/test-config-image: testing/helper/test-config-image.c \
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ -lcrypto -lssl $(ZLIB_LIBS) $(RUST_TEST_LDLIBS)
 
 testing/helper/test-config-update: testing/helper/test-config-update.c \
-		util/config_update.o \
 		$(REGISTER_OBJS)
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(REGISTER_LIBS)
@@ -1248,7 +1246,6 @@ $(FUZZ_OUT)/fuzz-tpm-wire: testing/fuzz/fuzz-tpm-wire.c $(FUZZ_BASE) \
 $(FUZZ_OUT)/fuzz-attest: testing/fuzz/fuzz-attest.c $(FUZZ_BASE) \
                           util/attest.c util/chain_history.c \
                           util/io.c $(FUZZ_SEAL) \
-                          util/config_update.c \
                           util/identity.c \
                           util/version_id.c util/upatch.c \
                           $(LIBBPF_A)
@@ -1299,7 +1296,7 @@ $(FUZZ_OUT)/fuzz-image: testing/fuzz/fuzz-image.c $(FUZZ_BASE) \
                          util/io.c util/paths.c \
                          $(FUZZ_SEAL)
 $(FUZZ_OUT)/fuzz-config-update: testing/fuzz/fuzz-config-update.c \
-                                 $(FUZZ_BASE) util/config_update.c \
+                                 $(FUZZ_BASE) \
                                  util/io.c $(FUZZ_SEAL)
 FUZZ_TREE_STATE := util/bpm_tree.c \
                    util/chain_history.c util/upatch.c $(FUZZ_OCI) \
@@ -1347,7 +1344,7 @@ $(FUZZ_OUT)/fuzz-attest-report: testing/fuzz/fuzz-attest-report.c \
                                $(FUZZ_BASE) testing/fuzz/output.c \
                                builtin-attest.c builtin.h util/attest.c \
                                util/chain_history.c \
-                               util/config_update.c \
+                               \
                                util/identity.c \
                                util/io.c \
                                \
@@ -1363,7 +1360,6 @@ $(FUZZ_OUT)/fuzz-attest-report: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) \
 $(FUZZ_OUT)/fuzz-otel: FUZZ_INCLUDED := util/upatch_maps_otel.c
 $(FUZZ_OUT)/fuzz-serializer: FUZZ_INCLUDED := util/upatch_maps.c
 $(FUZZ_OUT)/fuzz-decoder: FUZZ_INCLUDED := util/upatch_decode.c
-$(FUZZ_OUT)/fuzz-config-update: FUZZ_INCLUDED := util/config_update.c
 $(FUZZ_OUT)/fuzz-upatch-info: FUZZ_INCLUDED := builtin-upatch.c
 $(FUZZ_OUT)/fuzz-bpm-info: FUZZ_INCLUDED := builtin-bpm.c
 $(FUZZ_OUT)/fuzz-attest-report: FUZZ_INCLUDED := builtin-attest.c

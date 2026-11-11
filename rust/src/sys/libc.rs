@@ -17,6 +17,7 @@ pub const O_WRONLY: c_int = 0o1;
 pub const O_RDWR: c_int = 0o2;
 pub const O_CREAT: c_int = 0o100;
 pub const O_EXCL: c_int = 0o200;
+pub const O_APPEND: c_int = 0o2000;
 pub const O_NONBLOCK: c_int = 0o4000;
 pub const O_CLOEXEC: c_int = 0o2000000;
 #[cfg(target_arch = "x86_64")]
@@ -45,6 +46,7 @@ pub const IOFBF: c_int = 0;
 pub const BUFSIZ: usize = 8192;
 pub const STATX_TYPE: u32 = 0x1;
 pub const STATX_SIZE: u32 = 0x200;
+pub const STATX_BASIC_STATS: u32 = 0x7ff;
 pub const S_IFMT: u16 = 0o170000;
 pub const S_IFREG: u16 = 0o100000;
 pub const S_IFDIR: u16 = 0o040000;
@@ -61,6 +63,16 @@ pub const LOCK_NB: c_int = 4;
 
 /// A stdio `FILE`.
 pub enum File {}
+
+/// What fgetc() returns at the end or on an error.
+pub const EOF: c_int = -1;
+
+/// `struct timespec` of the 64-bit ABIs.
+#[repr(C)]
+pub struct Timespec {
+    pub tv_sec: i64,
+    pub tv_nsec: i64,
+}
 
 /// A `DIR` stream.
 pub enum Dir {}
@@ -253,6 +265,15 @@ unsafe extern "C" {
     pub fn open(path: *const c_char, flags: c_int, ...) -> c_int;
     pub fn openat(dirfd: c_int, path: *const c_char, flags: c_int, ...) -> c_int;
     pub fn flock(fd: c_int, op: c_int) -> c_int;
+    pub fn fsync(fd: c_int) -> c_int;
+    pub fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> c_int;
+    pub fn renameat(
+        olddirfd: c_int,
+        oldpath: *const c_char,
+        newdirfd: c_int,
+        newpath: *const c_char,
+    ) -> c_int;
+    pub fn unlinkat(dirfd: c_int, path: *const c_char, flags: c_int) -> c_int;
     pub fn fdopendir(fd: c_int) -> *mut Dir;
     pub fn readdir(dir: *mut Dir) -> *mut Dirent;
     /// The entries of `dir` the filter takes, sorted by `compar`, in an
@@ -312,6 +333,8 @@ unsafe extern "C" {
     pub fn fdopen(fd: c_int, mode: *const c_char) -> *mut File;
     pub fn setvbuf(f: *mut File, buf: *mut c_char, mode: c_int, size: usize) -> c_int;
     pub fn ferror(f: *mut File) -> c_int;
+    pub fn fgetc(f: *mut File) -> c_int;
+    pub fn ftello(f: *mut File) -> i64;
     pub fn fclose(f: *mut File) -> c_int;
     pub fn fileno(f: *mut File) -> c_int;
     pub fn fputs(s: *const c_char, f: *mut File) -> c_int;

@@ -787,14 +787,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
      - Stores only PCRs 0 to 23, the value its 64 hex digits spell under
        its index, and marks exactly that one; the other PCRs stay as they
        were; a refusal marks nothing
-   * - ``config-update-follows``
-     - ``event_follows()`` and ``same_event()`` of :src:`util/config_update.c`
-     - Every record ``record_decode()`` accepts, and the zeroed one before
-       the first line
-     - ``event_follows()`` accepts exactly what ``Follows`` of
-       ``Shirudo.ConfigActivation`` does and refuses with ``EUCLEAN``;
-       ``same_event()`` is the equality of TPM boot, the reset count,
-       sequence, PCR, kind, initial value and root
    * - ``config-evidence-event``
      - ``on_event()``, ``append_event()`` of :src:`util/config_attest.c`
      - Every event the JSON parser can hand over, into a history of 0, 1,
@@ -1140,7 +1132,7 @@ the model follows the C.
      - None since the port to Rust; the CBMC models went with
        ``util/json.h``
    * - ``Shirudo.ConfigActivation``, the config activation of
-       :src:`util/config_update.c` as ``image update``, ``image stage``,
+       :src:`rust/src/util/config_update.rs` as ``image update``, ``image stage``,
        ``status`` and ``init`` drive it
      - ``consistent_or_refusing``, ``refusal_persists``: the PCR replays
        from the record with its config mounted, or every command but
@@ -1184,8 +1176,8 @@ the model follows the C.
        which restarts without a reboot only by a resume between commands,
        which root breaks with a suspend, a TPM restart or ``TPM2_Clear``
        (R4 of :doc:`/security/threat-model`)
-     - Review; CBMC, ``config-update-follows``, for ``event_follows()`` and
-       ``same_event()``
+     - Review; the bounded C harness for these checks was removed when
+       the journal moved to Rust
    * - ``Shirudo.UpatchLoad``, the load, unload and purge of
        :src:`builtin-upatch.c`, the gate of :src:`util/image_runtime.c` and
        the boot restore of :src:`builtin-init.c`

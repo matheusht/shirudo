@@ -73,6 +73,11 @@ impl JsonField {
         Self::new(key, T_INT, dst.cast(), 0)
     }
 
+    /// A boolean, as an int of 0 or 1.
+    pub(crate) const fn boolean(key: &'static CStr, dst: *mut c_int) -> Self {
+        Self::new(key, T_BOOL, dst.cast(), 0)
+    }
+
     /// An object whose own declared keys are the `n` fields at `sub`.
     pub(crate) const fn object(key: &'static CStr, sub: *mut JsonField, n: usize) -> Self {
         let mut f = Self::new(key, T_OBJECT, ptr::null_mut(), 0);

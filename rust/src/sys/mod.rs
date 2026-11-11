@@ -6,7 +6,6 @@
 //! module for each header, each to go when what it declares is Rust.
 
 pub mod bpm_tree;
-pub mod config_update;
 pub mod curl;
 pub mod elf;
 pub mod hex;

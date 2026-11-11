@@ -1,5 +1,10 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
-/* Copyright (c) 2026 Authors of shirudo */
+/*
+ * Copyright (c) 2026 Authors of shirudo
+ *
+ * The config activation journal, which rust/src/util/config_update.rs
+ * implements.
+ */
 
 #ifndef SHIRUDO_CONFIG_UPDATE_H
 #define SHIRUDO_CONFIG_UPDATE_H
@@ -7,6 +12,7 @@
 #include <shirudo/misc.h>
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #define CONFIG_UPDATE_PREFIX_MAX 4096u
@@ -104,5 +110,19 @@ int config_update_check(struct config_update *update,
 /* Events describe selections, not a proof that activation completed. */
 int config_update_events(struct config_update *update,
 			 shirudo_config_cb consume, void *ctx);
+
+/*
+ * For the fuzz target, which reached these by including the C once: the
+ * record in the length bytes at data as the state file (state) or an
+ * event holds it, and the events file replayed into last and value, the
+ * end of its last whole line into *end unless NULL, a torn last line
+ * forgiven with partial, and each event to consume unless NULL.
+ */
+int config_update_record_decode(const char *data, size_t length, bool state,
+				struct config_update_record *record);
+int config_update_events_scan(struct config_update *update,
+			      struct config_update_record *last,
+			      __u8 value[32], __s64 *end, bool partial,
+			      shirudo_config_cb consume, void *ctx);
 
 #endif /* SHIRUDO_CONFIG_UPDATE_H */

@@ -1477,7 +1477,7 @@ invalid fails ``init`` rather than falling back to an older config.
    pending; ``shirudo status`` reports ``reboot-pending``
 :Counters: none
 :Tests: ``t4004``, ``t5105``
-:Proofs: ``Shirudo.ConfigActivation``, ``config-update-follows``
+:Proofs: ``Shirudo.ConfigActivation``
 :Residual: R4, R14
 
 T13 Reading or draining upatch state

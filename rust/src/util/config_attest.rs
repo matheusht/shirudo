@@ -9,14 +9,14 @@
 use core::ffi::{CStr, c_int, c_void};
 
 use crate::errno::{E2BIG, EINVAL, EKEYREJECTED, ENOMEM, EOVERFLOW, EUCLEAN};
-use crate::sys::config_update::{
-    ConfigUpdate, ConfigUpdateRecord, config_update_check, config_update_events,
-};
 use crate::sys::hex::{hex_decode, hex_encode};
 use crate::sys::malloc::{xfree, xreallocarray};
 use crate::text::cstr;
 use crate::util::chain::chain_fold;
 use crate::util::config_measure::{EVENT_BOOT, EVENT_UPDATE, event as measure_event, pcr_valid};
+use crate::util::config_update::{
+    ConfigUpdate, ConfigUpdateRecord, config_update_check, config_update_events,
+};
 use crate::util::json::{JsonArray, JsonEmit, JsonField, parse_schema};
 
 /// `CONFIG_EVIDENCE_EVENTS_MAX`.
@@ -158,7 +158,7 @@ unsafe extern "C" fn collect_event(
     if r.pcr != view.pcr || r.sequence > i64::MAX as u64 || r.initial_pcr != view.initial_pcr {
         return -EUCLEAN;
     }
-    append_event(view, &r.root_hash, r.sequence, r.kind)
+    append_event(view, &r.target.root_hash, r.sequence, r.kind)
 }
 
 /// The evidence of the active config from the update records, or none
@@ -204,7 +204,7 @@ unsafe fn collect(update: *mut ConfigUpdate, out: *mut Evidence) -> c_int {
     if ret == 0 {
         let last = &events(view)[view.n_events - 1];
 
-        if last.sequence != active.sequence || last.root_hash != active.root_hash {
+        if last.sequence != active.sequence || last.root_hash != active.target.root_hash {
             ret = -EUCLEAN;
         }
     }
@@ -472,7 +472,7 @@ mod capi {
 
     use super::Evidence;
     use crate::ffi;
-    use crate::sys::config_update::ConfigUpdate;
+    use crate::util::config_update::ConfigUpdate;
     use crate::util::json::JsonEmit;
 
     /// # Safety

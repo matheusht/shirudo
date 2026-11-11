@@ -4,7 +4,7 @@
 import Shirudo.Chain
 
 /-!
-The config image activation protocol of util/config_update.c, as `image
+The config image activation protocol of rust/src/util/config_update.rs, as `image
 update` (`image_update()` of util/image_runtime.c), `image stage`
 (`image_stage()`), `status` and `init` (`image_boot()` and
 `image_boot_complete()` around the upatch restore and the register

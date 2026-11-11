@@ -9,12 +9,14 @@
 
 #include <fcntl.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #include "fuzz.h"
 
 #include <shirudo/string.h>
 
-#include "config_update.c"
+#include "config_update.h"
+#include "io.h"
 
 static char dir[4096];
 static int dir_fd = -1;
@@ -46,8 +48,8 @@ int LLVMFuzzerTestOneInput(const __u8 *data, size_t size)
 	__u8 value[32];
 	int fd;
 
-	record_decode((const char *)data, size, true, &record);
-	record_decode((const char *)data, size, false, &record);
+	config_update_record_decode((const char *)data, size, true, &record);
+	config_update_record_decode((const char *)data, size, false, &record);
 	fd = openat(dir_fd, "events", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
 		    0600);
 	if (fd < 0)
@@ -57,8 +59,8 @@ int LLVMFuzzerTestOneInput(const __u8 *data, size_t size)
 		return 0;
 	}
 	close(fd);
-	events_scan(&update, &last, value, NULL, false, NULL, NULL);
-	events_scan(&update, &last, value, NULL, true, NULL, NULL);
+	config_update_events_scan(&update, &last, value, NULL, false, NULL, NULL);
+	config_update_events_scan(&update, &last, value, NULL, true, NULL, NULL);
 	fd = openat(dir_fd, "next-boot", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
 		    0600);
 	if (fd < 0)
