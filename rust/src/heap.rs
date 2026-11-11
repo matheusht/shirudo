@@ -6,15 +6,9 @@
 //! and is scrubbed before it goes back.
 
 use core::alloc::{GlobalAlloc, Layout};
-use core::ffi::{c_int, c_void};
 use core::ptr;
 
-unsafe extern "C" {
-    fn calloc(nmemb: usize, size: usize) -> *mut c_void;
-    fn posix_memalign(memptr: *mut *mut c_void, alignment: usize, size: usize) -> c_int;
-    fn free(ptr: *mut c_void);
-    fn explicit_bzero(s: *mut c_void, n: usize);
-}
+use crate::sys::libc::{calloc, explicit_bzero, free, posix_memalign};
 
 /// The alignment malloc gives every block on the supported targets.
 const MALLOC_ALIGN: usize = 16;

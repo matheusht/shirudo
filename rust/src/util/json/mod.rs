@@ -7,6 +7,9 @@
 mod emit;
 mod parse;
 
+pub(crate) use emit::JsonEmit;
+pub(crate) use parse::{JsonArray, JsonField, parse_schema};
+
 /// `JSON_MAX_BYTES`: the largest document either reader takes.
 const MAX_BYTES: usize = 8 * 1024 * 1024;
 /// `JSON_MAX_DEPTH`: the deepest nesting either reader takes.

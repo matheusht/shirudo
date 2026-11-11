@@ -592,12 +592,22 @@ it.
   for an empty buffer. The header stays and names the Rust file. The C
   file goes in the same commit, and every link in `Makefile.shirudo`
   that took its object takes `$(RUST_LIB)` after the objects and
-  `$(RUST_LDLIBS)` after the libraries.
+  `$(RUST_LDLIBS)` after the libraries, `$(RUST_TEST_LDLIBS)` in a
+  helper, unit or fuzz link, which lets the link drop the Rust it does
+  not reach and the C that Rust calls. A test or fuzz target that
+  included the C file to reach a static function calls an export of the
+  port instead, which the header declares as one for it.
 - `rust/src/ffi.rs` turns what C hands over into Rust views: `c_str()`
   for a C string, `slice()` for an array that may be NULL when empty,
+  `bytes_mut()` for a C buffer to write into as it is,
   `zeroed_slice_mut()` for room C has not initialised. Every `unsafe`
   block says in a `// SAFETY:` comment what part of the C contract makes
   it sound.
+- What the Rust code still calls in C, the C library, libcurl and the
+  `util/` modules not ported yet, is declared in `rust/src/sys/`, one
+  module for each header, which goes when the C it declares does. A
+  message goes through `pr_err()` with the format and arguments the C
+  passed, so that it reads as before.
 - Before the C file goes, compare the two: build the old file from git
   with its functions renamed, link it beside the archive and run both on
   the same random and corpus inputs until they agree on every result and

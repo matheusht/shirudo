@@ -30,6 +30,21 @@ pub unsafe fn slice<'a, T>(ptr: *const T, len: usize) -> &'a [T] {
     unsafe { core::slice::from_raw_parts(ptr, len) }
 }
 
+/// The `len` bytes of a C buffer to write into, as they are; none when
+/// `len` is 0.
+///
+/// # Safety
+///
+/// When `len` is not 0, `ptr` points to `len` bytes that nothing else
+/// accesses for `'a`.
+pub unsafe fn bytes_mut<'a>(ptr: *mut u8, len: usize) -> &'a mut [u8] {
+    if len == 0 {
+        return &mut [];
+    }
+    // SAFETY: the caller passes len bytes at ptr, which C initialised.
+    unsafe { core::slice::from_raw_parts_mut(ptr, len) }
+}
+
 /// The room for `len` elements at `ptr`, zeroed first so that memory C
 /// left uninitialised can be handed to safe code; none when `len` is 0.
 ///

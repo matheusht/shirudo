@@ -4,14 +4,11 @@
 //! A panic is a bug: say where through pr_err() and abort, as a failed
 //! assertion does in C.
 
-use core::ffi::c_char;
 use core::fmt::{self, Write};
 use core::panic::PanicInfo;
 
-unsafe extern "C" {
-    fn pr_err(fmt: *const c_char, ...);
-    fn abort() -> !;
-}
+use crate::sys::libc::abort;
+use crate::sys::log::pr_err;
 
 /// A message cut to the buffer, which keeps room for its NUL.
 struct Message {

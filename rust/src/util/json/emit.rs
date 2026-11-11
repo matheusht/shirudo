@@ -9,7 +9,7 @@ use core::ffi::{c_char, c_int};
 
 use super::{EMIT_MAX_DEPTH, utf8_width};
 use crate::errno::{E2BIG, EILSEQ, ENOMEM, ENOSPC};
-use crate::malloc::xreallocarray;
+use crate::sys::malloc::xreallocarray;
 
 /// `struct json_emit`, which C callers set up and read. `buf` and `cap`
 /// are the caller's, or with `max` set the emitter's: it grows `buf`,
@@ -221,13 +221,13 @@ impl JsonEmit {
         self.put(b':');
     }
 
-    fn obj_open(&mut self) {
+    pub(crate) fn obj_open(&mut self) {
         self.sep();
         self.put(b'{');
         self.enter();
     }
 
-    fn obj_open_key(&mut self, key: &[u8]) {
+    pub(crate) fn obj_open_key(&mut self, key: &[u8]) {
         self.member(key);
         self.put(b'{');
         self.enter();
@@ -239,7 +239,7 @@ impl JsonEmit {
         self.enter();
     }
 
-    fn obj_close(&mut self) {
+    pub(crate) fn obj_close(&mut self) {
         self.put(b'}');
         self.leave();
     }
@@ -266,12 +266,12 @@ impl JsonEmit {
         self.value_pending = true;
     }
 
-    fn kv_string(&mut self, key: &[u8], val: &[u8]) {
+    pub(crate) fn kv_string(&mut self, key: &[u8], val: &[u8]) {
         self.member(key);
         self.put_string(val, false);
     }
 
-    fn kv_int(&mut self, key: &[u8], val: i64) {
+    pub(crate) fn kv_int(&mut self, key: &[u8], val: i64) {
         let mut buf = [0; 20];
         let digits = format_s64(val, &mut buf);
 

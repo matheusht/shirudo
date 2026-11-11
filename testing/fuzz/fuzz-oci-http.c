@@ -6,8 +6,12 @@
  * challenge and upload location taken from them, and the token.
  */
 
+#include <limits.h>
+#include <string.h>
+
+#include "bpm_oci.h"
 #include "fuzz.h"
-#include "bpm_oci.c"
+#include "malloc.h"
 
 int LLVMFuzzerTestOneInput(const __u8 *data, size_t size)
 {
@@ -22,20 +26,20 @@ int LLVMFuzzerTestOneInput(const __u8 *data, size_t size)
 		const __u8 *nl = memchr(data + off, '\n', size - off);
 
 		n = nl ? (size_t)(nl - data) - off + 1 : size - off;
-		bpm_header((void *)(data + off), 1, n, &r);
+		bpm_oci_header((void *)(data + off), 1, n, &r);
 	}
-	parse_challenge(r.www_auth, realm, sizeof(realm), service,
-			sizeof(service), scope, sizeof(scope));
+	bpm_oci_parse_challenge(r.www_auth, realm, sizeof(realm), service,
+				sizeof(service), scope, sizeof(scope));
 	bpm_copy_string(c.base_url, sizeof(c.base_url),
 			"https://registry.example:5000");
-	upload_location(&c, r.location, upload, sizeof(upload));
+	bpm_oci_upload_location(&c, r.location, upload, sizeof(upload));
 
 	body = xmalloc(size + 1);
 	if (!body)
 		return 0;
 	memcpy(body, data, size);
 	body[size] = '\0';
-	token_from_body(body, c.token, sizeof(c.token));
+	bpm_oci_token_from_body(body, c.token, sizeof(c.token));
 	xfree(body, size + 1);
 	return 0;
 }

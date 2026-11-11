@@ -12,6 +12,6 @@ extern crate alloc;
 mod errno;
 mod ffi;
 mod heap;
-mod malloc;
 mod panic;
+mod sys;
 mod util;

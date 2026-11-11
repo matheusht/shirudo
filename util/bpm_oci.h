@@ -2,7 +2,8 @@
 /*
  * Copyright (c) 2026 Authors of shirudo
  *
- * OCI distribution client for BPM packages, indexes and upatch trees.
+ * OCI distribution client for BPM packages, indexes and upatch trees,
+ * which rust/src/util/bpm_oci/ implements.
  */
 
 #ifndef SHIRUDO_BPM_OCI_H
@@ -173,5 +174,17 @@ int bpm_oci_get_signed(struct bpm_oci_client *c, const char *repository,
 		       struct bpm_buffer *payload, struct bpm_buffer *sig);
 void bpm_oci_emit_descriptor(struct json_emit *e, const char *key,
 			     const struct bpm_descriptor *d, const char *title);
+
+/*
+ * The parsers of what a registry answers, for the fuzz target that
+ * reaches them: a response header line as curl hands it over, a Bearer
+ * challenge, a token server's answer and an upload's Location.
+ */
+size_t bpm_oci_header(void *ptr, size_t size, size_t nmemb, void *ud);
+int bpm_oci_parse_challenge(const char *header, char *realm, size_t rsz,
+			    char *service, size_t ssz, char *scope, size_t zsz);
+int bpm_oci_token_from_body(const char *body, char *out, size_t out_sz);
+int bpm_oci_upload_location(const struct bpm_oci_client *c,
+			    const char *location, char *out, size_t out_sz);
 
 #endif /* SHIRUDO_BPM_OCI_H */

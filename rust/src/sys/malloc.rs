@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The allocator of `util/malloc.h`, for memory that C code frees.
+//! The allocator of `util/malloc.h`, for memory that C code frees or
+//! hands over.
 
 use core::ffi::c_void;
 
@@ -15,4 +16,6 @@ unsafe extern "C" {
         new_nmemb: usize,
         size: usize,
     ) -> *mut c_void;
+    /// Scrubs `size` bytes at `ptr` and frees them; nothing for NULL.
+    pub fn xfree(ptr: *mut c_void, size: usize);
 }

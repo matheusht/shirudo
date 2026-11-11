@@ -38,9 +38,74 @@ pub struct JsonField {
 
 /// `struct json_array`: what an array field calls after each element.
 #[repr(C)]
-struct JsonArray {
+pub struct JsonArray {
     on_elem: Option<unsafe extern "C" fn(ctx: *mut c_void) -> c_int>,
     ctx: *mut c_void,
+}
+
+/// The fields of a schema that Rust code builds in C's layout, for the
+/// callers of json_parse() that moved to Rust before the schemas did.
+impl JsonField {
+    const fn new(key: &'static CStr, ty: c_int, dst: *mut c_void, dst_cap: usize) -> Self {
+        JsonField {
+            key: key.as_ptr(),
+            ty,
+            dst,
+            dst_cap,
+            seen: 0,
+            sub: ptr::null_mut(),
+            n_sub: 0,
+        }
+    }
+
+    /// A string, decoded into the `cap` bytes at `dst`.
+    pub(crate) const fn string(key: &'static CStr, dst: *mut u8, cap: usize) -> Self {
+        Self::new(key, T_STRING, dst.cast(), cap)
+    }
+
+    pub(crate) const fn int(key: &'static CStr, dst: *mut i64) -> Self {
+        Self::new(key, T_INT, dst.cast(), 0)
+    }
+
+    /// An object whose own declared keys are the `n` fields at `sub`.
+    pub(crate) const fn object(key: &'static CStr, sub: *mut JsonField, n: usize) -> Self {
+        let mut f = Self::new(key, T_OBJECT, ptr::null_mut(), 0);
+
+        f.sub = sub;
+        f.n_sub = n;
+        f
+    }
+
+    /// An array of objects with the `n` fields at `sub`, each of which
+    /// `sink` hears about.
+    pub(crate) const fn array(
+        key: &'static CStr,
+        sink: *mut JsonArray,
+        sub: *mut JsonField,
+        n: usize,
+    ) -> Self {
+        let mut f = Self::new(key, T_ARRAY, sink.cast(), 0);
+
+        f.sub = sub;
+        f.n_sub = n;
+        f
+    }
+
+    pub(crate) fn seen(&self) -> bool {
+        self.seen != 0
+    }
+}
+
+impl JsonArray {
+    pub(crate) const fn new(
+        on_elem: unsafe extern "C" fn(*mut c_void) -> c_int,
+        ctx: *mut c_void,
+    ) -> Self {
+        JsonArray {
+            on_elem: Some(on_elem),
+            ctx,
+        }
+    }
 }
 
 /// `struct json_map`: what a map field calls after each member.
@@ -70,6 +135,10 @@ pub struct JsonVisitor {
 
 fn status(ret: c_int) -> Result {
     if ret != 0 { Err(ret) } else { Ok(()) }
+}
+
+fn errno(ret: Result) -> c_int {
+    ret.err().unwrap_or(0)
 }
 
 /// What a walk reports: decoded keys and strings, numbers as their text,
@@ -780,16 +849,23 @@ fn walk(data: &[u8], visitor: &mut dyn Visit) -> Result {
     Ok(())
 }
 
+/// json_parse() for Rust code, on a schema of C layout.
+///
+/// # Safety
+///
+/// The `n` fields at `fields`, and the sub fields, destinations and
+/// sinks they point to, are valid as json.h describes them, and nothing
+/// but the sinks' callbacks touches them during the parse.
+pub(crate) unsafe fn parse_schema(data: &[u8], fields: *mut JsonField, n: usize) -> c_int {
+    errno(parse(data, Fields { ptr: fields, n }))
+}
+
 mod capi {
     use core::ffi::{CStr, c_char, c_int, c_void};
 
-    use super::{Fields, JsonField, JsonVisitor, MAX_BYTES, Result, Visit, status};
+    use super::{Fields, JsonField, JsonVisitor, MAX_BYTES, Result, Visit, errno, status};
     use crate::errno::{E2BIG, EINVAL};
     use crate::ffi;
-
-    fn errno(ret: Result) -> c_int {
-        ret.err().unwrap_or(0)
-    }
 
     /// A C visitor and the context its callbacks take.
     struct CVisitor {

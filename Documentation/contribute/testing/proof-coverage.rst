@@ -189,10 +189,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
      - Names of 0 to 10 bytes
      - A name passes exactly when it cannot leave its directory; a member
        exactly when it is the path below the one top directory
-   * - ``bpm-names``
-     - ``bpm_name_ok()``, ``bpm_version_ok()``, ``bpm_package_name_ok()``
-     - Up to 129 bytes, past the 128-byte limit
-     - Exactly the character, length and first-character rules
    * - ``bpm-archive-path-model``
      - ``bpm_archive_rel_ok()``, ``package_member_name_ok()``
      - Names of lengths 0 to 10, members up to 3 bytes
@@ -222,48 +218,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
        ``prerelease_compare()``
      - Every pair of strings up to 9 bytes
      - The sign of the Lean model ``Shirudo.SemVer``
-   * - ``bpm-oci-challenge``
-     - ``parse_challenge()``
-     - ``WWW-Authenticate`` values up to 17 bytes
-     - Outputs terminated in their buffers; only the whole token
-       ``Bearer`` as the scheme, with a realm; each value a quoted value
-       of the header
-   * - ``bpm-oci-token``
-     - ``token_from_body()``, ``token_from_reply()``
-     - Answers up to 17 bytes, as text and as the bytes of a response,
-       NULs included, and every outcome ``json_parse()`` may give
-     - The whole answer parsed; nothing written on refusal; a token
-       without controls, quotes or backslashes, the value of ``token``,
-       else of ``access_token``, from an answer parsed whole; no token
-       from a response without a body or with a NUL among its bytes
-   * - ``bpm-oci-header``
-     - ``bpm_header()``
-     - Header lines up to 26 bytes, NULs included, with the line's copy
-       and the challenge's field set to 24 and 4 bytes for their 4096
-       and 2048
-     - The whole line taken, and one too long for the copy or holding a
-       NUL read not at all; values terminated, without a leading blank,
-       a location without CR or LF; a challenge that fits kept whole, a
-       longer one dropped rather than cut
-   * - ``bpm-oci-buffer``
-     - ``bpm_buffer_append()``
-     - A buffer of 0, 3, 8, 12 and 15 bytes holding any shorter body,
-       every chunk of up to 8 bytes, allocations allowed to fail, with
-       ``BPM_MAX_HTTP_BODY`` set to 16 for its 16 MiB
-     - ``-E2BIG`` exactly when the body would reach the limit and
-       ``-ENOMEM`` without memory, nothing changed then; else the chunk
-       behind the body, which is kept, inside the buffer and terminated,
-       a buffer with room kept
-   * - ``bpm-oci-descriptor``
-     - ``on_descriptor()``, ``on_index_entry()``
-     - Any descriptor or index entry, into an empty or a full table
-     - Kept exactly when whole, with a ``sha256:`` digest of 64 digits,
-       and with room; copied as read; a refusal not counted
-   * - ``bpm-oci-strings``
-     - ``bpm_trim()``, ``bpm_copy_string()``, ``bpm_digest_matches()``
-     - Strings up to 6 bytes, buffers up to 4
-     - Terminated, what fits; a digest matches exactly ``sha256:`` and its
-       hex in either case
    * - ``bpm-source-config``
      - ``bpm_parse_source_line()``, ``bpm_parse_tree_line()``
      - Lines up to 22 bytes, settings of 4 bytes with their NUL
@@ -282,7 +236,7 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
        as read, with the next read into a cleared entry; a refusal not
        counted, ``-E2BIG`` from a full table
    * - ``bpm-state-emit``
-     - ``bpm_state_emit()`` with the writer of :src:`util/json.c`
+     - ``bpm_state_emit()`` with the writer of :src:`util/json.h`
      - None, one or both of two fixed entries, into buffers of 0 bytes
        and of each document's size with and without its NUL
      - 0 exactly when the document fits with its NUL, then the state
@@ -453,7 +407,7 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
      - ``tree_pending_parse()``, ``tree_pending_write()``
      - Any record ``json_parse()`` hands over and every operation
        ``tree_operation_validate()`` takes, ids up to 8 bytes; the
-       emitter, the directory or the write failing. ``util/json.c`` is a
+       emitter, the directory or the write failing. ``util/json.h`` is a
        stub that passes keys and values
      - Takes exactly a whole record of schema 1 with a positive seq, a
        upatch name and a sha256 digest; writes schema 1 and the
@@ -1366,7 +1320,7 @@ the model follows the C.
        ``JSON_MAX_STRING_BYTES`` and the buffer; well-formed UTF-8 is
        Table 3-7, which the Rust core checks
      - None since the port to Rust; the CBMC models went with
-       ``util/json.c``
+       ``util/json.h``
    * - ``Shirudo.ConfigActivation``, the config activation of
        :src:`util/config_update.c` as ``image update``, ``image stage``,
        ``status`` and ``init`` drive it
@@ -1606,8 +1560,10 @@ Not covered yet
 ---------------
 
 The fuzz targets in :doc:`test-coverage` cover these parsers; no proof
-does: the JSON reader and writer of :src:`rust/src/util/json/`, whose
-CBMC proofs went with the C they proved when the module moved to Rust,
+does: the JSON reader and writer of :src:`rust/src/util/json/` and the
+OCI client of :src:`rust/src/util/bpm_oci/`, whose CBMC proofs went
+with the C they proved when the modules moved to Rust, among them the
+one that also held ``on_index_entry()`` of :src:`util/bpm_package.c`,
 how ``json_parse()`` dispatches objects, arrays and maps to their
 schemas, and the members and elements of a JSON document longer than
 two bytes, the OTLP headers a configuration adds
@@ -1631,11 +1587,8 @@ those parts has no proof. So it is with the package state:
 and neither that nor reading back what ``bpm_state_emit()`` writes has a
 proof, as a string of any contents moves all that follows it in the
 document, which costs CBMC more memory than it has. The ``bpm_state``
-unit cases check both on fixed entries. Nor has the parse of a token
-server's answer: ``bpm-oci-token`` takes every outcome of
-``json_parse()`` its contract allows, as parsing 17 bytes of any value
-outgrew 6 GB, and the ``bpm_oci`` unit cases and the ``oci-http`` fuzz
-target read real answers. The zip directory walk of
+unit cases check both on fixed entries. Nor is the parse of a token server's answer proved as a whole.
+The bpm_oci unit cases and the oci-http fuzz target read real answers. The zip directory walk of
 ``jar_premain_class()`` in :src:`tools/shirudo-build/jar.c` has neither
 a fuzz target nor a proof; its unit cases cut and flip a jar byte by
 byte.

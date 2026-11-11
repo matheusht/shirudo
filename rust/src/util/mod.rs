@@ -3,5 +3,6 @@
 
 //! The ports of `util/`, one module for each C file they replace.
 
+mod bpm_oci;
 mod json;
 mod similar;
