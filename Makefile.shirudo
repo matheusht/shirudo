@@ -142,7 +142,6 @@ CC_LANG := $(call cc-option,$(CC),$(PROBED_LANG))
 CFLAGS_BASE := -O2 $(DEBUG_CFLAGS) -std=gnu11 $(WARNINGS) $(CC_WARNINGS) \
                $(HARDEN_CFLAGS) $(LANG_CFLAGS) $(CC_LANG) \
                -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE \
-               -DLIBEXEC_DIR='"$(SHIRUDO_LIBEXEC_DIR)"' \
                -DBPF_INCDIR='"$(SHIRUDO_BPF_INCDIR)"' \
                -DVMLINUX_PATH='"$(SHIRUDO_VMLINUX_PATH)"' \
                -DCLANG_PATH='"$(SHIRUDO_CLANG_PATH)"'
@@ -284,8 +283,7 @@ BUILTIN_SRCS := \
     builtin-image.c \
     builtin-upatch.c \
     builtin-bpm.c \
-    builtin-attest.c \
-    builtin-build.c
+    builtin-attest.c
 
 # BPF-side libbpf headers, used straight from vendor/libbpf (the BPF
 # compile rule adds it to the include path so <bpf/...> resolves) and
@@ -388,7 +386,8 @@ $(LIBBPF_A): $(LIBBPF_SRCS)
 # that cargo builds offline from the lock file and the target carries no
 # runtime it does not use; what core refers to of the unwinder comes
 # from libgcc_eh, linked in, as libgcc_s is not a library an operator
-# binary may link.
+# binary may link. The helper's directory reaches it in
+# SHIRUDO_LIBEXEC_DIR, and a change of it builds it again.
 CARGO       ?= cargo
 RUST_DIR    := rust
 RUST_TARGET := build/rust
@@ -401,16 +400,25 @@ RUST_LDLIBS := -static-libgcc
 # does not reach go, and with them the references to C it does not link.
 RUST_TEST_LDLIBS := $(RUST_LDLIBS) -Wl,--gc-sections
 RUSTFLAGS_WERROR := $(if $(filter 1,$(WERROR)),-D warnings)
+RUST_LIBEXEC_DIR := $(RUST_TARGET)/.libexec-dir
+ifneq ($(SHIRUDO_LIBEXEC_DIR),$(shell cat $(RUST_LIBEXEC_DIR) 2>/dev/null))
+RUST_LIBEXEC_CHANGED := FORCE_RUST_LIBEXEC
+endif
 
 rust: $(RUST_LIB)
 
-$(RUST_LIB): $(RUST_SRCS)
+$(RUST_LIB): $(RUST_SRCS) $(RUST_LIBEXEC_CHANGED)
 	@printf '  CARGO   $@\n'
 	$(Q)RUSTFLAGS="$(RUSTFLAGS_WERROR)" \
 	    CARGO_PROFILE_RELEASE_DEBUG=$(if $(DEBUG_CFLAGS),true,false) \
+	    SHIRUDO_LIBEXEC_DIR='$(SHIRUDO_LIBEXEC_DIR)' \
 	    $(CARGO) build --quiet --release --locked --offline \
 	    --manifest-path $(RUST_DIR)/Cargo.toml --target-dir $(RUST_TARGET)
+	$(Q)printf '%s\n' '$(SHIRUDO_LIBEXEC_DIR)' > $(RUST_LIBEXEC_DIR)
 	$(Q)touch $@
+
+.PHONY: FORCE_RUST_LIBEXEC
+FORCE_RUST_LIBEXEC:
 
 # Build-time only; links the vendored libbpf and dumps BTF as C.
 $(VMLINUX_GEN): tools/gen-vmlinux-h/gen-vmlinux-h.c $(LIBBPF_A)

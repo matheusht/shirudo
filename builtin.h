@@ -3,7 +3,7 @@
  * Copyright (c) 2026 Authors of shirudo
  *
  * Subcommand entry points dispatched from shirudo.c, each in its
- * builtin-<command>.c or, for config and version, in
+ * builtin-<command>.c or, for build, config and version, in
  * rust/src/builtin/<command>.rs.
  */
 
