@@ -173,14 +173,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
      - ``upatch_bpffs_name()``, ``upatch_name_from_bpffs()``
      - Up to 8 bytes, buffers up to 18
      - The result and the string of the Lean model ``Shirudo.PinName``
-   * - ``bpm-source-config``
-     - ``bpm_parse_source_line()``, ``bpm_parse_tree_line()``
-     - Lines up to 22 bytes, settings of 4 bytes with their NUL
-     - A setting written only for its exact key, holding the text after
-       the first ``=``: a source one without the blanks before it, cut
-       at CR or LF, a tree one without the blanks around it or its
-       quotes; ``-E2BIG`` exactly when it does not fit, ``-EINVAL`` for
-       an open quote
    * - ``bpm-state-entry``
      - ``on_state_entry()`` of :src:`util/bpm_state.c`
      - Any entry with a name and version of up to 6 bytes, into an empty
@@ -1435,11 +1427,13 @@ The fuzz targets in :doc:`test-coverage` cover these parsers; no proof
 does: the JSON reader and writer of :src:`rust/src/util/json/`, the
 OCI client of :src:`rust/src/util/bpm_oci/` and the package reader of
 :src:`rust/src/util/bpm_package/` and the TPM wire module of
-:src:`rust/src/util/tpm_wire/` the eventlog of
+:src:`rust/src/util/tpm_wire/`, the eventlog of
 :src:`rust/src/util/eventlog/` and site configuration in
 :src:`rust/src/util/config.rs`, plus the kernel build ID and release readers in
 :src:`rust/src/util/kernel_build_id.rs` and
-:src:`rust/src/util/kernel_release.rs`, whose CBMC proofs went with the C
+:src:`rust/src/util/kernel_release.rs` and the registry source
+and tree line parser in :src:`rust/src/util/bpm_source_config.rs`,
+whose CBMC proofs went with the C
 they proved when those modules moved to Rust; how ``json_parse()`` dispatches objects, arrays and maps to their
 schemas, and the members and elements of a JSON document longer than
 two bytes, the OTLP headers a configuration adds

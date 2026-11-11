@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * Copyright (c) 2026 Authors of shirudo
+ *
+ * The lines of a registry source and of an upatch tree config, which
+ * rust/src/util/bpm_source_config.rs implements.
  */
 
 #ifndef SHIRUDO_BPM_SOURCE_CONFIG_H

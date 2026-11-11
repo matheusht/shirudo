@@ -61,7 +61,6 @@ bpm-tree-selector	--unwind 10 --malloc-may-fail --malloc-fail-null LEN=0,1
 bpm-tree-reader		--unwind 6 --unwindset hex_digits.0:65,hex_decode.0:33,strlen.0:129,strncmp.0:8 --malloc-may-fail --malloc-fail-null LEN=0,1
 bpm-tree-reserve	--unwind 1
 bpm-tree-manifest	--max-field-sensitivity-array-size 768 --unwind 80 --unwindset memcmp.0:770 LEN=0-2
-bpm-source-config	--unwind 24
 chain-events		--unwind 258 LEN=0-8,255-257
 hex-model		--unwind 20
 paths-bpffs-name-model	--unwind 20

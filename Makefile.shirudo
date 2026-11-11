@@ -280,7 +280,6 @@ UTIL_SRCS := \
     util/config_update.c \
     util/config_measure.c \
     util/config_attest.c \
-    util/bpm_source_config.c \
     util/report.c \
     util/malloc.c \
     util/sysinfo.c \
@@ -959,10 +958,10 @@ testing/helper/test-config: testing/helper/test-config.c util/io.o util/seal.o u
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(RUST_TEST_LDLIBS)
 
-testing/helper/test-bpm-source: testing/helper/test-bpm-source.c util/bpm_source_config.o \
-                                util/string.o
+testing/helper/test-bpm-source: testing/helper/test-bpm-source.c util/string.o util/log.o \
+                                $(RUST_LIB)
 	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) -o $@ $^
+	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(RUST_TEST_LDLIBS)
 
 testing/helper/test-bpf-load: testing/helper/test-bpf-load.c
 	@printf '  CC      $@\n'
@@ -1332,8 +1331,7 @@ $(FUZZ_OUT)/fuzz-oci-ref: testing/fuzz/fuzz-oci-ref.c $(FUZZ_BASE) \
 $(FUZZ_OUT)/fuzz-registry-auth: testing/fuzz/fuzz-registry-auth.c \
                                  $(FUZZ_BASE) $(FUZZ_OCI)
 $(FUZZ_OUT)/fuzz-config: testing/fuzz/fuzz-config.c $(FUZZ_BASE) \
-                          $(FUZZ_CONFIG) util/seal.c util/io.c \
-                          util/bpm_source_config.c
+                          $(FUZZ_CONFIG) util/seal.c util/io.c
 $(FUZZ_OUT)/fuzz-image: testing/fuzz/fuzz-image.c $(FUZZ_BASE) \
                          util/image_bootstrap.c util/config_image.c \
                          util/config_measure.c util/crypto_openssl.c \
@@ -1379,7 +1377,7 @@ $(FUZZ_OUT)/fuzz-upatch-info: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) \
                                            $(LIBELF_LIBS) $(LUAJIT_LIBS)
 $(FUZZ_OUT)/fuzz-bpm-info: testing/fuzz/fuzz-bpm-info.c $(FUZZ_BASE) \
                            testing/fuzz/output.c builtin-bpm.c builtin.h \
-                           $(FUZZ_PACKAGE) util/bpm_source_config.c \
+                           $(FUZZ_PACKAGE) \
                            util/bpm_state.c util/bpm_tree_state.c \
                            util/chain.c util/help.c \
                            util/identity.c util/image_keys.c \
