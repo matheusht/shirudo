@@ -112,6 +112,11 @@ impl JsonEmit {
         self.err
     }
 
+    /// The bytes written so far, before the NUL that ends them.
+    pub(crate) fn written(&self) -> usize {
+        self.len
+    }
+
     fn grow(&mut self) -> bool {
         let cap = if self.cap != 0 {
             self.cap.saturating_mul(2)

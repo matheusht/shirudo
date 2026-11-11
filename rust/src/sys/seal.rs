@@ -42,4 +42,12 @@ unsafe extern "C" {
     /// `len` bytes at `buf` and a newline into the output, which it
     /// closes, unlinking a file it could not finish: 0 or -errno.
     pub fn seal_output_commit(out: *mut SealOutput, buf: *const c_void, len: usize) -> c_int;
+    /// The `len` bytes at `data` as the whole of the sealed file at
+    /// `path`, written in place of what was there: 0 or -errno.
+    pub fn seal_write_file(
+        path: *const c_char,
+        data: *const c_void,
+        len: usize,
+        mode: u32,
+    ) -> c_int;
 }

@@ -264,7 +264,6 @@ UTIL_SRCS := \
     util/bpm_tree_overlap.c \
     util/bpm_tree_state.c \
     util/curl.c \
-    util/bpm_state.c \
     util/kconfig.c \
     util/image_cache.c \
     util/image_config.c \
@@ -1361,7 +1360,7 @@ $(FUZZ_OUT)/fuzz-upatch-info: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) \
 $(FUZZ_OUT)/fuzz-bpm-info: testing/fuzz/fuzz-bpm-info.c $(FUZZ_BASE) \
                            testing/fuzz/output.c builtin-bpm.c builtin.h \
                            $(FUZZ_PACKAGE) \
-                           util/bpm_state.c util/bpm_tree_state.c \
+                           util/bpm_tree_state.c \
                            util/chain.c \
                            util/identity.c util/image_keys.c \
                            util/kconfig.c \

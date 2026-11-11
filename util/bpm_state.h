@@ -3,7 +3,7 @@
  * Copyright (c) 2026 Authors of shirudo
  *
  * The packages bpm installed, as /var/lib/shirudo/bpm/state.json records
- * them.
+ * them, which rust/src/util/bpm_state.rs reads and writes.
  */
 
 #ifndef SHIRUDO_BPM_STATE_H
