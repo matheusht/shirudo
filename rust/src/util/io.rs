@@ -473,7 +473,7 @@ pub(crate) unsafe fn check_trusted(fd: c_int, path: *const c_char, secret: bool)
 }
 
 /// A st_dev or st_rdev as the kernel encodes the dev_t in s_dev.
-fn kernel_dev(dev: u64) -> u32 {
+pub(crate) fn kernel_dev(dev: u64) -> u32 {
     let major = ((dev >> 8) & 0xfff) as u32 | ((dev >> 32) as u32 & !0xfff);
     let minor = (dev & 0xff) as u32 | ((dev >> 12) as u32 & !0xff);
 

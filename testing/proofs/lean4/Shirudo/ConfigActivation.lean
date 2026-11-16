@@ -8,7 +8,7 @@ The config image activation protocol of rust/src/util/config_update.rs, as `imag
 update` (`image_update()` of util/image_runtime.c), `image stage`
 (`image_stage()`), `status` and `init` (`image_boot()` and
 `image_boot_complete()` around the upatch restore and the register
-binding in builtin-init.c) drive it. An activation saves the selection
+binding in rust/src/builtin/init/) drive it. An activation saves the selection
 as pending in `state`, extends the config PCR with
 `config_measure_event()`, reads the PCR back, appends the event to
 `events`, mounts the config and saves the selection complete.

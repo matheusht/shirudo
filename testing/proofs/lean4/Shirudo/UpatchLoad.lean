@@ -5,7 +5,8 @@ import Shirudo.Chain
 
 /-!
 The upatch load and unload protocol of builtin-upatch.c and the boot
-restore of builtin-init.c, against crashes, concurrent commands and root.
+restore of rust/src/builtin/init/restore.rs, against crashes, concurrent
+commands and root.
 
 With enforcement active, `image_enter()` admits an upatch command only
 once this boot's config activation is complete, which
@@ -411,7 +412,7 @@ structure Variant where
   `init` wrote its record. -/
   gate : Bool := true
 
-/-- The protocol as builtin-upatch.c and builtin-init.c have it. -/
+/-- The protocol as builtin-upatch.c and rust/src/builtin/init have it. -/
 def C : Variant := {}
 
 /-- `eventlog_lock()` returns: no other descriptor holds the lock. -/

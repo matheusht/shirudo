@@ -38,7 +38,7 @@ pub(crate) fn in_initrd() -> bool {
 }
 
 /// Where the initrd mounts the root file system.
-fn sysroot() -> &'static CStr {
+pub(crate) fn sysroot() -> &'static CStr {
     test_override(c"SHIRUDO_SYSROOT").unwrap_or(c"/sysroot")
 }
 

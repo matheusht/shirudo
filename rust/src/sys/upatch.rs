@@ -37,6 +37,11 @@ unsafe extern "C" {
     ) -> c_int;
     /// Frees the `n` summaries at `list`, NULL for none.
     pub fn map_summary_free(list: *mut MapSummary, n: usize);
+    /// The first link of loaded upatch `name`, opened: a descriptor, or
+    /// -errno when none is pinned.
+    pub fn upatch_open_first_link(name: *const c_char) -> c_int;
+    /// Loads the archived upatch at `path`: 0 or -errno.
+    pub fn upatch_apply(path: *const c_char) -> c_int;
     /// Loads the upatch at `path`: 0, UPATCH_INSTALL_TARGET_MISSING or
     /// -errno.
     pub fn upatch_install(path: *const c_char) -> c_int;

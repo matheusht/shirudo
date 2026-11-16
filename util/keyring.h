@@ -99,6 +99,18 @@ key_serial_t keyring_bpf_add_cert(const __u8 *cert,
 /* Seal it for the rest of the boot: no key can be linked afterwards. */
 int keyring_bpf_seal(void);
 
+struct trusted_set;
+
+/*
+ * Enrol every certificate of <set> in the keyring <spec> names, whose
+ * serial is <ring>, and seal it, as init does the bpf keyring: 0, or
+ * -EEXIST when it was found sealed holding exactly the set, -ENOKEY
+ * when it was sealed empty, -EKEYREJECTED when it holds anything else
+ * or carries a restriction shirudo did not install, or another -errno.
+ */
+int keyring_seal_set(key_serial_t spec, key_serial_t ring,
+		     const struct trusted_set *set);
+
 /* The kernel-owned config trust anchor, populated only by trusted initrd. */
 #ifndef KEY_SPEC_DM_VERITY_KEYRING
 #define KEY_SPEC_DM_VERITY_KEYRING	(-10)

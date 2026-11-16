@@ -53,17 +53,17 @@ pub struct MeasuredUpatch {
 /// `struct chain_init_info`: the binding chain_init() made or found.
 #[repr(C)]
 pub struct ChainInitInfo {
-    writer_public: [u8; NV_RSA_BYTES],
-    reused: bool,
-    initrd: bool,
-    reset_count: u32,
-    value: [u8; DIGEST_LEN],
-    pcr_before: [u8; DIGEST_LEN],
-    phase_before: [u8; DIGEST_LEN],
-    name: [u8; NAME_LEN],
-    name_len: usize,
-    anchor: [u8; ANCHOR_MAX],
-    anchor_digest: [u8; DIGEST_LEN],
+    pub(crate) writer_public: [u8; NV_RSA_BYTES],
+    pub(crate) reused: bool,
+    pub(crate) initrd: bool,
+    pub(crate) reset_count: u32,
+    pub(crate) value: [u8; DIGEST_LEN],
+    pub(crate) pcr_before: [u8; DIGEST_LEN],
+    pub(crate) phase_before: [u8; DIGEST_LEN],
+    pub(crate) name: [u8; NAME_LEN],
+    pub(crate) name_len: usize,
+    pub(crate) anchor: [u8; ANCHOR_MAX],
+    pub(crate) anchor_digest: [u8; DIGEST_LEN],
 }
 
 /// `struct chain_status`: the register as a status report sees it.
@@ -539,7 +539,7 @@ fn zeroed<T>() -> T {
 
 /// Bind the register to this boot and write `event` as its first event,
 /// or find the binding a run before made: chain_init().
-fn init(event: &[u8; DIGEST_LEN], info: &mut ChainInitInfo) -> c_int {
+pub(crate) fn init(event: &[u8; DIGEST_LEN], info: &mut ChainInitInfo) -> c_int {
     let mut tpm: *mut Tpm = ptr::null_mut();
 
     // SAFETY: the caller's structure, all of whose bits zeroed are one.
@@ -964,7 +964,7 @@ fn live(out: &mut ChainLive) -> c_int {
 }
 
 /// Whether a TPM answers with the register written: chain_bound().
-fn bound() -> bool {
+pub(crate) fn bound() -> bool {
     let mut tpm: *mut Tpm = ptr::null_mut();
     let mut nv: TpmNvInfo = zeroed();
 

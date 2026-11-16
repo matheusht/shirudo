@@ -272,7 +272,6 @@ UTIL_SRCS := \
     util/upatch_resolve.c
 
 BUILTIN_SRCS := \
-    builtin-init.c \
     builtin-upatch.c
 
 
@@ -848,13 +847,10 @@ testing/helper/test-nv-writer: testing/helper/test-nv-writer.c $(REGISTER_OBJS)
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(REGISTER_LIBS)
 
 testing/helper/test-keyring-seal: testing/helper/test-keyring-seal.c \
-		testing/helper/keyring-seal.h builtin-init.c \
-		$(filter-out $(call obj,builtin-init.o),$(BUILTIN_OBJS)) \
-		$(UTIL_OBJS) $(VERSION_OBJ) $(LIBBPF_A) $(RUST_LIB)
+		$(BUILTIN_OBJS) $(UTIL_OBJS) $(VERSION_OBJ) $(LIBBPF_A) $(RUST_LIB)
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< \
 		$(filter %.o %.a,$^) \
-		-Wl,--wrap=keyring_bpf_add_cert -Wl,--wrap=keyring_bpf_seal \
 		$(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
 testing/helper/test-tpm-preopened: testing/helper/test-tpm-preopened.c \

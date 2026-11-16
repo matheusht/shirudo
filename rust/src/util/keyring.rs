@@ -200,7 +200,7 @@ fn read_links(keyring: i32, out: &mut *mut i32, n: &mut usize, size: &mut usize)
 
 /// The links of `keyring` the kernel describes, each to `f` with its
 /// type and description: 0 or -errno.
-fn list(keyring: i32, mut f: impl FnMut(i32, &CStr, &CStr)) -> c_int {
+pub(crate) fn list(keyring: i32, mut f: impl FnMut(i32, &CStr, &CStr)) -> c_int {
     let (mut serials, mut n, mut cap) = (core::ptr::null_mut(), 0, 0);
     let ret = read_links(keyring, &mut serials, &mut n, &mut cap);
 
@@ -470,6 +470,156 @@ impl KeyringLink {
     }
 }
 
+use crate::util::keys::{self, TrustedSet};
+
+/// A line of the log, through `pr_*("%s")`.
+fn say(level: unsafe extern "C" fn(*const c_char, ...), text: &[u8]) {
+    let msg = std::ffi::CString::new(cstr(text).to_vec()).unwrap_or_default();
+
+    // SAFETY: a "%s" format with a C string.
+    unsafe { level(c"%s".as_ptr(), msg.as_ptr()) };
+}
+
+fn strerr(err: c_int) -> &'static [u8] {
+    // SAFETY: strerror() gives a C string that outlives the message.
+    unsafe { crate::ffi::c_str(crate::sys::libc::strerror(err)) }
+}
+
+/// Whether the keyring holds the certificates of `set` and nothing else:
+/// 1, 0, or -errno.
+fn holds_set(ring: i32, set: &TrustedSet) -> c_int {
+    let mut certs = Vec::with_capacity(set.len());
+
+    for c in keys::members(set) {
+        match keys::cert_der(c) {
+            Ok(der) => certs.push(KeyringCert {
+                der: der.as_ptr(),
+                len: der.len(),
+            }),
+            Err(err) => return err,
+        }
+    }
+    // SAFETY: the certificates point into the set's DER, which lives.
+    unsafe { holds_exactly(ring, &certs) }
+}
+
+/// Enrols every certificate of `set` in the keyring `spec` names, whose
+/// serial is `ring`, and seals it.
+///
+/// The bpf keyring is the trust anchor a signed loader is verified
+/// against once it is sealed. Booted with bpf.keyring_unsealed=1 it
+/// takes keys until the first seal, which is init's job from the initrd.
+/// Found sealed, it was sealed by init earlier this boot (-EEXIST: use
+/// it) or empty by the kernel at boot (-ENOKEY). Either way it must then
+/// hold exactly the trusted set; a key another task linked before the
+/// seal, or a restriction init did not install, is refused
+/// (-EKEYREJECTED).
+pub(crate) fn seal_set(spec: i32, ring: i32, set: &TrustedSet) -> c_int {
+    use crate::errno::{EACCES, EEXIST, EKEYREJECTED, ENOENT, ENOKEY, ENOPKG, EPERM};
+    use crate::sys::log::{pr_err, pr_info};
+
+    let n = set.len();
+    let plural: &str = if n == 1 { "" } else { "s" };
+    let mut sealed = false;
+
+    for (i, c) in keys::members(set).iter().enumerate() {
+        let path = keys::cert_path(c);
+        let der = match keys::cert_der(c) {
+            Ok(der) => der,
+            Err(err) => {
+                say(pr_err, &[b"read ", path, b": ", strerr(-err)].concat());
+                return err;
+            }
+        };
+        // SAFETY: the certificate's DER.
+        let key = unsafe { add_cert(spec, der.as_ptr(), der.len()) };
+        if key >= 0 {
+            let head = format!("bpf keyring serial={ring}: ");
+            let tail = format!(" enrolled (key serial={key})");
+            say(pr_info, &[head.as_bytes(), path, tail.as_bytes()].concat());
+            continue;
+        }
+        if key != -EPERM && key != -EACCES {
+            say(
+                pr_err,
+                &[b"bpf keyring: add ", path, b": ", strerr(-key)].concat(),
+            );
+            if key == -ENOENT || key == -ENOPKG {
+                say(
+                    pr_err,
+                    b"kernel cannot verify this cert's public-key algorithm (ML-DSA needs CONFIG_CRYPTO_MLDSA=y and CONFIG_CRYPTO_SHA512=y)",
+                );
+            }
+            return key;
+        }
+        if i > 0 {
+            let msg = format!(
+                "bpf keyring serial={ring} was sealed while init enrolled the certificates (tampered)"
+            );
+            say(pr_err, msg.as_bytes());
+            return -EKEYREJECTED;
+        }
+        sealed = true;
+        break;
+    }
+    if !sealed {
+        let ret = keyctl_spec(KEYCTL_RESTRICT_KEYRING, spec).min(0) as c_int;
+        if ret == -EEXIST {
+            let msg = format!(
+                "bpf keyring serial={ring} carries a restriction init did not install (tampered)"
+            );
+            say(pr_err, msg.as_bytes());
+            return -EKEYREJECTED;
+        }
+        if ret != 0 {
+            say(
+                pr_err,
+                &[
+                    b"bpf keyring: certificates enrolled but the keyring could not be sealed: ",
+                    strerr(-ret),
+                ]
+                .concat(),
+            );
+            return ret;
+        }
+    }
+    let ret = holds_set(ring, set);
+    if ret < 0 {
+        say(pr_err, &[b"bpf keyring: compare: ", strerr(-ret)].concat());
+        return ret;
+    }
+    // SAFETY: no certificates.
+    if ret == 0 && sealed && unsafe { holds_exactly(ring, &[]) } == 1 {
+        let msg = format!(
+            "bpf keyring serial={ring} was sealed empty at boot; boot with bpf.keyring_unsealed=1"
+        );
+        say(pr_err, msg.as_bytes());
+        return -ENOKEY;
+    }
+    if ret == 0 {
+        let msg = format!(
+            "bpf keyring serial={ring} is sealed around keys other than the {n} trusted certificate{plural} (tampered)"
+        );
+        say(pr_err, msg.as_bytes());
+        return -EKEYREJECTED;
+    }
+    if sealed {
+        let msg = format!(
+            "bpf keyring serial={ring}: already holds the {n} trusted certificate{plural}, sealed this boot"
+        );
+        say(pr_info, msg.as_bytes());
+        return -EEXIST;
+    }
+    let msg = format!("bpf keyring serial={ring}: {n} certificate{plural} enrolled and sealed");
+    say(pr_info, msg.as_bytes());
+    0
+}
+
+/// [`seal_set`] of the kernel's bpf keyring, whose serial is `ring`.
+pub(crate) fn seal_bpf_set(ring: i32, set: &TrustedSet) -> c_int {
+    seal_set(KEY_SPEC_BPF_KEYRING, ring, set)
+}
+
 mod capi {
     use core::ffi::{c_char, c_int, c_long, c_void};
 
@@ -633,5 +783,21 @@ mod capi {
     #[unsafe(no_mangle)]
     pub extern "C" fn keyring_dm_verity_seal() -> c_int {
         super::keyctl_spec(KEYCTL_RESTRICT_KEYRING, KEY_SPEC_DM_VERITY_KEYRING).min(0) as c_int
+    }
+
+    /// [`super::seal_set`]: enrols the trusted set in the keyring `spec`
+    /// names, whose serial is `ring`, and seals it.
+    ///
+    /// # Safety
+    ///
+    /// `set` points to a loaded set.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn keyring_seal_set(
+        spec: i32,
+        ring: i32,
+        set: *const crate::util::keys::TrustedSet,
+    ) -> c_int {
+        // SAFETY: the caller passes a set.
+        super::seal_set(spec, ring, unsafe { &*set })
     }
 }

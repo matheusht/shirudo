@@ -505,8 +505,8 @@ unsafe fn unmeasured_archives(
 }
 
 pub(crate) use capi::{
-    measured_set_add, measured_set_boot, measured_set_free, measured_unmeasured_archives,
-    measured_unmeasured_pins, measured_upatch_of,
+    measured_holds, measured_set_add, measured_set_boot, measured_set_free, measured_set_log,
+    measured_unmeasured_archives, measured_unmeasured_pins, measured_upatch_of,
 };
 
 mod capi {

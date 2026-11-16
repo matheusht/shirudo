@@ -86,6 +86,8 @@ pub(crate) fn read(seed: &mut [u8; DIGEST_LEN], public: &mut [u8; NV_RSA_BYTES])
     0
 }
 
+pub(crate) use capi::nv_writer_create;
+
 mod capi {
     use core::ffi::c_int;
 

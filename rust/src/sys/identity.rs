@@ -10,19 +10,19 @@ use core::ffi::c_int;
 /// fields read here, and the rest as the header lays them out.
 #[repr(C)]
 pub struct Identity {
-    sb_dev: u32,
-    run_dev: u32,
+    pub sb_dev: u32,
+    pub run_dev: u32,
     pub keyring_serial: i32,
     pub keyring_type: u32,
     pub n_keys: u32,
     pub key_serials: [i32; 16],
-    runtime_root: [u8; 32],
+    pub runtime_root: [u8; 32],
     pub nv_writer_seed: [u8; 32],
     pub nv_writer_public: [u8; 384],
     pub ek_name: [u8; 34],
     pub dm_verity_ring: i32,
     pub dm_verity_key: i32,
-    nv_index: u32,
+    pub nv_index: u32,
 }
 
 const _: () = assert!(size_of::<Identity>() == 580);

@@ -42,6 +42,9 @@ pub const SYS_KEYCTL: core::ffi::c_long = 250;
 pub const SYS_ADD_KEY: core::ffi::c_long = 217;
 #[cfg(target_arch = "aarch64")]
 pub const SYS_KEYCTL: core::ffi::c_long = 219;
+
+/// pidfd_open(2), one number on every architecture.
+pub const SYS_PIDFD_OPEN: core::ffi::c_long = 434;
 #[cfg(target_arch = "x86_64")]
 pub const O_DIRECTORY: c_int = 0o200000;
 #[cfg(target_arch = "x86_64")]
@@ -167,7 +170,7 @@ pub struct Statvfs {
     f_ffree: u64,
     f_favail: u64,
     f_fsid: core::ffi::c_ulong,
-    f_flag: core::ffi::c_ulong,
+    pub f_flag: core::ffi::c_ulong,
     f_namemax: core::ffi::c_ulong,
     f_spare: [c_int; 6],
 }
@@ -373,6 +376,7 @@ unsafe extern "C" {
     pub fn gethostname(name: *mut c_char, len: usize) -> c_int;
     pub fn sysconf(name: c_int) -> core::ffi::c_long;
     pub fn statvfs(path: *const c_char, buf: *mut Statvfs) -> c_int;
+    pub fn statfs(path: *const c_char, buf: *mut Statfs) -> c_int;
     pub fn fgets(s: *mut c_char, n: c_int, f: *mut File) -> *mut c_char;
     pub fn sscanf(s: *const c_char, fmt: *const c_char, ...) -> c_int;
     pub fn strcmp(a: *const c_char, b: *const c_char) -> c_int;

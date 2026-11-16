@@ -1,28 +1,40 @@
 // SPDX-License-Identifier: BSD-2-Clause
 /* Copyright (c) 2026 Authors of shirudo */
 
+#include <errno.h>
+#include <limits.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+
 #include <linux/keyctl.h>
 
-#include "../../builtin-init.c"
-#include "keyring-seal.h"
+#include <shirudo/string.h>
 
-/* init's enrollment runs against a private keyring, not the sealed .bpf. */
+#include "util/keyring.h"
+#include "util/keys.h"
+#include "util/malloc.h"
+#include "util/paths.h"
+
+/*
+ * init's enrolment, keyring_seal_set(), runs against a private keyring
+ * rather than the sealed .bpf: it adds to and seals the keyring named.
+ */
 static key_serial_t test_ring;
 
-key_serial_t __wrap_keyring_bpf_add_cert(const __u8 *cert, size_t cert_len)
+/* Seal the ring as init seals the bpf keyring: no type, nothing more. */
+static int seal_ring(key_serial_t ring)
 {
-	long ret = syscall(__NR_add_key, "asymmetric", NULL, cert, cert_len,
-			   test_ring);
-
-	return ret < 0 ? -errno : (key_serial_t)ret;
-}
-
-int __wrap_keyring_bpf_seal(void)
-{
-	if (syscall(__NR_keyctl, KEYCTL_RESTRICT_KEYRING, test_ring, 0, 0,
-		    0) < 0)
+	if (syscall(__NR_keyctl, KEYCTL_RESTRICT_KEYRING, ring, 0, 0, 0) < 0)
 		return -errno;
 	return 0;
+}
+
+/* Enrol <set> in the private ring and seal it, as init does the .bpf. */
+static int enrol(const struct trusted_set *set)
+{
+	return keyring_seal_set(test_ring, test_ring, set);
 }
 
 static key_serial_t add(const char *type, const char *description,
@@ -120,36 +132,36 @@ static int seal_case(const char *mode,
 		return test_ring;
 	if (!strcmp(mode, "fresh")) {
 		fails += expect("enrol and seal",
-				init_bpf_keyring(test_ring, set), 0);
+				enrol(set), 0);
 		fails += expect("found sealed with the set",
-				init_bpf_keyring(test_ring, set), -EEXIST);
+				enrol(set), -EEXIST);
 	} else if (!strcmp(mode, "foreign")) {
 		if (add("asymmetric", NULL, other->der, other->len,
 			test_ring) < 0)
 			return -EIO;
 		fails += expect("foreign key sealed in",
-				init_bpf_keyring(test_ring, set), -EKEYREJECTED);
+				enrol(set), -EKEYREJECTED);
 		fails += expect("found sealed with a foreign key",
-				init_bpf_keyring(test_ring, set), -EKEYREJECTED);
+				enrol(set), -EKEYREJECTED);
 	} else if (!strcmp(mode, "nested")) {
 		if (add("keyring", "shirudo-test-nested", NULL, 0,
 			test_ring) < 0)
 			return -EIO;
 		fails += expect("nested keyring sealed in",
-				init_bpf_keyring(test_ring, set), -EKEYREJECTED);
+				enrol(set), -EKEYREJECTED);
 	} else if (!strcmp(mode, "restricted")) {
 		if (add("asymmetric", NULL, own->der, own->len, test_ring) < 0 ||
 		    syscall(__NR_keyctl, KEYCTL_RESTRICT_KEYRING, test_ring,
 			    "asymmetric", "key_or_keyring:0:chain", 0) < 0)
 			return -EIO;
-		ret = init_bpf_keyring(test_ring, set);
+		ret = enrol(set);
 		fails += expect("restriction init did not install",
 				ret == 0 || ret == -EEXIST, 0);
 	} else if (!strcmp(mode, "empty")) {
-		if (__wrap_keyring_bpf_seal())
+		if (seal_ring(test_ring))
 			return -EIO;
 		fails += expect("sealed empty",
-				init_bpf_keyring(test_ring, set), -ENOKEY);
+				enrol(set), -ENOKEY);
 	} else {
 		return -EINVAL;
 	}

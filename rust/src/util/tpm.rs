@@ -2119,9 +2119,9 @@ fn ek_certificate(t: &Tpm, out: &mut [u8], len: &mut usize, rsa: &mut bool) -> c
 /// For Rust callers.
 pub(crate) use capi::{
     tpm_activate_credential, tpm_ak_create, tpm_close, tpm_ek_certificate, tpm_ek_create,
-    tpm_key_flush, tpm_nv_certify, tpm_nv_define, tpm_nv_extend, tpm_nv_extend_first, tpm_nv_info,
-    tpm_nv_read, tpm_nv_set_writer, tpm_nv_undefine, tpm_open, tpm_open_quiet, tpm_pcr_extend,
-    tpm_pcr_read, tpm_quote, tpm_reset_count, tpm_tcti, tpm_writer_create,
+    tpm_ek_name, tpm_key_flush, tpm_nv_certify, tpm_nv_define, tpm_nv_extend, tpm_nv_extend_first,
+    tpm_nv_info, tpm_nv_read, tpm_nv_set_writer, tpm_nv_undefine, tpm_open, tpm_open_quiet,
+    tpm_pcr_extend, tpm_pcr_read, tpm_quote, tpm_reset_count, tpm_tcti, tpm_writer_create,
 };
 
 mod capi {

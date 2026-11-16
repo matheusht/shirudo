@@ -5,7 +5,26 @@
 
 use core::ffi::{c_char, c_int, c_void};
 
+use crate::util::keys::TrustedSet;
+
 unsafe extern "C" {
+    /// Reads the authenticated image settings the bootstrap names: 0, a
+    /// positive count, or -errno.
+    pub fn image_bootstrap_load() -> c_int;
+    /// The runtime image's root hash, 32 bytes, zero without one.
+    pub fn image_runtime_root() -> *const u8;
+    /// Mounts the authenticated runtime image: 0 or -errno.
+    pub fn image_runtime_mount() -> c_int;
+    /// The boot key image's trusted certificates into `set`: 0 or -errno.
+    pub fn image_boot_keys(set: *mut TrustedSet) -> c_int;
+    /// Closes the boot key image: 0 or -errno.
+    pub fn image_boot_keys_close() -> c_int;
+    /// Loads the runtime image's boot settings: 0 or -errno.
+    pub fn image_boot() -> c_int;
+    /// Completes the authenticated boot: 0 or -errno.
+    pub fn image_boot_complete() -> c_int;
+    /// Leaves the images this command entered.
+    pub fn image_leave();
     /// The config activation's state: 0, -EINPROGRESS while one is
     /// pending, the integrity error the other commands refuse on, or
     /// -ENODEV without activation state; `root` the selected or pending

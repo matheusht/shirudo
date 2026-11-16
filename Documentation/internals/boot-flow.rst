@@ -43,8 +43,8 @@ the switch to the root file system. It needs
 ``/sysroot/var/lib/shirudo``, remounts ``/sysroot`` read-write, and runs
 ``shirudo init`` with ``KeyringMode=inherit``.
 
-``init`` then runs these steps. ``cmd_init()`` and ``run_init()`` in
-:src:`builtin-init.c` are the reference.
+``init`` then runs these steps. ``init()`` and ``run()`` in
+:src:`rust/src/builtin/init/mod.rs` are the reference.
 
 #. Read the bootstrap settings from the initrd's
    ``/etc/shirudo/shirudo.conf``. ``runtime.image`` and

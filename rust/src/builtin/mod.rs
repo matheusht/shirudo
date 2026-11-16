@@ -15,6 +15,7 @@ mod build;
 mod config;
 mod genkey;
 mod image;
+mod init;
 mod keys;
 mod status;
 mod version;

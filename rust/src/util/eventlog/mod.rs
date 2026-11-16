@@ -11,9 +11,10 @@ mod capi;
 mod records;
 
 pub(crate) use capi::{
-    eventlog_append, eventlog_boot_id, eventlog_boot_init, eventlog_boot_lines,
-    eventlog_boot_upatches, eventlog_lock, eventlog_path, eventlog_record_open, eventlog_replay,
-    eventlog_timestamp, eventlog_tree_op_measured, eventlog_unlock, eventlog_upatches,
+    eventlog_adopt_pending, eventlog_append, eventlog_append_to, eventlog_boot_id,
+    eventlog_boot_init, eventlog_boot_lines, eventlog_boot_upatches, eventlog_lock, eventlog_path,
+    eventlog_pending_path, eventlog_record_open, eventlog_replay, eventlog_timestamp,
+    eventlog_tree_op_measured, eventlog_unlock, eventlog_upatches, eventlog_would_exceed,
 };
 pub(crate) use records::{EventlogInit, UPATCH_INIT, UPATCH_UNLOAD};
 

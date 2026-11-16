@@ -40,6 +40,9 @@ unsafe extern "C" {
     pub fn seal_lock(path: *const c_char) -> c_int;
     /// Whether the file at `path` carries shirudo's seal label.
     pub fn seal_owns(path: *const c_char) -> bool;
+    /// Labels shirudo's state trees; `allow_first` lets the run that
+    /// brings enforcement up label an unlabelled tree. 0 or -errno.
+    pub fn seal_label_tree(allow_first: bool) -> c_int;
     /// The seal label on the file at `path`, a symlink's own inode
     /// rather than its target's: 0 or -errno.
     pub fn seal_label(path: *const c_char) -> c_int;

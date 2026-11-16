@@ -902,7 +902,7 @@ the model follows the C.
        the journal moved to Rust
    * - ``Shirudo.UpatchLoad``, the load, unload and purge of
        :src:`builtin-upatch.c`, the gate of :src:`util/image_runtime.c` and
-       the boot restore of :src:`builtin-init.c`
+       the boot restore of :src:`rust/src/builtin/init/restore.rs`
      - ``undo_pass_sound``: once a command's undo pass is done, every pin
        directory holds one link, of the payload its xattr names and this
        boot's records hold, and every archive file shirudo wrote is on

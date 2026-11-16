@@ -51,18 +51,18 @@ const KEYS_REVOKED_DIR: &CStr = c"/var/lib/shirudo/keys/revoked";
 /// `struct preflight_check`.
 #[repr(C)]
 pub struct PreflightCheck {
-    id: c_int,
-    name: *const c_char,
-    ok: bool,
-    detail: [u8; DETAIL_MAX],
+    pub(crate) id: c_int,
+    pub(crate) name: *const c_char,
+    pub(crate) ok: bool,
+    pub(crate) detail: [u8; DETAIL_MAX],
 }
 
 /// `struct preflight_result`.
 #[repr(C)]
 pub struct PreflightResult {
-    checks: [PreflightCheck; PRE_MAX],
-    n: c_int,
-    n_failed: c_int,
+    pub(crate) checks: [PreflightCheck; PRE_MAX],
+    pub(crate) n: c_int,
+    pub(crate) n_failed: c_int,
 }
 
 const _: () = assert!(size_of::<PreflightCheck>() == 280);
@@ -510,6 +510,8 @@ unsafe fn run(out: *mut PreflightResult) {
     check_embedded_loader(r);
     check_tpm(r);
 }
+
+pub(crate) use capi::preflight_run;
 
 mod capi {
     use super::PreflightResult;

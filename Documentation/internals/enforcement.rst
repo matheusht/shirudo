@@ -220,8 +220,8 @@ Writable state
 Attach order
 ------------
 
-``init_lsm()`` in :src:`builtin-init.c` brings the enforcement up in this
-order:
+``attach()`` in :src:`rust/src/builtin/init/lsm.rs` brings the enforcement
+up in this order:
 
 #. Load ``bpf2``.
 #. Fill the identity map and freeze it.
