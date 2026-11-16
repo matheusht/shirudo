@@ -24,7 +24,6 @@ use crate::sys::libc::{
 };
 use crate::sys::log::{pr_err, pr_warn};
 use crate::sys::malloc::xfree;
-use crate::sys::otel::{OtelOpts, otel_send_log_json, status_otel_severity};
 use crate::sys::string::name_has_suffix;
 use crate::sys::tamper::{TamperCounts, tamper_meaning, tamper_name, tamper_read};
 use crate::sys::upatch::{
@@ -56,6 +55,7 @@ use crate::util::measured::{
     MeasuredSet, measured_set_boot, measured_set_free, measured_unmeasured_archives,
     measured_unmeasured_pins,
 };
+use crate::util::otel::{OtelOpts, otel_send_log_json, status_otel_severity};
 use crate::util::sysinfo::{Sysinfo, sysinfo_emit_json, sysinfo_gather};
 use crate::util::tpm::tpm_tcti;
 use crate::util::upatch_table::{self, UpatchTableRow};

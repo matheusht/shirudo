@@ -481,19 +481,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
        attestation, its signature and the key, each in that order and
        into all its room, terminated; ``-E2BIG`` with nothing written
        when it does not fit; the first failed encoding's error
-   * - ``otel-header-fields``
-     - The OTLP header checks and ``percent_decode()``
-     - Strings up to 32 bytes
-     - Names exactly RFC 9110 tokens, values without controls but tab;
-       each ``%XX`` decoded, a stray ``%`` and ``%00`` refused
-   * - ``otel-retry-after``
-     - ``otel_retry_after()``, ``response_header()``
-     - Headers up to 32 bytes, dates modelled; lines of 139 to 142
-       bytes whose value is 122 to 130 bytes once trimmed, around the
-       128-byte buffer it is copied into
-     - A delay is at most 30 seconds, the value itself when shorter; a
-       header line read only within itself, its value copied only when
-       it fits
    * - ``tpm-signer``
      - ``tpm_attest_signer()``, ``tpm_attest_verify()``
      - Every signer of up to 34 bytes and key name; attestations of up

@@ -83,4 +83,61 @@ unsafe extern "C" {
     ) -> c_int;
     pub fn inflate(strm: *mut ZStream, flush: c_int) -> c_int;
     pub fn inflateEnd(strm: *mut ZStream) -> c_int;
+    /// deflateInit2(): the macro passes the version and size of the
+    /// stream.
+    pub fn deflateInit2_(
+        strm: *mut ZStream,
+        level: c_int,
+        method: c_int,
+        window_bits: c_int,
+        mem_level: c_int,
+        strategy: c_int,
+        version: *const c_char,
+        stream_size: c_int,
+    ) -> c_int;
+    pub fn deflate(strm: *mut ZStream, flush: c_int) -> c_int;
+    pub fn deflateEnd(strm: *mut ZStream) -> c_int;
+    pub fn deflateSetHeader(strm: *mut ZStream, head: *mut GzHeader) -> c_int;
+    pub fn compressBound(source_len: c_ulong) -> c_ulong;
+}
+
+/// `gz_header`: the gzip header deflate() writes.
+#[repr(C)]
+pub struct GzHeader {
+    pub text: c_int,
+    pub time: c_ulong,
+    pub xflags: c_int,
+    pub os: c_int,
+    extra: *mut u8,
+    extra_len: c_uint,
+    extra_max: c_uint,
+    name: *mut u8,
+    name_max: c_uint,
+    comment: *mut u8,
+    comm_max: c_uint,
+    hcrc: c_int,
+    done: c_int,
+}
+
+const _: () = assert!(size_of::<GzHeader>() == 80);
+
+impl GzHeader {
+    /// No name, comment or extra field, as `= {}` is in C.
+    pub const fn zeroed() -> Self {
+        GzHeader {
+            text: 0,
+            time: 0,
+            xflags: 0,
+            os: 0,
+            extra: core::ptr::null_mut(),
+            extra_len: 0,
+            extra_max: 0,
+            name: core::ptr::null_mut(),
+            name_max: 0,
+            comment: core::ptr::null_mut(),
+            comm_max: 0,
+            hcrc: 0,
+            done: 0,
+        }
+    }
 }

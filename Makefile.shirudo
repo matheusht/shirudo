@@ -265,7 +265,7 @@ UTIL_SRCS := \
     util/upatch_maps.c \
      \
     util/upatch_decode.c \
-    util/upatch_maps_otel.c \
+     \
     util/upatch_pins.c \
     util/upatch_verify.c \
     util/upatch_resolve.c
@@ -953,8 +953,7 @@ testing/helper/test-signed-load: testing/helper/test-signed-load.c
 	    -o $@ $^ -lcrypto
 
 testing/helper/test-otel-map: testing/helper/test-otel-map.c util/upatch_maps.o \
-                        util/upatch_maps_otel.o util/keepalive_quote.o \
-                        util/identity.o util/curl.o \
+                        util/curl.o \
                         util/upatch_decode.o util/upatch_pins.o \
                         util/upatch_resolve.o \
                          util/string.o util/log.o \
@@ -1260,9 +1259,7 @@ $(FUZZ_OUT)/fuzz-decoder: FUZZ_CFLAGS += $(LUAJIT_CFLAGS) -DHAVE_LUAJIT \
 	-DFUZZ_SOURCE_TREE='"$(CURDIR)"'
 $(FUZZ_OUT)/fuzz-decoder: FUZZ_LIBS += $(LUAJIT_LIBS)
 $(FUZZ_OUT)/fuzz-otel: testing/fuzz/fuzz-otel.c $(FUZZ_BASE) \
-                        util/upatch_maps_otel.c util/curl.c \
-                         util/version_id.c \
-                        $(FUZZ_SEAL)
+                        util/version_id.c
 $(FUZZ_OUT)/fuzz-beefile: testing/fuzz/fuzz-beefile.c $(FUZZ_BASE) \
                            util/version_id.c
 $(FUZZ_OUT)/fuzz-oci-http: testing/fuzz/fuzz-oci-http.c $(FUZZ_BASE) \
@@ -1299,7 +1296,7 @@ $(FUZZ_OUT)/fuzz-upatch-info: testing/fuzz/fuzz-upatch-info.c $(FUZZ_BASE) \
                               util/similar.c \
                                \
                               util/upatch_decode.c util/upatch_maps.c \
-                              util/upatch_maps_otel.c util/upatch_pins.c \
+                               util/upatch_pins.c \
                               util/upatch_resolve.c \
                               util/upatch_verify.c util/version_id.c \
                               util/xdp.c $(FUZZ_SEAL) $(LIBBPF_A)
@@ -1336,7 +1333,6 @@ $(FUZZ_OUT)/fuzz-attest-report: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) \
 
 # A target that reaches static parsers or printers includes their source,
 # which it then depends on without linking it a second time.
-$(FUZZ_OUT)/fuzz-otel: FUZZ_INCLUDED := util/upatch_maps_otel.c
 $(FUZZ_OUT)/fuzz-serializer: FUZZ_INCLUDED := util/upatch_maps.c
 $(FUZZ_OUT)/fuzz-decoder: FUZZ_INCLUDED := util/upatch_decode.c
 $(FUZZ_OUT)/fuzz-upatch-info: FUZZ_INCLUDED := builtin-upatch.c

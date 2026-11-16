@@ -128,6 +128,11 @@ impl JsonEmit {
         (self.buf, self.cap, self.len)
     }
 
+    /// How many containers are open.
+    pub(crate) fn depth(&self) -> u32 {
+        self.depth
+    }
+
     /// The first error, which stopped the emitter, or 0.
     pub(crate) fn err(&self) -> c_int {
         self.err
@@ -363,7 +368,7 @@ impl JsonEmit {
         self.put_raw(b"null");
     }
 
-    fn kv_raw(&mut self, key: &[u8], value: &[u8]) {
+    pub(crate) fn kv_raw(&mut self, key: &[u8], value: &[u8]) {
         self.member(key);
         self.put_raw(value);
     }

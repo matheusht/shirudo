@@ -123,6 +123,33 @@ pub fn parse_u64(s: &[u8], max: u64) -> Result<u64, c_int> {
     })
 }
 
+/// parse_s64(): an optional minus and the digits of a decimal number,
+/// from `min` to `max`; -EINVAL for anything else, -ERANGE out of range.
+pub fn parse_s64(s: &[u8], min: i64, max: i64) -> Result<i64, c_int> {
+    let (neg, digits) = match s.strip_prefix(b"-") {
+        Some(d) => (true, d),
+        None => (false, s),
+    };
+    let limit = if neg {
+        i64::MAX as u64 + 1
+    } else {
+        i64::MAX as u64
+    };
+    let v = parse_u64(digits, limit)?;
+    let r = if !neg {
+        v as i64
+    } else if v == limit {
+        i64::MIN
+    } else {
+        -(v as i64)
+    };
+    if r < min || r > max {
+        Err(-ERANGE)
+    } else {
+        Ok(r)
+    }
+}
+
 /// name_has_suffix(): whether `name` is a stem of at least one byte and
 /// then `suffix`, as a file name and its extension are.
 pub fn name_has_suffix(name: &[u8], suffix: &[u8]) -> bool {

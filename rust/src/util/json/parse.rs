@@ -182,7 +182,7 @@ fn errno(ret: Result) -> c_int {
 /// What a walk reports: decoded keys and strings, numbers as their text,
 /// with `integer` set when it has no fraction or exponent, and literals
 /// as 1 for true, 0 for false and -1 for null.
-trait Visit {
+pub(crate) trait Visit {
     fn open(&mut self, array: bool) -> Result;
     fn close(&mut self, array: bool) -> Result;
     fn key(&mut self, key: &CStr) -> Result;
@@ -861,7 +861,7 @@ fn parse(data: &[u8], fields: Fields) -> Result {
     Ok(())
 }
 
-fn walk(data: &[u8], visitor: &mut dyn Visit) -> Result {
+pub(crate) fn walk(data: &[u8], visitor: &mut dyn Visit) -> Result {
     let mut scratch = Vec::new();
 
     if data.len() > MAX_BYTES {

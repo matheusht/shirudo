@@ -39,6 +39,7 @@ pub(crate) mod keyring;
 pub(crate) mod keys;
 pub(crate) mod measured;
 pub(crate) mod nv_writer;
+pub(crate) mod otel;
 pub(crate) mod preflight;
 mod report;
 pub(crate) mod seal;
