@@ -50,14 +50,14 @@ test_expect_success 'a map listing is not appended through a symbolic link' '
 
 test_expect_success 'an output that cannot be written is removed' '
 	mkdir "$WORK/fail" &&
-	[ "$("$H" fail "$WORK/fail/out.json")" = -5 ] &&
+	[ "$("$H" fail "$WORK/fail/out.json")" = -27 ] &&
 	[ ! -e "$WORK/fail/out.json" ]
 '
 
 test_expect_success 'a failed output is removed where it was opened, not where its path leads' '
 	mkdir "$WORK/swapped" "$WORK/state" &&
 	printf "keep\n" >"$WORK/state/out.json" &&
-	[ "$("$H" swap-dir "$WORK/swapped/out.json" "$WORK/state")" = -5 ] &&
+	[ "$("$H" swap-dir "$WORK/swapped/out.json" "$WORK/state")" = -27 ] &&
 	[ -L "$WORK/swapped" ] &&
 	[ "$(cat "$WORK/state/out.json")" = keep ] &&
 	[ ! -e "$WORK/swapped.moved/out.json" ]
@@ -65,7 +65,7 @@ test_expect_success 'a failed output is removed where it was opened, not where i
 
 test_expect_success 'a failed output does not remove a file put in its place' '
 	mkdir "$WORK/replaced" &&
-	[ "$("$H" swap-file "$WORK/replaced/out.json")" = -5 ] &&
+	[ "$("$H" swap-file "$WORK/replaced/out.json")" = -27 ] &&
 	[ -e "$WORK/replaced/out.json" ] &&
 	[ -e "$WORK/replaced/out.json.moved" ]
 '

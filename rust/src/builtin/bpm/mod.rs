@@ -27,12 +27,12 @@ use crate::sys::libc::{
 };
 use crate::sys::log::{pr_err, pr_warn};
 use crate::sys::malloc::libc_free;
-use crate::sys::seal::{seal_lock, seal_mkdir_p};
 use crate::util::help::{
     Help, HelpItem, HelpSection, is_help, is_list_cmds, print_help, print_subcmd_list,
     resolve_subcommand,
 };
 use crate::util::io::read_text_line;
+use crate::util::seal::{seal_lock, seal_mkdir_p};
 
 /// A negative errno, or a command's own non-zero status.
 type Result<T = ()> = core::result::Result<T, c_int>;

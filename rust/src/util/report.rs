@@ -11,10 +11,10 @@ use crate::errno::{E2BIG, ENOMEM};
 use crate::sys::libc::{Utsname, printf, strerror, strerrorname_np, uname};
 use crate::sys::log::pr_err;
 use crate::sys::malloc::{xfree, xmalloc, xstrfree, xstrndup};
-use crate::sys::seal::{SealOutput, seal_output_commit, seal_output_create};
 use crate::text::{cstr, strsprintf};
 use crate::util::eventlog::NV_INDEX;
 use crate::util::json::JsonEmit;
+use crate::util::seal::{SealOutput, seal_output_commit, seal_output_create};
 
 /// `VERIFIER_LOG_MAX`: the most of a verifier log a report keeps.
 const VERIFIER_LOG_MAX: usize = 16 * 1024 * 1024;

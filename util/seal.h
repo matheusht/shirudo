@@ -2,7 +2,8 @@
 /*
  * Copyright (c) 2026 Authors of shirudo
  *
- * Inode labelling for the bpf/seal.c filesystem-sealing LSM.
+ * Inode labelling for the bpf/seal.c filesystem-sealing LSM, in
+ * rust/src/util/seal.rs.
  */
 
 #ifndef SHIRUDO_SEAL_H

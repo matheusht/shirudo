@@ -13,7 +13,6 @@ use super::{Init, cat, error, hex, info, strerr, warn};
 use crate::errno::{EACCES, EEXIST, EINVAL, ENAMETOOLONG, ENODEV, ENOENT, ENOSPC, EPERM};
 use crate::sys::hex::hex_decode;
 use crate::sys::libc::{close, explicit_bzero};
-use crate::sys::seal::seal_owns;
 use crate::sys::string::name_has_suffix;
 use crate::sys::upatch::{upatch_apply, upatch_open_first_link, upatch_payload_sha256};
 use crate::text::cstr;
@@ -30,6 +29,7 @@ use crate::util::keys::{self, keys_set_digest};
 use crate::util::measured::{
     MeasuredSet, measured_holds, measured_set_free, measured_set_log, measured_upatch_of,
 };
+use crate::util::seal::seal_owns;
 use crate::util::upatch::{Upatch, upatch_close, upatch_open};
 
 const UPATCHES_DIR: &str = "/var/lib/shirudo/upatches";

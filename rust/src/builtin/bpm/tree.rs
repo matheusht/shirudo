@@ -12,9 +12,6 @@ use super::{
     finish, lock, message, path, print, remove, status, warn,
 };
 use crate::errno::{EINVAL, EIO, EKEYREJECTED, ENOENT, ERANGE};
-use crate::sys::seal::{
-    SealOutput, seal_mkdir_p, seal_output_commit, seal_output_create, seal_write_file,
-};
 use crate::sys::upatch::{UPATCH_INSTALL_TARGET_MISSING, upatch_install, upatch_remove};
 use crate::text::{cstr, strscpy};
 use crate::util::bpm_oci::{MAX_DIGEST, package_name_ok};
@@ -33,6 +30,9 @@ use crate::util::eventlog::{
 };
 use crate::util::help::is_help;
 use crate::util::json::JsonEmit;
+use crate::util::seal::{
+    SealOutput, seal_mkdir_p, seal_output_commit, seal_output_create, seal_write_file,
+};
 use crate::util::upatch;
 
 /// The lowercase hex of `bytes` into `out`, NUL-terminated.

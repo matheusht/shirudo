@@ -2,24 +2,25 @@
 /*
  * Copyright (c) 2026 Authors of shirudo
  *
- * seal_output_create() and seal_output_commit() with every write failing,
- * and root's move made at that moment: test-seal-output <how> <path>
- * [<dir>], how being fail, swap-dir, which puts a symbolic link to dir in
- * place of the path's directory, or swap-file, which puts another file in
- * place of the one being written. Prints what the commit returned.
+ * seal_output_create() and seal_output_commit() with the write failing,
+ * as a file size limit of 0 makes every write to a regular file fail,
+ * and root's move made before it: test-seal-output <how> <path> [<dir>],
+ * how being fail, swap-dir, which puts a symbolic link to dir in place of
+ * the path's directory, or swap-file, which puts another file in place of
+ * the one being written. Prints what the commit returned.
  */
 
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <unistd.h>
 
 #include <shirudo/string.h>
 
 #include "util/seal.h"
-
-int __wrap_write_complete(int fd, const void *buf, size_t len);
 
 static const char *how, *path, *dir;
 
@@ -52,24 +53,22 @@ static int swap_file(void)
 	return 0;
 }
 
-int __wrap_write_complete(int fd, const void *buf, size_t len)
+/* Every write to a regular file from here fails with EFBIG. */
+static int fail_writes(void)
 {
-	int ret = 0;
+	struct rlimit lim;
 
-	if (!strcmp(how, "swap-dir"))
-		ret = swap_dir();
-	else if (!strcmp(how, "swap-file"))
-		ret = swap_file();
-	if (ret)
-		fprintf(stderr, "test-seal-output: %s: %s\n", how,
-			strerror(-ret));
-	return -EIO;
+	if (signal(SIGXFSZ, SIG_IGN) == SIG_ERR ||
+	    getrlimit(RLIMIT_FSIZE, &lim))
+		return -errno;
+	lim.rlim_cur = 0;
+	return setrlimit(RLIMIT_FSIZE, &lim) ? -errno : 0;
 }
 
 int main(int argc, char **argv)
 {
 	struct seal_output out;
-	int ret;
+	int ret, err = 0;
 
 	if (argc < 3) {
 		fprintf(stderr, "usage: test-seal-output <how> <path> [<dir>]\n");
@@ -79,8 +78,18 @@ int main(int argc, char **argv)
 	path = argv[2];
 	dir = argc > 3 ? argv[3] : "";
 	ret = seal_output_create(&out, path, 0600);
-	if (!ret)
+	if (!ret) {
+		if (!strcmp(how, "swap-dir"))
+			err = swap_dir();
+		else if (!strcmp(how, "swap-file"))
+			err = swap_file();
+		if (!err)
+			err = fail_writes();
+		if (err)
+			fprintf(stderr, "test-seal-output: %s: %s\n", how,
+				strerror(-err));
 		ret = seal_output_commit(&out, "{}", 2);
+	}
 	printf("%d\n", ret);
 	return 0;
 }

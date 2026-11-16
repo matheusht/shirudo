@@ -28,11 +28,11 @@ use crate::sys::openssl::{
     X509_sign, X509V3_EXT_conf_nid, X509V3_set_ctx, X509v3Ctx, i2d_X509_bio,
 };
 use crate::sys::paths::{key_paths, keys_dir_resolve, path_exists};
-use crate::sys::seal::seal_mkdir_p;
 use crate::sys::string::strsprintf;
 use crate::util::crypto_openssl::openssl_complain;
 use crate::util::help::{Help, HelpItem, HelpSection, is_help, print_help};
 use crate::util::io::stat_fd;
+use crate::util::seal::seal_mkdir_p;
 
 const CERT_CN: &CStr = c"shirudo";
 const CERT_NO_EXPIRY: &CStr = c"99991231235959Z";

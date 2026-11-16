@@ -20,7 +20,6 @@ pub mod malloc;
 pub mod openssl;
 pub mod otel;
 pub mod paths;
-pub mod seal;
 pub mod ssl;
 pub mod string;
 pub mod tamper;

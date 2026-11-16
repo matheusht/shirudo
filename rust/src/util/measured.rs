@@ -13,12 +13,12 @@ use crate::errno::{E2BIG, EEXIST, EINVAL, ENAMETOOLONG, ENOENT, ENOMEM, ENOSPC};
 use crate::sys::hex::hex_encode;
 use crate::sys::libc::{Dirent, PATH_MAX, alphasort, errno, getxattr, scandir, strcmp, strnlen};
 use crate::sys::malloc::{libc_free, xcalloc, xfree, xmalloc};
-use crate::sys::seal::seal_owns;
 use crate::text::{at, strscpy, strsprintf};
 use crate::util::chain::MeasuredUpatch;
 use crate::util::eventlog::{
     UPATCH_INIT, UPATCH_UNLOAD, eventlog_boot_upatches, eventlog_upatches,
 };
+use crate::util::seal::seal_owns;
 use crate::util::upatch::{
     NAME_MAX, PAYLOAD_HASH_LEN, Upatch, upatch_close, upatch_header_name, upatch_member_valid,
     upatch_open, upatch_select,

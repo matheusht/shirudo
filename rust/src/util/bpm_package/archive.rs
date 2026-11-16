@@ -17,11 +17,11 @@ use crate::sys::libc::{
     lseek,
 };
 use crate::sys::malloc::{xfree, xmalloc};
-use crate::sys::seal::{seal_mkdir_p, seal_open};
 use crate::sys::zlib::{GzFileS, Z_OK, gzclose, gzdirect, gzdopen, gzopen, gzread};
 use crate::text::{at, cstr, strsprintf};
 use crate::util::bpm_oci::{MAX_PACKAGE_BYTES, MAX_PACKAGE_ENTRIES};
 use crate::util::io::write_complete;
+use crate::util::seal::{seal_mkdir_p, seal_open};
 
 /// The most a read asks zlib for at once.
 const CHUNK: usize = 65536;

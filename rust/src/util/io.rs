@@ -17,7 +17,7 @@ use crate::sys::libc::{
 };
 use crate::sys::log::{pr_err, pr_warn};
 use crate::sys::malloc::{xfree, xmalloc};
-use crate::sys::seal::seal_open_read;
+use crate::util::seal::seal_open_read;
 
 /// `ETC_DIR` of util/paths.h.
 const ETC_DIR: &CStr = c"/etc/shirudo";
@@ -122,7 +122,12 @@ pub(crate) fn stat_fd(fd: c_int, st: &mut Statx) -> c_int {
 /// # Safety
 ///
 /// `path` is a C string and `line` holds `len` bytes.
-unsafe fn append_line(fd: c_int, path: *const c_char, line: *const c_char, len: usize) -> c_int {
+pub(crate) unsafe fn append_line(
+    fd: c_int,
+    path: *const c_char,
+    line: *const c_char,
+    len: usize,
+) -> c_int {
     let mut st = Statx::zeroed();
     let mut end: i64 = 0;
     // SAFETY: the caller's bytes.
@@ -521,7 +526,7 @@ pub(crate) unsafe fn bpffs_mounted_at(path: *const c_char) -> c_int {
 }
 
 /// An exclusive flock() on `fd`, waited for through signals.
-fn lock_exclusive(fd: c_int) -> c_int {
+pub(crate) fn lock_exclusive(fd: c_int) -> c_int {
     // SAFETY: the caller's fd.
     while unsafe { flock(fd, LOCK_EX) } != 0 {
         if errno() != EINTR {

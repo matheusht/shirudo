@@ -12,8 +12,8 @@ use crate::sys::libc::{
     AT_EMPTY_PATH, LOCK_EX, LOCK_NB, O_CLOEXEC, O_CREAT, O_DIRECTORY, O_NOFOLLOW, O_RDONLY, O_RDWR,
     S_IFMT, S_IFREG, STATX_TYPE, Statx, close, errno, flock, getrandom, open, openat, statx,
 };
-use crate::sys::seal::{seal_inherit, seal_mkdir_p};
 use crate::text::{decimal, strsprintf};
+use crate::util::seal::{seal_inherit, seal_mkdir_p};
 
 /// `SERIAL_MAGIC`, "SRLZ" little-endian, and `SERIAL_VERSION` of
 /// bpf/lib/serializer.h.

@@ -24,7 +24,6 @@ use crate::sys::libc::{
     link, mkdtemp, open, read, rmdir, statx, strerror, unlink,
 };
 use crate::sys::log::pr_warn;
-use crate::sys::seal::seal_label;
 use crate::sys::string::strsprintf;
 use crate::util::config_image::{
     ConfigImageOpen, MAX_BYTES, SIG_MAX, config_image_close, config_image_open,
@@ -34,6 +33,7 @@ use crate::util::dm_verity::{
     DmVerity, dm_verity_close, dm_verity_create, dm_verity_remove, dm_verity_verify,
 };
 use crate::util::io::write_complete;
+use crate::util::seal::seal_label;
 use crate::util::tls_openssl::tls_curl_policy;
 
 /// `IMAGE_CACHE_DIR` of util/paths.h.

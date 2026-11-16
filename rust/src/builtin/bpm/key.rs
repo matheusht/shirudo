@@ -17,13 +17,13 @@ use super::{
 };
 use crate::errno::{EEXIST, EIO, EKEYREJECTED, ENOENT, EPERM};
 use crate::sys::libc::close;
-use crate::sys::seal::{seal_inherit_path, seal_mkdir_p};
 use crate::text::name_has_suffix;
 use crate::util::bpm_package::read_member_in;
 use crate::util::crypto_openssl::{Cert, cert_free, cert_pubkey_digest, cert_read_file};
 use crate::util::help::{HelpItem, is_help, is_list_cmds, print_subcmd_list, resolve_subcommand};
 use crate::util::image_config;
 use crate::util::json::JsonEmit;
+use crate::util::seal::{seal_inherit_path, seal_mkdir_p};
 
 const ITEMS: [HelpItem; 3] = [
     item(

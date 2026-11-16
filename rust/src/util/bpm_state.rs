@@ -9,11 +9,11 @@ use core::ffi::{CStr, c_char, c_int, c_void};
 use crate::errno::{E2BIG, EINVAL, ENOENT, ENOMEM};
 use crate::sys::libc::PATH_MAX;
 use crate::sys::malloc::{xfree, xmalloc};
-use crate::sys::seal::{seal_mkdir_p, seal_write_file};
 use crate::text::{cstr, strsprintf};
 use crate::util::bpm_oci::{MAX_NAME, name_ok, version_ok};
 use crate::util::io::read_file;
 use crate::util::json::{JsonArray, JsonEmit, JsonField, parse_schema};
+use crate::util::seal::{seal_mkdir_p, seal_write_file};
 
 /// `BPM_MAX_STATE`: the most packages the state records.
 const MAX_STATE: c_int = 256;

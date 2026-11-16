@@ -28,12 +28,12 @@ use crate::sys::libc::{
 };
 use crate::sys::log::pr_err;
 use crate::sys::malloc::{xfree, xmalloc};
-use crate::sys::seal::{seal_append_line, seal_lock};
 use crate::text::{cstr, strsprintf};
 use crate::util::crypto_openssl::sha256_calc;
 use crate::util::image_config;
 use crate::util::io::read_file;
 use crate::util::json::{JsonEmit, JsonField, MAX_BYTES, parse_schema};
+use crate::util::seal::{seal_append_line, seal_lock};
 use crate::util::timefmt::iso8601;
 
 /// The most bytes one record takes.

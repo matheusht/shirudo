@@ -21,7 +21,6 @@ use super::{
 };
 use crate::errno::{E2BIG, EEXIST, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT};
 use crate::sys::libc::{F_OK, O_CREAT, O_EXCL, O_NOFOLLOW, O_TRUNC, O_WRONLY, access};
-use crate::sys::seal::{seal_mkdir_p, seal_open};
 use crate::sys::upatch::{upatch_install, upatch_remove};
 use crate::text::{cstr, strscpy, strsprintf};
 use crate::util::bpm_oci::{
@@ -33,6 +32,7 @@ use crate::util::bpm_package::{
 use crate::util::bpm_state::{self, BpmStateEntry};
 use crate::util::help::is_help;
 use crate::util::json::JsonEmit;
+use crate::util::seal::{seal_mkdir_p, seal_open};
 
 /// The most upatches of one kind a package loads or unloads.
 const PATHS_MAX: usize = 128;

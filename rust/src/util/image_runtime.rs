@@ -38,7 +38,6 @@ use crate::sys::libc::{
 };
 use crate::sys::log::{pr_err, pr_warn};
 use crate::sys::malloc::xfree;
-use crate::sys::seal::seal_label;
 use crate::text::cstr;
 use crate::util::config::{CONF_PATH, Config, config_load_fd, config_load_path};
 use crate::util::config_image::{
@@ -66,6 +65,7 @@ use crate::util::keyring::{
     keyring_holds_exactly,
 };
 use crate::util::keys::{KEYS_MAX, TrustedCert, TrustedSet, keys_read_der_fd, members};
+use crate::util::seal::seal_label;
 use crate::util::tpm::{Tpm, tpm_boot_identity, tpm_close, tpm_open, tpm_pcr_extend, tpm_pcr_read};
 
 const RUNTIME_DIR: &CStr = c"/run/shirudo/runtime";

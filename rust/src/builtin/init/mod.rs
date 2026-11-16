@@ -25,7 +25,6 @@ use crate::sys::libc::{
     Statfs, Statvfs, fwrite, mount, statfs, statvfs, stderr, stdout, strerror, umount2,
 };
 use crate::sys::log::{pr_err, pr_info, pr_warn};
-use crate::sys::seal::{seal_label, seal_label_tree, seal_mkdir_p};
 use crate::text::cstr;
 use crate::util::chain;
 use crate::util::eventlog::{
@@ -39,6 +38,7 @@ use crate::util::json::JsonEmit;
 use crate::util::keyring::{self, keyring_bpf_serial};
 use crate::util::keys::{self, TrustedSet};
 use crate::util::preflight::{PreflightResult, preflight_run};
+use crate::util::seal::{seal_label, seal_label_tree, seal_mkdir_p};
 
 const VAR_LIB: &CStr = c"/var/lib/shirudo";
 const RUN_DIR: &CStr = c"/run/shirudo";
@@ -505,8 +505,7 @@ fn run(init: &mut Init) -> c_int {
     }
     // Seal writable state before the hooks attach, then adopt the
     // initrd's log.
-    // SAFETY: labels the state tree.
-    let ret = unsafe { seal_label_tree(bootstrap) };
+    let ret = seal_label_tree(bootstrap);
     if ret != 0 {
         return phase(ret, "sealing persistent state");
     }
@@ -518,8 +517,7 @@ fn run(init: &mut Init) -> c_int {
     if ret != 0 {
         return phase(ret, "loading enforcement");
     }
-    // SAFETY: labels the state tree.
-    let ret = unsafe { seal_label_tree(bootstrap) };
+    let ret = seal_label_tree(bootstrap);
     if ret != 0 {
         return phase(ret, "sealing initialized state");
     }

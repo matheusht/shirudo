@@ -391,6 +391,21 @@ unsafe extern "C" {
         value: *mut c_void,
         size: usize,
     ) -> isize;
+    pub fn lsetxattr(
+        path: *const c_char,
+        name: *const c_char,
+        value: *const c_void,
+        size: usize,
+        flags: c_int,
+    ) -> c_int;
+    pub fn fgetxattr(fd: c_int, name: *const c_char, value: *mut c_void, size: usize) -> isize;
+    pub fn lgetxattr(
+        path: *const c_char,
+        name: *const c_char,
+        value: *mut c_void,
+        size: usize,
+    ) -> isize;
+    pub fn mkdirat(dirfd: c_int, path: *const c_char, mode: u32) -> c_int;
     pub fn fsetxattr(
         fd: c_int,
         name: *const c_char,

@@ -20,7 +20,6 @@ use crate::sys::libc::{
 };
 use crate::sys::log::pr_err;
 use crate::sys::malloc::{libc_free, xcalloc, xfree, xmalloc};
-use crate::sys::seal::{seal_mkdir_p, seal_write_file};
 use crate::sys::string::name_has_suffix;
 use crate::text::{cstr, strscpy, strsprintf};
 use crate::util::crypto_openssl::{
@@ -28,6 +27,7 @@ use crate::util::crypto_openssl::{
 };
 use crate::util::image_config;
 use crate::util::io::{check_trusted, open_beneath, read_fd};
+use crate::util::seal::{seal_mkdir_p, seal_write_file};
 
 /// `KEYS_MAX`: the most certificates a set holds.
 pub(crate) const KEYS_MAX: usize = 16;

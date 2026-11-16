@@ -18,7 +18,6 @@ use super::{
 };
 use crate::errno::{EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT};
 use crate::sys::libc::{O_CREAT, O_EXCL, O_WRONLY, R_OK, access};
-use crate::sys::seal::{seal_mkdir_p, seal_output_open, seal_write_file};
 use crate::text::{cstr, strscpy};
 use crate::util::bpm_oci::{
     Buffer, Client, Descriptor, MANIFEST_MEDIA, MAX_ENTRIES, MAX_NAME, digest_matches,
@@ -31,6 +30,7 @@ use crate::util::crypto_openssl::{
 };
 use crate::util::initrd;
 use crate::util::io::read_file;
+use crate::util::seal::{seal_mkdir_p, seal_output_open, seal_write_file};
 use crate::util::upatch::{self, Upatch, is_unload, upatch_close, upatch_open};
 
 /// The most layers a package manifest names that bpm reads.

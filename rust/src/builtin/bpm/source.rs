@@ -14,7 +14,6 @@ use super::{
 };
 use crate::errno::{E2BIG, EINVAL, ENAMETOOLONG, EPERM};
 use crate::sys::libc::{O_DIRECTORY, O_RDONLY, PATH_MAX, close};
-use crate::sys::seal::{seal_mkdir_p, seal_write_file};
 use crate::text::{contains, cstr, name_has_suffix, strscpy, strsprintf};
 use crate::util::bpm_oci::{Client, MAX_DIGEST, MAX_ENDPOINT, MAX_NAME, name_ok};
 use crate::util::bpm_package::{verify_cms, verify_cms_fd};
@@ -24,6 +23,7 @@ use crate::util::help::is_help;
 use crate::util::image_config::{self, REGISTRIES, TREE_CONF};
 use crate::util::io::check_trusted;
 use crate::util::json::JsonEmit;
+use crate::util::seal::{seal_mkdir_p, seal_write_file};
 
 /// `BPM_MAX_KEY`: the longest key file path, its NUL included.
 const MAX_KEY: usize = 256;

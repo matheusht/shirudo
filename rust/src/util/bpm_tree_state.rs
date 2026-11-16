@@ -18,7 +18,6 @@ use crate::sys::libc::{
 };
 use crate::sys::log::pr_err;
 use crate::sys::malloc::{libc_free, xfree, xreallocarray};
-use crate::sys::seal::{seal_append_line, seal_mkdir_p, seal_write_file};
 use crate::sys::zlib::{
     MAX_WBITS, Z_MEM_ERROR, Z_NO_FLUSH, Z_OK, Z_STREAM_END, ZLIB_VERSION, ZStream, inflate,
     inflateEnd, inflateInit2_,
@@ -34,6 +33,7 @@ use crate::util::io::{read_file, read_text_line};
 use crate::util::json::{JsonEmit, JsonField, MAX_BYTES, parse_schema};
 use crate::util::kernel_build_id::read_build_id;
 use crate::util::kernel_release::prefix_matches;
+use crate::util::seal::{seal_append_line, seal_mkdir_p, seal_write_file};
 use crate::util::upatch::upatch_name_valid;
 
 /// The open-addressed index of a selector's kconfig keys.

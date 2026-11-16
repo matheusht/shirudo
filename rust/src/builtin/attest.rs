@@ -15,7 +15,6 @@ use crate::ffi;
 use crate::sys::libc::{fwrite, stdout, strerror};
 use crate::sys::log::{pr_err, pr_warn};
 use crate::sys::malloc::xfree;
-use crate::sys::seal::{SealOutput, seal_output_commit, seal_output_create};
 use crate::text::{cstr, parse_u64};
 use crate::util::attest::{
     AttestChallenge, AttestChallengePolicy, AttestExpect, attest_challenge_make,
@@ -37,6 +36,7 @@ use crate::util::io::read_file;
 use crate::util::json::{JsonEmit, MAX_BYTES};
 use crate::util::keys::{KEYS_MAX, keys_anchor_digest};
 use crate::util::measured::{measured_set_add, measured_upatch_of};
+use crate::util::seal::{SealOutput, seal_output_commit, seal_output_create};
 use crate::util::tpm_wire::{tpm_nv_name, tpm_register_policy};
 use crate::util::upatch::{self, Upatch, upatch_close, upatch_open};
 

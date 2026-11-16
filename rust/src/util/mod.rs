@@ -41,6 +41,7 @@ pub(crate) mod measured;
 pub(crate) mod nv_writer;
 pub(crate) mod preflight;
 mod report;
+pub(crate) mod seal;
 mod serializer;
 pub(crate) mod similar;
 pub(crate) mod sysinfo;
