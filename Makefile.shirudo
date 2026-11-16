@@ -277,7 +277,7 @@ BUILTIN_SRCS := \
     builtin-keys.c \
     builtin-image.c \
     builtin-upatch.c \
-    builtin-bpm.c \
+     \
     builtin-attest.c
 
 # BPF-side libbpf headers, used straight from vendor/libbpf (the BPF
@@ -465,7 +465,7 @@ else
 override TREE_LIMIT_CFLAGS :=
 endif
 TREE_LIMIT_STAMP := build/tree-limits-$(PROFILE)
-TREE_LIMIT_OBJS := $(call obj,builtin-bpm.o) $(call obj,builtin-status.o)
+TREE_LIMIT_OBJS :=  $(call obj,builtin-status.o)
 
 .PHONY: FORCE_TREE_LIMITS
 FORCE_TREE_LIMITS:
@@ -1068,13 +1068,11 @@ testing/helper/test-image-config: testing/helper/test-image-config.c \
 		$(RUST_TEST_LDLIBS)
 
 testing/helper/test-image-cli: testing/helper/test-image-cli.c \
-		testing/helper/image-cli.h builtin-bpm.c \
-		$(filter-out $(call obj,builtin-bpm.o),$(BUILTIN_OBJS)) \
+		$(BUILTIN_OBJS) \
 		$(UTIL_OBJS) $(VERSION_OBJ) $(LIBBPF_A) $(RUST_LIB)
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) $(LDFLAGS) $(RPATH_LDFLAGS) -o $@ \
-		$(filter-out builtin-bpm.c testing/helper/image-cli.h,$^) \
-		-Wl,--wrap=bpm_tree_fetch_publication \
+		$^ \
 		-Wl,--wrap=keys_load_image_root -Wl,--wrap=keys_check_image_set \
 		$(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
@@ -1331,7 +1329,7 @@ $(FUZZ_OUT)/fuzz-upatch-info: FUZZ_CFLAGS += $(TSS2_CFLAGS) $(LIBELF_CFLAGS) \
 $(FUZZ_OUT)/fuzz-upatch-info: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) \
                                            $(LIBELF_LIBS) $(LUAJIT_LIBS)
 $(FUZZ_OUT)/fuzz-bpm-info: testing/fuzz/fuzz-bpm-info.c $(FUZZ_BASE) \
-                           testing/fuzz/output.c builtin-bpm.c builtin.h \
+                           testing/fuzz/output.c  builtin.h \
                            $(FUZZ_PACKAGE) \
                            util/identity.c util/image_keys.c \
                            util/kconfig.c \
@@ -1361,7 +1359,7 @@ $(FUZZ_OUT)/fuzz-otel: FUZZ_INCLUDED := util/upatch_maps_otel.c
 $(FUZZ_OUT)/fuzz-serializer: FUZZ_INCLUDED := util/upatch_maps.c
 $(FUZZ_OUT)/fuzz-decoder: FUZZ_INCLUDED := util/upatch_decode.c
 $(FUZZ_OUT)/fuzz-upatch-info: FUZZ_INCLUDED := builtin-upatch.c
-$(FUZZ_OUT)/fuzz-bpm-info: FUZZ_INCLUDED := builtin-bpm.c
+$(FUZZ_OUT)/fuzz-bpm-info: FUZZ_INCLUDED :=
 $(FUZZ_OUT)/fuzz-attest-report: FUZZ_INCLUDED := builtin-attest.c
 
 # A target compiles its sources and links in one step, so it depends on

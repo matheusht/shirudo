@@ -29,16 +29,16 @@ const PACKAGES_DIR: &[u8] = b"/var/lib/shirudo/bpm/packages";
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct BpmStateEntry {
-    name: [u8; MAX_NAME],
-    version: [u8; MAX_NAME],
-    source: [u8; MAX_NAME],
-    path: [u8; PATH_MAX],
+    pub(crate) name: [u8; MAX_NAME],
+    pub(crate) version: [u8; MAX_NAME],
+    pub(crate) source: [u8; MAX_NAME],
+    pub(crate) path: [u8; PATH_MAX],
 }
 
 const _: () = assert!(size_of::<BpmStateEntry>() == 3 * 128 + 4096);
 
 impl BpmStateEntry {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         BpmStateEntry {
             name: [0; MAX_NAME],
             version: [0; MAX_NAME],
@@ -189,7 +189,22 @@ unsafe fn read(st: *mut BpmStateEntry, n: &mut c_int) -> c_int {
     ret
 }
 
-fn write(st: &[BpmStateEntry]) -> c_int {
+/// The packages the state records.
+pub(crate) fn read_all() -> Result<Vec<BpmStateEntry>, c_int> {
+    let mut st = vec![BpmStateEntry::new(); MAX_STATE as usize];
+    let mut n = 0;
+
+    // SAFETY: room for MAX_STATE entries.
+    match unsafe { read(st.as_mut_ptr(), &mut n) } {
+        0 => {
+            st.truncate(usize::try_from(n).unwrap_or(0));
+            Ok(st)
+        }
+        err => Err(err),
+    }
+}
+
+pub(crate) fn write(st: &[BpmStateEntry]) -> c_int {
     let mut len = 0usize;
     // SAFETY: a size alone.
     let buf: *mut c_char = unsafe { xmalloc(STATE_EMIT_MAX) }.cast();

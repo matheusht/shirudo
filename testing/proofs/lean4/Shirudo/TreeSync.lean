@@ -18,7 +18,7 @@ selector does not match gets its outcome line and moves the cursor. At the
 end it writes the state again, for the cursor a run of unmatched operations
 moved.
 
-The model follows the C step by step: a node is its five files, a sync the
+The model describes the Rust sync step by step: a node is its five files, a sync the
 list of writes it makes, each atomic, and a crash or a refusal after some of
 them the writes before it. Root picks every input: any publication the
 node's key signed, in any manifest a registry wraps it in, the selector's

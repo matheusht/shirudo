@@ -18,7 +18,7 @@ use crate::util::io::stat_fd;
 pub(crate) const NAME_MAX: usize = 256;
 pub(crate) const PAYLOAD_HASH_LEN: usize = 32;
 /// The largest container a reader takes; .upatch is small.
-const FILE_MAX: usize = 16 * 1024 * 1024;
+pub(crate) const FILE_MAX: usize = 16 * 1024 * 1024;
 /// The NAME_MAX of `<limits.h>` a pin directory's name must fit.
 const PIN_NAME_MAX: usize = 255;
 
@@ -970,7 +970,7 @@ unsafe fn specs_parse(
 
 pub(crate) use capi::{
     upatch_close, upatch_header_name, upatch_member_valid, upatch_name_valid, upatch_open,
-    upatch_select,
+    upatch_open_memory, upatch_select,
 };
 
 mod capi {

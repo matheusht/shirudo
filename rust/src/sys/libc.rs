@@ -24,6 +24,7 @@ pub const O_WRONLY: c_int = 0o1;
 pub const O_RDWR: c_int = 0o2;
 pub const O_CREAT: c_int = 0o100;
 pub const O_EXCL: c_int = 0o200;
+pub const O_TRUNC: c_int = 0o1000;
 pub const O_APPEND: c_int = 0o2000;
 pub const O_NONBLOCK: c_int = 0o4000;
 pub const O_CLOEXEC: c_int = 0o2000000;
@@ -76,6 +77,7 @@ pub const MCL_CURRENT: c_int = 1;
 pub const MCL_FUTURE: c_int = 2;
 pub const SC_NPROCESSORS_ONLN: c_int = 84;
 pub const LOCK_EX: c_int = 2;
+pub const LOCK_UN: c_int = 8;
 pub const LOCK_NB: c_int = 4;
 
 /// A stdio `FILE`.
@@ -318,6 +320,8 @@ unsafe extern "C" {
     ) -> c_int;
     pub fn unlinkat(dirfd: c_int, path: *const c_char, flags: c_int) -> c_int;
     pub fn fdopendir(fd: c_int) -> *mut Dir;
+    pub fn opendir(name: *const c_char) -> *mut Dir;
+    pub fn mkstemp(template: *mut c_char) -> c_int;
     pub fn readdir(dir: *mut Dir) -> *mut Dirent;
     /// The entries of `dir` the filter takes, sorted by `compar`, in an
     /// array of allocations free() takes: how many, or -1.

@@ -1,35 +1,17 @@
 // SPDX-License-Identifier: BSD-2-Clause
 /* Copyright (c) 2026 Authors of shirudo */
 
-#include "../../builtin-bpm.c"
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+#include <shirudo/string.h>
+
+#include "builtin.h"
 #include "util/config.h"
-
-#include "image-cli.h"
-
-int __wrap_bpm_tree_fetch_publication(struct bpm_oci_client *client,
-				      const char *repository,
-				      const char *reference,
-				      const char *certificate,
-				      const struct trusted_set *trusted,
-				      struct tree_publication *pub,
-				      char *digest, size_t capacity)
-{
-	puts(certificate);
-	strscpy_literal(pub->tree_id, "t");
-	return 0;
-}
-
-int __wrap_keys_load_image_root(const char *primary, int root_fd,
-				bool with_trusted, struct trusted_set *set)
-{
-	set->n = 1;
-	return 0;
-}
-
-int __wrap_keys_check_image_set(const struct trusted_set *set)
-{
-	return set->n == 1 ? 0 : -EINVAL;
-}
+#include "util/image_config.h"
 
 int main(int argc, const char **argv)
 {
@@ -45,8 +27,10 @@ int main(int argc, const char **argv)
 	if (!ret) {
 		memcpy(bootstrap.tpm_owner_auth, "bootstrap-owner", 15);
 		bootstrap.tpm_owner_auth_len = 15;
-		strscpy_literal(bootstrap.tpm_tcti, "bootstrap-tcti");
-		ret = image_config_set(&bootstrap, fd);
+		ret = strscpy(bootstrap.tpm_tcti, "bootstrap-tcti",
+			      sizeof(bootstrap.tpm_tcti));
+		if (ret >= 0)
+			ret = image_config_set(&bootstrap, fd);
 	}
 	close(fd);
 	if (ret)
@@ -58,41 +42,24 @@ int main(int argc, const char **argv)
 	} else if (!strcmp(argv[2], "config")) {
 		ret = cmd_config(argc - 2, argv + 2);
 	} else if (!strcmp(argv[2], "source") && argc == 4) {
-		struct bpm_source source;
+		char content[64];
+		int kfd = bpm_source_key_open(argv[3]);
+		FILE *file = kfd < 0 ? NULL : fdopen(kfd, "r");
 
-		ret = load_source(argv[3], &source);
-		if (!ret) {
-			char content[64];
-			int kfd = image_open_relative(source.key_file,
-						      O_RDONLY);
-			FILE *file = kfd < 0 ? NULL : fdopen(kfd, "r");
-
-			if (!file) {
-				ret = kfd < 0 ? kfd : -errno;
-				if (kfd >= 0)
-					close(kfd);
-			} else {
-				if (!fgets(content, sizeof(content), file))
-					ret = -EIO;
-				else
-					fputs(content, stdout);
-				fclose(file);
-			}
+		if (!file) {
+			ret = kfd < 0 ? kfd : -errno;
+			if (kfd >= 0)
+				close(kfd);
+		} else {
+			if (!fgets(content, sizeof(content), file))
+				ret = -EIO;
+			else
+				fputs(content, stdout);
+			fclose(file);
 		}
 	} else if (!strcmp(argv[2], "tree")) {
-		struct tree_publication publication = {};
-		struct bpm_tree_config config = {};
-		struct tree_source source = {};
-		char digest[BPM_MAX_DIGEST];
-
-		strscpy_literal(config.endpoint, "oci://example.invalid/tree");
-		strscpy_literal(config.reference, "latest");
-		ret = tree_source_open(&config, &source);
-		if (!ret)
-			ret = tree_fetch_checked(&source, config.reference,
-						 &publication, digest,
-						 sizeof(digest));
-		tree_source_clear(&source);
+		puts(bpm_tree_certificate());
+		ret = 0;
 	} else {
 		ret = 2;
 	}

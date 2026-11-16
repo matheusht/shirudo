@@ -1,0 +1,472 @@
+// SPDX-License-Identifier: BSD-2-Clause
+// Copyright (c) 2026 Authors of shirudo
+
+//! What bpm fetches from registries: packages, repository indexes and
+//! the tree's artifacts, each checked against the digest that names it.
+
+use core::ffi::{CStr, c_int};
+use std::ffi::{CString, OsStr};
+use std::fs;
+use std::io::Read;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
+
+use super::source::{self, Source, TreeConfig};
+use super::{
+    INDEX_MEDIA, INDEX_SIG_MEDIA, INDEX_TAG, PACKAGE_MEDIA, REPOS_DIR, Result, TREE_ARTIFACTS_DIR,
+    UPATCH_MEDIA, curl_ready, fail, finish, lock, os_err, path, remove, status,
+};
+use crate::errno::{EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT};
+use crate::sys::libc::{O_CREAT, O_EXCL, O_WRONLY, R_OK, access};
+use crate::sys::seal::{seal_mkdir_p, seal_output_open, seal_write_file};
+use crate::text::{cstr, strscpy};
+use crate::util::bpm_oci::{
+    Buffer, Client, Descriptor, MANIFEST_MEDIA, MAX_ENTRIES, MAX_NAME, digest_matches,
+    manifest_layers, name_ok, package_name_ok, sha256_hex, trim,
+};
+use crate::util::bpm_package::{IndexEntry, fetch_publication, index_parse, semver_compare};
+use crate::util::bpm_tree::{TreeOperation, TreePublication};
+use crate::util::crypto_openssl::{
+    Sha256Ctx, sha256_final, sha256_free, sha256_init, sha256_update,
+};
+use crate::util::initrd;
+use crate::util::io::read_file;
+use crate::util::upatch::{self, Upatch, is_unload, upatch_close, upatch_open};
+
+/// The most layers a package manifest names that bpm reads.
+const LAYERS_MAX: usize = 8;
+
+/// The hex SHA-256 of what is at `path`.
+pub(super) fn sha256_file(path: &CStr) -> Result<[u8; 64]> {
+    let mut ctx = Sha256Ctx::new();
+    let mut digest = [0; 32];
+    let mut hex = [0; 65];
+
+    // SAFETY: a context to set up, freed below.
+    if unsafe { sha256_init(&mut ctx) } != 0 {
+        return Err(-EINVAL);
+    }
+    let ret = (|| {
+        let mut file = fs::File::open(OsStr::from_bytes(path.to_bytes())).map_err(os_err)?;
+        let mut buf = vec![0u8; 65536];
+
+        loop {
+            let n = file.read(&mut buf).map_err(|_| -EIO)?;
+            if n == 0 {
+                break;
+            }
+            // SAFETY: the context and n bytes read.
+            if unsafe { sha256_update(&mut ctx, buf.as_ptr().cast(), n) } != 0 {
+                return Err(-EIO);
+            }
+        }
+        // SAFETY: the context and room for the digest.
+        if unsafe { sha256_final(&mut ctx, digest.as_mut_ptr()) } != 0 {
+            return Err(-EIO);
+        }
+        Ok(())
+    })();
+    // SAFETY: the context set up above.
+    unsafe { sha256_free(&mut ctx) };
+    ret?;
+    sha256_hex_of(&digest, &mut hex);
+    let mut out = [0; 64];
+    out.copy_from_slice(&hex[..64]);
+    Ok(out)
+}
+
+/// The lowercase hex of `digest`, NUL-terminated.
+fn sha256_hex_of(digest: &[u8; 32], hex: &mut [u8; 65]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    for (i, b) in digest.iter().enumerate() {
+        hex[2 * i] = HEX[usize::from(b >> 4)];
+        hex[2 * i + 1] = HEX[usize::from(b & 0xf)];
+    }
+    hex[64] = 0;
+}
+
+/// The hex SHA-256 of `data`.
+pub(super) fn sha256_of(data: &[u8]) -> Result<[u8; 64]> {
+    let mut hex = [0; 65];
+    let mut out = [0; 64];
+
+    status(sha256_hex(data.as_ptr(), data.len(), &mut hex))?;
+    out.copy_from_slice(&hex[..64]);
+    Ok(out)
+}
+
+/// The manifest at `reference` of `repository`.
+pub(super) fn manifest(c: &mut Client, repository: &[u8], reference: &[u8]) -> Result<Buffer> {
+    let url = c.url(repository, b"manifests", reference)?;
+
+    c.get(&url, MANIFEST_MEDIA, false)
+}
+
+/// The registry names the layer without a signature, so its title names
+/// the file only when it is a package name ending in .bee: never a path,
+/// a hidden file, an option or a terminal control sequence.
+fn bee_title_ok(title: &[u8]) -> bool {
+    package_name_ok(title) && crate::text::name_has_suffix(title, b".bee")
+}
+
+/// The last component of a repository.
+fn base(repository: &[u8]) -> &[u8] {
+    repository
+        .iter()
+        .rposition(|&c| c == b'/')
+        .map_or(repository, |slash| &repository[slash + 1..])
+}
+
+/// The package of the OCI reference `raw`, into the file open at
+/// `destination` when given, or else into a new file in the working
+/// directory named after the package. The registry picks that name, so
+/// it is created, never an existing file replaced, and opened as output
+/// root may ask for: never a sealed file nor one reached through a link.
+pub(super) fn download(raw: &[u8], destination: Option<(&CStr, c_int)>) -> Result {
+    let mut c = Client::new();
+    let (repository, tag) = c.parse_pull_ref(raw)?;
+    let body = manifest(&mut c, &repository, &tag)?;
+    let (layers, package_name) = manifest_layers(body.bytes(), LAYERS_MAX, true)?;
+    let mut name = [0; MAX_NAME];
+
+    let _ = trim(&package_name, &mut name);
+    let package_name = cstr(&name);
+    let Some(layer) = layers
+        .iter()
+        .find(|l| l.media() == PACKAGE_MEDIA.to_bytes())
+    else {
+        return Err(-EINVAL);
+    };
+    let url = c.url(&repository, b"blobs", layer.digest())?;
+    let mut title = [0; crate::sys::libc::PATH_MAX];
+    // A cut title would name another file; fall back to the package name.
+    if trim(layer.title(), &mut title).is_err() {
+        title[0] = 0;
+    }
+    let filename = match destination {
+        Some((path, _)) => path.to_owned(),
+        None if bee_title_ok(cstr(&title)) => super::message(&[cstr(&title)]),
+        None => {
+            let base = if package_name.is_empty() {
+                base(&repository)
+            } else {
+                package_name
+            };
+            if !package_name_ok(base) {
+                return Err(-EINVAL);
+            }
+            path(&[base, b"-", &tag, b".bee"])?
+        }
+    };
+    let made = match destination {
+        Some(_) => None,
+        None => {
+            // SAFETY: a C string.
+            let fd =
+                unsafe { seal_output_open(filename.as_ptr(), O_WRONLY | O_CREAT | O_EXCL, 0o644) };
+            if fd < 0 {
+                return Err(fd);
+            }
+            // SAFETY: the fd seal_output_open() opened.
+            Some(unsafe { OwnedFd::from_raw_fd(fd) })
+        }
+    };
+    let fd = destination.map_or_else(|| made.as_ref().map_or(-1, |f| f.as_raw_fd()), |(_, fd)| fd);
+    let mut ret = c.get_file(&url, PACKAGE_MEDIA, fd, layer.size());
+    drop(made);
+    if ret.is_ok() && !checked(&filename, layer) {
+        ret = Err(-EKEYREJECTED);
+    }
+    if ret.is_err() && destination.is_none() {
+        remove(&filename);
+    }
+    ret
+}
+
+/// Whether the file at `path` is the blob `layer` describes: its digest,
+/// and its size when the layer gives one.
+fn checked(path: &CStr, layer: &Descriptor) -> bool {
+    let digest_ok = sha256_file(path).is_ok_and(|hex| digest_matches(layer.digest(), &hex));
+
+    digest_ok
+        && (layer.size() < 0
+            || fs::metadata(OsStr::from_bytes(path.to_bytes()))
+                .is_ok_and(|m| i64::try_from(m.len()) == Ok(layer.size())))
+}
+
+/// The source and index entry a direct OCI reference installs.
+pub(super) fn direct(raw: &[u8]) -> Result<(Source, IndexEntry)> {
+    let mut c = Client::new();
+    let (repository, tag) = c.parse_pull_ref(raw)?;
+    let body = manifest(&mut c, &repository, &tag)?;
+    let (_, package_name) = manifest_layers(body.bytes(), LAYERS_MAX, true)?;
+    let name = if package_name.is_empty() {
+        base(&repository)
+    } else {
+        &package_name
+    };
+    // The name is the C's, cut to its room.
+    let name = &name[..name.len().min(MAX_NAME - 1)];
+
+    if !package_name_ok(name) {
+        return Err(-EINVAL);
+    }
+    let endpoint = [b"oci://", c.registry()].concat();
+    if endpoint.len() >= crate::util::bpm_oci::MAX_ENDPOINT {
+        return Err(-ENAMETOOLONG);
+    }
+    let mut entry = IndexEntry::new();
+    let _ = strscpy(&mut entry.name, name);
+    let _ = strscpy(&mut entry.version, &tag);
+    let _ = strscpy(&mut entry.repository, &repository);
+    // package_install treats a non-digest reference as a tag.
+    let _ = strscpy(&mut entry.manifest_digest, &tag);
+    entry.package_size = -1;
+    Ok((Source::direct(&endpoint), entry))
+}
+
+/// The first layer of `media`, fetched and checked against its digest;
+/// None when the manifest names none.
+fn layer_blob(
+    c: &mut Client,
+    repository: &[u8],
+    layers: &[Descriptor],
+    media: &CStr,
+) -> Result<Option<Buffer>> {
+    let Some(layer) = layers.iter().find(|l| l.media() == media.to_bytes()) else {
+        return Ok(None);
+    };
+    let url = c.url(repository, b"blobs", layer.digest())?;
+    let blob = c.get(&url, media, true)?;
+    if !digest_matches(layer.digest(), &sha256_of(blob.bytes())?) {
+        return Err(-EKEYREJECTED);
+    }
+    Ok(Some(blob))
+}
+
+/// The cached index of source `name`.
+fn cache_path(name: &[u8]) -> Result<CString> {
+    if !name_ok(name) {
+        return Err(-EINVAL);
+    }
+    path(&[REPOS_DIR.as_bytes(), b"/", name, b"/index.json"])
+}
+
+/// Fetches the signed index of source `name`, verifies it with the
+/// source's certificate and caches it.
+fn update_one(name: &[u8]) -> Result {
+    let s = source::load(name)?;
+    let mut c = Client::new();
+
+    c.parse_endpoint(s.endpoint())?;
+    let body = manifest(&mut c, s.index_repository(), INDEX_TAG)?;
+    let (layers, _) = manifest_layers(body.bytes(), LAYERS_MAX, false)?;
+    if layers.len() < 2 {
+        return Err(-EINVAL);
+    }
+    let index = layer_blob(&mut c, s.index_repository(), &layers, INDEX_MEDIA)?;
+    let Some(sig) = layer_blob(&mut c, s.index_repository(), &layers, INDEX_SIG_MEDIA)?
+        .filter(Buffer::has_data)
+    else {
+        return Err(-EINVAL);
+    };
+    let index = index.as_ref().map_or(&[][..], |b| b.bytes());
+    if s.verify(index, sig.bytes()) != 0 {
+        return Err(-EKEYREJECTED);
+    }
+    index_parse(index).map_err(|_| -EINVAL)?;
+    let dir = path(&[super::REPOS_DIR.as_bytes(), b"/", name])?;
+    // SAFETY: a C string.
+    status(unsafe { seal_mkdir_p(dir.as_ptr(), 0o700) })?;
+    let cache = cache_path(name)?;
+    // SAFETY: a C string and the index's bytes.
+    status(unsafe { seal_write_file(cache.as_ptr(), index.as_ptr().cast(), index.len(), 0o600) })
+}
+
+/// `shirudo bpm repo update [<source>]`.
+pub(super) fn repo_update(args: &[&[u8]]) -> c_int {
+    if args.len() == 4 && crate::util::help::is_help(Some(args[3])) {
+        super::eprint(b"usage: shirudo bpm repo update [<source>]\n");
+        return 0;
+    }
+    if args.len() > 4 {
+        return 2;
+    }
+    if !curl_ready() {
+        return fail(b"initialize curl", -EIO);
+    }
+    let held = match lock() {
+        Ok(held) => held,
+        Err(err) => return finish(None, Err(err), b"lock"),
+    };
+    let mut ret = Ok(());
+    if args.len() == 3 {
+        let registries = match source::registries() {
+            Ok(d) => Some(d),
+            Err(err) if err == -ENOENT => None,
+            Err(err) => {
+                ret = Err(err);
+                None
+            }
+        };
+        // One unreachable registry must not hold back the others.
+        for file in registries.into_iter().flatten() {
+            let Some(name) = source::registered_name(&file) else {
+                continue;
+            };
+            if name.len() >= MAX_NAME {
+                ret = Err(-ENAMETOOLONG);
+                continue;
+            }
+            if update_one(name).is_err() {
+                ret = Err(-EIO);
+            }
+        }
+    } else {
+        ret = update_one(args[3]);
+    }
+    finish(Some(held), ret, b"repo update")
+}
+
+/// The entries of the cached index of source `name`.
+pub(super) fn cached_index(name: &[u8]) -> Result<Vec<IndexEntry>> {
+    let cache = cache_path(name)?;
+    let mut body: *mut u8 = core::ptr::null_mut();
+    let mut len = 0;
+
+    // SAFETY: a C string and room for the buffer and its length.
+    status(unsafe { read_file(cache.as_ptr(), 64 << 20, (&raw mut body).cast(), &mut len) })?;
+    // SAFETY: read_file() gives len bytes.
+    let parsed = index_parse(unsafe { core::slice::from_raw_parts(body, len) });
+    // SAFETY: read_file()'s buffer of len + 1 bytes.
+    unsafe { crate::sys::malloc::xfree(body.cast(), len + 1) };
+    parsed
+}
+
+/// The entry of `name` in `entries`: of `version` when given, else the
+/// newest, the first of equal versions.
+pub(super) fn find_entry(
+    entries: &[IndexEntry],
+    name: &[u8],
+    version: Option<&[u8]>,
+) -> Result<IndexEntry> {
+    let mut found: Option<&IndexEntry> = None;
+
+    for e in entries {
+        if cstr(&e.name) != name || version.is_some_and(|v| cstr(&e.version) != v) {
+            continue;
+        }
+        if found.is_none_or(|f| {
+            version.is_none() && semver_compare(cstr(&f.version), cstr(&e.version)) < 0
+        }) {
+            found = Some(e);
+        }
+    }
+    found.copied().ok_or(-ENOENT)
+}
+
+/// The tree publication the configuration names, verified against the
+/// node's trust anchor, with its manifest's digest.
+pub(super) fn tree_publication(
+    cfg: &TreeConfig,
+    out: &mut TreePublication,
+    manifest_digest: &mut [u8],
+) -> Result {
+    let mut c = Client::new();
+    let repository = c.parse_tree_repo(cstr(&cfg.endpoint))?;
+
+    status(fetch_publication(
+        &mut c,
+        &repository,
+        cstr(&cfg.reference),
+        initrd::cert_path(),
+        out,
+        manifest_digest,
+    ))
+}
+
+/// That the upatch at `path` carries the expected payload digest, the
+/// operation's name when given and the kind it says.
+fn verify_upatch(path: &CStr, expected: &[u8], id: Option<&[u8]>, unload: bool) -> Result {
+    // SAFETY: an all-zero container is the closed one upatch_open() fills.
+    let mut u: Upatch = unsafe { core::mem::zeroed() };
+    let mut name = [0u8; upatch::NAME_MAX + 1];
+    let mut actual = [0; 65];
+
+    // SAFETY: a C string and a container to fill.
+    status(unsafe { upatch_open(path.as_ptr(), &mut u) })?;
+    upatch::header_name(&u, &mut name);
+    sha256_hex_of(&u.hdr.payload_sha256, &mut actual);
+    let ret = if !digest_matches(expected, cstr(&actual))
+        || id.is_some_and(|id| cstr(&name) != id)
+        || is_unload(&u) != unload
+    {
+        Err(-EKEYREJECTED)
+    } else {
+        Ok(())
+    };
+    // SAFETY: the container opened above.
+    unsafe { upatch_close(&mut u) };
+    ret
+}
+
+/// The artifact of a tree operation: cached by the digest of the blob as
+/// fetched, which names it as the payload digest would not, since
+/// equally built upatches published under different names share that.
+pub(super) fn tree_artifact(op: &TreeOperation) -> Result<CString> {
+    let a = &op.artifact;
+    let layer_digest = cstr(&a.layer_digest);
+    let unload = cstr(&op.op) == b"delete";
+
+    if crate::util::bpm_tree::digest_bytes(&a.layer_digest).is_none() {
+        return Err(-EINVAL);
+    }
+    let cache = path(&[
+        TREE_ARTIFACTS_DIR.as_bytes(),
+        b"/",
+        &layer_digest[b"sha256:".len()..],
+        b".upatch",
+    ])?;
+    let expected = cstr(&a.payload_sha256);
+    let id = Some(cstr(&op.id));
+    // SAFETY: a C string.
+    if unsafe { access(cache.as_ptr(), R_OK) } == 0 {
+        verify_upatch(&cache, expected, id, unload)?;
+        return Ok(cache);
+    }
+    let mut c = Client::new();
+    let repository = c.parse_tree_repo(cstr(&a.repository))?;
+    let body = manifest(&mut c, &repository, cstr(&a.manifest_digest))?;
+    if !digest_matches(cstr(&a.manifest_digest), &sha256_of(body.bytes())?) {
+        return Err(-EKEYREJECTED);
+    }
+    let (layers, _) = manifest_layers(body.bytes(), MAX_ENTRIES, false)?;
+    let Some(layer) = layers
+        .iter()
+        .find(|l| l.digest() == layer_digest && l.media() == UPATCH_MEDIA.to_bytes())
+    else {
+        return Err(-ENOENT);
+    };
+    let url = c.url(&repository, b"blobs", layer.digest())?;
+    let blob = c.get(&url, UPATCH_MEDIA, true)?;
+    let data = blob.bytes();
+    if !digest_matches(layer.digest(), &sha256_of(data)?)
+        || (layer.size() >= 0 && i64::try_from(data.len()) != Ok(layer.size()))
+    {
+        return Err(-EKEYREJECTED);
+    }
+    let dir = super::message(&[TREE_ARTIFACTS_DIR.as_bytes()]);
+    // SAFETY: C strings and the blob's bytes.
+    unsafe {
+        status(seal_mkdir_p(dir.as_ptr(), 0o700))?;
+        status(seal_write_file(
+            cache.as_ptr(),
+            data.as_ptr().cast(),
+            data.len(),
+            0o600,
+        ))?;
+    }
+    verify_upatch(&cache, expected, id, unload)?;
+    Ok(cache)
+}

@@ -62,7 +62,7 @@ pub(super) fn padding(size: u64) -> u64 {
 
 /// A relative path of components that are neither empty nor `.` nor
 /// `..`, which may end in a slash.
-pub(super) fn archive_rel_ok(name: &[u8]) -> bool {
+pub(crate) fn archive_rel_ok(name: &[u8]) -> bool {
     if name.first().is_none_or(|&c| c == b'/') {
         return false;
     }
@@ -81,7 +81,7 @@ pub(super) fn archive_rel_ok(name: &[u8]) -> bool {
 /// What a file of a package's upatches/ is by its name:
 /// `<x>.unload.upatch` an unload directive, any other `<x>.upatch` a
 /// load, and a hidden name neither.
-pub(super) fn upatch_member(name: &[u8]) -> UpatchMember {
+pub(crate) fn upatch_member(name: &[u8]) -> UpatchMember {
     if name.first().is_none_or(|&c| c == b'.') || name.contains(&0) {
         return UpatchMember::Other;
     }
@@ -95,7 +95,7 @@ pub(super) fn upatch_member(name: &[u8]) -> UpatchMember {
 }
 
 /// The other half of a load or unload name into `out`, terminated.
-pub(super) fn upatch_pair(name: &[u8], out: &mut [u8]) -> c_int {
+pub(crate) fn upatch_pair(name: &[u8], out: &mut [u8]) -> c_int {
     let (from, to): (&[u8], &[u8]) = match upatch_member(name) {
         UpatchMember::Load => (b".upatch", b".unload.upatch"),
         UpatchMember::Unload => (b".unload.upatch", b".upatch"),

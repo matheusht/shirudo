@@ -33,6 +33,14 @@ int build_forward(const char *label, const char *const words[], int argc,
 int cmd_init(int argc, const char **argv);
 int cmd_upatch(int argc, const char **argv);
 int cmd_bpm(int argc, const char **argv);
+/*
+ * For the image CLI test, which reached these by including builtin-bpm.c:
+ * the key file of registered source name, open as `bpm repo update`
+ * opens it to verify an index, or -errno; and the certificate `bpm tree
+ * sync` verifies publications against.
+ */
+int bpm_source_key_open(const char *name);
+const char *bpm_tree_certificate(void);
 
 /* Either-side. */
 int cmd_status(int argc, const char **argv);

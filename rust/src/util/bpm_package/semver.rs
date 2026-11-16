@@ -131,7 +131,7 @@ pub(super) fn valid(s: &[u8]) -> bool {
 /// describe sorts below every one it does, and such versions sort among
 /// themselves by their bytes, so that the order stays total over every
 /// version `bpm_version_ok()` lets through.
-pub(super) fn compare(a: &[u8], b: &[u8]) -> c_int {
+pub(crate) fn compare(a: &[u8], b: &[u8]) -> c_int {
     let (va, vb) = match (parse(a), parse(b)) {
         (Some(va), Some(vb)) => (va, vb),
         (Some(_), None) => return 1,

@@ -28,6 +28,11 @@ unsafe extern "C" {
     /// open(2), an inode it creates labelled as its sealed directory is:
     /// the fd, or -errno.
     pub fn seal_open(path: *const c_char, flags: c_int, mode: u32) -> c_int;
+    /// Output a command writes for its caller: refused when sealed or
+    /// reached through a link.
+    pub fn seal_output_open(path: *const c_char, flags: c_int, mode: u32) -> c_int;
+    /// The seal label of the directory holding `path`, onto it.
+    pub fn seal_inherit_path(path: *const c_char) -> c_int;
     /// mkdir -p, every directory created labelled as its parent is.
     pub fn seal_mkdir_p(path: *const c_char, mode: u32) -> c_int;
     /// The lock file at `path`, created sealed when it is not there, held

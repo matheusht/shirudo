@@ -76,7 +76,7 @@ fn on_path(name: &CStr) -> bool {
     false
 }
 
-fn available() -> bool {
+pub(super) fn available() -> bool {
     let (helper, use_path) = resolve_helper();
 
     if helper.is_empty() {
@@ -140,7 +140,7 @@ unsafe fn exec(label: *const c_char, argv: *mut *const c_char) -> c_int {
 ///
 /// `label` is a C string, `words` C strings up to a NULL, and `argv`
 /// holds `argc` C strings.
-unsafe fn forward(
+pub(super) unsafe fn forward(
     label: *const c_char,
     words: *const *const c_char,
     argc: c_int,

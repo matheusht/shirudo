@@ -7,12 +7,14 @@
 
 mod auth;
 mod capi;
+mod client;
 mod http;
 mod manifest;
 mod refs;
 
 use core::ffi::{CStr, c_char, c_long};
 
+pub(crate) use client::{Buffer, Client, manifest_layers};
 pub(crate) use http::{buffer_free, get_memory, get_signed, sha256_hex};
 pub(crate) use manifest::{emit_descriptor, parse_manifest};
 pub(crate) use refs::url;
@@ -196,7 +198,7 @@ fn trim_range(s: &[u8]) -> (usize, usize) {
 
 /// Blanks trimmed off both ends of `s` into `out`; -E2BIG when `out` had
 /// to cut it, as strscpy() does.
-fn trim(s: &[u8], out: &mut [u8]) -> Result<(), i32> {
+pub(crate) fn trim(s: &[u8], out: &mut [u8]) -> Result<(), i32> {
     let Some(room) = out.len().checked_sub(1) else {
         return Err(-E2BIG);
     };
@@ -214,7 +216,7 @@ fn trim(s: &[u8], out: &mut [u8]) -> Result<(), i32> {
 }
 
 /// `want` is `sha256:` and the hex of `hex` in either case.
-fn digest_matches(want: &[u8], hex: &[u8]) -> bool {
+pub(crate) fn digest_matches(want: &[u8], hex: &[u8]) -> bool {
     want.strip_prefix(b"sha256:")
         .is_some_and(|w| w.eq_ignore_ascii_case(hex))
 }

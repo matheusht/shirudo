@@ -8,11 +8,19 @@
 
 mod archive;
 mod capi;
+mod facade;
 mod index;
 mod info;
 mod publication;
 mod semver;
 mod tar;
+
+pub(crate) use facade::{
+    Member, extract, fetch_publication, index_parse, read_member_in, verify_cms, verify_cms_fd,
+    visit_members,
+};
+pub(crate) use semver::compare as semver_compare;
+pub(crate) use tar::{archive_rel_ok, upatch_member, upatch_pair};
 
 use super::bpm_oci::{MAX_DIGEST, MAX_ENDPOINT, MAX_NAME};
 
@@ -20,13 +28,13 @@ use super::bpm_oci::{MAX_DIGEST, MAX_ENDPOINT, MAX_NAME};
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct IndexEntry {
-    name: [u8; MAX_NAME],
-    version: [u8; MAX_NAME],
-    repository: [u8; MAX_ENDPOINT],
-    manifest_digest: [u8; MAX_DIGEST],
-    package_digest: [u8; MAX_DIGEST],
+    pub(crate) name: [u8; MAX_NAME],
+    pub(crate) version: [u8; MAX_NAME],
+    pub(crate) repository: [u8; MAX_ENDPOINT],
+    pub(crate) manifest_digest: [u8; MAX_DIGEST],
+    pub(crate) package_digest: [u8; MAX_DIGEST],
     signer: [u8; MAX_DIGEST],
-    package_size: i64,
+    pub(crate) package_size: i64,
 }
 
 /// `struct bpm_package_info`: a package's identity, and its signer's
@@ -55,7 +63,7 @@ const _: () = assert!(size_of::<PackageInfo>() == 400);
 const _: () = assert!(size_of::<UpatchMember>() == size_of::<core::ffi::c_int>());
 
 impl IndexEntry {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         IndexEntry {
             name: [0; MAX_NAME],
             version: [0; MAX_NAME],

@@ -21,5 +21,6 @@ pub mod seal;
 pub mod ssl;
 pub mod string;
 pub mod tss2;
+pub mod upatch;
 pub mod version;
 pub mod zlib;

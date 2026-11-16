@@ -18,7 +18,7 @@ fn is_space(c: u8) -> bool {
 /// A source line's `endpoint`, `index_repository` or `key_file` into
 /// its field; other keys and lines without `=` leave the fields as they
 /// were.
-fn parse_source_line(
+pub(crate) fn parse_source_line(
     line: &mut [u8],
     endpoint: &mut [u8],
     index_repository: &mut [u8],
@@ -83,7 +83,7 @@ fn trim(line: &mut [u8], start: usize, end: usize) -> (usize, usize) {
 
 /// A tree line's `endpoint` or `reference`, a value in double quotes
 /// taken without them, into its field.
-fn parse_tree_line(line: &mut [u8], endpoint: &mut [u8], reference: &mut [u8]) -> c_int {
+pub(crate) fn parse_tree_line(line: &mut [u8], endpoint: &mut [u8], reference: &mut [u8]) -> c_int {
     let n = cstr(line).len();
     let Some(eq) = line[..n].iter().position(|&c| c == b'=') else {
         return 0;

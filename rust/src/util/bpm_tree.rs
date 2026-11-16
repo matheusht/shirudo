@@ -1057,6 +1057,30 @@ pub(crate) fn publication_follows(
     0
 }
 
+/// A publication Rust code owns, released when it goes.
+pub(crate) struct Publication(Box<TreePublication>);
+
+impl Publication {
+    pub(crate) fn new() -> Self {
+        // SAFETY: an all-zero publication holds nothing.
+        Publication(Box::new(unsafe { mem::zeroed() }))
+    }
+
+    pub(crate) fn get(&self) -> &TreePublication {
+        &self.0
+    }
+
+    pub(crate) fn get_mut(&mut self) -> &mut TreePublication {
+        &mut self.0
+    }
+}
+
+impl Drop for Publication {
+    fn drop(&mut self) {
+        publication_free(&mut self.0);
+    }
+}
+
 pub(crate) use capi::tree_parse;
 
 mod capi {

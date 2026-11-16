@@ -33,7 +33,9 @@ const RELATIVE: [&CStr; 7] = [
     c"keys/revoked",
 ];
 
-/// IMAGE_TREE_CONF and IMAGE_NODE_LABELS of `enum image_path`.
+/// IMAGE_REGISTRIES, IMAGE_TREE_CONF and IMAGE_NODE_LABELS of `enum
+/// image_path`.
+pub(crate) const REGISTRIES: c_uint = 1;
 pub(crate) const TREE_CONF: c_uint = 3;
 pub(crate) const NODE_LABELS: c_uint = 4;
 
@@ -72,6 +74,19 @@ pub(crate) fn open(which: c_uint, flags: c_int) -> c_int {
     }
     // SAFETY: the root, a relative path and the caller's flags.
     unsafe { open_beneath(fd, RELATIVE[which as usize].as_ptr(), flags) }
+}
+
+/// `path`, relative to the image's root and never above it, open with
+/// `flags`: an fd or -errno.
+pub(crate) fn open_relative(path: &CStr, flags: c_int) -> c_int {
+    let fd = root_fd();
+    let rel = path.to_bytes();
+
+    if fd < 0 || rel.first() == Some(&b'/') || rel.windows(2).any(|w| w == b"..") {
+        return -EINVAL;
+    }
+    // SAFETY: the root, the relative path and flags.
+    unsafe { open_beneath(fd, path.as_ptr(), flags) }
 }
 
 pub(crate) fn root_fd() -> c_int {
@@ -415,7 +430,6 @@ mod capi {
 
     use crate::errno::EINVAL;
     use crate::util::config::Config;
-    use crate::util::io::open_beneath;
 
     #[unsafe(no_mangle)]
     pub extern "C" fn image_config_active() -> bool {
@@ -448,19 +462,11 @@ mod capi {
     /// `path` is NULL or a C string.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn image_open_relative(path: *const c_char, flags: c_int) -> c_int {
-        let fd = super::root_fd();
-
-        if fd < 0 || path.is_null() {
+        if path.is_null() {
             return -EINVAL;
         }
         // SAFETY: the caller passes a C string.
-        let rel = unsafe { CStr::from_ptr(path) }.to_bytes();
-
-        if rel.first() == Some(&b'/') || rel.windows(2).any(|w| w == b"..") {
-            return -EINVAL;
-        }
-        // SAFETY: the root, the caller's relative path and flags.
-        unsafe { open_beneath(fd, path, flags) }
+        super::open_relative(unsafe { CStr::from_ptr(path) }, flags)
     }
 
     #[unsafe(no_mangle)]

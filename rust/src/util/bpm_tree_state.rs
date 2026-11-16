@@ -1147,6 +1147,11 @@ unsafe fn kconfig_read(
     unsafe { read_selector_config_file(path, &mut kv, gz) }
 }
 
+pub(crate) use capi::{
+    tree_configured, tree_event_append, tree_event_replay, tree_pending_read, tree_pending_write,
+    tree_selector_matches, tree_state_read, tree_state_write,
+};
+
 mod capi {
     use core::ffi::{c_char, c_int};
 

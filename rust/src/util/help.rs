@@ -103,14 +103,14 @@ pub(crate) fn is_help(arg: Option<&[u8]>) -> bool {
 
 /// Whether a command line word asks for the subcommands, for bash
 /// completion.
-fn is_list_cmds(arg: Option<&[u8]>) -> bool {
+pub(crate) fn is_list_cmds(arg: Option<&[u8]>) -> bool {
     arg == Some(b"--list-cmds")
 }
 
 /// # Safety
 ///
 /// Each of `items` has a name.
-unsafe fn print_subcmd_list(items: &[HelpItem]) {
+pub(crate) unsafe fn print_subcmd_list(items: &[HelpItem]) {
     for item in items {
         // SAFETY: a format of one C string, and the item's name.
         unsafe { printf(c"%s\n".as_ptr(), item.name) };
@@ -242,7 +242,7 @@ unsafe fn help_unknown_subcommand(
 ///
 /// `cmd_label` and `input` are C strings, and each of `subcmds` has a
 /// name.
-unsafe fn resolve_subcommand(
+pub(crate) unsafe fn resolve_subcommand(
     cmd_label: *const c_char,
     input: *const c_char,
     subcmds: &[HelpItem],

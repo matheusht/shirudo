@@ -136,7 +136,7 @@ unsafe fn sha256_calc(data: *const c_void, len: usize, out: *mut u8) -> c_int {
 ///
 /// `a` and `b` hold their lengths' bytes and `out` has room for a
 /// digest.
-unsafe fn sha256_2(
+pub(crate) unsafe fn sha256_2(
     a: *const c_void,
     a_len: usize,
     b: *const c_void,
@@ -1074,7 +1074,8 @@ fn status_on(tpm: *mut Tpm, st: &mut ChainStatus) -> c_int {
 }
 
 pub(crate) use capi::{
-    chain_anchor, chain_fold, chain_key_event, chain_tree_event, chain_upatch_event,
+    chain_anchor, chain_bound, chain_extend, chain_fold, chain_key_event, chain_tree_event,
+    chain_upatch_event,
 };
 
 mod capi {

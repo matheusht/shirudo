@@ -118,7 +118,8 @@ message that carries a change.
 
 - Rust under `rust/` replaces a C module whole: the module that ports
   `util/<m>.c` is `rust/src/util/<m>.rs` or `rust/src/util/<m>/`, and
-  the one that ports `builtin-<c>.c` is `rust/src/builtin/<c>.rs`. It
+  the one that ports `builtin-<c>.c` is `rust/src/builtin/<c>.rs` or
+  `rust/src/builtin/<c>/`. It
   re-implements the module in Rust rather than translating it line by
   line, and keeps what callers and users see: the C interface of its
   header, in a `capi` submodule of `#[unsafe(no_mangle)]` functions

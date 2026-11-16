@@ -29,6 +29,7 @@ pub type CurlUCode = c_int;
 pub type CurlUPart = c_int;
 
 pub const CURLE_OK: CurlCode = 0;
+pub const CURL_GLOBAL_DEFAULT: c_long = 3;
 pub const CURLE_SSL_CONNECT_ERROR: CurlCode = 35;
 pub const CURLE_SSL_CIPHER: CurlCode = 59;
 pub const CURLE_FILESIZE_EXCEEDED: CurlCode = 63;
@@ -75,6 +76,8 @@ pub const CURLUPART_SCHEME: CurlUPart = 1;
 pub const CURLUPART_HOST: CurlUPart = 5;
 
 unsafe extern "C" {
+    pub fn curl_global_init(flags: c_long) -> CurlCode;
+    pub fn curl_global_cleanup();
     pub fn curl_easy_init() -> *mut Curl;
     pub fn curl_easy_setopt(curl: *mut Curl, option: c_int, ...) -> CurlCode;
     pub fn curl_easy_perform(curl: *mut Curl) -> CurlCode;
