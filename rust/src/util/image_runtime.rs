@@ -33,8 +33,8 @@ use crate::sys::identity::{
 };
 use crate::sys::image_guards::image_guards_ready;
 use crate::sys::libc::{
-    Statvfs, Timespec, explicit_bzero, fsetxattr, fstatvfs, fwrite, ioctl, nanosleep, stdout,
-    umount2,
+    O_DIRECTORY, O_NOFOLLOW, O_PATH, Statvfs, Timespec, explicit_bzero, fsetxattr, fstatvfs,
+    fwrite, ioctl, nanosleep, stdout, umount2,
 };
 use crate::sys::log::{pr_err, pr_warn};
 use crate::sys::malloc::xfree;
@@ -77,9 +77,6 @@ const IMAGE_CACHE_DIR: &CStr = c"/var/lib/shirudo/images";
 const DEVICES_MAP: &CStr = c"/run/shirudo/bpffs/devices";
 const RUNTIME_MAPPING: &CStr = c"shirudo-runtime";
 
-const O_PATH: c_int = 0o10000000;
-const O_DIRECTORY: c_int = 0o200000;
-const O_NOFOLLOW: c_int = 0o400000;
 const MNT_DETACH: c_int = 2;
 const ST_RDONLY: u64 = 1;
 const ST_NOSUID: u64 = 2;

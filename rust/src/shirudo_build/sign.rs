@@ -17,6 +17,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
 use super::{error, path, strerr};
 use crate::errno::{E2BIG, EINVAL, EIO, ENOMEM, ENOSPC, EPERM};
+use crate::sys::libc::{O_NONBLOCK, S_IFMT, S_IFREG};
 use crate::sys::openssl::{
     BIO_CLOSE, BIO_CTRL_INFO, BIO_CTRL_RESET, BIO_ctrl, BIO_free, BIO_new, BIO_new_fd,
     BIO_new_file, BIO_new_mem_buf, BIO_read, BIO_s_mem, Bio, CMS_BINARY, CMS_ContentInfo_free,
@@ -34,8 +35,6 @@ const CMS_PARTIAL: c_uint = 0x4000;
 const CMS_USE_KEYID: c_uint = 0x10000;
 const CMS_NO_SIGNING_TIME: c_uint = 0x40_0000;
 const ERR_TXT_STRING: c_int = 0x02;
-const O_NONBLOCK: c_int = 0o4000;
-const S_IFMT: u32 = 0o170000;
 
 fn say(text: String) {
     error(text.as_bytes());
@@ -117,7 +116,7 @@ pub(crate) fn open_signing_key(pkey: &CStr) -> Result<OwnedFd, c_int> {
         ));
         err
     })?;
-    if st.mode() & S_IFMT != 0o100000 {
+    if st.mode() & u32::from(S_IFMT) != u32::from(S_IFREG) {
         say(format!("signing key {} is not a regular file", shown(pkey)));
         return Err(-EPERM);
     }

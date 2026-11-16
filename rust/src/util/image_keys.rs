@@ -10,7 +10,10 @@ use core::ffi::{CStr, c_int};
 use std::ffi::CString;
 
 use crate::errno::{EINVAL, EKEYREJECTED, ENOENT, ENOKEY};
-use crate::sys::libc::{Statx, close, closedir, fdopendir, openat, readdir, set_errno};
+use crate::sys::libc::{
+    O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW, O_NONBLOCK, S_IFMT, S_IFREG, Statx, close, closedir,
+    fdopendir, openat, readdir, set_errno,
+};
 use crate::sys::log::pr_err;
 use crate::sys::malloc::xfree;
 use crate::util::image_config;
@@ -26,12 +29,6 @@ const DER_MAX: u64 = 1024 * 1024;
 pub(crate) const RUNTIME_CERT_PATH: &CStr = c"/run/shirudo/runtime/keys/cert.der";
 
 const O_RDONLY: c_int = 0;
-const O_NONBLOCK: c_int = 0o4000;
-const O_DIRECTORY: c_int = 0o200000;
-const O_NOFOLLOW: c_int = 0o400000;
-const O_CLOEXEC: c_int = 0o2000000;
-const S_IFMT: u16 = 0o170000;
-const S_IFREG: u16 = 0o100000;
 
 fn error(text: String) {
     let text = CString::new(text).unwrap_or_default();
