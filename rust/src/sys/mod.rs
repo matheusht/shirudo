@@ -16,6 +16,7 @@ pub mod libbpf;
 pub mod libc;
 pub mod loader;
 pub mod log;
+pub mod luajit;
 pub mod malloc;
 pub mod openssl;
 pub mod paths;

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The map reading of `util/upatch_maps.h` and the signed decoders of
-//! `util/upatch_decode.h`, which hand an export what a map holds.
+//! The map reading of `util/upatch_maps.h`, which hands an export what
+//! a map holds.
 
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_char, c_void};
 
 use crate::sys::btf::Btf;
 
@@ -107,42 +107,4 @@ unsafe extern "C" {
         btf_type: *const c_char,
     ) -> *mut c_char;
 
-    /// What the map's signed decoder makes of it, the upatch's or the
-    /// artifact's at `path`: an allocation of `*out_len` + 1 bytes for
-    /// xfree(), -ENODATA without a decoder or -errno.
-    pub fn upatch_decode_map_json(
-        v: *const MapView,
-        out: *mut *mut c_char,
-        out_len: *mut usize,
-    ) -> c_int;
-    pub fn upatch_decode_map_json_limit(
-        v: *const MapView,
-        max_bytes: usize,
-        out: *mut *mut c_char,
-        out_len: *mut usize,
-    ) -> c_int;
-    pub fn upatch_decode_map_otel(
-        v: *const MapView,
-        out: *mut *mut c_char,
-        out_len: *mut usize,
-    ) -> c_int;
-    pub fn upatch_decode_map_file_json(
-        path: *const c_char,
-        v: *const MapView,
-        out: *mut *mut c_char,
-        out_len: *mut usize,
-    ) -> c_int;
-    pub fn upatch_decode_map_file_json_limit(
-        path: *const c_char,
-        v: *const MapView,
-        max_bytes: usize,
-        out: *mut *mut c_char,
-        out_len: *mut usize,
-    ) -> c_int;
-    pub fn upatch_decode_map_file_otel(
-        path: *const c_char,
-        v: *const MapView,
-        out: *mut *mut c_char,
-        out_len: *mut usize,
-    ) -> c_int;
 }

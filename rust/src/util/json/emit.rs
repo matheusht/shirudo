@@ -398,7 +398,7 @@ impl JsonEmit {
         self.put_string(s, true);
     }
 
-    fn key_lossy(&mut self, s: &[u8]) {
+    pub(crate) fn key_lossy(&mut self, s: &[u8]) {
         self.sep();
         self.put_string(s, true);
         self.put(b':');

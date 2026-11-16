@@ -18,6 +18,7 @@ pub(crate) mod config_image;
 pub(crate) mod config_measure;
 mod config_update;
 pub(crate) mod crypto_openssl;
+pub(crate) mod decode;
 mod dm_verity;
 pub(crate) mod elf_target;
 pub(crate) mod eventlog;

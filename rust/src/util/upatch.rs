@@ -138,16 +138,16 @@ const _: () = assert!(core::mem::offset_of!(Upatch, signed_unload_payload) == 42
 /// source within the container.
 #[repr(C)]
 pub struct DecoderView {
-    language: u32,
-    api_version: u32,
-    input_format: u32,
-    export_signal: u32,
-    upatch: [u8; 64],
-    map: [u8; 16],
-    source_name: [u8; 64],
-    entrypoint: [u8; 32],
-    source: *const c_char,
-    source_len: u32,
+    pub(crate) language: u32,
+    pub(crate) api_version: u32,
+    pub(crate) input_format: u32,
+    pub(crate) export_signal: u32,
+    pub(crate) upatch: [u8; 64],
+    pub(crate) map: [u8; 16],
+    pub(crate) source_name: [u8; 64],
+    pub(crate) entrypoint: [u8; 32],
+    pub(crate) source: *const c_char,
+    pub(crate) source_len: u32,
 }
 
 const _: () = assert!(size_of::<DecoderView>() == 208);
@@ -969,9 +969,9 @@ unsafe fn specs_parse(
 }
 
 pub(crate) use capi::{
-    upatch_close, upatch_data, upatch_header_name, upatch_loader, upatch_member_valid,
-    upatch_metadata, upatch_name_valid, upatch_open, upatch_open_memory, upatch_select,
-    upatch_signature,
+    upatch_close, upatch_data, upatch_decoder_view, upatch_header_name, upatch_loader,
+    upatch_member_valid, upatch_metadata, upatch_name_valid, upatch_open, upatch_open_fd,
+    upatch_open_memory, upatch_select, upatch_signature,
 };
 
 mod capi {

@@ -28,11 +28,11 @@ use crate::sys::curl::{
     curl_easy_getinfo, curl_easy_init, curl_easy_perform, set_callback, set_long, set_off, set_ptr,
 };
 use crate::sys::libc::{fchmod, mkstemp, unlink};
-use crate::sys::upatch_maps::{upatch_decode_map_file_json_limit, upatch_decode_map_json_limit};
 use crate::sys::zlib::{GzHeader, ZStream, deflate, deflateEnd, deflateInit2_, deflateSetHeader};
 use crate::util::crypto_openssl::{
     Sha256Ctx, base64_encode, sha256_final, sha256_free, sha256_init, sha256_update,
 };
+use crate::util::decode::{upatch_decode_map_file_json_limit, upatch_decode_map_json_limit};
 use crate::util::tls_openssl::tls_curl_policy;
 
 /// S3_URL_MAX and the rest of the C's limits.

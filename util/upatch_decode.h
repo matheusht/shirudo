@@ -2,12 +2,13 @@
 /*
  * Copyright (c) 2026 Authors of shirudo
  *
- * Userspace upatch map decoders.
+ * Userspace upatch map decoders, in rust/src/util/decode.rs.
  */
 
 #ifndef SHIRUDO_UTIL_UPATCH_DECODE_H
 #define SHIRUDO_UTIL_UPATCH_DECODE_H
 
+#include <stdbool.h>
 #include <stddef.h>
 
 #include <shirudo/misc.h>
@@ -44,5 +45,16 @@ int upatch_decode_map_file_otel(const char *path,
 
 int upatch_decode_map_signal(const struct map_view *v,
 			     __u32 *signal_out);
+
+/*
+ * For the fuzzer: one run of the decoder d on the view, as an export
+ * runs it, the JSON or with otel the OTLP AnyValue of what it returns,
+ * at most max_bytes: *out for xfree(*out, *out_len + 1), or -errno.
+ */
+struct upatch_decoder_view;
+
+int upatch_decode_run(const struct upatch_decoder_view *d,
+		      const struct map_view *v, bool otel, size_t max_bytes,
+		      char **out, size_t *out_len);
 
 #endif /* SHIRUDO_UTIL_UPATCH_DECODE_H */

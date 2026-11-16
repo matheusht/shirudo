@@ -12,11 +12,14 @@ use crate::errno::{E2BIG, EBADMSG, EINVAL, ENODATA, ENOMEM};
 use crate::sys::libc::gethostname;
 use crate::sys::malloc::xstrfree;
 use crate::sys::upatch_maps::{
-    MapView, upatch_decode_map_file_json, upatch_decode_map_file_otel, upatch_decode_map_json,
-    upatch_decode_map_otel, upatch_map_format_cell, upatch_map_format_percpu_sum,
-    upatch_map_is_percpu, upatch_map_value_stride,
+    MapView, upatch_map_format_cell, upatch_map_format_percpu_sum, upatch_map_is_percpu,
+    upatch_map_value_stride,
 };
 use crate::text::cstr;
+use crate::util::decode::{
+    upatch_decode_map_file_json, upatch_decode_map_file_otel, upatch_decode_map_json,
+    upatch_decode_map_otel,
+};
 use crate::util::json::{self, JsonEmit, Visit};
 
 /// JSON_MAX_BYTES: the largest document the emitter makes.

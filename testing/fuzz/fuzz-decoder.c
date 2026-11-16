@@ -11,8 +11,16 @@
 #include <stdlib.h>
 
 #include "fuzz.h"
+
+#include <shirudo/string.h>
+
 #include "io.h"
-#include "upatch_decode.c"
+#include "json.h"
+#include "malloc.h"
+#include "upatch.h"
+#include "upatch_decode.h"
+#include "upatch_maps.h"
+#include "bpf/lib/serializer.h"
 
 static const char * const sources[] = {
 	"upatches/kernel-obs/decoders/dns.lua",
@@ -102,11 +110,11 @@ int LLVMFuzzerTestOneInput(const __u8 *data, size_t size)
 	}
 	v.entries = entries;
 
-	if (!run_lua_decoder(d, &v, false, JSON_MAX_BYTES, &out,
-			     &out_len))
+	if (!upatch_decode_run(d, &v, false, JSON_MAX_BYTES, &out,
+			       &out_len))
 		xfree(out, out_len + 1);
-	if (!run_lua_decoder(d, &v, true, JSON_MAX_BYTES, &out,
-			     &out_len))
+	if (!upatch_decode_run(d, &v, true, JSON_MAX_BYTES, &out,
+			       &out_len))
 		xfree(out, out_len + 1);
 	xfree(page.data, size + 1);
 	return 0;

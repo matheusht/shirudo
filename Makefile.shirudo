@@ -264,7 +264,7 @@ UTIL_SRCS := \
      \
     util/upatch_maps.c \
      \
-    util/upatch_decode.c \
+     \
      \
     util/upatch_pins.c \
     util/upatch_verify.c \
@@ -953,8 +953,7 @@ testing/helper/test-signed-load: testing/helper/test-signed-load.c
 	    -o $@ $^ -lcrypto
 
 testing/helper/test-otel-map: testing/helper/test-otel-map.c util/upatch_maps.o \
-                        util/curl.o \
-                        util/upatch_decode.o util/upatch_pins.o \
+                        util/curl.o util/upatch_pins.o \
                         util/upatch_resolve.o \
                          util/string.o util/log.o \
                         util/paths.o \
@@ -992,7 +991,7 @@ testing/helper/test-upatch-rodata: testing/helper/test-upatch-rodata.c \
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
 testing/helper/test-upatch-decode: testing/helper/test-upatch-decode.c \
-			      util/upatch_decode.o  util/malloc.o util/hex.o \
+			        util/malloc.o util/hex.o \
 			      util/string.o   util/log.o \
 			      $(RUST_LIB)
 	@printf '  CC      $@\n'
@@ -1253,7 +1252,7 @@ $(FUZZ_OUT)/fuzz-serializer: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS)
 $(FUZZ_OUT)/fuzz-cms: testing/fuzz/fuzz-cms.c $(FUZZ_BASE) \
                         $(FUZZ_SEAL)
 $(FUZZ_OUT)/fuzz-decoder: testing/fuzz/fuzz-decoder.c $(FUZZ_BASE) \
-                           util/upatch_decode.c   \
+                              \
                            $(FUZZ_SEAL)
 $(FUZZ_OUT)/fuzz-decoder: FUZZ_CFLAGS += $(LUAJIT_CFLAGS) -DHAVE_LUAJIT \
 	-DFUZZ_SOURCE_TREE='"$(CURDIR)"'
@@ -1295,12 +1294,12 @@ $(FUZZ_OUT)/fuzz-upatch-info: testing/fuzz/fuzz-upatch-info.c $(FUZZ_BASE) \
                               util/options.c util/paths.c \
                               util/similar.c \
                                \
-                              util/upatch_decode.c util/upatch_maps.c \
+                               util/upatch_maps.c \
                                util/upatch_pins.c \
                               util/upatch_resolve.c \
                               util/upatch_verify.c util/version_id.c \
                               util/xdp.c $(FUZZ_SEAL) $(LIBBPF_A)
-# util/upatch_decode.c defines upatch_decode_map_signal(), which
+# Rust defines upatch_decode_map_signal(), which
 # builtin-upatch.c calls, with LuaJIT alone; upatch info runs no Lua.
 $(FUZZ_OUT)/fuzz-upatch-info: FUZZ_CFLAGS += $(TSS2_CFLAGS) $(LIBELF_CFLAGS) \
                                              $(LUAJIT_CFLAGS) -DHAVE_LUAJIT
@@ -1334,7 +1333,6 @@ $(FUZZ_OUT)/fuzz-attest-report: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) \
 # A target that reaches static parsers or printers includes their source,
 # which it then depends on without linking it a second time.
 $(FUZZ_OUT)/fuzz-serializer: FUZZ_INCLUDED := util/upatch_maps.c
-$(FUZZ_OUT)/fuzz-decoder: FUZZ_INCLUDED := util/upatch_decode.c
 $(FUZZ_OUT)/fuzz-upatch-info: FUZZ_INCLUDED := builtin-upatch.c
 $(FUZZ_OUT)/fuzz-bpm-info: FUZZ_INCLUDED :=
 $(FUZZ_OUT)/fuzz-attest-report: FUZZ_INCLUDED :=
