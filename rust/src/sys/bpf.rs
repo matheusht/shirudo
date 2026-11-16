@@ -13,6 +13,11 @@ unsafe extern "C" {
     /// Opens the BPF object pinned at `pathname`: a descriptor, or a
     /// negative error.
     pub fn bpf_obj_get(pathname: *const c_char) -> c_int;
+    /// The kernel's `struct bpf_*_info` of object `fd`, at most `*len`
+    /// bytes of it into `info`, the bytes into `*len`: 0 or -errno.
+    pub fn bpf_obj_get_info_by_fd(fd: c_int, info: *mut c_void, len: *mut u32) -> c_int;
+    /// Program `id`, opened: a descriptor or -errno.
+    pub fn bpf_prog_get_fd_by_id(id: u32) -> c_int;
     /// Pins the object at `fd` at `pathname`: 0, or a negative error
     /// with errno set.
     pub fn bpf_obj_pin(fd: c_int, pathname: *const c_char) -> c_int;

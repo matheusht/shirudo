@@ -10,6 +10,7 @@
 
 use core::ffi::{CStr, c_char, c_int};
 
+use super::upatch::cmd_upatch;
 use super::{
     attest::cmd_attest, bpm::cmd_bpm, build::cmd_build, config::cmd_config, genkey::cmd_genkey,
     image::cmd_image, init::cmd_init, keys::cmd_keys, status::cmd_status, version::cmd_version,
@@ -18,7 +19,6 @@ use super::{
 use crate::ffi;
 use crate::sys::libc::{fwrite, stderr, stdout, strerror};
 use crate::sys::log::log_init;
-use crate::sys::upatch::cmd_upatch;
 use crate::util::harden::{harden_self, harden_stdio};
 use crate::util::help::{help_suggest, is_help, is_list_cmds};
 use crate::util::image_runtime;

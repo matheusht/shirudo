@@ -19,6 +19,7 @@ mod image;
 mod init;
 pub(crate) mod keys;
 mod status;
+mod upatch;
 mod version;
 
 /// The `argc` words of a command line at `argv`.

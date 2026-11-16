@@ -379,10 +379,11 @@ Project layout
      - ``main()``, which hands the command line to the dispatch table
        in :src:`rust/src/builtin/commands.rs`.
    * - :src:`builtin-upatch.c`, :src:`builtin.h`
-     - One file or module per top-level command: ``upatch`` in
-       :src:`builtin-upatch.c`, and ``attest``, ``bpm``, ``build``,
-       ``config``, ``genkey``, ``image``, ``init``, ``keys``,
-       ``status`` and ``version`` in :src:`rust/src/builtin/`.
+     - One module per top-level command, in :src:`rust/src/builtin/`:
+       ``attest``, ``bpm``, ``build``, ``config``, ``genkey``,
+       ``image``, ``init``, ``keys``, ``status``, ``upatch`` and
+       ``version``. ``upatch load``, ``unload`` and ``map`` are still C,
+       in :src:`builtin-upatch.c`.
    * - :src:`util/`
      - The userspace library both binaries link.
    * - :src:`bpf/`

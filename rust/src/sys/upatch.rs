@@ -13,11 +13,20 @@ use crate::sys::btf::Btf;
 pub const UPATCH_INSTALL_TARGET_MISSING: c_int = 2;
 
 /// `struct map_summary`: a map of an upatch, as upatch_maps lists it.
-pub enum MapSummary {}
+#[repr(C)]
+pub struct MapSummary {
+    pub upatch: [u8; 257],
+    pub name: [u8; 17],
+    pub ty: u32,
+    pub type_name: *const c_char,
+    pub max_entries: u32,
+    pub n_cpus: u32,
+}
+
+const _: () = assert!(size_of::<MapSummary>() == 296);
+const _: () = assert!(core::mem::offset_of!(MapSummary, type_name) == 280);
 
 unsafe extern "C" {
-    /// `shirudo upatch`, still C in builtin-upatch.c.
-    pub fn cmd_upatch(argc: c_int, argv: *const *const c_char) -> c_int;
     /// Where upatch `name` attaches, as a C string into the `cap` bytes at
     /// `out`, looked up in `vbtf`, the vmlinux BTF or NULL: 0 or -errno.
     pub fn upatch_resolve_location(

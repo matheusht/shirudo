@@ -4,9 +4,10 @@
 //! The map reading of `util/upatch_maps.h`, which hands an export what
 //! a map holds.
 
-use core::ffi::{c_char, c_void};
+use core::ffi::{c_char, c_int, c_void};
 
 use crate::sys::btf::Btf;
+use crate::util::json::JsonEmit;
 
 /// UPATCH_NAME_MAX, MAP_NAME_MAX, UPATCH_LOCATION_MAX, MAP_TYPENAME_MAX
 /// and MAP_TYPEDEF_MAX.
@@ -106,5 +107,20 @@ unsafe extern "C" {
         values_per_cpu: *const c_void,
         btf_type: *const c_char,
     ) -> *mut c_char;
-
+    /// Map `map` of upatch `upatch` into `out`, at most `cap` entries or
+    /// all for 0, MAP_READ_PEEK in `flags` to leave a serializer's
+    /// interval for the exporter: 0 or -errno; map_view_free() frees it.
+    pub fn upatch_maps_read(
+        upatch: *const c_char,
+        map: *const c_char,
+        cap: u32,
+        flags: u32,
+        out: *mut MapView,
+    ) -> c_int;
+    /// Frees what a read put in `v`.
+    pub fn map_view_free(v: *mut MapView);
+    /// Prints the map read, its types and entries, to stdout.
+    pub fn upatch_maps_print_detail(v: *const MapView);
+    /// Emits the map read as a JSON object, as the status report has it.
+    pub fn upatch_maps_emit_json_object(e: *mut JsonEmit, v: *const MapView);
 }

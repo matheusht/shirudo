@@ -603,7 +603,7 @@ pub(crate) fn header_name(u: &Upatch, out: &mut [u8; NAME_MAX + 1]) {
     out[NAME_MAX] = 0;
 }
 
-fn signed_name(u: &Upatch) -> *const c_char {
+pub(crate) fn signed_name(u: &Upatch) -> *const c_char {
     if u.map.is_null() {
         ptr::null()
     } else {
@@ -643,7 +643,7 @@ fn at(u: &Upatch, off: u32) -> *const c_void {
     unsafe { u.map.add(off as usize) }.cast()
 }
 
-fn decoder_view(u: &Upatch, idx: u32, out: &mut DecoderView) -> c_int {
+pub(crate) fn decoder_view(u: &Upatch, idx: u32, out: &mut DecoderView) -> c_int {
     // SAFETY: the view, every byte of it.
     unsafe { ptr::write_bytes(ptr::from_mut(out), 0, 1) };
     if !has_decoders(u) || idx >= u.nr_decoders {
@@ -665,11 +665,97 @@ fn decoder_view(u: &Upatch, idx: u32, out: &mut DecoderView) -> c_int {
     0
 }
 
+/// The length of the signed attach metadata, 0 for none.
+pub(crate) fn signed_attach_len(u: &Upatch) -> u32 {
+    if u.map.is_null() {
+        0
+    } else {
+        u.signed_attach_len
+    }
+}
+
+/// The signed digest of the payload an unload directive unloads.
+pub(crate) fn signed_unload_payload(u: &Upatch) -> Option<&[u8]> {
+    if u.map.is_null() || u.signed_unload_payload.is_null() {
+        return None;
+    }
+    // SAFETY: a signed section within the open container, its 32 bytes.
+    Some(unsafe { ffi::slice(u.signed_unload_payload, PAYLOAD_HASH_LEN) })
+}
+
+/// What the payload is: a BPF program, the one kind there is.
+pub(crate) fn payload_type(_u: &Upatch) -> &'static [u8] {
+    b"bpf"
+}
+
+/// The bpffs name of upatch `name`: bpffs reserves dots in a path
+/// component, so each becomes `~d`, which no name has.
+pub(crate) fn pin_name(name: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(name.len());
+    for &c in name {
+        if c == b'.' {
+            out.extend_from_slice(b"~d");
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The upatch name a bpffs pin spells, `~d` a dot again; none for
+/// another `~`.
+pub(crate) fn name_from_pin(pin: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(pin.len());
+    let mut it = pin.iter();
+
+    while let Some(&c) = it.next() {
+        if c != b'~' {
+            out.push(c);
+        } else if it.next() == Some(&b'd') {
+            out.push(b'.');
+        } else {
+            return None;
+        }
+    }
+    Some(out)
+}
+
+/// An upatch file opened, closed when dropped.
+pub(crate) struct Opened(Box<Upatch>);
+
+impl Opened {
+    /// The upatch at `path`, or -errno.
+    pub(crate) fn open(path: &core::ffi::CStr) -> Result<Self, c_int> {
+        // SAFETY: an all-zero container is a closed one.
+        let mut u: Box<Upatch> = Box::new(unsafe { core::mem::zeroed() });
+        // SAFETY: a C string and the container to fill.
+        match unsafe { capi::upatch_open(path.as_ptr(), &mut *u) } {
+            0 => Ok(Opened(u)),
+            err => Err(err),
+        }
+    }
+}
+
+impl core::ops::Deref for Opened {
+    type Target = Upatch;
+
+    fn deref(&self) -> &Upatch {
+        &self.0
+    }
+}
+
+impl Drop for Opened {
+    fn drop(&mut self) {
+        // SAFETY: the container opened, closed once.
+        unsafe { capi::upatch_close(&mut *self.0) };
+    }
+}
+
 pub(crate) fn is_unload(u: &Upatch) -> bool {
     u.hdr.flags & DIRECTIVE_UNLOAD != 0
 }
 
-fn has_decoders(u: &Upatch) -> bool {
+pub(crate) fn has_decoders(u: &Upatch) -> bool {
     !u.map.is_null() && !u.decoder_blob.is_null() && u.nr_decoders > 0
 }
 

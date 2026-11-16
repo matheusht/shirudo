@@ -91,6 +91,8 @@ unsafe extern "C" {
     /// The running kernel's BTF, or NULL with errno set.
     pub fn btf__load_vmlinux_btf() -> *mut Btf;
     pub fn btf__free(btf: *mut Btf);
+    /// The kernel's BTF object `id`, or NULL with errno set.
+    pub fn btf__load_from_kernel_by_id(id: u32) -> *mut Btf;
     /// The ID of the type of `kind` named `name`, or a negative errno.
     pub fn btf__find_by_name_kind(btf: *const Btf, name: *const c_char, kind: u32) -> i32;
     /// The type of `id`, or NULL.

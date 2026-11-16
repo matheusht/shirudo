@@ -58,6 +58,7 @@ use crate::util::measured::{
 use crate::util::otel::{OtelOpts, otel_send_log_json, status_otel_severity};
 use crate::util::sysinfo::{Sysinfo, sysinfo_emit_json, sysinfo_gather};
 use crate::util::tpm::tpm_tcti;
+use crate::util::upatch::name_from_pin;
 use crate::util::upatch_table::{self, UpatchTableRow};
 
 const VAR_LIB: &[u8] = b"/var/lib/shirudo";
@@ -464,7 +465,7 @@ fn upatch_rows(pins: &[Vec<u8>]) -> Vec<UpatchTableRow> {
         .map(|pin| {
             // SAFETY: an all-zero row is an empty one.
             let mut r: UpatchTableRow = unsafe { mem::zeroed() };
-            let name = message(&[&upatch_name(pin).unwrap_or_else(|| pin.clone())]);
+            let name = message(&[&name_from_pin(pin).unwrap_or_else(|| pin.clone())]);
             let (mut list, mut n): (*mut MapSummary, usize) = (ptr::null_mut(), 0);
 
             let bytes = name.as_bytes_with_nul();
@@ -497,23 +498,6 @@ fn upatch_rows(pins: &[Vec<u8>]) -> Vec<UpatchTableRow> {
     // SAFETY: the BTF loaded above, or NULL.
     unsafe { btf__free(vbtf) };
     rows
-}
-
-/// The upatch name of a bpffs pin, `~d` standing for `.` there.
-fn upatch_name(pin: &[u8]) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(pin.len());
-    let mut it = pin.iter();
-
-    while let Some(&c) = it.next() {
-        if c != b'~' {
-            out.push(c);
-        } else if it.next() == Some(&b'd') {
-            out.push(b'.');
-        } else {
-            return None;
-        }
-    }
-    Some(out)
 }
 
 /// A link of a keyring: what it is and whether init froze it.
