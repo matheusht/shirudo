@@ -95,45 +95,45 @@ pub struct AttestChallenge {
 #[repr(C)]
 pub struct AttestChallengePolicy {
     /// Issuer bundle, or NULL.
-    ek_ca: *const c_char,
+    pub(crate) ek_ca: *const c_char,
     /// Pinned attestation key, or NULL.
-    ak_name: *const u8,
+    pub(crate) ak_name: *const u8,
     /// Pinned endorsement key, or NULL.
-    ek_name: *const u8,
+    pub(crate) ek_name: *const u8,
     /// Accept an unvouched endorsement key.
-    trust_presented: bool,
+    pub(crate) trust_presented: bool,
 }
 
 /// `struct attest_expect`: what the operator expects the evidence to
 /// show.
 #[repr(C)]
 pub struct AttestExpect {
-    nonce: *const u8,
-    nonce_len: usize,
-    have_ak_name: bool,
-    ak_name: [u8; NAME_LEN],
-    have_chain: bool,
-    chain: [u8; 32],
+    pub(crate) nonce: *const u8,
+    pub(crate) nonce_len: usize,
+    pub(crate) have_ak_name: bool,
+    pub(crate) ak_name: [u8; NAME_LEN],
+    pub(crate) have_chain: bool,
+    pub(crate) chain: [u8; 32],
     /// Cert, set and tree root known.
-    have_init: bool,
-    init_event: [u8; 32],
-    allow_runtime_events: bool,
-    strict_anchor: bool,
-    pcr_expect_mask: u32,
-    pcrs: [[u8; 32]; 24],
-    have_credential: bool,
-    credential: [u8; CREDENTIAL_LEN],
-    have_ek_name: bool,
-    ek_name: [u8; NAME_LEN],
+    pub(crate) have_init: bool,
+    pub(crate) init_event: [u8; 32],
+    pub(crate) allow_runtime_events: bool,
+    pub(crate) strict_anchor: bool,
+    pub(crate) pcr_expect_mask: u32,
+    pub(crate) pcrs: [[u8; 32]; 24],
+    pub(crate) have_credential: bool,
+    pub(crate) credential: [u8; CREDENTIAL_LEN],
+    pub(crate) have_ek_name: bool,
+    pub(crate) ek_name: [u8; NAME_LEN],
     /// The binding must be the initrd's.
-    require_initrd: bool,
+    pub(crate) require_initrd: bool,
     /// PCR values at binding time.
-    bind_expect_mask: u32,
-    bind_values: [[u8; 32]; 24],
-    have_config_root: bool,
-    config_root: [u8; 32],
-    have_config_pcr: bool,
-    config_pcr: u32,
+    pub(crate) bind_expect_mask: u32,
+    pub(crate) bind_values: [[u8; 32]; 24],
+    pub(crate) have_config_root: bool,
+    pub(crate) config_root: [u8; 32],
+    pub(crate) have_config_pcr: bool,
+    pub(crate) config_pcr: u32,
 }
 
 const _: () = assert!(size_of::<AttestChallenge>() == 376);
@@ -2552,6 +2552,11 @@ unsafe fn parse_name_digest(spec: *const c_char, name: *mut c_char, digest: *mut
     }
     0
 }
+
+pub(crate) use capi::{
+    attest_challenge_make, attest_challenge_read, attest_evidence_config, attest_parse_name_digest,
+    attest_parse_pcr_value, attest_parse_pcrs, attest_verify,
+};
 
 mod capi {
     use core::ffi::{c_char, c_int};

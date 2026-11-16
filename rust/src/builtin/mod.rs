@@ -9,6 +9,7 @@ use core::ffi::{c_char, c_int};
 
 use crate::ffi;
 
+mod attest;
 mod bpm;
 mod build;
 mod config;

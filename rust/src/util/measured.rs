@@ -504,6 +504,8 @@ unsafe fn unmeasured_archives(
     if ret != 0 { ret } else { unmeasured }
 }
 
+pub(crate) use capi::{measured_set_add, measured_upatch_of};
+
 mod capi {
     use core::ffi::{c_char, c_int, c_void};
 

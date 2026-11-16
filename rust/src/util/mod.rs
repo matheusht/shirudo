@@ -3,7 +3,7 @@
 
 //! The ports of `util/`, one module for each C file they replace.
 
-mod attest;
+pub(crate) mod attest;
 pub(crate) mod bpm_oci;
 pub(crate) mod bpm_package;
 pub(crate) mod bpm_source_config;
@@ -15,7 +15,7 @@ mod conditions;
 pub(crate) mod config;
 mod config_attest;
 mod config_image;
-mod config_measure;
+pub(crate) mod config_measure;
 mod config_update;
 pub(crate) mod crypto_openssl;
 mod dm_verity;
@@ -35,7 +35,7 @@ mod kernel_build_id;
 mod kernel_release;
 pub(crate) mod keyring;
 pub(crate) mod keys;
-mod measured;
+pub(crate) mod measured;
 mod nv_writer;
 mod preflight;
 mod report;
@@ -45,7 +45,7 @@ mod sysinfo;
 mod timefmt;
 mod tls_openssl;
 mod tpm;
-mod tpm_wire;
+pub(crate) mod tpm_wire;
 pub(crate) mod upatch;
 pub(crate) mod upatch_rodata;
 mod upatch_table;

@@ -1356,6 +1356,8 @@ unsafe fn install(
     }
 }
 
+pub(crate) use capi::keys_anchor_digest;
+
 mod capi {
     use core::ffi::{c_char, c_int};
 

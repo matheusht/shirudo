@@ -39,6 +39,8 @@ pub(crate) fn event(kind: c_int, root_hash: &[u8; 32], out: *mut u8) -> c_int {
     unsafe { sha256_buffer(data.as_ptr().cast(), data.len(), out) }
 }
 
+pub(crate) use capi::config_measure_pcr_valid;
+
 mod capi {
     use core::ffi::c_int;
 

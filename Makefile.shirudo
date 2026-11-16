@@ -276,7 +276,7 @@ BUILTIN_SRCS := \
     builtin-status.c \
     builtin-upatch.c \
      \
-    builtin-attest.c
+    
 
 # BPF-side libbpf headers, used straight from vendor/libbpf (the BPF
 # compile rule adds it to the include path so <bpf/...> resolves) and
@@ -1346,7 +1346,7 @@ $(FUZZ_OUT)/fuzz-bpm-info: FUZZ_CFLAGS += $(TSS2_CFLAGS) $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-bpm-info: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) $(LIBELF_LIBS)
 $(FUZZ_OUT)/fuzz-attest-report: testing/fuzz/fuzz-attest-report.c \
                                $(FUZZ_BASE) testing/fuzz/output.c \
-                               builtin-attest.c builtin.h  \
+                                builtin.h  \
                                util/chain_history.c \
                                \
                                util/identity.c \
@@ -1365,7 +1365,7 @@ $(FUZZ_OUT)/fuzz-serializer: FUZZ_INCLUDED := util/upatch_maps.c
 $(FUZZ_OUT)/fuzz-decoder: FUZZ_INCLUDED := util/upatch_decode.c
 $(FUZZ_OUT)/fuzz-upatch-info: FUZZ_INCLUDED := builtin-upatch.c
 $(FUZZ_OUT)/fuzz-bpm-info: FUZZ_INCLUDED :=
-$(FUZZ_OUT)/fuzz-attest-report: FUZZ_INCLUDED := builtin-attest.c
+$(FUZZ_OUT)/fuzz-attest-report: FUZZ_INCLUDED := 
 
 # A target compiles its sources and links in one step, so it depends on
 # every header a source may include, and on the compiler and flags it was
