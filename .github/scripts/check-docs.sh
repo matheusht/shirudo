@@ -42,7 +42,8 @@ while IFS= read -r page; do
 done <"$work/pages" >"$work/options"
 
 cat shirudo.c builtin-*.c rust/src/builtin/*.rs rust/src/builtin/*/*.rs \
-	tools/shirudo-build/*.c tools/gen-image/* tools/gen-initrd/* >"$work/parsers"
+	tools/shirudo-build/*.c rust/src/shirudo_build/*.rs tools/gen-image/* \
+	tools/gen-initrd/* >"$work/parsers"
 while read -r page option; do
 	grep -qF -- "\"$option" "$work/parsers" ||
 		grep -qE -- "(^|[^a-z0-9-])$option([^a-z0-9-]|\$)" \

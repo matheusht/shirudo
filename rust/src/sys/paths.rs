@@ -20,4 +20,12 @@ unsafe extern "C" {
     pub fn keys_dir_resolve(keys_dir_arg: *const c_char) -> *const c_char;
     /// Whether stat() finds `path`.
     pub fn path_exists(path: *const c_char) -> bool;
+    /// `keys_dir`/`file` into `out_sz` bytes at `out`: 0, -EINVAL or
+    /// -ENAMETOOLONG.
+    pub fn format_key_path(
+        out: *mut c_char,
+        out_sz: usize,
+        keys_dir: *const c_char,
+        file: *const c_char,
+    ) -> c_int;
 }

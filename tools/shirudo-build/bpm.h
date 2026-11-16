@@ -144,6 +144,8 @@ int build_tree_fetch_sealed(struct bpm_oci_client *c, const char *repository,
 			    char *manifest_digest, size_t digest_sz);
 
 int build_check_keys(const char *pkey, const char *cert);
+/* The command line, from main(): rust/src/shirudo_build/. */
+int shirudo_build_main(int argc, char **argv);
 
 /*
  * Downloads the package layer of the manifest at reference, an

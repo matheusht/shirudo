@@ -28,23 +28,6 @@ int build_bpm_tree(int argc, const char **argv)
 	return -ENOSYS;
 }
 
-int build_check_keys(const char *pkey, const char *cert)
-{
-	return -ENOSYS;
-}
-
-int build_compile(const char *source, const char *output,
-		  const char *vmlinux_h, const char *extra_cflags,
-		  const char *shirudo_bpf_incdir)
-{
-	return -ENOSYS;
-}
-
-const char *build_locate_vmlinux(const char *override)
-{
-	return NULL;
-}
-
 int build_package_load(const char *bpf_o, const char *src_path,
 		       const char *out_upatch, const char *upatch_name,
 		       const struct upatch_policy_label_entry *policies,

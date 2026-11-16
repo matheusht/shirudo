@@ -300,10 +300,10 @@ BPF_SRCS := \
 # link util/sign.c.
 BUILD_SRCS := \
     tools/shirudo-build/shirudo-build.c \
-    tools/shirudo-build/compile.c \
+     \
     tools/shirudo-build/package.c \
     tools/shirudo-build/jar.c \
-    tools/shirudo-build/vmlinux.c \
+     \
     tools/shirudo-build/bpm-build.c \
     tools/shirudo-build/bpm-publish.c \
     tools/shirudo-build/bpm-show.c \
@@ -1282,7 +1282,7 @@ $(FUZZ_OUT)/fuzz-otel: testing/fuzz/fuzz-otel.c $(FUZZ_BASE) \
 $(FUZZ_OUT)/fuzz-beefile: testing/fuzz/fuzz-beefile.c $(FUZZ_BASE) \
                            tools/shirudo-build/bpm-build.c $(FUZZ_PACKAGE) \
                             util/paths.c \
-                           util/version_id.c util/options.c \
+                           util/version_id.c util/options.c util/sign.c \
                            util/similar.c
 $(FUZZ_OUT)/fuzz-oci-http: testing/fuzz/fuzz-oci-http.c $(FUZZ_BASE) \
                             $(FUZZ_OCI)

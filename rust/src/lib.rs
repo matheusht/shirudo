@@ -11,6 +11,7 @@ mod errno;
 mod ffi;
 mod heap;
 mod panic;
+mod shirudo_build;
 mod sys;
 mod text;
 mod util;

@@ -325,6 +325,7 @@ unsafe extern "C" {
     pub fn fdopendir(fd: c_int) -> *mut Dir;
     pub fn opendir(name: *const c_char) -> *mut Dir;
     pub fn mkstemp(template: *mut c_char) -> c_int;
+    pub fn mkstemps(template: *mut c_char, suffixlen: c_int) -> c_int;
     pub fn readdir(dir: *mut Dir) -> *mut Dirent;
     /// The entries of `dir` the filter takes, sorted by `compar`, in an
     /// array of allocations free() takes: how many, or -1.
