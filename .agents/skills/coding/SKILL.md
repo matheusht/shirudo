@@ -581,9 +581,9 @@ its point of no return:
 
 ## Rust
 
-The Rust library under `rust/` replaces C modules one at a time, and a
-module's C interface stays its contract while any C caller or test uses
-it.
+The Rust library under `rust/` replaces C modules, re-implemented
+rather than translated line by line, and a module's C interface stays
+its contract while any C caller uses it.
 
 - The port of `util/<m>.c` is `rust/src/util/<m>.rs`, or the directory
   `rust/src/util/<m>/` for one that takes more than a file: safe code
@@ -601,7 +601,9 @@ it.
   behind libcrypto: ld refuses such a symbol before `--gc-sections`
   drops the call. A test or fuzz target that included the C file to
   reach a static function calls an export of the port instead, which the
-  header declares as one for it.
+  header declares as one for it, and a test that wrapped a call the port
+  now makes inside Rust drives the same case through the interface or a
+  path or environment override.
 - `rust/src/ffi.rs` turns what C hands over into Rust views: `c_str()`
   for a C string, `slice()` for an array that may be NULL when empty,
   `bytes_mut()` for a C buffer to write into as it is,
@@ -610,24 +612,25 @@ it.
   `include/shirudo/string.h` and the C library, `strscpy()` to
   `parse_u64()`, over byte slices. Every `unsafe` block says in a
   `// SAFETY:` comment what part of the C contract makes it sound.
-- What the Rust code still calls in C, the C library, libcurl, zlib,
-  OpenSSL past `util/crypto.h` and the `util/` modules not ported yet,
-  is declared in `rust/src/sys/`, one module for each header, which goes
-  when the C it declares does. A message goes through `pr_err()` with
-  the format and arguments the C passed, so that it reads as before.
+- What the Rust code calls in C that std does not cover, the `*at()`
+  calls and ioctls, libcurl, zlib, OpenSSL past `util/crypto.h` and the
+  `util/` modules not ported yet, is declared in `rust/src/sys/`, one
+  module for each header, which goes when the C it declares does. A
+  message goes through `pr_err()` and reads as the C's did.
 - Before the C file goes, compare the two: build the old file from git
   with its functions renamed, link it beside the archive and run both on
   the same random and corpus inputs until they agree on every result and
-  every byte written. The tests then hold the port to the rest.
-- No crates and no std: core and alloc, so that cargo builds offline
-  from `rust/Cargo.lock` and the target carries no runtime it does not
-  use. What the C library offers comes through `extern` declarations, as
-  the C uses it. Rust allocations go through the allocator of
+  every byte written; the calls each makes on the way may differ. The
+  tests then hold the port to the rest.
+- std, and a crate only where it replaces a large binding layer and
+  AGENTS.md's dependency rules admit it, vendored and pinned in
+  `rust/Cargo.lock` so that cargo builds offline. Rust allocations go through the allocator of
   `rust/src/heap.rs`, which zeroes and scrubs as `util/malloc.c` does; a
   buffer C frees with `xfree()` comes from the xmalloc family
   `rust/src/sys/malloc.rs` declares. A panic reports through `pr_err()`
-  and aborts. `panic = "abort"`, overflow checks and LTO hold in every
-  release build, and arithmetic that input can overflow is checked.
+  and aborts: the crate unwinds only so that a Lua error can cross a
+  `"C-unwind"` callback. Overflow checks and LTO hold in every release
+  build, and arithmetic that input can overflow is checked.
 - `rustfmt` sets the layout. Comments follow the rules above with `//`
   and `///`, and `//!` holds the lines of purpose under the SPDX line
   and the copyright.

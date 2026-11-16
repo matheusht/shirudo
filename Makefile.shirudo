@@ -375,14 +375,13 @@ $(LIBBPF_A): $(LIBBPF_SRCS)
 			$(if $(SANITIZE_MEMORY), \
 			-fno-omit-frame-pointer $(SANITIZE_CFLAGS))"
 
-# The Rust library, which replaces C modules one at a time behind their
-# headers. Every binary that links util objects links it too, after
-# them. The crate takes core and alloc alone, no crates and no std, so
-# that cargo builds offline from the lock file and the target carries no
-# runtime it does not use; what core refers to of the unwinder comes
-# from libgcc_eh, linked in, as libgcc_s is not a library an operator
-# binary may link. The helper's directory reaches it in
-# SHIRUDO_LIBEXEC_DIR, and a change of it builds it again.
+# The Rust library, which replaces C modules behind their headers. Every
+# binary that links util objects links it too, after them. The crate
+# takes std, and a crate only vendored and pinned in the lock file, so
+# that cargo builds offline; the unwinder std unwinds with comes from
+# libgcc_eh, linked in, as libgcc_s is not a library an operator binary
+# may link. The helper's directory reaches it in SHIRUDO_LIBEXEC_DIR,
+# and a change of it builds it again.
 CARGO       ?= cargo
 RUST_DIR    := rust
 RUST_TARGET := build/rust

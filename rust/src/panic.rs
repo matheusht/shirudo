@@ -2,12 +2,13 @@
 // Copyright (c) 2026 Authors of shirudo
 
 //! A panic is a bug: say where through pr_err() and abort, as a failed
-//! assertion does in C.
+//! assertion does in C. The crate unwinds only so that a Lua error can
+//! cross a Rust callback; a panic never unwinds.
 
-use core::fmt::{self, Write};
-use core::panic::PanicInfo;
+use std::fmt::{self, Write};
+use std::panic::{self, PanicHookInfo};
+use std::process;
 
-use crate::sys::libc::abort;
 use crate::sys::log::pr_err;
 
 /// A message cut to the buffer, which keeps room for its NUL.
@@ -27,17 +28,7 @@ impl Write for Message {
     }
 }
 
-/// The personality routine the unwind tables of the prebuilt core and
-/// alloc name, which std would otherwise define. Nothing unwinds with
-/// `panic = "abort"`, so nothing calls it.
-#[unsafe(no_mangle)]
-extern "C" fn rust_eh_personality() {
-    // SAFETY: abort() takes nothing and does not return.
-    unsafe { abort() }
-}
-
-#[panic_handler]
-fn panic(info: &PanicInfo) -> ! {
+fn report(info: &PanicHookInfo<'_>) {
     let mut msg = Message {
         buf: [0; 512],
         len: 0,
@@ -46,10 +37,18 @@ fn panic(info: &PanicInfo) -> ! {
     let _ = write!(msg, "{info}");
     // A NUL inside would only cut the message short.
     msg.buf[msg.len] = 0;
-    // SAFETY: a "%s" format with the NUL-terminated message, and abort()
-    // does not return.
-    unsafe {
-        pr_err(c"rust: %s".as_ptr(), msg.buf.as_ptr());
-        abort()
-    }
+    // SAFETY: a "%s" format with the NUL-terminated message.
+    unsafe { pr_err(c"rust: %s".as_ptr(), msg.buf.as_ptr()) };
+    process::abort()
 }
+
+extern "C" fn install() {
+    panic::set_hook(Box::new(report));
+}
+
+/// Every binary that links the archive takes the hook before main().
+#[used]
+// SAFETY: the C runtime calls each function of .init_array before main()
+// with no arguments, which install takes.
+#[unsafe(link_section = ".init_array")]
+static INSTALL: extern "C" fn() = install;

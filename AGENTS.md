@@ -119,15 +119,20 @@ message that carries a change.
 - Rust under `rust/` replaces a C module whole: the module that ports
   `util/<m>.c` is `rust/src/util/<m>.rs` or `rust/src/util/<m>/`, and
   the one that ports `builtin-<c>.c` is `rust/src/builtin/<c>.rs`. It
-  keeps the C interface of its header in a `capi` submodule of
-  `#[unsafe(no_mangle)]` functions, so that the C callers and the tests
-  stay as they are, and the C file goes in the same commit. The crate is
-  `no_std`: core and alloc alone, no crates, and the C library through
-  `extern` declarations as the C uses it. It builds with
-  `panic = "abort"`, overflow checks and LTO, allocates through a global
-  allocator that zeroes and scrubs as `util/malloc.c` does, and every
-  `unsafe` block says why it is sound in a `// SAFETY:` comment, which
-  clippy enforces. The BPF side stays in C.
+  re-implements the module in Rust rather than translating it line by
+  line, and keeps what callers and users see: the C interface of its
+  header, in a `capi` submodule of `#[unsafe(no_mangle)]` functions
+  while C still calls it, the formats it reads and writes, its output
+  and its messages. The C file goes in the same commit, and a test that
+  reached into its internals is reworked to test the same behavior
+  through that interface. The crate takes std, a crate only as the
+  dependency rules below admit one, vendored and pinned so that cargo
+  builds offline, and what std lacks through `extern` declarations. It
+  builds with overflow checks and LTO, unwinds only so that a Lua error
+  can cross a Rust callback, logs a panic and aborts, allocates through
+  a global allocator that zeroes and scrubs as `util/malloc.c` does,
+  and every `unsafe` block says why it is sound in a `// SAFETY:`
+  comment, which clippy enforces. BPF programs stay in C.
 - C, no C++. Zero-initialise with `= {}`. Integers are `__u8` to
   `__u64` and `__s8` to `__s64`; a system header that uses `uint8_t` and
   its kin goes above the first shirudo header, which poisons them.
@@ -352,8 +357,8 @@ one usually still compiles and passes tests.
   ML-DSA-87 is the only signing algorithm, TLS is 1.3 with hybrid ML-KEM
   only), `libcurl`, `libtss2-esys` + `libtss2-tctildr`, `libelf`,
   `zlib`, `libluajit`, the vendored `libbpf` and, linked in, Rust's
-  `core` and `alloc` with the unwinder from `libgcc_eh`. A new library must be
-  absolutely necessary, universally available, actively maintained,
+  standard library with the unwinder from `libgcc_eh`. A new library, a
+  Rust crate included, must be absolutely necessary, universally available, actively maintained,
   BSD-2-Clause compatible and load-bearing for one thing. `libsystemd`,
   `libsubcmd`, `libkeyutils`, `libcap` and any JSON/YAML/TOML parser
   are refused; whiteroom or open-code instead.
