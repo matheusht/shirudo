@@ -274,7 +274,6 @@ UTIL_SRCS := \
 BUILTIN_SRCS := \
     builtin-init.c \
     builtin-status.c \
-    builtin-image.c \
     builtin-upatch.c \
      \
     builtin-attest.c
@@ -1106,7 +1105,14 @@ UNIT_SRCS  := $(filter-out testing/unit/unit.c,$(wildcard testing/unit/*.c))
 UNIT_TESTS := $(patsubst testing/unit/%.c,build/unit/%,$(UNIT_SRCS))
 UNIT_LIB   := build/unit/libshirudo.a
 
-$(UNIT_LIB): $(UTIL_OBJS) $(VERSION_OBJ)
+# The config image runtime is left out: no unit test reaches it, and a
+# Rust builtin's reference would pull it in, and with it, under a
+# sanitizer that keeps a whole object, keys_revoke_image() and the
+# builtins it calls, which no unit test links.
+UNIT_UTIL_OBJS := $(filter-out $(call obj,util/image_runtime.o) \
+                    $(call obj,util/image_keys.o),$(UTIL_OBJS))
+
+$(UNIT_LIB): $(UNIT_UTIL_OBJS) $(VERSION_OBJ)
 	@printf '  AR      $@\n'
 	$(Q)mkdir -p $(dir $@)
 	$(Q)rm -f $@

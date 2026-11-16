@@ -13,6 +13,7 @@ mod bpm;
 mod build;
 mod config;
 mod genkey;
+mod image;
 mod keys;
 mod version;
 
