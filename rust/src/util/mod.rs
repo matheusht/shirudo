@@ -46,4 +46,5 @@ mod tls_openssl;
 mod tpm;
 mod tpm_wire;
 mod upatch;
+mod upatch_rodata;
 mod upatch_table;

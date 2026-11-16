@@ -5,7 +5,9 @@
 //! `struct btf` and find its types, and the inline helpers of the header
 //! and of `linux/btf.h` that decode a type.
 
-use core::ffi::{c_char, c_long, c_void};
+use core::ffi::{c_char, c_int, c_long, c_void};
+
+use crate::sys::libc::VaList;
 
 /// `struct btf`: libbpf's, opaque.
 #[repr(C)]
@@ -49,8 +51,41 @@ pub const KIND_VOLATILE: u16 = 9;
 pub const KIND_CONST: u16 = 10;
 pub const KIND_RESTRICT: u16 = 11;
 pub const KIND_TYPE_TAG: u16 = 18;
+pub const KIND_UNION: u16 = 5;
+pub const KIND_ENUM: u16 = 6;
+pub const KIND_FWD: u16 = 7;
+pub const KIND_VAR: u16 = 14;
+pub const KIND_DATASEC: u16 = 15;
+pub const KIND_FLOAT: u16 = 16;
+pub const KIND_ENUM64: u16 = 19;
 /// `BTF_INT_SIGNED`.
 pub const INT_SIGNED: u8 = 1;
+/// `BTF_INT_BOOL`.
+pub const INT_BOOL: u8 = 4;
+
+/// `struct btf_dump`: libbpf's dumper, opaque.
+#[repr(C)]
+pub struct BtfDump {
+    _private: [u8; 0],
+}
+
+/// `btf_dump_printf_fn_t`: what the dumper prints through.
+pub type BtfDumpPrintfFn = unsafe extern "C" fn(ctx: *mut c_void, fmt: *const c_char, args: VaList);
+
+/// `struct btf_dump_type_data_opts` of the vendored libbpf.
+#[repr(C)]
+pub struct BtfDumpTypeDataOpts {
+    pub sz: usize,
+    pub indent_str: *const c_char,
+    pub indent_level: c_int,
+    pub compact: bool,
+    pub skip_names: bool,
+    pub emit_zeroes: bool,
+    pub emit_strings: bool,
+}
+
+const _: () = assert!(size_of::<BtfDumpTypeDataOpts>() == 24);
+const _: () = assert!(core::mem::offset_of!(BtfDumpTypeDataOpts, compact) == 20);
 
 unsafe extern "C" {
     /// The running kernel's BTF, or NULL with errno set.
@@ -64,6 +99,30 @@ unsafe extern "C" {
     pub fn btf__name_by_offset(btf: *const Btf, offset: u32) -> *const c_char;
     /// The negative errno a pointer libbpf returned stands for, or 0.
     pub fn libbpf_get_error(ptr: *const c_void) -> c_long;
+    /// The BTF in `size` bytes at `data`, or NULL with errno set.
+    pub fn btf__new(data: *const c_void, size: u32) -> *mut Btf;
+    /// The number of types, the void type included.
+    pub fn btf__type_cnt(btf: *const Btf) -> u32;
+    /// The size of type `id`, or a negative errno.
+    pub fn btf__resolve_size(btf: *const Btf, id: u32) -> i64;
+    /// A dumper of `btf` printing through `printf_fn` with `ctx`, or
+    /// NULL with errno set.
+    pub fn btf_dump__new(
+        btf: *const Btf,
+        printf_fn: Option<BtfDumpPrintfFn>,
+        ctx: *mut c_void,
+        opts: *const c_void,
+    ) -> *mut BtfDump;
+    pub fn btf_dump__free(d: *mut BtfDump);
+    /// The value of type `id` in `data_sz` bytes at `data`, printed: the
+    /// bytes printed, or a negative errno.
+    pub fn btf_dump__dump_type_data(
+        d: *mut BtfDump,
+        id: u32,
+        data: *const c_void,
+        data_sz: usize,
+        opts: *const BtfDumpTypeDataOpts,
+    ) -> c_int;
 }
 
 impl BtfType {

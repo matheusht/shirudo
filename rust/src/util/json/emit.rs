@@ -107,6 +107,27 @@ impl JsonEmit {
         }
     }
 
+    /// An emitter that grows its own buffer up to `max` bytes, as a C
+    /// caller sets one up with only `max`; parts() hands the buffer over
+    /// for `xfree(buf, cap)`.
+    pub(crate) fn growing(max: usize) -> Self {
+        JsonEmit {
+            buf: core::ptr::null_mut(),
+            cap: 0,
+            len: 0,
+            max,
+            err: 0,
+            depth: 0,
+            nonempty: [0; EMIT_MAX_DEPTH as usize / 64],
+            value_pending: false,
+        }
+    }
+
+    /// The buffer, its capacity and the bytes written into it.
+    pub(crate) fn parts(&self) -> (*mut c_char, usize, usize) {
+        (self.buf, self.cap, self.len)
+    }
+
     /// The first error, which stopped the emitter, or 0.
     pub(crate) fn err(&self) -> c_int {
         self.err
@@ -280,7 +301,7 @@ impl JsonEmit {
         self.enter();
     }
 
-    fn obj_value_open(&mut self) {
+    pub(crate) fn obj_value_open(&mut self) {
         self.value_begin();
         self.put(b'{');
         self.enter();
@@ -297,7 +318,7 @@ impl JsonEmit {
         self.enter();
     }
 
-    fn arr_open_value(&mut self) {
+    pub(crate) fn arr_open_value(&mut self) {
         self.value_begin();
         self.put(b'[');
         self.enter();
@@ -308,7 +329,7 @@ impl JsonEmit {
         self.leave();
     }
 
-    fn key(&mut self, key: &[u8]) {
+    pub(crate) fn key(&mut self, key: &[u8]) {
         self.member(key);
         self.value_pending = true;
     }
@@ -352,12 +373,12 @@ impl JsonEmit {
         self.put_string(val, false);
     }
 
-    fn str_value(&mut self, val: &[u8]) {
+    pub(crate) fn str_value(&mut self, val: &[u8]) {
         self.value_begin();
         self.put_string(val, false);
     }
 
-    fn raw_value(&mut self, value: &[u8]) {
+    pub(crate) fn raw_value(&mut self, value: &[u8]) {
         self.value_begin();
         self.put_raw(value);
     }
@@ -367,7 +388,7 @@ impl JsonEmit {
         self.put_raw(value);
     }
 
-    fn str_lossy(&mut self, s: &[u8]) {
+    pub(crate) fn str_lossy(&mut self, s: &[u8]) {
         self.value_begin();
         self.put_string(s, true);
     }

@@ -1,9 +1,16 @@
 // SPDX-License-Identifier: BSD-2-Clause
 /* Copyright (c) 2026 Authors of shirudo */
 
-#include <shirudo/misc.h>
+#include <stdio.h>
+#include <string.h>
 
-#include "../../util/upatch_rodata.c"
+#include <bpf/btf.h>
+
+#include <shirudo/misc.h>
+#include <shirudo/string.h>
+
+#include "malloc.h"
+#include "upatch_rodata.h"
 
 /*
  * A typedef of len characters behind ptrs pointers, named into a buffer
@@ -33,7 +40,7 @@ static int name_into(size_t len, int ptrs, size_t cap)
 		btf__free(btf);
 		return 2;
 	}
-	ret = append_type_name(btf, (__u32)id, buf, cap, &off, 0);
+	ret = upatch_rodata_type_name(btf, (__u32)id, buf, cap, &off, 0);
 	btf__free(btf);
 	printf("rc=%d off=%zu terminated=%d\n", ret, off,
 	       !!memchr(buf, '\0', cap));
@@ -79,7 +86,7 @@ static int dumpable(const char *what)
 {
 	const char *member = "a", *value = "E", *pointee = "int";
 	int ints, en, target, ptr, st, a, b, ret = 2;
-	struct dump_cost *cost;
+	struct rodata_dump_cost *cost;
 	struct btf_type *t;
 	struct btf *btf;
 	__u32 types;
@@ -129,7 +136,7 @@ static int dumpable(const char *what)
 	cost = xcalloc(types, sizeof(*cost));
 	if (!cost)
 		goto out;
-	ret = btf_dump_cost(btf, (__u32)st, 0, cost);
+	ret = upatch_rodata_dump_cost(btf, (__u32)st, 0, cost);
 	printf("%s dumpable=%d rc=%d\n", what, !ret, ret);
 	ret = ret ? 1 : 0;
 	xfree(cost, types * sizeof(*cost));

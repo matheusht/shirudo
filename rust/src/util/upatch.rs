@@ -665,6 +665,10 @@ fn decoder_view(u: &Upatch, idx: u32, out: &mut DecoderView) -> c_int {
     0
 }
 
+pub(crate) fn is_unload(u: &Upatch) -> bool {
+    u.hdr.flags & DIRECTIVE_UNLOAD != 0
+}
+
 fn has_decoders(u: &Upatch) -> bool {
     !u.map.is_null() && !u.decoder_blob.is_null() && u.nr_decoders > 0
 }
@@ -1179,7 +1183,7 @@ mod capi {
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn upatch_is_unload(u: *const Upatch) -> bool {
         // SAFETY: the caller passes a container.
-        unsafe { (*u).hdr.flags & super::DIRECTIVE_UNLOAD != 0 }
+        super::is_unload(unsafe { &*u })
     }
 
     #[unsafe(no_mangle)]

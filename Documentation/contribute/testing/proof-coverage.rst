@@ -465,25 +465,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
        the target reads up to generation and sequence number
        2\ :sup:`63` - 2 and refuses the three ``bpm tree append`` does
        not write
-   * - ``upatch-loader``
-     - ``loader_lddw()``, ``sys_bpf_call()``, ``map_create_slot()``,
-       ``map_update_slot()``, ``loader_store_source()``
-     - Loaders of 4, 5, 25 and 49 instructions
-     - Reads only the loader, and only instructions before the call it
-       looks back from; reports exactly what it matched; every slot
-       below the table's size
-   * - ``upatch-btf``
-     - ``btf_name_printable()``, ``btf_decl_printable()``,
-       ``btf_unwrap()``
-     - BTF of 4 types, names up to 6 bytes, libbpf modelled
-     - A printed name is printable ASCII, an accepted declaration chain
-       has no loop, an unwrapped type is 0 or has no qualifier
-   * - ``upatch-btf-int``
-     - ``btf_integer()``
-     - Every encoding and every value of up to 8 bytes
-     - The bits stay inside the integer's bytes; each bit of the value
-       is the integer's bit at its place, least significant first, then
-       zero- or sign-extended
    * - ``upatch-writer-header``
      - ``pack_header()`` of :src:`tools/shirudo-build/package.c`, read
        back by ``parse_header()``
@@ -1302,7 +1283,7 @@ proof: ``dns_name_valid()`` of :src:`util/string.c` at its limits of a
 8 GB; ``tpm_public_marshal()`` and ``tpm_writer_public()`` of
 :src:`rust/src/util/tpm_wire/`, the first of which the ``tpm-wire`` fuzz target
 round-trips; ``upatch_rodata_symbol_range()`` of
-:src:`util/upatch_rodata.c`, the range of ``.rodata`` the builder
+:src:`rust/src/util/upatch_rodata.rs`, the range of ``.rodata`` the builder
 rewrites; ``chain_init_event()`` of :src:`rust/src/util/chain.rs` on a set that is
 not empty; ``upatch_name_signed()``, ``upatch_member_valid()`` and
 ``prog_specs_xdp_classes()`` of :src:`rust/src/util/upatch.rs`; the reading of

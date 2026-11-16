@@ -264,7 +264,7 @@ UTIL_SRCS := \
     util/keepalive_quote.c \
     util/seal.c \
     util/upatch_maps.c \
-    util/upatch_rodata.c \
+     \
     util/upatch_decode.c \
     util/upatch_maps_otel.c \
     util/upatch_pins.c \
@@ -559,7 +559,7 @@ tools/shirudo-build/shirudo-build: $(BUILD_OBJS) $(SIGN_OBJ) \
                                    util/hex.o \
                                    util/seal.o util/string.o \
                                    util/curl.o \
-                                   util/upatch_rodata.o \
+                                    \
                                    util/bpm_tree.o util/bpm_tree_overlap.o \
                                    util/chain_history.o util/options.o \
                                    $(VERSION_OBJ) \
@@ -1235,7 +1235,7 @@ $(FUZZ_OUT)/fuzz-upatch: testing/fuzz/fuzz-upatch.c $(FUZZ_BASE) \
 $(FUZZ_OUT)/fuzz-prog-metadata: testing/fuzz/fuzz-prog-metadata.c \
                                  $(FUZZ_BASE)
 $(FUZZ_OUT)/fuzz-rodata: testing/fuzz/fuzz-rodata.c $(FUZZ_BASE) \
-                           util/upatch_rodata.c \
+                            \
                            $(FUZZ_SEAL) $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-rodata: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-rodata: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS) $(ZLIB_LIBS)
@@ -1339,7 +1339,7 @@ $(FUZZ_OUT)/fuzz-bpm-info: testing/fuzz/fuzz-bpm-info.c $(FUZZ_BASE) \
                                                      util/options.c util/paths.c \
                            util/similar.c \
                            util/upatch_pins.c \
-                           util/upatch_rodata.c $(LIBBPF_A)
+                            $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-bpm-info: FUZZ_CFLAGS += $(TSS2_CFLAGS) $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-bpm-info: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) $(LIBELF_LIBS)
 $(FUZZ_OUT)/fuzz-attest-report: testing/fuzz/fuzz-attest-report.c \

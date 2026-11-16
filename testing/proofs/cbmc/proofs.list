@@ -11,9 +11,6 @@ string-search		--unwind 8 LEN=0-5
 string-sanitize		--unwind 8 LEN=0-6
 hex			--unwind 12
 paths-bpffs-name	--unwind 18
-upatch-loader		--unwind 50 LEN=4,5,25,49
-upatch-btf		--unwind 6 --unwindset btf_decl_printable.0:33,btf_name_printable.0:7,btf_unwrap.0:9
-upatch-btf-int		--unwind 2 --unwindset btf_integer.0:65,value_of_bits.0:65
 string-number-model	--unwind 6
 bpm-tree-follows	--unwind 4
 bpm-tree-sync-model	--object-bits 10 --unwind 8 --unwindset memcmp.0:33,memneq_explicit.0:33,hex_encode.0:33,hex_decode.0:33,model_hash.0:33,model_history.0:33,want_outcome.0:33,want_outcome.1:33,same_history.0:33,any_node.0:33,run.0:33,same_digest.0:33,history_ok.0:33,want_write.0:33,want_write.1:33,strcmp.0:66,strlen.0:66,run.1:2,run.2:2,tree_walk_back.0:2,tree_walk_forward.0:1 --max-field-sensitivity-array-size 257 --slice-formula LEN=0-1
