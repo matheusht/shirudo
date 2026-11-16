@@ -17,6 +17,9 @@ unsafe extern "C" {
     /// with errno set.
     pub fn bpf_obj_pin(fd: c_int, pathname: *const c_char) -> c_int;
     pub fn bpf_map_lookup_elem(fd: c_int, key: *const c_void, value: *mut c_void) -> c_int;
+    /// The key after `key` into `next`, the first with NULL: 0, or an
+    /// error at the end.
+    pub fn bpf_map_get_next_key(fd: c_int, key: *const c_void, next: *mut c_void) -> c_int;
     pub fn bpf_map_update_elem(
         fd: c_int,
         key: *const c_void,

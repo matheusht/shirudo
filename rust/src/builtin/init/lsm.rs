@@ -25,7 +25,6 @@ use crate::sys::image_guards::{
     shirudo_image_observer_guards, shirudo_image_seal_guards, shirudo_mount_guards,
     shirudo_observer_guards, shirudo_seal_guards,
 };
-use crate::sys::image_runtime::image_runtime_root;
 use crate::sys::libbpf::{
     BpfLink, BpfMap, BpfObject, BpfProgram, bpf_link__destroy, bpf_link__pin, bpf_link__unpin,
     bpf_map__fd, bpf_map__reuse_fd, bpf_object__close, bpf_object__find_map_by_name,
@@ -35,6 +34,7 @@ use crate::sys::libc::{
     O_CLOEXEC, O_DIRECTORY, O_RDONLY, SYS_PIDFD_OPEN, access, close, open, syscall, unlink,
 };
 use crate::sys::loader::{EmbeddedBpf, bpf2_blob, seal_blob};
+use crate::util::image_runtime;
 use crate::util::io::kernel_dev;
 use crate::util::keyring::{self, keyring_bpf_serial, keyring_dm_verity_serial};
 use crate::util::nv_writer::nv_writer_create;
@@ -456,9 +456,10 @@ impl Attached {
             Ok(m) => id.run_dev = kernel_dev(std::os::unix::fs::MetadataExt::dev(&m)),
             Err(e) => return -e.raw_os_error().unwrap_or(crate::errno::EIO),
         }
-        // SAFETY: the runtime image's root, 32 bytes.
-        id.runtime_root
-            .copy_from_slice(unsafe { ffi::slice(image_runtime_root(), 32) });
+        let Some(root) = image_runtime::runtime_root() else {
+            return -crate::errno::EINVAL;
+        };
+        id.runtime_root = root;
 
         // The trust anchor lsm/bpf_prog_load enforces: only a load the
         // kernel verified against exactly this sealed keyring, of exactly

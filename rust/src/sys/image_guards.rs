@@ -70,4 +70,7 @@ unsafe extern "C" {
     pub fn config_root_begin(root: *const u8, guard: *mut ConfigRootGuard) -> c_int;
     /// The staged root taken back: 0 or -errno.
     pub fn config_root_end(guard: *mut ConfigRootGuard) -> c_int;
+    /// Whether every guard the initrd installs is pinned, attached and
+    /// frozen as it left them: 0 or -errno.
+    pub fn image_guards_ready() -> c_int;
 }

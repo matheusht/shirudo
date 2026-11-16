@@ -21,10 +21,6 @@ use super::words;
 use crate::errno::{EEXIST, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT, ENOKEY, ENOTBLK, EROFS};
 use crate::ffi;
 use crate::sys::identity::{Identity, enforcement_active, identity_read};
-use crate::sys::image_runtime::{
-    image_boot, image_boot_complete, image_boot_keys, image_boot_keys_close, image_bootstrap_load,
-    image_leave, image_runtime_mount, image_runtime_root,
-};
 use crate::sys::libc::{
     Statfs, Statvfs, fwrite, mount, statfs, statvfs, stderr, stdout, strerror, umount2,
 };
@@ -36,6 +32,7 @@ use crate::util::eventlog::{
     EventlogInit, eventlog_adopt_pending, eventlog_boot_init, eventlog_path,
 };
 use crate::util::help::{Help, HelpItem, HelpSection, is_help, print_help};
+use crate::util::image_runtime;
 use crate::util::initrd;
 use crate::util::io::bpffs_mounted_at;
 use crate::util::json::JsonEmit;
@@ -242,17 +239,14 @@ fn init_keyring(init: &mut Init) -> c_int {
     }
     // SAFETY: the identity to fill.
     if unsafe { identity_read(&mut id) } == 0 {
-        // SAFETY: the runtime image's root, 32 bytes.
-        let root = unsafe { ffi::slice(image_runtime_root(), 32) };
         let same = id.keyring_type == SIG_KEYRING_BPF
             && id.keyring_serial == ring
-            && id.runtime_root[..] == *root;
+            && image_runtime::runtime_root() == Some(id.runtime_root);
         return if same { 0 } else { -EKEYREJECTED };
     }
     // SAFETY: an all-zero set is an empty one.
     let mut set: Box<TrustedSet> = Box::new(unsafe { mem::zeroed() });
-    // SAFETY: the set to fill.
-    let ret = unsafe { image_boot_keys(&mut *set) };
+    let ret = image_runtime::boot_keys(&mut set);
     if ret != 0 {
         return ret;
     }
@@ -505,8 +499,7 @@ fn run(init: &mut Init) -> c_int {
     if ret != 0 {
         return phase(ret, "BPF keyring initialization");
     }
-    // SAFETY: closes the boot key image, if open.
-    let ret = unsafe { image_boot_keys_close() };
+    let ret = image_runtime::boot_keys_close();
     if ret != 0 {
         return phase(ret, "closing the boot key image");
     }
@@ -530,13 +523,11 @@ fn run(init: &mut Init) -> c_int {
     if ret != 0 {
         return phase(ret, "sealing initialized state");
     }
-    // SAFETY: mounts the runtime image.
-    let ret = unsafe { image_runtime_mount() };
+    let ret = image_runtime::runtime_mount();
     if ret != 0 {
         return phase(ret, "mounting the authenticated runtime");
     }
-    // SAFETY: reads the runtime image's boot settings.
-    let ret = unsafe { image_boot() };
+    let ret = image_runtime::boot();
     if ret != 0 {
         return phase(ret, "loading authenticated boot settings");
     }
@@ -579,8 +570,7 @@ fn run(init: &mut Init) -> c_int {
         error(b"init: incomplete: LSM active and upatches loaded, but the TPM register did not advance");
         return phase(ret, "binding the TPM register");
     }
-    // SAFETY: completes the runtime image's boot.
-    let ret = unsafe { image_boot_complete() };
+    let ret = image_runtime::boot_complete();
     if ret != 0 {
         return phase(ret, "completing authenticated boot");
     }
@@ -648,8 +638,7 @@ fn init(args: &[&[u8]]) -> c_int {
         // SAFETY: an all-zero set is an empty one.
         enrolled: Box::new(unsafe { mem::zeroed() }),
     };
-    // SAFETY: reads the image settings.
-    let ret = unsafe { image_bootstrap_load() };
+    let ret = image_runtime::bootstrap_load();
     if ret < 0 {
         error(&cat!("init: authenticated image settings: ", strerr(-ret)));
         return 1;
@@ -686,8 +675,7 @@ fn init(args: &[&[u8]]) -> c_int {
         return 1;
     }
     let ret = run(&mut init);
-    // SAFETY: leaves the runtime image.
-    unsafe { image_leave() };
+    image_runtime::leave();
     if init.initrd {
         initrd_leave();
     }

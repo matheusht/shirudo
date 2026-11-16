@@ -3,18 +3,21 @@
 
 #include <shirudo/misc.h>
 
-#include "../../util/image_runtime.c"
+#include <errno.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
+
 #include "image-cleanup.h"
 
-static struct dm_verity candidate;
+static int candidate;
 static __u32 busy_calls, remove_calls, sleep_calls;
 static int remove_result;
 static bool invalid_call;
 
-int __wrap_dm_verity_remove(struct dm_verity *device,
-			    bool deferred)
+static int remove_mapping(void *ctx)
 {
-	if (device != &candidate || deferred || remove_calls != sleep_calls)
+	if (ctx != &candidate || remove_calls != sleep_calls)
 		invalid_call = true;
 	remove_calls++;
 	return remove_calls <= busy_calls ? -EBUSY : remove_result;
@@ -55,7 +58,7 @@ int main(int argc, char **argv)
 	} else {
 		return 2;
 	}
-	ret = remove_candidate(&candidate);
+	ret = image_retry_busy(remove_mapping, &candidate);
 	printf("rc=%d removes=%u sleeps=%u invalid=%d\n", ret,
 	       remove_calls, sleep_calls, invalid_call);
 	return ret != expected_result || remove_calls != expected_calls ||

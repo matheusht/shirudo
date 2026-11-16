@@ -901,7 +901,7 @@ the model follows the C.
      - Review; the bounded C harness for these checks was removed when
        the journal moved to Rust
    * - ``Shirudo.UpatchLoad``, the load, unload and purge of
-       :src:`builtin-upatch.c`, the gate of :src:`util/image_runtime.c` and
+       :src:`builtin-upatch.c`, the gate of :src:`rust/src/util/image_runtime.rs` and
        the boot restore of :src:`rust/src/builtin/init/restore.rs`
      - ``undo_pass_sound``: once a command's undo pass is done, every pin
        directory holds one link, of the payload its xattr names and this

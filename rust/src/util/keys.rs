@@ -554,7 +554,36 @@ impl TrustedCert {
     }
 }
 
+impl TrustedCert {
+    /// The certificate at `path`, by its digests, as a set's primary.
+    pub(crate) fn primary_at(path: &CStr) -> Result<Self, c_int> {
+        // SAFETY: plain C data, for which all-zero bytes are a value.
+        let mut c: TrustedCert = unsafe { core::mem::zeroed() };
+        let p = path.to_bytes();
+        if p.len() >= c.path.len() {
+            return Err(-crate::errno::ENAMETOOLONG);
+        }
+        c.path[..p.len()].copy_from_slice(p);
+        c.primary = true;
+        // SAFETY: the C string just copied and rooms for its digests.
+        let ret = unsafe {
+            capi::keys_digest_file(
+                c.path.as_ptr().cast(),
+                c.sha256.as_mut_ptr(),
+                c.fingerprint.as_mut_ptr(),
+            )
+        };
+        if ret != 0 { Err(ret) } else { Ok(c) }
+    }
+}
+
 impl TrustedSet {
+    /// `c` added; the caller checked there is room.
+    pub(crate) fn push(&mut self, c: TrustedCert) {
+        self.certs[self.n] = c;
+        self.n += 1;
+    }
+
     /// How many certificates the set holds.
     pub(crate) fn len(&self) -> usize {
         self.n.min(KEYS_MAX)
@@ -570,8 +599,8 @@ impl TrustedSet {
 }
 
 pub(crate) use capi::{
-    keys_cert_der, keys_digest_der, keys_install, keys_is_revoked, keys_load, keys_read_der,
-    keys_set_digest, keys_verify_vouch, keys_vouch_payload,
+    keys_cert_der, keys_digest_der, keys_install, keys_is_revoked, keys_load, keys_load_image_root,
+    keys_read_der, keys_read_der_fd, keys_set_digest, keys_verify_vouch, keys_vouch_payload,
 };
 
 /// The members of a set.

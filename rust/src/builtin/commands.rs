@@ -16,12 +16,12 @@ use super::{
     words,
 };
 use crate::ffi;
-use crate::sys::image_runtime::{image_enter, image_leave};
 use crate::sys::libc::{fwrite, stderr, stdout, strerror};
 use crate::sys::log::log_init;
 use crate::sys::upatch::cmd_upatch;
 use crate::util::harden::{harden_self, harden_stdio};
 use crate::util::help::{help_suggest, is_help, is_list_cmds};
+use crate::util::image_runtime;
 use crate::util::similar;
 
 type Run = unsafe extern "C" fn(argc: c_int, argv: *const *const c_char) -> c_int;
@@ -246,20 +246,22 @@ fn run(args: &[*const c_char]) -> c_int {
             return 1;
         }
     };
-    // SAFETY: the command's name and the rest of the caller's arguments.
-    let ret = unsafe { image_enter(c.name.as_ptr(), n_rest, rest.as_ptr()) };
+    let words: Vec<&[u8]> = rest
+        .iter()
+        // SAFETY: the caller's arguments, C strings.
+        .map(|&w| unsafe { ffi::c_str(w) })
+        .collect();
+    let ret = image_runtime::enter(c.name.to_bytes(), &words);
     if ret != 0 {
         // SAFETY: strerror() gives a C string.
         let why = unsafe { ffi::c_str(strerror(-ret)) };
         err(&[b"shirudo: image state: ", why, b"\n"].concat());
-        // SAFETY: leaves what image_enter() entered.
-        unsafe { image_leave() };
+        image_runtime::leave();
         return 1;
     }
     // SAFETY: the command, with the rest of the caller's arguments.
     let ret = unsafe { (c.run)(n_rest, rest.as_ptr()) };
-    // SAFETY: leaves what image_enter() entered.
-    unsafe { image_leave() };
+    image_runtime::leave();
     ret
 }
 

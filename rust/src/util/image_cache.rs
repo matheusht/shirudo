@@ -39,9 +39,10 @@ use crate::util::tls_openssl::tls_curl_policy;
 /// `IMAGE_CACHE_DIR` of util/paths.h.
 const IMAGE_CACHE_DIR: &CStr = c"/var/lib/shirudo/images";
 /// `XATTR_SEAL` of util/paths.h.
-const XATTR_SEAL: &CStr = c"security.bpf.shirudo";
+pub(crate) const XATTR_SEAL: &CStr = c"security.bpf.shirudo";
 /// `SEAL_LABEL` of util/seal.h.
-const SEAL_LABEL: &CStr = c"94442b45cfcdc59aabc2a91364ed2ae129418e05a5c1985231b9c032e673f469";
+pub(crate) const SEAL_LABEL: &CStr =
+    c"94442b45cfcdc59aabc2a91364ed2ae129418e05a5c1985231b9c032e673f469";
 
 /// The parts of an image, each with the most a fetch of it may write.
 const FILES: [(&CStr, u64); 4] = [
@@ -450,6 +451,8 @@ unsafe fn fetch(source: *const c_char, target: &mut ConfigUpdateTarget) -> c_int
     }
     ret
 }
+
+pub(crate) use capi::image_cache_fetch;
 
 mod capi {
     use core::ffi::{c_char, c_int};

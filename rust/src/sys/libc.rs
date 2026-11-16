@@ -378,6 +378,7 @@ unsafe extern "C" {
     pub fn gethostname(name: *mut c_char, len: usize) -> c_int;
     pub fn sysconf(name: c_int) -> core::ffi::c_long;
     pub fn statvfs(path: *const c_char, buf: *mut Statvfs) -> c_int;
+    pub fn fstatvfs(fd: c_int, buf: *mut Statvfs) -> c_int;
     pub fn statfs(path: *const c_char, buf: *mut Statfs) -> c_int;
     pub fn fgets(s: *mut c_char, n: c_int, f: *mut File) -> *mut c_char;
     pub fn sscanf(s: *const c_char, fmt: *const c_char, ...) -> c_int;

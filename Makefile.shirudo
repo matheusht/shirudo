@@ -255,9 +255,8 @@ UTIL_SRCS := \
     util/curl.c \
     util/kconfig.c \
      \
-    util/image_runtime.c \
+     \
     util/image_guards.c \
-    util/image_keys.c \
     util/malloc.c \
     util/options.c \
     util/keepalive.c \
@@ -1039,14 +1038,11 @@ testing/helper/test-config-attest: testing/helper/test-config-attest.c \
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(REGISTER_LIBS)
 
-# The helper stands in for keyring_holds_cert(), keyring_bpf_serial() and
-# keys_revoke_image(), which the Rust library defines too: the link keeps
-# the first definition, the helper's.
+# The helper passes its keyring membership callback to the Rust checker.
 testing/helper/test-image-keys: testing/helper/test-image-keys.c \
-		util/image_keys.o $(REGISTER_OBJS)
+		$(REGISTER_OBJS)
 	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(REGISTER_LIBS) \
-		-Wl,--allow-multiple-definition
+	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(REGISTER_LIBS)
 
 testing/helper/test-image-config: testing/helper/test-image-config.c \
 		util/hex.o \
@@ -1066,12 +1062,12 @@ testing/helper/test-image-cli: testing/helper/test-image-cli.c \
 		$(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
 testing/helper/test-image-cleanup: testing/helper/test-image-cleanup.c \
-		testing/helper/image-cleanup.h util/image_runtime.c $(BUILTIN_OBJS) \
-		$(filter-out $(call obj,util/image_runtime.o),$(UTIL_OBJS)) \
+		testing/helper/image-cleanup.h  $(BUILTIN_OBJS) \
+		$(filter-out $(call obj,),$(UTIL_OBJS)) \
 		$(VERSION_OBJ) $(LIBBPF_A) $(RUST_LIB)
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) $(LDFLAGS) $(RPATH_LDFLAGS) -o $@ \
-		$(filter-out %.h util/image_runtime.c,$^) \
+		$(filter-out %.h ,$^) \
 		-Wl,--wrap=dm_verity_remove,--wrap=nanosleep \
 		$(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
@@ -1096,12 +1092,7 @@ UNIT_SRCS  := $(filter-out testing/unit/unit.c,$(wildcard testing/unit/*.c))
 UNIT_TESTS := $(patsubst testing/unit/%.c,build/unit/%,$(UNIT_SRCS))
 UNIT_LIB   := build/unit/libshirudo.a
 
-# The config image runtime is left out: no unit test reaches it, and a
-# Rust builtin's reference would pull it in, and with it, under a
-# sanitizer that keeps a whole object, keys_revoke_image() and the
-# builtins it calls, which no unit test links.
-UNIT_UTIL_OBJS := $(filter-out $(call obj,util/image_runtime.o) \
-                    $(call obj,util/image_keys.o),$(UTIL_OBJS))
+UNIT_UTIL_OBJS := $(UTIL_OBJS)
 
 $(UNIT_LIB): $(UNIT_UTIL_OBJS) $(VERSION_OBJ)
 	@printf '  AR      $@\n'
@@ -1326,7 +1317,7 @@ $(FUZZ_OUT)/fuzz-upatch-info: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) \
 $(FUZZ_OUT)/fuzz-bpm-info: testing/fuzz/fuzz-bpm-info.c $(FUZZ_BASE) \
                            testing/fuzz/output.c  builtin.h \
                            $(FUZZ_PACKAGE) \
-                           util/identity.c util/image_keys.c \
+                           util/identity.c \
                            util/kconfig.c \
                                                      util/options.c util/paths.c \
                            util/similar.c \

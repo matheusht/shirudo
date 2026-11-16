@@ -12,7 +12,6 @@ pub mod elf;
 pub mod hex;
 pub mod identity;
 pub mod image_guards;
-pub mod image_runtime;
 pub mod libbpf;
 pub mod libc;
 pub mod loader;

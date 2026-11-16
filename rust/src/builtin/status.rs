@@ -19,7 +19,6 @@ use crate::ffi;
 use crate::sys::bpf::bpf_obj_get;
 use crate::sys::btf::{btf__free, btf__load_vmlinux_btf};
 use crate::sys::identity::{Identity, identity_read};
-use crate::sys::image_runtime::image_config_state;
 use crate::sys::libc::{
     access, close, explicit_bzero, fwrite, gethostname, stderr, stdout, strerror,
 };
@@ -45,6 +44,7 @@ use crate::util::eventlog::{eventlog_lock, eventlog_path, eventlog_replay, event
 use crate::util::format::{fputs_sanitized, human_size};
 use crate::util::help::{Help, HelpItem, HelpSection, is_help, print_help};
 use crate::util::image_bootstrap::{ImageBootstrap, image_bootstrap_read};
+use crate::util::image_runtime;
 use crate::util::initrd;
 use crate::util::io::{bpffs_mounted_at, read_file};
 use crate::util::json::{JsonEmit, JsonField, MAX_BYTES, parse_schema};
@@ -1194,8 +1194,7 @@ impl Report {
             err => Err(err),
         };
         let mut root = [0u8; 32];
-        // SAFETY: room for the root.
-        let config_state = unsafe { image_config_state(&mut root) };
+        let config_state = image_runtime::config_state(&mut root);
         let config_root = message(&[&if config_state != -ENODEV {
             hex(&root)
         } else {

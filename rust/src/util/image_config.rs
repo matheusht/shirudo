@@ -425,6 +425,8 @@ fn clear() {
     }
 }
 
+pub(crate) use capi::{image_config_clear, image_config_set};
+
 mod capi {
     use core::ffi::{CStr, c_char, c_int, c_uint};
 

@@ -174,13 +174,23 @@ unsafe fn empty_into(out: *mut DmVerity) {
     }
 }
 
+impl DmVerity {
+    /// A mapping not open: `{ .data_loop_fd = -1, .hash_loop_fd = -1 }`.
+    pub(crate) fn empty() -> Self {
+        let mut d: DmVerity = zeroed();
+        d.data_loop_fd = -1;
+        d.hash_loop_fd = -1;
+        d
+    }
+}
+
 /// glibc's major() of a dev_t.
 fn major(dev: u64) -> u32 {
     (((dev & 0x0000_0000_000f_ff00) >> 8) | ((dev & 0xffff_f000_0000_0000) >> 32)) as u32
 }
 
 /// glibc's minor() of a dev_t.
-fn minor(dev: u64) -> u32 {
+pub(crate) fn minor(dev: u64) -> u32 {
     ((dev & 0x0000_0000_0000_00ff) | ((dev & 0x0000_0fff_fff0_0000) >> 12)) as u32
 }
 
@@ -1299,7 +1309,10 @@ unsafe fn mount_at(device: *const DmVerity, mountpoint: *const c_char, executabl
     ret
 }
 
-pub(crate) use capi::{dm_verity_close, dm_verity_create, dm_verity_remove, dm_verity_verify};
+pub(crate) use capi::{
+    dm_verity_close, dm_verity_create, dm_verity_inspect, dm_verity_list, dm_verity_mount,
+    dm_verity_remove, dm_verity_verify,
+};
 
 mod capi {
     use core::ffi::{c_char, c_int, c_void};

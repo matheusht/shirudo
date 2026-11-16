@@ -223,7 +223,7 @@ mkdir "$output/check-live" "$output/check-boot"
 	"$output/check-boot" "$keys_dir/cert.der" "$output/public/boot.der" \
 	>"$output/check-boot.log"
 grep -qx 'extends=1 activations=1' "$output/check-boot.log"
-grep -qx 'rc=0 mutations=0 signers=2' "$output/check-boot.log"
+grep -qx 'rc=0 signers=2' "$output/check-boot.log"
 if "$validator" "$keys_dir/cert.der" "$output/source/config-live-new-key" \
 	"$output/check-live" "$keys_dir/cert.der" "$output/public/boot.der" \
 	>"$output/check-live.log"; then
@@ -231,7 +231,7 @@ if "$validator" "$keys_dir/cert.der" "$output/source/config-live-new-key" \
 	exit 1
 fi
 grep -qx 'extends=0 activations=0' "$output/check-live.log"
-grep -qx 'rc=-126 mutations=0 signers=3' "$output/check-live.log"
+grep -qx 'rc=-126 signers=3' "$output/check-live.log"
 printf 'Target artifacts only: %s/public\n' "$output"
 printf 'Private operator keys remain in: %s/private\n' \
 	"$output"

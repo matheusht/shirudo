@@ -59,7 +59,7 @@ impl ConfigImage {
 }
 
 impl ConfigImageOpen {
-    const fn closed() -> Self {
+    pub(crate) const fn closed() -> Self {
         ConfigImageOpen {
             image: ConfigImage::zeroed(),
             data_fd: -1,
@@ -319,7 +319,7 @@ fn open_image(
     }
 }
 
-pub(crate) use capi::{config_image_close, config_image_open};
+pub(crate) use capi::{config_image_close, config_image_open, config_image_open_root};
 
 mod capi {
     use core::ffi::{CStr, c_char, c_int};

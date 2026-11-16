@@ -47,8 +47,8 @@ const _: () = assert!(size_of::<KeyringLink>() == 584);
 /// `struct keyring_cert`.
 #[repr(C)]
 pub struct KeyringCert {
-    der: *const u8,
-    len: usize,
+    pub(crate) der: *const u8,
+    pub(crate) len: usize,
 }
 
 /// add_key(2): the key's serial, or -1 with errno set.
@@ -447,7 +447,8 @@ unsafe fn add_cert(spec: i32, cert: *const u8, cert_len: usize) -> i32 {
 }
 
 pub(crate) use capi::{
-    keyring_bpf_serial, keyring_dm_verity_serial, keyring_find_cert, keyring_holds_cert,
+    keyring_bpf_serial, keyring_dm_verity_add_cert, keyring_dm_verity_seal,
+    keyring_dm_verity_serial, keyring_find_cert, keyring_holds_cert, keyring_holds_exactly,
     keyring_links, keyring_unlink_key,
 };
 

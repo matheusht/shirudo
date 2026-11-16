@@ -8,9 +8,9 @@ The upatch load and unload protocol of builtin-upatch.c and the boot
 restore of rust/src/builtin/init/restore.rs, against crashes, concurrent
 commands and root.
 
-With enforcement active, `image_enter()` admits an upatch command only
+With enforcement active, `image_runtime::enter()` admits an upatch command only
 once this boot's config activation is complete, which
-`image_boot_complete()` does after `init` restored the archive and wrote
+`image_runtime::boot_complete()` does after `init` restored the archive and wrote
 its record. A load (`upatch_load()`, which
 `upatch load` and a package install run) takes the register lock
 (`eventlog_lock()`) and runs the undo pass
@@ -65,16 +65,16 @@ every move. The assumptions, each a step or the absence of one:
   `init`'s run is one step, which completes or stops anywhere without its
   record. The gate is why: no upatch command runs in a boot before an
   `init` run completed, a run after one that stopped refuses at
-  `image_boot()`, and a run after one that completed changes nothing the
+  `image_runtime::boot()`, and a run after one that completed changes nothing the
   model keeps. The model leaves out the boot in which enforcement never
-  came up, which R6 leaves unprotected: `image_enter()` admits commands
+  came up, which R6 leaves unprotected: `image_runtime::enter()` admits commands
   there without a config, and their undo pass refuses at
   `measured_set_boot()`, which finds no register or no init record of it.
 - No TPM Restart comes without a reboot, as no hibernation does (A9):
   one clears the register and keeps the pins, a state the model has no
   step to, in which every later command refuses at `chain_live()`.
 - The archive `init` restores from is the one the revocations of the
-  config it activates left: `image_boot()` runs `purge_signed_by()`
+  config it activates left: `image_runtime::boot()` runs `purge_signed_by()`
   before `boot_restore()`, with no record. `init_restores_exactly` holds
   of that archive, and only of a run whose every restore succeeds; one
   that fails is `rebootFail`.
@@ -407,8 +407,8 @@ structure Variant where
   purgeLock : Bool := true
   /-- The `measured_holds()` filter of `boot_restore()`. -/
   filter : Bool := true
-  /-- `image_enter()` admits an upatch command only once this boot's
-  config activation is complete, which `image_boot_complete()` does after
+  /-- `image_runtime::enter()` admits an upatch command only once this boot's
+  config activation is complete, which `image_runtime::boot_complete()` does after
   `init` wrote its record. -/
   gate : Bool := true
 
@@ -422,7 +422,7 @@ def canLock (V : Variant) (s : State Name Payload) : Prop :=
 /-- One step of one process, of root, or a reboot. -/
 inductive Step (V : Variant) :
     State Name Payload → State Name Payload → Prop where
-  /-- Root, a timer or the operator starts a command; `image_enter()`
+  /-- Root, a timer or the operator starts a command; `image_runtime::enter()`
   admits it only once this boot's init record is on the log. -/
   | spawn (s) (i c) : s.procs i = none → (V.gate = true → hasInit s = true) →
       Step V s (s.go i c .start)
@@ -2276,7 +2276,7 @@ theorem reach_inv {s : State Name Payload} (h : Reach C s) : Inv s := by
   | init => exact inv_s0
   | step _ hs ih => exact inv_step ih hs
 
-/-- With enforcement active, `image_enter()` admits upatch commands only
+/-- With enforcement active, `image_runtime::enter()` admits upatch commands only
 in a boot whose init record is on the log. The boot in which enforcement
 never came up, where it admits them without one, is not modelled. -/
 theorem commands_need_init {s : State Name Payload} (h : Reach C s) {i : Nat}

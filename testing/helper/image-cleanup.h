@@ -6,10 +6,11 @@
 
 #include <time.h>
 
-#include "util/dm_verity.h"
-
-int __wrap_dm_verity_remove(struct dm_verity *device,
-			    bool deferred);
+/*
+ * The retry with which rust/src/util/image_runtime.rs removes a rejected
+ * candidate's mapping, with remove() in place of the removal.
+ */
+int image_retry_busy(int (*remove)(void *ctx), void *ctx);
 int __wrap_nanosleep(const struct timespec *req, struct timespec *rem);
 
 #endif /* SHIRUDO_TEST_IMAGE_CLEANUP_H */

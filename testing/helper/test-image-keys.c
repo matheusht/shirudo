@@ -14,10 +14,8 @@
 #include "chain.h"
 #include "config_update.h"
 #include "malloc.h"
-#include "keyring.h"
 #include "keys.h"
 
-static __u32 mutations;
 static char **held;
 static int held_count;
 
@@ -30,13 +28,8 @@ struct test_context {
 	bool interrupt;
 };
 
-key_serial_t keyring_bpf_serial(void)
-{
-	return 42;
-}
-
-int keyring_holds_cert(key_serial_t ring, const __u8 *der,
-		       size_t size)
+/* The BPF keyring, as the certificates named on the command line. */
+static int holds(const __u8 *der, size_t size, void *unused)
 {
 	int i;
 
@@ -54,12 +47,6 @@ int keyring_holds_cert(key_serial_t ring, const __u8 *der,
 			return 1;
 	}
 	return 0;
-}
-
-int keys_revoke_image(const __u8 *der, size_t size, bool boot)
-{
-	mutations++;
-	return -EPERM;
 }
 
 static int boot_count(void *opaque, __u32 *reset, __u32 *restart)
@@ -90,7 +77,7 @@ static int prepare(void *opaque,
 {
 	struct test_context *ctx = opaque;
 
-	return ctx->live ? keys_check_image_set(ctx->set) : 0;
+	return ctx->live ? keys_check_image_set_with(ctx->set, holds, NULL) : 0;
 }
 
 static int activate(void *opaque,
@@ -166,6 +153,6 @@ int main(int argc, char **argv)
 		ret = live_update(argv[3], &set);
 	}
 	close(fd);
-	printf("rc=%d mutations=%u signers=%zu\n", ret, mutations, set.n);
-	return ret || mutations ? 1 : 0;
+	printf("rc=%d signers=%zu\n", ret, set.n);
+	return ret ? 1 : 0;
 }

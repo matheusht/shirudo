@@ -12,7 +12,6 @@ use std::ffi::CString;
 use super::words;
 use crate::errno::{EEXIST, EINVAL, EIO, EKEYREJECTED, ENODATA, ENODEV, ENXIO};
 use crate::ffi;
-use crate::sys::image_runtime::image_update_context;
 use crate::sys::libc::{fwrite, stdout, strerror};
 use crate::sys::log::{pr_err, pr_warn};
 use crate::sys::malloc::xfree;
@@ -33,6 +32,7 @@ use crate::util::help::{
     Help, HelpItem, HelpSection, is_help, is_list_cmds, print_help, print_subcmd_list,
     resolve_subcommand,
 };
+use crate::util::image_runtime;
 use crate::util::io::read_file;
 use crate::util::json::{JsonEmit, MAX_BYTES};
 use crate::util::keys::{KEYS_MAX, keys_anchor_digest};
@@ -1292,7 +1292,7 @@ fn evidence(args: &[&[u8]]) -> c_int {
             nonce_len,
             mask,
             request,
-            image_update_context().cast(),
+            image_runtime::update_context().cast(),
             &mut doc,
             &mut len,
             &mut cap,

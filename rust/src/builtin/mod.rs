@@ -17,7 +17,7 @@ mod config;
 mod genkey;
 mod image;
 mod init;
-mod keys;
+pub(crate) mod keys;
 mod status;
 mod version;
 

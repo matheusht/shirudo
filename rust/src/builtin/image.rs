@@ -12,9 +12,9 @@ use std::ffi::CString;
 use super::words;
 use crate::errno::{EINPROGRESS, ENODEV};
 use crate::ffi;
-use crate::sys::image_runtime::{image_status, image_update};
 use crate::sys::libc::{fwrite, stderr, stdout, strerror};
 use crate::sys::log::pr_err;
+use crate::util::image_runtime;
 
 const HELP: &[u8] = b"usage: shirudo image build [image builder options]\n       \
 shirudo image verify <prefix> --cert <certificate>\n       \
@@ -70,10 +70,9 @@ unsafe fn image(argc: c_int, argv: *const *const c_char) -> c_int {
             };
         }
         // SAFETY: the caller's C string.
-        b"update" if n == 3 => unsafe { image_update(raw[2]) },
+        b"update" if n == 3 => image_runtime::update(unsafe { CStr::from_ptr(raw[2]) }),
         b"status" if n == 2 || (n == 3 && args[2] == b"--json") => {
-            // SAFETY: a call with a flag.
-            let ret = unsafe { image_status(n == 3) };
+            let ret = image_runtime::status(n == 3);
             if ret == -ENODEV {
                 error(&[b"image status: no config activation state on this host"]);
                 return 1;

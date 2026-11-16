@@ -100,14 +100,17 @@ impl ConfigUpdateRecord {
 /// `struct config_update_ops`: what the caller does for the protocol.
 #[repr(C)]
 pub struct ConfigUpdateOps {
-    boot_identity: Option<unsafe extern "C" fn(*mut c_void, *mut u32, *mut u32) -> c_int>,
-    pcr_read: Option<unsafe extern "C" fn(*mut c_void, u32, *mut u8) -> c_int>,
-    pcr_extend: Option<unsafe extern "C" fn(*mut c_void, u32, *const u8) -> c_int>,
-    prepare: Option<unsafe extern "C" fn(*mut c_void, *const ConfigUpdateTarget) -> c_int>,
-    activate: Option<unsafe extern "C" fn(*mut c_void, *const ConfigUpdateTarget) -> c_int>,
-    seal: Option<unsafe extern "C" fn(*mut c_void, c_int) -> c_int>,
-    checkpoint: Option<unsafe extern "C" fn(*mut c_void, c_int) -> c_int>,
-    lock_wait_ms: u32,
+    pub(crate) boot_identity:
+        Option<unsafe extern "C" fn(*mut c_void, *mut u32, *mut u32) -> c_int>,
+    pub(crate) pcr_read: Option<unsafe extern "C" fn(*mut c_void, u32, *mut u8) -> c_int>,
+    pub(crate) pcr_extend: Option<unsafe extern "C" fn(*mut c_void, u32, *const u8) -> c_int>,
+    pub(crate) prepare:
+        Option<unsafe extern "C" fn(*mut c_void, *const ConfigUpdateTarget) -> c_int>,
+    pub(crate) activate:
+        Option<unsafe extern "C" fn(*mut c_void, *const ConfigUpdateTarget) -> c_int>,
+    pub(crate) seal: Option<unsafe extern "C" fn(*mut c_void, c_int) -> c_int>,
+    pub(crate) checkpoint: Option<unsafe extern "C" fn(*mut c_void, c_int) -> c_int>,
+    pub(crate) lock_wait_ms: u32,
 }
 
 /// `struct config_update`: an open journal, its lock held until close.
@@ -124,6 +127,26 @@ pub struct ConfigUpdate {
 pub type ConfigCb = unsafe extern "C" fn(r: *const ConfigUpdateRecord, ctx: *mut c_void) -> c_int;
 
 impl ConfigUpdate {
+    /// A journal not open.
+    pub(crate) const fn closed() -> Self {
+        ConfigUpdate {
+            ops: core::ptr::null(),
+            ctx: core::ptr::null_mut(),
+            dir_fd: -1,
+            lock_fd: -1,
+            boot_pending: false,
+        }
+    }
+
+    pub(crate) fn is_open(&self) -> bool {
+        self.lock_fd >= 0
+    }
+
+    /// The operations the open journal calls from here.
+    pub(crate) fn set_ops(&mut self, ops: &'static ConfigUpdateOps) {
+        self.ops = ops;
+    }
+
     fn ops(&self) -> &ConfigUpdateOps {
         // SAFETY: an open journal holds the operations it was opened
         // with, which outlive it.
@@ -1265,7 +1288,10 @@ unsafe fn boot(update: *mut ConfigUpdate, t: *const ConfigUpdateTarget, pcr: u32
     unsafe { begin_event(u, t, &last, pcr, EVENT_BOOT) }
 }
 
-pub(crate) use capi::{config_update_check, config_update_events};
+pub(crate) use capi::{
+    config_update_begin, config_update_boot, config_update_check, config_update_close,
+    config_update_complete_boot, config_update_events, config_update_open, config_update_read,
+};
 
 mod capi {
     use core::ffi::{c_char, c_int, c_void};

@@ -49,6 +49,35 @@ impl Identity {
     }
 }
 
+/// DEVICE_RUNTIME and DEVICE_CONFIG of util/identity.h: what a mapping
+/// the guards watched being made was made as.
+pub const DEVICE_RUNTIME: u32 = 1;
+pub const DEVICE_CONFIG: u32 = 2;
+
+/// `struct device_authority`, a value of the guards' devices map: a
+/// dm-verity mapping, its kind and root, and the disk sequence number
+/// of the instance they watched.
+#[repr(C)]
+pub struct DeviceAuthority {
+    pub dev: u32,
+    pub kind: u32,
+    pub root: [u8; 32],
+    pub diskseq: u64,
+}
+
+const _: () = assert!(size_of::<DeviceAuthority>() == 48);
+
+impl DeviceAuthority {
+    pub const fn zeroed() -> Self {
+        DeviceAuthority {
+            dev: 0,
+            kind: 0,
+            root: [0; 32],
+            diskseq: 0,
+        }
+    }
+}
+
 unsafe extern "C" {
     /// The identity map init populated, froze and pinned this boot, into
     /// `out`: 0, -ENOENT before init, or another -errno.

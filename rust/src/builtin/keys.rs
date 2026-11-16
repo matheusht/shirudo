@@ -1287,7 +1287,7 @@ fn purge_signed_by(der: &[u8]) -> c_int {
 
 /// Revokes the certificate `der` of a config image: out of the .bpf
 /// keyring, measured unless at boot, and what it signed purged.
-fn revoke_image(der: &[u8], boot: bool) -> c_int {
+pub(crate) fn revoke_image(der: &[u8], boot: bool) -> c_int {
     let ring = keyring_bpf_serial();
 
     if ring < 0 {
@@ -1620,8 +1620,6 @@ pub(super) use capi::cmd_keys;
 mod capi {
     use core::ffi::{c_char, c_int};
 
-    use crate::ffi;
-
     /// # Safety
     ///
     /// `argv` holds `argc` C strings.
@@ -1629,14 +1627,5 @@ mod capi {
     pub unsafe extern "C" fn cmd_keys(argc: c_int, argv: *const *const c_char) -> c_int {
         // SAFETY: the caller's arguments.
         unsafe { super::keys(argc, argv) }
-    }
-
-    /// # Safety
-    ///
-    /// `der` holds `size` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn keys_revoke_image(der: *const u8, size: usize, boot: bool) -> c_int {
-        // SAFETY: the caller's bytes.
-        super::revoke_image(unsafe { ffi::slice(der, size) }, boot)
     }
 }
