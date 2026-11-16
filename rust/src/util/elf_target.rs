@@ -27,11 +27,11 @@ const OFFSETS_MAX: usize = 1 << 20;
 /// `struct elf_target`.
 #[repr(C)]
 pub struct ElfTarget {
-    build_id: [u8; BUILD_ID_MAX],
-    build_id_len: u32,
-    offsets: *mut u64,
-    nr_offsets: u32,
-    offsets_cap: u32,
+    pub(crate) build_id: [u8; BUILD_ID_MAX],
+    pub(crate) build_id_len: u32,
+    pub(crate) offsets: *mut u64,
+    pub(crate) nr_offsets: u32,
+    pub(crate) offsets_cap: u32,
 }
 
 const _: () = assert!(size_of::<ElfTarget>() == 88);
@@ -348,6 +348,8 @@ unsafe fn target_resolve(
     }
     err
 }
+
+pub(crate) use capi::{elf_target_free, elf_target_resolve};
 
 mod capi {
     use core::ffi::{c_char, c_int};

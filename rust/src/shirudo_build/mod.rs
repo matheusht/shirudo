@@ -9,6 +9,7 @@
 
 mod compile;
 mod image;
+mod package;
 mod vouch;
 
 use core::ffi::{CStr, c_char, c_int};
@@ -17,9 +18,7 @@ use std::ffi::CString;
 
 use crate::errno::{EIO, ENAMETOOLONG, EPERM};
 use crate::ffi;
-use crate::sys::build::{
-    build_bpm, build_package_load, build_package_unload, build_upatch_cli, build_upatch_name,
-};
+use crate::sys::build::{build_bpm, build_upatch_name};
 use crate::sys::hex::hex_decode;
 use crate::sys::libc::{access, close, fwrite, mkstemps, stderr, stdout, strerror, unlink};
 use crate::sys::log::{log_init, pr_err, pr_info};
@@ -422,16 +421,7 @@ fn unload(o: &Opts, name: &CStr, pkey: &CStr, cert: &CStr) -> c_int {
             &derived
         }
     };
-    // SAFETY: C strings and the digest.
-    let ret = unsafe {
-        build_package_unload(
-            name.as_ptr(),
-            digest.as_ptr(),
-            output.as_ptr(),
-            pkey.as_ptr(),
-            cert.as_ptr(),
-        )
-    };
+    let ret = package::unload_directive(name, &digest, output, pkey, cert);
     if ret == 0 && o.emit_artifacts {
         let text = [
             b"emitted:\n  upatch: ",
@@ -553,19 +543,7 @@ fn load(o: &Opts, input: &CStr, pkey: &CStr, cert: &CStr) -> c_int {
             CStr::from_bytes_until_nul(&name_buf).unwrap_or_default()
         }
     };
-    // SAFETY: C strings, NULL for none, and no policies.
-    let ret = unsafe {
-        build_package_load(
-            bpf_o.as_ptr(),
-            src.map_or(ptr::null(), CStr::as_ptr),
-            output.as_ptr(),
-            name.as_ptr(),
-            ptr::null(),
-            0,
-            pkey.as_ptr(),
-            cert.as_ptr(),
-        )
-    };
+    let ret = package::load_object(bpf_o, src, output, name, pkey, cert);
     drop(temp);
     if ret == 0 && o.emit_artifacts {
         let obj: &[u8] = match emitted {
@@ -621,7 +599,7 @@ unsafe fn run(argc: c_int, argv: *mut *mut c_char) -> c_int {
     let all: Vec<&CStr> = (0..n).map(word).collect();
     match all.get(1).map(|w| w.to_bytes()) {
         Some(b"image") => return image::run(&all[1..]),
-        Some(b"upatch") => return sub(build_upatch_cli, 1),
+        Some(b"upatch") => return package::upatch_cli(&all[1..]),
         Some(b"bpm") => return sub(build_bpm, 1),
         Some(b"keys") if n >= 3 && all[2].to_bytes() == b"vouch" => return vouch::run(&all[2..]),
         _ => {}

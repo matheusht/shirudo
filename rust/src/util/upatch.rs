@@ -22,65 +22,65 @@ pub(crate) const FILE_MAX: usize = 16 * 1024 * 1024;
 /// The NAME_MAX of `<limits.h>` a pin directory's name must fit.
 const PIN_NAME_MAX: usize = 255;
 
-const MAGIC: u64 = 0x5348_5244_554e_4150;
-const VERSION: u32 = 1;
-const HEADER_SIZE: usize = 360;
-const DIRECTIVE_UNLOAD: u32 = 1;
-const TYPE_BPF: u32 = 1;
+pub(crate) const MAGIC: u64 = 0x5348_5244_554e_4150;
+pub(crate) const VERSION: u32 = 1;
+pub(crate) const HEADER_SIZE: usize = 360;
+pub(crate) const DIRECTIVE_UNLOAD: u32 = 1;
+pub(crate) const TYPE_BPF: u32 = 1;
 
-const SIGNED_TRAILER_MAGIC: u32 = 0x5254_4753;
-const SIGNED_VERSION: u32 = 1;
-const SIGNED_SECTIONS_MAX: u32 = 8;
-const SECTION_NAME: u32 = 0x454d_414e;
-const SECTION_ATTACH: u32 = 0x4d47_5055;
-const SECTION_UNLOAD: u32 = 0x444c_4e55;
-const SECTION_DECODERS: u32 = 0x4244_4344;
-const SECTION_POLICY_LABELS: u32 = 0x4c50_4853;
+pub(crate) const SIGNED_TRAILER_MAGIC: u32 = 0x5254_4753;
+pub(crate) const SIGNED_VERSION: u32 = 1;
+pub(crate) const SIGNED_SECTIONS_MAX: u32 = 8;
+pub(crate) const SECTION_NAME: u32 = 0x454d_414e;
+pub(crate) const SECTION_ATTACH: u32 = 0x4d47_5055;
+pub(crate) const SECTION_UNLOAD: u32 = 0x444c_4e55;
+pub(crate) const SECTION_DECODERS: u32 = 0x4244_4344;
+pub(crate) const SECTION_POLICY_LABELS: u32 = 0x4c50_4853;
 
-const POLICY_LABELS_MAGIC: u32 = 0x4c50_4853;
-const POLICY_LABELS_VERSION: u32 = 1;
-const MAPS_MAX: u32 = 64;
+pub(crate) const POLICY_LABELS_MAGIC: u32 = 0x4c50_4853;
+pub(crate) const POLICY_LABELS_VERSION: u32 = 1;
+pub(crate) const MAPS_MAX: u32 = 64;
 const POLICY_NAME_MAX: usize = 64;
 const POLICY_PATH_MAX: usize = 4096;
 
-const DECODER_MAGIC: u32 = 0x4244_4344;
-const DECODER_VERSION: u32 = 1;
+pub(crate) const DECODER_MAGIC: u32 = 0x4244_4344;
+pub(crate) const DECODER_VERSION: u32 = 1;
 
-const ATTACH_TARGET_MAX: usize = 128;
-const PROG_MAGIC: u32 = 0x4d47_5055;
-const PROG_VERSION: u32 = 1;
-const PROG_MAP_MAX: usize = 16;
-const UPROBE_TARGET_MAGIC: u32 = 0x5455_5055;
-const UPROBE_TARGET_VERSION: u32 = 1;
-const UPROBE_PATH_MAX: u32 = 4096;
+pub(crate) const ATTACH_TARGET_MAX: usize = 128;
+pub(crate) const PROG_MAGIC: u32 = 0x4d47_5055;
+pub(crate) const PROG_VERSION: u32 = 1;
+pub(crate) const PROG_MAP_MAX: usize = 16;
+pub(crate) const UPROBE_TARGET_MAGIC: u32 = 0x5455_5055;
+pub(crate) const UPROBE_TARGET_VERSION: u32 = 1;
+pub(crate) const UPROBE_PATH_MAX: u32 = 4096;
 const BUILD_ID_MAX: usize = 64;
 const UPROBE_OFFSETS_MAX: u32 = 1 << 20;
 
-const ATTACH_RAW_TRACEPOINT: u32 = 0;
-const ATTACH_KPROBE: u32 = 1;
-const ATTACH_KRETPROBE: u32 = 2;
-const ATTACH_CGROUP_SKB_INGRESS: u32 = 3;
-const ATTACH_CGROUP_SKB_EGRESS: u32 = 4;
-const ATTACH_FMOD_RET: u32 = 5;
-const ATTACH_NETFILTER_IPV6_PRE_ROUTING: u32 = 6;
-const ATTACH_UPROBE_MULTI: u32 = 7;
+pub(crate) const ATTACH_RAW_TRACEPOINT: u32 = 0;
+pub(crate) const ATTACH_KPROBE: u32 = 1;
+pub(crate) const ATTACH_KRETPROBE: u32 = 2;
+pub(crate) const ATTACH_CGROUP_SKB_INGRESS: u32 = 3;
+pub(crate) const ATTACH_CGROUP_SKB_EGRESS: u32 = 4;
+pub(crate) const ATTACH_FMOD_RET: u32 = 5;
+pub(crate) const ATTACH_NETFILTER_IPV6_PRE_ROUTING: u32 = 6;
+pub(crate) const ATTACH_UPROBE_MULTI: u32 = 7;
 
-const ROLE_ATTACH: u32 = 0;
-const ROLE_SERIALIZER: u32 = 1;
-const ROLE_TEST_RUN: u32 = 2;
+pub(crate) const ROLE_ATTACH: u32 = 0;
+pub(crate) const ROLE_SERIALIZER: u32 = 1;
+pub(crate) const ROLE_TEST_RUN: u32 = 2;
 
 /// The sizes of the records of `include/shirudo/upatch.h`, which the
 /// parser reads at their offsets, little-endian.
-const POLICY_LABEL_HEADER: usize = 20;
-const POLICY_LABEL_ENTRY: usize = 8 + POLICY_NAME_MAX + POLICY_PATH_MAX;
-const SIGNED_SECTION: usize = 16;
-const SIGNED_TRAILER: usize = 16;
-const DECODER_BLOB: usize = 16;
-const DECODER_ENTRY: usize = 16 + 64 + 16 + 64 + 32 + 8;
-const PROG_METADATA: usize = 16;
-const PROG_ENTRY: usize = 16 + ATTACH_TARGET_MAX + PROG_MAP_MAX;
-const UPROBE_TARGETS: usize = 16;
-const UPROBE_TARGET: usize = 16;
+pub(crate) const POLICY_LABEL_HEADER: usize = 20;
+pub(crate) const POLICY_LABEL_ENTRY: usize = 8 + POLICY_NAME_MAX + POLICY_PATH_MAX;
+pub(crate) const SIGNED_SECTION: usize = 16;
+pub(crate) const SIGNED_TRAILER: usize = 16;
+pub(crate) const DECODER_BLOB: usize = 16;
+pub(crate) const DECODER_ENTRY: usize = 16 + 64 + 16 + 64 + 32 + 8;
+pub(crate) const PROG_METADATA: usize = 16;
+pub(crate) const PROG_ENTRY: usize = 16 + ATTACH_TARGET_MAX + PROG_MAP_MAX;
+pub(crate) const UPROBE_TARGETS: usize = 16;
+pub(crate) const UPROBE_TARGET: usize = 16;
 
 /// `struct upatch_host_header`: the container's header in host order.
 #[repr(C)]
@@ -969,8 +969,9 @@ unsafe fn specs_parse(
 }
 
 pub(crate) use capi::{
-    upatch_close, upatch_header_name, upatch_member_valid, upatch_name_valid, upatch_open,
-    upatch_open_memory, upatch_select, upatch_signature,
+    upatch_close, upatch_data, upatch_header_name, upatch_loader, upatch_member_valid,
+    upatch_metadata, upatch_name_valid, upatch_open, upatch_open_memory, upatch_select,
+    upatch_signature,
 };
 
 mod capi {

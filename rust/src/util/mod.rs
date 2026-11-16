@@ -19,7 +19,7 @@ pub(crate) mod config_measure;
 mod config_update;
 pub(crate) mod crypto_openssl;
 mod dm_verity;
-mod elf_target;
+pub(crate) mod elf_target;
 pub(crate) mod eventlog;
 pub(crate) mod format;
 pub(crate) mod harden;

@@ -16,6 +16,7 @@
 #include "tools/shirudo-build/compile.h"
 #include "tools/shirudo-build/package.h"
 #include "tools/shirudo-build/vmlinux.h"
+#include "util/loader.h"
 
 /* What bpm build does with a parsed Beefile is out of reach from here. */
 int build_bpm_push(int argc, const char **argv)
@@ -28,49 +29,9 @@ int build_bpm_tree(int argc, const char **argv)
 	return -ENOSYS;
 }
 
-int build_package_load(const char *bpf_o, const char *src_path,
-		       const char *out_upatch, const char *upatch_name,
-		       const struct upatch_policy_label_entry *policies,
-		       __u32 nr_policies,
-		       const char *pkey_path, const char *cert_path)
+const struct embedded_bpf *unload_blob(void)
 {
-	return -ENOSYS;
-}
-
-int build_package_unload(const char *name,
-			 const __u8 payload_sha256[32],
-			 const char *out_upatch,
-			 const char *pkey_path, const char *cert_path)
-{
-	return -ENOSYS;
-}
-
-int build_package_java_load(const char *jar_path, const char *out_upatch,
-			    const char *upatch_name,
-			    const char *pkey_path, const char *cert_path)
-{
-	return -ENOSYS;
-}
-
-int build_package_java_unload(const char *name,
-			      const __u8 payload_sha256[32],
-			      const char *out_upatch,
-			      const char *pkey_path, const char *cert_path)
-{
-	return -ENOSYS;
-}
-
-int build_package_patch_rodata(const char *input, const char *output,
-			       const char *symbol, const __u8 *value,
-			       size_t value_len, const char *pkey_path,
-			       const char *cert_path)
-{
-	return -ENOSYS;
-}
-
-int build_package_verify(const char *input, const char *cert_path)
-{
-	return -ENOSYS;
+	return NULL;
 }
 
 #define FIX_ID_BYTES \

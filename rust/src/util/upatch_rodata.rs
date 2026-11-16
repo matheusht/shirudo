@@ -66,8 +66,8 @@ const ATTR_BTF_SIZE_END: u32 = 20;
 /// `struct rodata_range` of `util/upatch_rodata.h`.
 #[repr(C)]
 pub struct RodataRange {
-    offset: u32,
-    size: u32,
+    pub(crate) offset: u32,
+    pub(crate) size: u32,
 }
 
 /// The `.rodata` the loader fills: its BTF, its bytes in the loader
@@ -1509,7 +1509,7 @@ unsafe fn print(u: &Upatch, path: *const c_char, json: bool) -> c_int {
     }
 }
 
-pub(crate) use capi::upatch_rodata_print;
+pub(crate) use capi::{upatch_rodata_data_offset, upatch_rodata_print, upatch_rodata_symbol_range};
 
 mod capi {
     use core::ffi::{c_char, c_int};

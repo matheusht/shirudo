@@ -301,7 +301,7 @@ BPF_SRCS := \
 BUILD_SRCS := \
     tools/shirudo-build/shirudo-build.c \
      \
-    tools/shirudo-build/package.c \
+     \
     tools/shirudo-build/jar.c \
      \
     tools/shirudo-build/bpm-build.c \
@@ -1234,6 +1234,8 @@ $(FUZZ_OUT)/fuzz-rodata: testing/fuzz/fuzz-rodata.c $(FUZZ_BASE) \
                            $(FUZZ_SEAL) $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-rodata: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-rodata: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS) $(ZLIB_LIBS)
+$(FUZZ_OUT)/fuzz-beefile: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
+$(FUZZ_OUT)/fuzz-beefile: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS) $(ZLIB_LIBS)
 $(FUZZ_OUT)/fuzz-bpm-tar: testing/fuzz/fuzz-bpm-tar.c $(FUZZ_BASE) \
                            $(FUZZ_PACKAGE)
 $(FUZZ_OUT)/fuzz-bpm-package: testing/fuzz/fuzz-bpm-package.c $(FUZZ_BASE) \
@@ -1281,7 +1283,7 @@ $(FUZZ_OUT)/fuzz-beefile: testing/fuzz/fuzz-beefile.c $(FUZZ_BASE) \
                            tools/shirudo-build/bpm-build.c $(FUZZ_PACKAGE) \
                             util/paths.c \
                            util/version_id.c util/options.c util/sign.c \
-                           util/similar.c
+                           util/similar.c $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-oci-http: testing/fuzz/fuzz-oci-http.c $(FUZZ_BASE) \
                             $(FUZZ_OCI)
 $(FUZZ_OUT)/fuzz-oci-ref: testing/fuzz/fuzz-oci-ref.c $(FUZZ_BASE) \

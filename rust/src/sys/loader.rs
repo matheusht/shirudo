@@ -15,5 +15,7 @@ pub struct EmbeddedBpf {
 
 unsafe extern "C" {
     pub fn bpf2_blob() -> *const EmbeddedBpf;
+    /// The unload directive's template.
+    pub fn unload_blob() -> *const EmbeddedBpf;
     pub fn seal_blob() -> *const EmbeddedBpf;
 }
