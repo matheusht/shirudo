@@ -1148,8 +1148,8 @@ unsafe fn kconfig_read(
 }
 
 pub(crate) use capi::{
-    tree_configured, tree_event_append, tree_event_replay, tree_pending_read, tree_pending_write,
-    tree_selector_matches, tree_state_read, tree_state_write,
+    tree_configured, tree_emit_status, tree_event_append, tree_event_replay, tree_pending_read,
+    tree_pending_write, tree_selector_matches, tree_state_read, tree_state_write,
 };
 
 mod capi {

@@ -15,38 +15,38 @@ use crate::text::strscpy;
 /// flags telling whether it carried a value that was not null.
 #[repr(C)]
 pub struct ConditionsInput {
-    reachable: bool,
-    parsed: bool,
-    unreach: *const c_char,
-    lsm_attached: c_int,
-    keyring_present: c_int,
-    keyring_mode: *const c_char,
-    keyring_serial: i64,
-    keyring_serial_pinned: i64,
-    keyring_serial_matches: c_int,
-    ks_seen: c_int,
-    ksp_seen: c_int,
-    ksm_seen: c_int,
-    bpf_unfrozen: c_int,
-    dmv_present: c_int,
-    dmv_serial: i64,
-    dmv_serial_pinned: i64,
-    dmv_serial_matches: c_int,
-    dmvp_seen: c_int,
-    dmvm_seen: c_int,
-    dmv_unfrozen: c_int,
-    dmv_key_missing: c_int,
-    tpm_reachable: c_int,
-    chain_seen: c_int,
-    chain_matches: c_int,
-    cm_seen: c_int,
-    nv_index: *const c_char,
-    config_seen: c_int,
-    config_state: c_int,
-    config_root: *const c_char,
-    pins_rc: c_int,
-    pins_unmeasured: c_int,
-    pins_detail: *const c_char,
+    pub(crate) reachable: bool,
+    pub(crate) parsed: bool,
+    pub(crate) unreach: *const c_char,
+    pub(crate) lsm_attached: c_int,
+    pub(crate) keyring_present: c_int,
+    pub(crate) keyring_mode: *const c_char,
+    pub(crate) keyring_serial: i64,
+    pub(crate) keyring_serial_pinned: i64,
+    pub(crate) keyring_serial_matches: c_int,
+    pub(crate) ks_seen: c_int,
+    pub(crate) ksp_seen: c_int,
+    pub(crate) ksm_seen: c_int,
+    pub(crate) bpf_unfrozen: c_int,
+    pub(crate) dmv_present: c_int,
+    pub(crate) dmv_serial: i64,
+    pub(crate) dmv_serial_pinned: i64,
+    pub(crate) dmv_serial_matches: c_int,
+    pub(crate) dmvp_seen: c_int,
+    pub(crate) dmvm_seen: c_int,
+    pub(crate) dmv_unfrozen: c_int,
+    pub(crate) dmv_key_missing: c_int,
+    pub(crate) tpm_reachable: c_int,
+    pub(crate) chain_seen: c_int,
+    pub(crate) chain_matches: c_int,
+    pub(crate) cm_seen: c_int,
+    pub(crate) nv_index: *const c_char,
+    pub(crate) config_seen: c_int,
+    pub(crate) config_state: c_int,
+    pub(crate) config_root: *const c_char,
+    pub(crate) pins_rc: c_int,
+    pub(crate) pins_unmeasured: c_int,
+    pub(crate) pins_detail: *const c_char,
 }
 
 const _: () = assert!(size_of::<ConditionsInput>() == 168);
@@ -57,9 +57,9 @@ const _: () = assert!(core::mem::offset_of!(ConditionsInput, pins_detail) == 160
 /// `struct condition`.
 #[repr(C)]
 pub struct Condition {
-    kind: *const c_char,
-    status: *const c_char,
-    detail: [u8; 192],
+    pub(crate) kind: *const c_char,
+    pub(crate) status: *const c_char,
+    pub(crate) detail: [u8; 192],
 }
 
 const _: () = assert!(size_of::<Condition>() == 208);
@@ -213,7 +213,7 @@ fn set_fixed(c: &mut Condition, status: &CStr, detail: &CStr) {
 /// The conditions, as many as `out` holds, in their order: LsmAttached,
 /// KeyringSealed, ChainIntact, UpatchesMeasured, TpmMeasured and
 /// ConfigActive; returns how many it wrote.
-fn conditions(i: &ConditionsInput, out: &mut [Condition]) -> usize {
+pub(crate) fn conditions(i: &ConditionsInput, out: &mut [Condition]) -> usize {
     let n = out.len().min(CONDITIONS_MAX);
     let mut it = out[..n].iter_mut();
 
@@ -309,7 +309,7 @@ fn conditions(i: &ConditionsInput, out: &mut [Condition]) -> usize {
 }
 
 /// The conditions as the table `shirudo status` prints.
-fn conditions_print(conds: &[Condition]) {
+pub(crate) fn conditions_print(conds: &[Condition]) {
     let row = c"  %-18s %-7s %s\n";
 
     // SAFETY: formats of C strings, and the conditions' strings.
@@ -330,7 +330,7 @@ fn conditions_print(conds: &[Condition]) {
 /// The verdict in one word, from worst to best: unreachable,
 /// unparseable, tampered, lsm-off, init-pending, reboot-pending,
 /// degraded, ok.
-fn status_verdict(i: &ConditionsInput) -> &'static CStr {
+pub(crate) fn status_verdict(i: &ConditionsInput) -> &'static CStr {
     if !i.reachable {
         c"unreachable"
     } else if !i.parsed {
@@ -360,7 +360,7 @@ fn status_verdict(i: &ConditionsInput) -> &'static CStr {
 /// # Safety
 ///
 /// `i.unreach` is NULL or a C string.
-unsafe fn status_reason(i: &ConditionsInput, buf: &mut [u8]) {
+pub(crate) unsafe fn status_reason(i: &ConditionsInput, buf: &mut [u8]) {
     let verdict = status_verdict(i).to_bytes();
     let reason: Option<&[u8]> = match verdict {
         b"unreachable" if !i.unreach.is_null() => {

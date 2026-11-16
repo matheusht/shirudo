@@ -14,7 +14,7 @@ use crate::sys::malloc::{xcalloc, xfree, xmalloc, xreallocarray};
 use crate::text::{cstr, strscpy};
 
 /// `KEYRING_DESC_MAX`.
-const DESC_MAX: usize = 512;
+pub(crate) const DESC_MAX: usize = 512;
 
 const KEYCTL_GET_KEYRING_ID: c_long = 0;
 const KEYCTL_DESCRIBE: c_long = 6;
@@ -279,7 +279,11 @@ fn links(keyring: i32, links: &mut *mut KeyringLink, n: &mut usize) -> c_int {
 /// # Safety
 ///
 /// `der` holds `der_len` bytes.
-unsafe fn cert_description(der: *const u8, der_len: usize, out: &mut [u8; DESC_MAX]) -> c_int {
+pub(crate) unsafe fn cert_description(
+    der: *const u8,
+    der_len: usize,
+    out: &mut [u8; DESC_MAX],
+) -> c_int {
     let mut desc = [0u8; DESC_MAX];
     // SAFETY: a type, no description, and the caller's certificate.
     let probe = unsafe {

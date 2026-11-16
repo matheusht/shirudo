@@ -13,13 +13,13 @@ use crate::util::timefmt::format_duration;
 /// `struct upatch_table_row`.
 #[repr(C)]
 pub struct UpatchTableRow {
-    name: [c_char; 257],
-    location: [c_char; 160],
-    loaded_at: [c_char; 32],
-    status: [c_char; 64],
-    n_maps: u32,
-    age_sec: i64,
-    payload_sha256: [c_char; 65],
+    pub(crate) name: [c_char; 257],
+    pub(crate) location: [c_char; 160],
+    pub(crate) loaded_at: [c_char; 32],
+    pub(crate) status: [c_char; 64],
+    pub(crate) n_maps: u32,
+    pub(crate) age_sec: i64,
+    pub(crate) payload_sha256: [c_char; 65],
 }
 
 const _: () = assert!(size_of::<UpatchTableRow>() == 600);
@@ -40,7 +40,7 @@ fn in_array(a: &[c_char]) -> &[u8] {
 /// # Safety
 ///
 /// `ts` is NULL or a C string.
-unsafe fn age_sec(ts: *const c_char) -> i64 {
+pub(crate) unsafe fn age_sec(ts: *const c_char) -> i64 {
     let mut tm = Tm::zeroed();
 
     // SAFETY: the caller passes NULL or a C string.
@@ -58,7 +58,7 @@ unsafe fn age_sec(ts: *const c_char) -> i64 {
 }
 
 /// The rows as `shirudo status` prints them.
-fn print(rows: &[UpatchTableRow]) {
+pub(crate) fn print(rows: &[UpatchTableRow]) {
     let row = c"  %-24s  %-28s  %5u  %-28s  %s\n";
 
     // SAFETY: a format of an unsigned long, and its count.
@@ -113,7 +113,7 @@ fn print(rows: &[UpatchTableRow]) {
 }
 
 /// The rows as the `upatches_loaded` array of the status JSON.
-fn emit_json(e: &mut JsonEmit, rows: &[UpatchTableRow]) {
+pub(crate) fn emit_json(e: &mut JsonEmit, rows: &[UpatchTableRow]) {
     e.arr_open(b"upatches_loaded");
     for r in rows {
         let status: &[u8] = if r.status[0] != 0 {

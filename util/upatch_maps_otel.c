@@ -38,6 +38,7 @@
 #include "crypto.h"
 #include "curl.h"
 #include "hex.h"
+#include "keepalive_quote.h"
 #include "json.h"
 #include "log.h"
 #include "malloc.h"
@@ -1453,6 +1454,24 @@ int otel_send_log_string(const struct otel_opts *opts,
 	}
 	xfree(e.buf, e.cap);
 	return ret;
+}
+
+int otel_send_log_json(const struct otel_opts *opts,
+		       const char *scope_name, const char *event_name,
+		       int severity_number, const char *severity_text,
+		       const char *status, const char *version_id,
+		       __s64 tamper_attempts, const char *body_json,
+		       size_t body_len)
+{
+	char quote[KEEPALIVE_QUOTE_MAX];
+	int ret;
+
+	ret = keepalive_quote(body_json, body_len, quote, sizeof(quote));
+	if (ret)
+		return ret;
+	return otel_send_log_string(opts, scope_name, event_name,
+				    severity_number, severity_text, body_json,
+				    body_len, "shirudo.quote", quote);
 }
 
 struct snapshot_writer {

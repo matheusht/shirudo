@@ -21,13 +21,13 @@ const RUNTIME_DIR_PREFIX: &[u8] = b"/run/shirudo/runtime/";
 /// `struct image_bootstrap`.
 #[repr(C)]
 pub struct ImageBootstrap {
-    runtime: [u8; PATH_MAX],
-    config: [u8; PATH_MAX],
-    certificate: [u8; PATH_MAX],
-    runtime_root: [u8; 32],
-    pcr: u32,
-    have_root: bool,
-    have_pcr: bool,
+    pub(crate) runtime: [u8; PATH_MAX],
+    pub(crate) config: [u8; PATH_MAX],
+    pub(crate) certificate: [u8; PATH_MAX],
+    pub(crate) runtime_root: [u8; 32],
+    pub(crate) pcr: u32,
+    pub(crate) have_root: bool,
+    pub(crate) have_pcr: bool,
 }
 
 const _: () = assert!(size_of::<ImageBootstrap>() == 12328);
@@ -151,6 +151,8 @@ unsafe fn parse(f: *mut File, boot: &mut ImageBootstrap, initial: bool) -> c_int
     }
     ret
 }
+
+pub(crate) use capi::image_bootstrap_read;
 
 mod capi {
     use core::ffi::{c_char, c_int};

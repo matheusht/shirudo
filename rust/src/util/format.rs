@@ -13,7 +13,7 @@ use crate::text::{decimal, strscpy, strsprintf};
 /// `bytes` with a binary unit, `512B`, `1.50K`, `12.3M` or `256G`: two
 /// decimals below 10, one below 100 and none above, as printf() rounds
 /// them.
-fn human_size(bytes: u64, out: &mut [u8]) -> c_int {
+pub(crate) fn human_size(bytes: u64, out: &mut [u8]) -> c_int {
     const UNITS: [(u32, &CStr); 3] = [(30, c"G"), (20, c"M"), (10, c"K")];
     let mut digits = [0u8; 20];
 

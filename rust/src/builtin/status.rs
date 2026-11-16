@@ -1,0 +1,1954 @@
+// SPDX-License-Identifier: BSD-2-Clause
+// Copyright (c) 2026 Authors of shirudo
+
+//! `shirudo status`: the verdict on this host, the conditions behind it,
+//! the tamper counters and the loaded upatches; below them, unfolded when
+//! their condition is not OK or on request, the keyrings, the TPM
+//! register, the assets, the system and the eventlog. As JSON it is also
+//! the keepalive a target sends its collector.
+
+use core::ffi::{CStr, c_char, c_int, c_void};
+use core::{mem, ptr};
+use std::ffi::{CString, OsStr};
+use std::io::Read;
+use std::os::unix::ffi::OsStrExt;
+
+use super::words;
+use crate::errno::{EINPROGRESS, ENODEV, ENOENT, ENOKEY};
+use crate::ffi;
+use crate::sys::bpf::bpf_obj_get;
+use crate::sys::btf::{btf__free, btf__load_vmlinux_btf};
+use crate::sys::identity::{Identity, identity_read};
+use crate::sys::image_runtime::image_config_state;
+use crate::sys::libc::{
+    access, close, explicit_bzero, fwrite, gethostname, stderr, stdout, strerror,
+};
+use crate::sys::log::{pr_err, pr_warn};
+use crate::sys::malloc::xfree;
+use crate::sys::otel::{OtelOpts, otel_send_log_json, status_otel_severity};
+use crate::sys::string::name_has_suffix;
+use crate::sys::tamper::{TamperCounts, tamper_meaning, tamper_name, tamper_read};
+use crate::sys::upatch::{
+    MapSummary, map_summary_free, upatch_loaded_at, upatch_maps_list_one, upatch_payload_sha256,
+    upatch_resolve_location,
+};
+use crate::sys::version::shirudo_version_id;
+use crate::text::cstr;
+use crate::util::bpm_tree_state::tree_emit_status;
+use crate::util::chain::{self, ChainStatus};
+use crate::util::conditions::{self, Condition, ConditionsInput};
+use crate::util::config::{self, Config};
+use crate::util::crypto_openssl::{
+    Cert, cert_free, cert_key_algorithm, cert_not_before, cert_read_der, cert_subject,
+};
+use crate::util::eventlog::{eventlog_lock, eventlog_path, eventlog_replay, eventlog_unlock};
+use crate::util::format::{fputs_sanitized, human_size};
+use crate::util::help::{Help, HelpItem, HelpSection, is_help, print_help};
+use crate::util::image_bootstrap::{ImageBootstrap, image_bootstrap_read};
+use crate::util::initrd;
+use crate::util::io::{bpffs_mounted_at, read_file};
+use crate::util::json::{JsonEmit, JsonField, MAX_BYTES, parse_schema};
+use crate::util::keyring::{
+    self, KeyringLink, keyring_bpf_serial, keyring_dm_verity_serial, keyring_links,
+};
+use crate::util::keys::{self, TrustedSet, keys_digest_der, keys_read_der};
+use crate::util::measured::{
+    MeasuredSet, measured_set_boot, measured_set_free, measured_unmeasured_archives,
+    measured_unmeasured_pins,
+};
+use crate::util::sysinfo::{Sysinfo, sysinfo_emit_json, sysinfo_gather};
+use crate::util::tpm::tpm_tcti;
+use crate::util::upatch_table::{self, UpatchTableRow};
+
+const VAR_LIB: &[u8] = b"/var/lib/shirudo";
+const KEYS_DIR: &CStr = c"/var/lib/shirudo/keys";
+const SIGNING_KEY_PATH: &CStr = c"/var/lib/shirudo/keys/signing_key.pem";
+const UPATCHES_DIR: &str = "/var/lib/shirudo/upatches";
+const INCOMING_DIR: &str = "/var/lib/shirudo/incoming";
+const BPFFS_DIR: &CStr = c"/run/shirudo/bpffs";
+const BPFFS_UPATCHES_DIR: &str = "/run/shirudo/bpffs/upatches";
+const LSM_LINK_PIN: &CStr = c"/run/shirudo/bpffs/lsm_link";
+const RUNTIME_CONF_PATH: &CStr = c"/run/shirudo/runtime/etc/shirudo/shirudo.conf";
+/// The register's NV index, as `0x%08X` prints it.
+const NV_INDEX: &CStr = c"0x01818E00";
+const CHAIN_PCR: u32 = 9;
+const CHAIN_PHASE_PCR: u32 = 11;
+const TCTI_MAX: usize = 256;
+const IDENTITY_KEYS_MAX: usize = 16;
+const UNMEASURED_NAMES: usize = 256;
+const SUBJECT_MAX: usize = 256;
+const CONDITIONS_MAX: usize = 6;
+
+fn print(text: &[u8]) {
+    // SAFETY: the bytes, to the C library's stdout.
+    unsafe { fwrite(text.as_ptr().cast(), 1, text.len(), stdout) };
+}
+
+fn eprint(text: &[u8]) {
+    // SAFETY: the bytes, to the C library's stderr.
+    unsafe { fwrite(text.as_ptr().cast(), 1, text.len(), stderr) };
+}
+
+fn message(parts: &[&[u8]]) -> CString {
+    let mut text = parts.concat();
+
+    if let Some(nul) = text.iter().position(|&c| c == 0) {
+        text.truncate(nul);
+    }
+    CString::new(text).unwrap_or_default()
+}
+
+fn strerr(err: c_int) -> &'static [u8] {
+    // SAFETY: strerror() gives a C string that outlives the message.
+    unsafe { ffi::c_str(strerror(err)) }
+}
+
+fn hex(bytes: &[u8]) -> Vec<u8> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    bytes
+        .iter()
+        .flat_map(|b| [HEX[usize::from(b >> 4)], HEX[usize::from(b & 0xf)]])
+        .collect()
+}
+
+/// `s` padded with spaces to `width` bytes, as `%-<width>s` prints it.
+fn pad(s: &[u8], width: usize) -> Vec<u8> {
+    let mut out = s.to_vec();
+
+    out.resize(width.max(s.len()), b' ');
+    out
+}
+
+/// At most `n` bytes of `s`, as `%.<n>s` prints it.
+fn trunc(s: &[u8], n: usize) -> &[u8] {
+    &s[..s.len().min(n)]
+}
+
+/// `<indent><label, to 22 columns> <value>`, a line of the report.
+fn row(indent: &[u8], label: &[u8], value: &[u8]) {
+    print(&[indent, &pad(label, 22), b" ", value, b"\n"].concat());
+}
+
+fn exists(path: &CStr) -> bool {
+    // SAFETY: a C string.
+    unsafe { access(path.as_ptr(), 0) == 0 }
+}
+
+/// The names in `dir` but `.` and `..`, in the C locale's alphasort()
+/// order; None when it cannot be listed.
+fn list_dir(dir: &str) -> Option<Vec<Vec<u8>>> {
+    let mut names = std::fs::read_dir(dir)
+        .ok()?
+        .map(|e| e.map(|e| e.file_name().as_bytes().to_vec()))
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+
+    names.sort();
+    Some(names)
+}
+
+fn is_upatch(name: &[u8]) -> bool {
+    let n = message(&[name]);
+    // SAFETY: a C string, its length and a suffix.
+    unsafe { name_has_suffix(n.as_ptr(), n.as_bytes().len(), c".upatch".as_ptr()) }
+}
+
+fn count_dir(dir: &str, upatch_only: bool) -> Option<usize> {
+    let names = list_dir(dir)?;
+
+    Some(
+        names
+            .iter()
+            .filter(|n| !upatch_only || is_upatch(n))
+            .count(),
+    )
+}
+
+fn eventlog() -> &'static [u8] {
+    // SAFETY: the path, a static C string.
+    unsafe { ffi::c_str(eventlog_path()) }
+}
+
+/// The eventlog's lines and bytes.
+fn count_eventlog() -> Option<(i64, i64)> {
+    let path = OsStr::from_bytes(eventlog());
+    let bytes = std::fs::metadata(path).ok()?.len() as i64;
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut buf = vec![0u8; 65536];
+    let mut lines = 0;
+
+    while let Ok(n @ 1..) = f.read(&mut buf) {
+        lines += buf[..n].iter().filter(|&&c| c == b'\n').count() as i64;
+    }
+    Some((lines, bytes))
+}
+
+/// The eventlog, up to its first NUL as the C string it was read as.
+fn read_eventlog() -> Option<Vec<u8>> {
+    let (mut buf, mut len): (*mut u8, usize) = (ptr::null_mut(), 0);
+
+    // SAFETY: a C string and room for the buffer and its length.
+    if unsafe { read_file(eventlog_path(), MAX_BYTES, (&raw mut buf).cast(), &mut len) } != 0 {
+        return None;
+    }
+    // SAFETY: the len bytes read.
+    let text = cstr(unsafe { ffi::slice(buf, len) }).to_vec();
+    // SAFETY: read_file()'s buffer of len + 1 bytes.
+    unsafe { xfree(buf.cast(), len + 1) };
+    Some(text)
+}
+
+/// The lines strtok_r() would give: the non-empty ones.
+fn lines(text: &[u8]) -> impl Iterator<Item = &[u8]> {
+    text.split(|&c| c == b'\n').filter(|l| !l.is_empty())
+}
+
+/// Enough of an eventlog record for the table and events[]; the log
+/// itself stays the authoritative copy.
+struct Event {
+    ts: [u8; 40],
+    ty: [u8; 24],
+    digest: [u8; 65],
+    set_digest: [u8; 65],
+    up_name: [u8; 257],
+    up_payload: [u8; 65],
+}
+
+fn parse_event(line: &[u8]) -> Option<Event> {
+    let mut ev = Event {
+        ts: [0; 40],
+        ty: [0; 24],
+        digest: [0; 65],
+        set_digest: [0; 65],
+        up_name: [0; 257],
+        up_payload: [0; 65],
+    };
+    let mut up = [
+        JsonField::string(c"name", ev.up_name.as_mut_ptr(), ev.up_name.len()),
+        JsonField::string(
+            c"payload_sha256",
+            ev.up_payload.as_mut_ptr(),
+            ev.up_payload.len(),
+        ),
+    ];
+    let mut f = [
+        JsonField::string(c"ts", ev.ts.as_mut_ptr(), ev.ts.len()),
+        JsonField::string(c"type", ev.ty.as_mut_ptr(), ev.ty.len()),
+        JsonField::string(c"digest", ev.digest.as_mut_ptr(), ev.digest.len()),
+        JsonField::string(
+            c"set_digest",
+            ev.set_digest.as_mut_ptr(),
+            ev.set_digest.len(),
+        ),
+        JsonField::object(c"upatch", up.as_mut_ptr(), up.len()),
+    ];
+
+    // SAFETY: the fields point into ev and up, which outlive the parse.
+    let ret = unsafe { parse_schema(line, f.as_mut_ptr(), f.len()) };
+    (ret == 0).then_some(ev)
+}
+
+impl Event {
+    /// The table's detail column; empty when it would not fit 256 bytes.
+    fn detail(&self) -> Vec<u8> {
+        let name = cstr(&self.up_name);
+        let set_digest = cstr(&self.set_digest);
+
+        if !name.is_empty() {
+            let d = [name, b" payload=", trunc(cstr(&self.up_payload), 12), b".."].concat();
+            return if d.len() < 256 { d } else { Vec::new() };
+        }
+        if !set_digest.is_empty() {
+            return [b"set_digest=", trunc(set_digest, 12), b".."].concat();
+        }
+        Vec::new()
+    }
+}
+
+fn emit_events(e: &mut JsonEmit) {
+    e.arr_open(b"events");
+    for line in read_eventlog().iter().flat_map(|t| lines(t)) {
+        e.obj_open();
+        let Some(ev) = parse_event(line) else {
+            e.kv_string(b"type", b"unparseable");
+            e.obj_close();
+            continue;
+        };
+        e.kv_string(b"ts", cstr(&ev.ts));
+        e.kv_string(b"type", cstr(&ev.ty));
+        e.kv_string(b"digest", cstr(&ev.digest));
+        if ev.set_digest[0] != 0 {
+            e.kv_string(b"set_digest", cstr(&ev.set_digest));
+        }
+        if ev.up_name[0] != 0 {
+            e.obj_open_key(b"upatch");
+            e.kv_string(b"name", cstr(&ev.up_name));
+            e.kv_string(b"payload_sha256", cstr(&ev.up_payload));
+            e.obj_close();
+        }
+        e.obj_close();
+    }
+    e.arr_close();
+}
+
+fn print_events() {
+    let Some(text) = read_eventlog() else {
+        return;
+    };
+
+    print(b"\nEventlog:\n");
+    print(
+        &[
+            &b"  "[..],
+            &pad(b"TIME", 20),
+            b" ",
+            &pad(b"TYPE", 13),
+            b" ",
+            &pad(b"DIGEST", 13),
+            b" DETAIL\n",
+        ]
+        .concat(),
+    );
+    for line in lines(&text) {
+        let Some(ev) = parse_event(line) else {
+            print(
+                &[
+                    &b"  "[..],
+                    &pad(b"?", 20),
+                    b" ",
+                    &pad(b"unparseable", 13),
+                    b" ",
+                    &pad(b"", 13),
+                    b"\n",
+                ]
+                .concat(),
+            );
+            continue;
+        };
+        let digest = if ev.digest[0] != 0 {
+            cstr(&ev.digest)
+        } else {
+            b"-"
+        };
+        print(
+            &[
+                &b"  "[..],
+                &pad(cstr(&ev.ts), 20),
+                b" ",
+                &pad(cstr(&ev.ty), 13),
+                b" ",
+                &pad(trunc(digest, 12), 13),
+                b" ",
+                &ev.detail(),
+                b"\n",
+            ]
+            .concat(),
+        );
+    }
+}
+
+fn size(bytes: u64) -> Vec<u8> {
+    let mut out = [0u8; 16];
+
+    human_size(bytes, &mut out);
+    cstr(&out).to_vec()
+}
+
+fn print_system(si: &Sysinfo) {
+    let field = |label: &[u8], value: &[u8]| row(b"  ", label, value);
+
+    print(b"\nSystem:\n");
+    field(b"OS:", cstr(&si.os_pretty));
+    field(b"Kernel:", cstr(&si.kernel_release));
+    if si.kernel_version[0] != 0 {
+        field(b"Kernel version:", cstr(&si.kernel_version));
+    }
+    if si.kernel_build_id[0] != 0 {
+        field(b"Kernel build ID:", cstr(&si.kernel_build_id));
+    }
+    field(b"Architecture:", cstr(&si.machine));
+    if si.nproc > 0 {
+        field(b"CPUs:", si.nproc.to_string().as_bytes());
+    }
+    if si.mem_total_kb > 0 {
+        let total = size((si.mem_total_kb as u64).wrapping_mul(1024));
+        if si.mem_avail_kb >= 0 && si.mem_avail_kb <= si.mem_total_kb {
+            let used = size(((si.mem_total_kb - si.mem_avail_kb) as u64).wrapping_mul(1024));
+            field(b"Memory:", &[&used[..], b"/", &total].concat());
+        } else {
+            field(b"Memory:", &total);
+        }
+    }
+    if si.disk_total_kb > 0 {
+        let total = size((si.disk_total_kb as u64).wrapping_mul(1024));
+        let used = size((si.disk_used_kb as u64).wrapping_mul(1024));
+        field(b"Disk:", &[&used[..], b"/", &total].concat());
+    }
+    if si.uptime_sec >= 0 {
+        let s = si.uptime_sec;
+        let up = format!(
+            "{}d {}h {}m",
+            s / 86400,
+            (s % 86400) / 3600,
+            (s % 3600) / 60
+        );
+        field(b"Uptime:", up.as_bytes());
+    }
+    if si.machine_id[0] != 0 {
+        field(b"Machine ID:", cstr(&si.machine_id));
+    }
+    if si.boot_id[0] != 0 {
+        field(b"Boot ID:", cstr(&si.boot_id));
+    }
+}
+
+const fn item(name: &'static CStr, summary: &'static CStr) -> HelpItem {
+    HelpItem {
+        name: name.as_ptr(),
+        summary: summary.as_ptr(),
+    }
+}
+
+const OPTIONS: [HelpItem; 6] = [
+    item(c"--json", c"print the report as one JSON document"),
+    item(c"--otel", c"send the JSON report as an OTLP keepalive log"),
+    item(c"--check", c"exit 1 when the verdict is tampered"),
+    item(
+        c"--show-full",
+        c"print every section, folded or not, and the system and eventlog sections",
+    ),
+    item(
+        c"--include-system",
+        c"add the system section: OS, kernel, machine, memory, disk, uptime",
+    ),
+    item(
+        c"--include-eventlog",
+        c"add the eventlog records, all boots",
+    ),
+];
+const USAGE: &CStr = c"shirudo status [--json | --otel] [--check] [--show-full]\n                       [--include-system] [--include-eventlog]";
+
+fn help() {
+    let sections = [HelpSection {
+        header: c"options:".as_ptr(),
+        items: OPTIONS.as_ptr(),
+        n_items: OPTIONS.len(),
+    }];
+    let help = Help {
+        usage: USAGE.as_ptr(),
+        summary: c"Report the state of this host: the verdict, the conditions behind it, the\n\
+tamper counters and the loaded upatches. A section whose condition is not OK\n\
+unfolds below them. Safe to run before init, on a target or an operator host."
+            .as_ptr(),
+        sections: sections.as_ptr(),
+        n_sections: sections.len(),
+        footer: ptr::null(),
+    };
+
+    // SAFETY: the help, its constant strings and its section live.
+    unsafe { print_help(&help) };
+}
+
+/// A loaded upatch's row: its location, when it loaded, its payload and
+/// its maps.
+fn upatch_rows(pins: &[Vec<u8>]) -> Vec<UpatchTableRow> {
+    if pins.is_empty() {
+        return Vec::new();
+    }
+    // vmlinux BTF loaded once; every shirudo upatch attaches to vmlinux.
+    // SAFETY: libbpf's loader, NULL when there is none.
+    let vbtf = unsafe { btf__load_vmlinux_btf() };
+    let rows = pins
+        .iter()
+        .map(|pin| {
+            // SAFETY: an all-zero row is an empty one.
+            let mut r: UpatchTableRow = unsafe { mem::zeroed() };
+            let name = message(&[&upatch_name(pin).unwrap_or_else(|| pin.clone())]);
+            let (mut list, mut n): (*mut MapSummary, usize) = (ptr::null_mut(), 0);
+
+            let bytes = name.as_bytes_with_nul();
+            let n_name = bytes.len().min(r.name.len());
+            for (d, &s) in r.name.iter_mut().zip(&bytes[..n_name]) {
+                *d = s as c_char;
+            }
+            // SAFETY: the BTF or NULL, a C string and each field's room.
+            unsafe {
+                upatch_resolve_location(
+                    vbtf,
+                    name.as_ptr(),
+                    r.location.as_mut_ptr(),
+                    r.location.len(),
+                );
+                upatch_loaded_at(name.as_ptr(), r.loaded_at.as_mut_ptr(), r.loaded_at.len());
+                upatch_payload_sha256(
+                    name.as_ptr(),
+                    r.payload_sha256.as_mut_ptr(),
+                    r.payload_sha256.len(),
+                );
+                upatch_maps_list_one(name.as_ptr(), &mut list, &mut n);
+                map_summary_free(list, n);
+                r.age_sec = upatch_table::age_sec(r.loaded_at.as_ptr());
+            }
+            r.n_maps = n as u32;
+            r
+        })
+        .collect();
+    // SAFETY: the BTF loaded above, or NULL.
+    unsafe { btf__free(vbtf) };
+    rows
+}
+
+/// The upatch name of a bpffs pin, `~d` standing for `.` there.
+fn upatch_name(pin: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(pin.len());
+    let mut it = pin.iter();
+
+    while let Some(&c) = it.next() {
+        if c != b'~' {
+            out.push(c);
+        } else if it.next() == Some(&b'd') {
+            out.push(b'.');
+        } else {
+            return None;
+        }
+    }
+    Some(out)
+}
+
+/// A link of a keyring: what it is and whether init froze it.
+struct Link {
+    serial: i32,
+    err: c_int,
+    ty: Vec<u8>,
+    description: Vec<u8>,
+    frozen: bool,
+    /// Holds one of the certificates.
+    cert: bool,
+}
+
+impl Link {
+    fn asymmetric(&self) -> bool {
+        self.err == 0 && self.ty == b"asymmetric"
+    }
+}
+
+struct CertInfo {
+    subject: Vec<u8>,
+    algorithm: Vec<u8>,
+    not_before: Vec<u8>,
+}
+
+/// A certificate a keyring should hold, and the link that holds it.
+struct CertView {
+    sha256: [u8; 32],
+    fingerprint: [u8; 32],
+    primary: bool,
+    info: Result<CertInfo, c_int>,
+    link: Option<usize>,
+}
+
+/// A keyring init froze: its live and frozen serials, every link it
+/// holds and which of those init froze, and the certificates it should
+/// hold.
+struct KeyringView {
+    /// Live, or -errno.
+    serial: i32,
+    /// Frozen, 0 for none, or -errno.
+    pinned: i32,
+    links: Result<Vec<Link>, c_int>,
+    certs: Vec<CertView>,
+    certs_rc: c_int,
+    key_missing: bool,
+}
+
+impl KeyringView {
+    fn new(serial: i32, pinned: i32, frozen: &[i32]) -> Self {
+        let links = if serial < 0 {
+            Err(serial)
+        } else {
+            let (mut raw, mut n): (*mut KeyringLink, usize) = (ptr::null_mut(), 0);
+            // SAFETY: the serial and room for the links and their count.
+            match unsafe { keyring_links(serial, &mut raw, &mut n) } {
+                0 => {
+                    // SAFETY: the n links read.
+                    let all = unsafe { ffi::slice(raw, n) };
+                    let links = all
+                        .iter()
+                        .map(|l| Link {
+                            serial: l.serial(),
+                            err: l.err(),
+                            ty: l.ty().to_vec(),
+                            description: l.description().to_vec(),
+                            frozen: frozen.contains(&l.serial()),
+                            cert: false,
+                        })
+                        .collect();
+                    // SAFETY: keyring_links()'s array of n links.
+                    unsafe { xfree(raw.cast(), n * size_of::<KeyringLink>()) };
+                    Ok(links)
+                }
+                err => Err(err),
+            }
+        };
+        KeyringView {
+            serial,
+            pinned,
+            links,
+            certs: Vec::new(),
+            certs_rc: 0,
+            key_missing: false,
+        }
+    }
+
+    fn links(&self) -> &[Link] {
+        self.links.as_deref().unwrap_or(&[])
+    }
+
+    fn n_unfrozen(&self) -> usize {
+        self.links().iter().filter(|l| !l.frozen).count()
+    }
+
+    fn n_asymmetric(&self) -> usize {
+        self.links().iter().filter(|l| l.asymmetric()).count()
+    }
+
+    /// Adds a certificate, with its subject, key and dates, and the link
+    /// whose key it is.
+    fn add(&mut self, mut c: CertView, der: &[u8]) {
+        let mut desc = [0u8; keyring::DESC_MAX];
+
+        c.info = cert_info(der);
+        // SAFETY: the DER and room for the description.
+        let described =
+            unsafe { keyring::cert_description(der.as_ptr(), der.len(), &mut desc) } == 0;
+        if let (true, Ok(links)) = (described, &mut self.links) {
+            let desc = cstr(&desc);
+            if let Some(i) = links
+                .iter()
+                .position(|l| l.asymmetric() && !l.cert && l.description == desc)
+            {
+                links[i].cert = true;
+                c.link = Some(i);
+            }
+        }
+        self.certs.push(c);
+    }
+
+    fn bpf(
+        serial: i32,
+        pinned: i32,
+        ident: &Identity,
+        certs: &TrustedSet,
+        certs_rc: c_int,
+    ) -> Self {
+        let n_frozen = if pinned >= 1 {
+            (ident.n_keys as usize).min(IDENTITY_KEYS_MAX)
+        } else {
+            0
+        };
+        let mut k = KeyringView::new(serial, pinned, &ident.key_serials[..n_frozen]);
+
+        k.certs_rc = certs_rc;
+        if certs_rc != 0 {
+            return k;
+        }
+        for t in keys::members(certs) {
+            let c = CertView {
+                sha256: *t.sha256(),
+                fingerprint: *t.fingerprint(),
+                primary: t.primary(),
+                info: Err(0),
+                link: None,
+            };
+            match keys::cert_der(t) {
+                Ok(der) => k.add(c, der),
+                Err(err) => k.certs.push(CertView {
+                    info: Err(err),
+                    ..c
+                }),
+            }
+        }
+        k
+    }
+
+    /// The config certificate comes from the runtime image's bootstrap.
+    fn dm_verity(serial: i32, pinned: i32, ident: &Identity) -> Self {
+        let key = ident.dm_verity_key;
+        let frozen: &[i32] = if pinned >= 1 && key > 0 {
+            core::slice::from_ref(&ident.dm_verity_key)
+        } else {
+            &[]
+        };
+        let mut k = KeyringView::new(serial, pinned, frozen);
+        // SAFETY: an all-zero bootstrap is an empty one.
+        let mut boot: Box<ImageBootstrap> = Box::new(unsafe { mem::zeroed() });
+        let (mut der, mut len): (*mut u8, usize) = (ptr::null_mut(), 0);
+        let mut c = CertView {
+            sha256: [0; 32],
+            fingerprint: [0; 32],
+            primary: true,
+            info: Err(0),
+            link: None,
+        };
+
+        if pinned >= 1 && key > 0 {
+            if let Ok(links) = &k.links {
+                k.key_missing = !links.iter().any(|l| l.serial == key);
+            }
+        }
+        // SAFETY: a C string and the bootstrap to fill.
+        let mut rc = unsafe { image_bootstrap_read(RUNTIME_CONF_PATH.as_ptr(), &mut *boot, false) };
+        if rc == 0 && boot.certificate[0] == 0 {
+            rc = -ENOENT;
+        }
+        if rc == 0 {
+            // SAFETY: the certificate path, a C string, and room for the DER.
+            rc = unsafe { keys_read_der(boot.certificate.as_ptr().cast(), &mut der, &mut len) };
+        }
+        if rc == 0 {
+            // SAFETY: the DER read and room for the two digests.
+            rc = unsafe {
+                keys_digest_der(der, len, c.sha256.as_mut_ptr(), c.fingerprint.as_mut_ptr())
+            };
+        }
+        k.certs_rc = rc;
+        if rc == 0 {
+            // SAFETY: the len bytes read.
+            k.add(c, unsafe { ffi::slice(der, len) });
+        }
+        // SAFETY: keys_read_der()'s buffer of len bytes, or NULL.
+        unsafe { xfree(der.cast(), len) };
+        k
+    }
+
+    fn emit_json(&self, e: &mut JsonEmit, key: &[u8], role: &[u8]) {
+        e.obj_open_key(key);
+        e.kv_bool(b"present", self.serial >= 0);
+        match self.serial {
+            s if s >= 0 => e.kv_int(b"serial", s.into()),
+            _ => e.kv_null(b"serial"),
+        }
+        match self.pinned {
+            p if p >= 1 => e.kv_int(b"serial_pinned", p.into()),
+            _ => e.kv_null(b"serial_pinned"),
+        }
+        if self.serial >= 0 && self.pinned >= 1 {
+            e.kv_bool(b"serial_matches", self.serial == self.pinned);
+        } else {
+            e.kv_null(b"serial_matches");
+        }
+        e.arr_open(b"certs");
+        for c in &self.certs {
+            e.obj_open();
+            e.kv_string(b"sha256", &hex(&c.sha256));
+            e.kv_string(b"fingerprint", &hex(&c.fingerprint));
+            e.kv_bool(role, c.primary);
+            match &c.info {
+                Ok(i) => {
+                    e.kv_string(b"subject", &i.subject);
+                    e.kv_string(b"algorithm", &i.algorithm);
+                    e.kv_string(b"not_before", &i.not_before);
+                }
+                Err(_) => {
+                    e.kv_null(b"subject");
+                    e.kv_null(b"algorithm");
+                    e.kv_null(b"not_before");
+                }
+            }
+            match c.link.map(|i| &self.links()[i]) {
+                Some(l) => {
+                    e.kv_int(b"key_serial", l.serial.into());
+                    e.kv_string(b"key_description", &l.description);
+                    e.kv_bool(b"frozen", l.frozen);
+                }
+                None => {
+                    e.kv_null(b"key_serial");
+                    e.kv_null(b"key_description");
+                    e.kv_null(b"frozen");
+                }
+            }
+            e.obj_close();
+        }
+        e.arr_close();
+        e.arr_open(b"other_links");
+        for l in self.links().iter().filter(|l| !l.cert) {
+            e.obj_open();
+            e.kv_int(b"serial", l.serial.into());
+            if l.err != 0 {
+                e.kv_null(b"type");
+                e.kv_null(b"description");
+            } else {
+                e.kv_string(b"type", &l.ty);
+                e.kv_string(b"description", &l.description);
+            }
+            e.kv_bool(b"frozen", l.frozen);
+            e.obj_close();
+        }
+        e.arr_close();
+        e.obj_close();
+    }
+
+    fn print_link(l: &Link, indent: &[u8]) {
+        let serial = l.serial.to_string();
+
+        if l.err != 0 {
+            print(
+                &[
+                    indent,
+                    b"link ",
+                    serial.as_bytes(),
+                    b"  (cannot describe: ",
+                    strerr(-l.err),
+                    b")",
+                ]
+                .concat(),
+            );
+        } else {
+            let ty: &[u8] = if l.ty == b"asymmetric" { b"key" } else { &l.ty };
+            print(&[indent, ty, b" ", serial.as_bytes(), b"  "].concat());
+            // SAFETY: the description, to the C library's stdout.
+            unsafe { fputs_sanitized(&l.description, stdout) };
+        }
+        print(if l.frozen {
+            b"  (frozen)\n"
+        } else {
+            b"  (not frozen)\n"
+        });
+    }
+
+    fn print_certs(&self, role: &[u8], unlinked: &[u8]) {
+        for c in &self.certs {
+            let role: Vec<u8> = if c.primary {
+                [b"  (", role, b")"].concat()
+            } else {
+                Vec::new()
+            };
+            print(&[b"    ", &hex(&c.fingerprint)[..], &role, b"\n"].concat());
+            match &c.info {
+                Err(rc) => print(&[b"      (details unreadable: ", strerr(-rc), b")\n"].concat()),
+                Ok(i) => print(
+                    &[
+                        b"      ",
+                        &i.subject[..],
+                        b", ",
+                        &i.algorithm,
+                        b", issued ",
+                        &i.not_before,
+                        b"\n",
+                    ]
+                    .concat(),
+                ),
+            }
+            match c.link {
+                Some(i) => Self::print_link(&self.links()[i], b"      "),
+                None if self.links.is_ok() => {
+                    print(&[b"      not in the keyring  (", unlinked, b")\n"].concat())
+                }
+                None => {}
+            }
+        }
+    }
+
+    fn print_other_links(&self) {
+        let mut others = self.links().iter().filter(|l| !l.cert).peekable();
+
+        if others.peek().is_some() {
+            print(b"  Other links:\n");
+        }
+        for l in others {
+            Self::print_link(l, b"    ");
+        }
+    }
+
+    fn print_serials(&self) {
+        let field = |label: &[u8], value: &[u8]| row(b"  ", label, value);
+        let (serial, pinned) = (self.serial, self.pinned);
+
+        if serial >= 0 {
+            field(b"Serial:", serial.to_string().as_bytes());
+        } else if pinned == -ENOENT {
+            field(b"Serial:", b"absent before init");
+        } else if serial == -ENOKEY {
+            field(b"Serial:", b"absent");
+        } else {
+            field(b"Serial:", &[b"lookup error: ", strerr(-serial)].concat());
+        }
+        if pinned == -ENOENT || pinned == 0 {
+            field(b"Frozen serial:", b"(none this boot)");
+        } else if pinned < 0 {
+            field(
+                b"Frozen serial:",
+                &[b"unreadable: ", strerr(-pinned)].concat(),
+            );
+        } else {
+            let state: &[u8] = if serial < 0 {
+                b"  (gone)"
+            } else if serial == pinned {
+                b"  (matches)"
+            } else {
+                b"  (swapped)"
+            };
+            field(
+                b"Frozen serial:",
+                &[pinned.to_string().as_bytes(), state].concat(),
+            );
+        }
+        if let (Err(rc), true) = (&self.links, serial >= 0) {
+            field(b"Links:", &[b"unreadable: ", strerr(-rc)].concat());
+        }
+    }
+}
+
+fn cert_info(der: &[u8]) -> Result<CertInfo, c_int> {
+    let mut cert = Cert::new();
+    let mut subject = [0u8; SUBJECT_MAX];
+    let mut algorithm = [0u8; 32];
+    let mut not_before = [0u8; 11];
+
+    // SAFETY: the DER and the cert to fill.
+    let rc = unsafe { cert_read_der(der.as_ptr(), der.len(), &mut cert) };
+    if rc != 0 {
+        return Err(rc);
+    }
+    // SAFETY: the cert read above and each field's room, then freed.
+    let rc = unsafe {
+        let mut rc = cert_subject(&cert, subject.as_mut_ptr().cast(), subject.len());
+        if rc == 0 {
+            rc = cert_key_algorithm(&cert, algorithm.as_mut_ptr().cast(), algorithm.len());
+        }
+        if rc == 0 {
+            rc = cert_not_before(&cert, not_before.as_mut_ptr().cast());
+        }
+        cert_free(&mut cert);
+        rc
+    };
+    if rc != 0 {
+        return Err(rc);
+    }
+    Ok(CertInfo {
+        subject: cstr(&subject).to_vec(),
+        algorithm: cstr(&algorithm).to_vec(),
+        not_before: cstr(&not_before).to_vec(),
+    })
+}
+
+/// Appends `name` to the comma-separated `names`, ending them with
+/// `, ...` once the next does not fit.
+fn note(names: &mut [u8; UNMEASURED_NAMES], name: &[u8]) {
+    let used = cstr(names).len();
+    let room = UNMEASURED_NAMES - used;
+    let text = [if used != 0 { &b", "[..] } else { b"" }, name].concat();
+
+    if used >= 3 && names[..used].ends_with(b"...") {
+        return;
+    }
+    if text.len() < room {
+        names[used..used + text.len()].copy_from_slice(&text);
+        names[used + text.len()] = 0;
+        return;
+    }
+    names[used] = 0;
+    if used != 0 {
+        let n = b", ...".len().min(room - 1);
+        names[used..used + n].copy_from_slice(&b", ..."[..n]);
+        names[used + n] = 0;
+    }
+}
+
+unsafe extern "C" fn note_pin(name: *const c_char, ctx: *mut c_void) -> c_int {
+    // SAFETY: the names this command passed, and a C string.
+    unsafe { note(&mut *ctx.cast(), ffi::c_str(name)) };
+    0
+}
+
+unsafe extern "C" fn note_archive(
+    name: *const c_char,
+    _path: *const c_char,
+    ctx: *mut c_void,
+) -> c_int {
+    // SAFETY: as note_pin().
+    unsafe { note_pin(name, ctx) }
+}
+
+/// The pins and archives this boot's eventlog did not measure: how many,
+/// or -errno, and their names.
+fn unmeasured(names: &mut [u8; UNMEASURED_NAMES]) -> c_int {
+    let lock = eventlog_lock();
+    let mut set: *mut MeasuredSet = ptr::null_mut();
+    let ctx: *mut c_void = names.as_mut_ptr().cast();
+    let mut n = if lock < 0 {
+        lock
+    } else {
+        // SAFETY: room for the set.
+        unsafe { measured_set_boot(&mut set) }
+    };
+
+    if n == 0 {
+        // SAFETY: the set read above, a callback and the names it fills;
+        // then the set is freed.
+        unsafe {
+            n = measured_unmeasured_pins(set, Some(note_pin), ctx);
+            if n >= 0 {
+                let archived = measured_unmeasured_archives(set, Some(note_archive), ctx);
+                n = if archived < 0 { archived } else { n + archived };
+            }
+            measured_set_free(set);
+        }
+    }
+    eventlog_unlock(lock);
+    n
+}
+
+struct Assets {
+    cert: bool,
+    signing_key: bool,
+    eventlog_bytes: Option<i64>,
+    upatches: Option<usize>,
+    incoming: Option<usize>,
+    bpffs_mounted: bool,
+}
+
+impl Assets {
+    fn gather() -> Self {
+        Assets {
+            cert: exists(initrd::cert_path()),
+            signing_key: exists(SIGNING_KEY_PATH),
+            eventlog_bytes: std::fs::metadata(OsStr::from_bytes(eventlog()))
+                .ok()
+                .map(|m| m.len() as i64),
+            upatches: count_dir(UPATCHES_DIR, true),
+            incoming: count_dir(INCOMING_DIR, false),
+            // SAFETY: a C string.
+            bpffs_mounted: unsafe { bpffs_mounted_at(BPFFS_DIR.as_ptr()) } > 0,
+        }
+    }
+}
+
+/// The OTLP export the configuration names, scrubbed when it goes.
+struct Otel {
+    cfg: Box<Config>,
+}
+
+impl Drop for Otel {
+    fn drop(&mut self) {
+        // SAFETY: the configuration, all of it.
+        unsafe { explicit_bzero((&raw mut *self.cfg).cast(), size_of::<Config>()) };
+    }
+}
+
+impl Otel {
+    fn load() -> Result<Self, c_int> {
+        // SAFETY: an all-zero configuration is an empty one.
+        let cfg = Box::new(unsafe { mem::zeroed() });
+        let mut o = Otel { cfg };
+
+        // SAFETY: the configuration to fill.
+        let err = unsafe { config::load(&mut *o.cfg) };
+        if err != 0 {
+            let msg = message(&[b"status: load OTEL configuration: ", strerr(-err)]);
+            // SAFETY: a "%s" format with a C string.
+            unsafe { pr_err(c"%s".as_ptr(), msg.as_ptr()) };
+            return Err(1);
+        }
+        if !o.cfg.map_export_valid {
+            // SAFETY: a format without conversions.
+            unsafe { pr_err(c"status: invalid OTEL configuration".as_ptr()) };
+            return Err(2);
+        }
+        Ok(o)
+    }
+
+    fn opts(&self) -> OtelOpts {
+        let c = &self.cfg;
+        let set = |s: &[u8]| {
+            if s[0] != 0 {
+                s.as_ptr().cast()
+            } else {
+                ptr::null()
+            }
+        };
+
+        OtelOpts {
+            endpoint: set(&c.map_export_otel_endpoint),
+            tenant_id: set(&c.map_export_tenant_id),
+            s3_uri: ptr::null(),
+            allow_insecure: c.map_export_otel_insecure,
+            retries: c.map_export_otel_retries,
+            log_record_max_bytes: 0,
+            otlp_max_bytes: c.map_export_otlp_max_bytes,
+        }
+    }
+
+    /// Unlike the general OTLP exporter, the keepalive must not silently
+    /// turn an absent configuration into a request to localhost: it is
+    /// sent only to an endpoint configured explicitly.
+    fn endpoint_configured(&self) -> bool {
+        let set = |var| std::env::var_os(var).is_some_and(|v| !v.is_empty());
+
+        self.cfg.map_export_otel_endpoint[0] != 0
+            || set("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
+            || set("OTEL_EXPORTER_OTLP_ENDPOINT")
+    }
+}
+
+/// What this host looks like.
+struct Report {
+    hostname: Vec<u8>,
+    lsm_attached: bool,
+    keyring_serial: i32,
+    keyring_pinned: i32,
+    keyring_mode: &'static CStr,
+    certs: Box<TrustedSet>,
+    certs_rc: c_int,
+    bpf: KeyringView,
+    dmv: KeyringView,
+    is_operator: bool,
+    cert_present: bool,
+    is_target: bool,
+    pins: Vec<Vec<u8>>,
+    unmeasured: c_int,
+    unmeasured_names: [u8; UNMEASURED_NAMES],
+    assets: Assets,
+    tamper: Result<TamperCounts, c_int>,
+    config_state: c_int,
+    config_root: CString,
+    tcti: Vec<u8>,
+    cst: ChainStatus,
+    chain_rc: c_int,
+    eventlog: Option<(i64, i64)>,
+    /// Whether the register equals this boot's records replayed.
+    matches: Option<bool>,
+    sysinfo: Option<Box<Sysinfo>>,
+}
+
+impl Report {
+    fn gather(include_system: bool) -> Self {
+        let sysinfo = include_system.then(|| {
+            // SAFETY: an all-zero sysinfo is an empty one.
+            let mut si: Box<Sysinfo> = Box::new(unsafe { mem::zeroed() });
+            // SAFETY: the sysinfo to fill.
+            unsafe { sysinfo_gather(&mut *si) };
+            si
+        });
+        let mut host = [0u8; 256];
+        // SAFETY: room for the name.
+        if unsafe { gethostname(host.as_mut_ptr().cast(), host.len()) } != 0 {
+            host[..2].copy_from_slice(b"?\0");
+        }
+        host[255] = 0;
+        // SAFETY: a C string.
+        let fd = unsafe { bpf_obj_get(LSM_LINK_PIN.as_ptr()) };
+        if fd >= 0 {
+            // SAFETY: the descriptor opened above.
+            unsafe { close(fd) };
+        }
+
+        // The anchor init froze is the kernel's record; the live keyring
+        // of that kind is what a load would name, and the two must agree.
+        let mut ident = Identity::zeroed();
+        // SAFETY: the identity to fill.
+        let mut pinned = unsafe { identity_read(&mut ident) };
+        if pinned == 0 {
+            pinned = ident.keyring_serial;
+        }
+        let serial = if pinned >= 1 {
+            keyring_bpf_serial()
+        } else {
+            -ENOKEY
+        };
+        let mode = if serial >= 0 { c"bpf" } else { c"none" };
+        // The certificates the keyring would have been given, and how
+        // many keys it holds now: the two part when a certificate was
+        // added or revoked since the boot.
+        // SAFETY: an all-zero set is an empty one.
+        let mut certs: Box<TrustedSet> = Box::new(unsafe { mem::zeroed() });
+        // SAFETY: a C string and the set to fill.
+        let certs_rc =
+            unsafe { keys::load(KEYS_DIR.as_ptr(), ptr::null(), serial >= 0, &mut *certs) };
+        let bpf = KeyringView::bpf(serial, pinned, &ident, &certs, certs_rc);
+        let dmv_pinned = if pinned < 0 {
+            pinned
+        } else {
+            ident.dm_verity_ring
+        };
+        let dmv_serial = if dmv_pinned >= 1 {
+            keyring_dm_verity_serial()
+        } else {
+            -ENOKEY
+        };
+        let dmv = KeyringView::dm_verity(dmv_serial, dmv_pinned, &ident);
+        let is_operator = exists(SIGNING_KEY_PATH);
+        let cert_present = exists(initrd::cert_path());
+        let lsm_attached = fd >= 0;
+
+        let pins = list_dir(BPFFS_UPATCHES_DIR).unwrap_or_default();
+        let mut unmeasured_names = [0u8; UNMEASURED_NAMES];
+        let unmeasured = unmeasured(&mut unmeasured_names);
+        let assets = Assets::gather();
+        // SAFETY: an all-zero count is an empty one.
+        let mut counts: TamperCounts = unsafe { mem::zeroed() };
+        // SAFETY: the counts to fill.
+        let tamper = match unsafe { tamper_read(&mut counts) } {
+            0 => Ok(counts),
+            err => Err(err),
+        };
+        let mut root = [0u8; 32];
+        // SAFETY: room for the root.
+        let config_state = unsafe { image_config_state(&mut root) };
+        let config_root = message(&[&if config_state != -ENODEV {
+            hex(&root)
+        } else {
+            Vec::new()
+        }]);
+
+        let mut tcti = [0u8; TCTI_MAX];
+        // SAFETY: room for the TCTI.
+        if unsafe { tpm_tcti(tcti.as_mut_ptr().cast(), tcti.len()) } != 0 {
+            tcti[..2].copy_from_slice(b"?\0");
+        }
+        // SAFETY: an all-zero status is an empty one.
+        let mut cst: ChainStatus = unsafe { mem::zeroed() };
+        let mut chain_rc = chain::status(&mut cst);
+        if chain_rc == 0 && !(cst.defined && cst.written) {
+            chain_rc = -ENODEV;
+        }
+        let eventlog = count_eventlog();
+        // Tamper check: the live register must be the index init bound
+        // this boot and equal this boot's eventlog records replayed from
+        // zero. A replay failure (malformed log, or no init record while
+        // a register exists) is a mismatch.
+        let matches = (chain_rc == 0).then(|| {
+            let mut replay = [0u8; 32];
+            // SAFETY: room for the digest.
+            cst.anchored
+                && !cst.rebound
+                && unsafe { eventlog_replay(replay.as_mut_ptr()) } == 0
+                && cst.value == replay
+        });
+
+        Report {
+            hostname: cstr(&host).to_vec(),
+            lsm_attached,
+            keyring_serial: serial,
+            keyring_pinned: pinned,
+            keyring_mode: mode,
+            certs,
+            certs_rc,
+            bpf,
+            dmv,
+            is_operator,
+            cert_present,
+            is_target: cert_present || lsm_attached || serial >= 0,
+            pins,
+            unmeasured,
+            unmeasured_names,
+            assets,
+            tamper,
+            config_state,
+            config_root,
+            tcti: cstr(&tcti).to_vec(),
+            cst,
+            chain_rc,
+            eventlog,
+            matches,
+            sysinfo,
+        }
+    }
+
+    fn keyring_present(&self) -> bool {
+        self.keyring_serial >= 0
+    }
+
+    /// The conditions' input, which points into the report.
+    fn input(&self) -> ConditionsInput {
+        let (present, pinned) = (self.keyring_present(), self.keyring_pinned >= 1);
+        let (dmv_present, dmvp_seen) = (self.dmv.serial >= 0, self.dmv.pinned >= 1);
+
+        ConditionsInput {
+            reachable: true,
+            parsed: true,
+            unreach: ptr::null(),
+            lsm_attached: self.lsm_attached.into(),
+            keyring_present: present.into(),
+            keyring_mode: self.keyring_mode.as_ptr(),
+            keyring_serial: self.keyring_serial.into(),
+            keyring_serial_pinned: if pinned {
+                self.keyring_pinned.into()
+            } else {
+                0
+            },
+            keyring_serial_matches: (present
+                && pinned
+                && self.keyring_serial == self.keyring_pinned)
+                .into(),
+            ks_seen: present.into(),
+            ksp_seen: pinned.into(),
+            ksm_seen: (present && pinned).into(),
+            bpf_unfrozen: self.bpf.n_unfrozen() as c_int,
+            dmv_present: dmv_present.into(),
+            dmv_serial: self.dmv.serial.into(),
+            dmv_serial_pinned: if dmvp_seen { self.dmv.pinned.into() } else { 0 },
+            dmv_serial_matches: (dmv_present && dmvp_seen && self.dmv.serial == self.dmv.pinned)
+                .into(),
+            dmvp_seen: dmvp_seen.into(),
+            dmvm_seen: (dmv_present && dmvp_seen).into(),
+            dmv_unfrozen: self.dmv.n_unfrozen() as c_int,
+            dmv_key_missing: self.dmv.key_missing.into(),
+            tpm_reachable: self.cst.tpm.into(),
+            chain_seen: (self.chain_rc == 0).into(),
+            chain_matches: (self.matches == Some(true)).into(),
+            cm_seen: self.matches.is_some().into(),
+            nv_index: NV_INDEX.as_ptr(),
+            config_seen: (self.config_state != -ENODEV).into(),
+            config_state: self.config_state,
+            config_root: self.config_root.as_ptr(),
+            pins_rc: self.unmeasured.min(0),
+            pins_unmeasured: self.unmeasured.max(0),
+            pins_detail: self.unmeasured_names.as_ptr().cast(),
+        }
+    }
+
+    fn chain_hex(&self) -> Option<(Vec<u8>, Vec<u8>)> {
+        let c = &self.cst;
+        (self.chain_rc == 0).then(|| (hex(&c.value), hex(&c.name[..c.name_len.min(c.name.len())])))
+    }
+
+    /// Room for the document: every loaded upatch adds a row, every
+    /// certificate and link of the keyrings an entry, whose strings JSON
+    /// escaping can grow sixfold, and the events[] dump re-emits the log.
+    fn json_cap(&self, include_eventlog: bool) -> usize {
+        let entries = self.bpf.certs.len()
+            + self.bpf.links().len()
+            + self.dmv.certs.len()
+            + self.dmv.links().len();
+        let mut cap = 16384 + self.pins.len() * (6 * size_of::<UpatchTableRow>() + 256);
+
+        cap += entries * (6 * (keyring::DESC_MAX + SUBJECT_MAX) + 512);
+        if let (true, Some((_, bytes))) = (include_eventlog, self.eventlog) {
+            cap += 65536 + 3 * bytes as usize;
+        }
+        if self.sysinfo.is_some() {
+            cap += 1024 * 1024;
+        }
+        cap.min(MAX_BYTES)
+    }
+
+    fn emit_json(&self, e: &mut JsonEmit, cin: &ConditionsInput, include_eventlog: bool) {
+        let (present, pinned) = (self.keyring_present(), self.keyring_pinned >= 1);
+        let mut reason = [0u8; 160];
+        let mut conds: [Condition; CONDITIONS_MAX] = no_conditions();
+
+        e.obj_open();
+        e.kv_int(b"schema", 1);
+        e.kv_string(b"version_id", version_id());
+        e.kv_string(b"host", &self.hostname);
+        e.kv_bool(b"is_target", self.is_target);
+        e.kv_bool(b"is_operator", self.is_operator);
+        e.kv_string(b"status", conditions::status_verdict(cin).to_bytes());
+        // SAFETY: the input and room for the reason.
+        unsafe { conditions::status_reason(cin, &mut reason) };
+        match cstr(&reason) {
+            [] => e.kv_null(b"reason"),
+            r => e.kv_string(b"reason", r),
+        }
+        let nc = conditions::conditions(cin, &mut conds);
+        e.arr_open(b"conditions");
+        for c in &conds[..nc] {
+            e.obj_open();
+            // SAFETY: a condition's strings are C strings.
+            unsafe {
+                e.kv_string(b"type", ffi::c_str(c.kind));
+                e.kv_string(b"status", ffi::c_str(c.status));
+            }
+            e.kv_string(b"detail", cstr(&c.detail));
+            e.obj_close();
+        }
+        e.arr_close();
+        e.kv_bool(b"lsm_attached", self.lsm_attached);
+        e.kv_string(b"mode", self.mode());
+        e.kv_string(b"keyring_mode", self.keyring_mode.to_bytes());
+        e.kv_bool(b"keyring_present", present);
+        if present {
+            e.kv_int(b"keyring_serial", self.keyring_serial.into());
+        } else {
+            e.kv_null(b"keyring_serial");
+        }
+        if pinned {
+            e.kv_int(b"keyring_serial_pinned", self.keyring_pinned.into());
+        } else {
+            e.kv_null(b"keyring_serial_pinned");
+        }
+        if present && pinned {
+            e.kv_bool(
+                b"keyring_serial_matches",
+                self.keyring_serial == self.keyring_pinned,
+            );
+        } else {
+            e.kv_null(b"keyring_serial_matches");
+        }
+        e.kv_bool(b"cert_present", self.cert_present);
+        e.arr_open(b"certs");
+        for c in self.trusted() {
+            e.obj_open();
+            e.kv_string(b"sha256", &hex(c.sha256()));
+            e.kv_string(b"fingerprint", &hex(c.fingerprint()));
+            e.kv_bool(b"primary", c.primary());
+            e.obj_close();
+        }
+        e.arr_close();
+        let ok = self.certs_rc == 0;
+        e.kv_int(
+            b"certs_revoked",
+            if ok { self.certs.n_revoked() as i64 } else { 0 },
+        );
+        e.kv_int(
+            b"certs_unvouched",
+            if ok {
+                self.certs.n_unvouched() as i64
+            } else {
+                0
+            },
+        );
+        match self.certs_enrolled() {
+            Some(n) => e.kv_int(b"certs_enrolled", n as i64),
+            None => e.kv_null(b"certs_enrolled"),
+        }
+        self.bpf.emit_json(e, b"bpf_keyring", b"primary");
+        self.dmv.emit_json(e, b"dm_verity_keyring", b"config");
+        e.kv_bool(b"signing_key_present", self.is_operator);
+        upatch_table::emit_json(e, &upatch_rows(&self.pins));
+        self.emit_assets(e);
+        // What the guards counted this boot, every counter by name so a
+        // collector's keys stay the same from one record to the next;
+        // null until init has pinned the map.
+        match &self.tamper {
+            Ok(t) => {
+                e.obj_open_key(b"tamper_attempts");
+                e.kv_int(b"total", t.total as i64);
+                e.obj_open_key(b"counters");
+                for (i, &n) in t.count.iter().enumerate() {
+                    e.kv_int(tamper_label(i, tamper_name), n as i64);
+                }
+                e.obj_close();
+                e.obj_close();
+            }
+            Err(_) => e.kv_null(b"tamper_attempts"),
+        }
+        if self.config_state != -ENODEV {
+            e.obj_open_key(b"config");
+            e.kv_string(b"root_hash", self.config_root.to_bytes());
+            e.kv_bool(b"activation_pending", self.config_state == -EINPROGRESS);
+            if self.config_state != 0 && self.config_state != -EINPROGRESS {
+                e.kv_string(b"error", strerr(-self.config_state));
+            } else {
+                e.kv_null(b"error");
+            }
+            e.obj_close();
+        } else {
+            e.kv_null(b"config");
+        }
+        if let Some(si) = &self.sysinfo {
+            // SAFETY: the emitter and the sysinfo gathered.
+            unsafe { sysinfo_emit_json(e, &**si) };
+        }
+        self.emit_tpm(e, include_eventlog);
+        // SAFETY: the emitter.
+        unsafe { tree_emit_status(e) };
+        e.obj_close();
+    }
+
+    fn emit_assets(&self, e: &mut JsonEmit) {
+        let a = &self.assets;
+        let count = |e: &mut JsonEmit, key: &[u8], n: Option<usize>| match n {
+            Some(n) => e.kv_int(key, n as i64),
+            None => e.kv_null(key),
+        };
+
+        e.obj_open_key(b"assets");
+        e.kv_string(b"root", VAR_LIB);
+        e.kv_bool(b"cert", a.cert);
+        e.kv_bool(b"signing_key", a.signing_key);
+        e.kv_bool(b"eventlog", a.eventlog_bytes.is_some());
+        e.kv_int(b"eventlog_bytes", a.eventlog_bytes.unwrap_or(0));
+        count(e, b"upatches", a.upatches);
+        count(e, b"incoming", a.incoming);
+        e.kv_bool(b"bpffs_mounted", a.bpffs_mounted);
+        e.obj_close();
+    }
+
+    fn emit_tpm(&self, e: &mut JsonEmit, include_eventlog: bool) {
+        let c = &self.cst;
+
+        e.obj_open_key(b"tpm");
+        e.kv_bool(b"reachable", c.tpm);
+        e.kv_string(b"nv_index", NV_INDEX.to_bytes());
+        match self.chain_hex() {
+            Some((chain, name)) => {
+                e.kv_string(b"chain", &chain);
+                e.kv_string(b"nv_name", &name);
+            }
+            None => {
+                e.kv_null(b"chain");
+                e.kv_null(b"nv_name");
+            }
+        }
+        e.kv_bool(b"register_bound", self.chain_rc == 0);
+        e.kv_bool(b"register_anchored", c.anchored);
+        e.kv_int(
+            b"init_records",
+            if c.logged { c.init.records.into() } else { 0 },
+        );
+        e.kv_bool(b"register_rebound", c.rebound);
+        e.kv_int(b"pcr", CHAIN_PCR.into());
+        e.kv_int(b"phase_pcr", CHAIN_PHASE_PCR.into());
+        if c.logged {
+            e.kv_string(b"pcr_before", &hex(&c.init.pcr_before));
+            e.kv_string(b"phase_before", &hex(&c.init.phase_before));
+            e.kv_string(b"bound_in", if c.init.initrd { b"initrd" } else { b"root" });
+        } else {
+            e.kv_null(b"pcr_before");
+            e.kv_null(b"phase_before");
+            e.kv_null(b"bound_in");
+        }
+        match self.matches {
+            Some(m) => e.kv_bool(b"chain_matches_eventlog", m),
+            None => e.kv_null(b"chain_matches_eventlog"),
+        }
+        e.obj_open_key(b"eventlog");
+        e.kv_bool(b"present", self.eventlog.is_some());
+        let (entries, bytes) = self.eventlog.unwrap_or((0, 0));
+        e.kv_int(b"entries", entries);
+        e.kv_int(b"bytes", bytes);
+        if include_eventlog {
+            emit_events(e);
+        }
+        e.obj_close();
+        e.obj_close();
+    }
+
+    fn mode(&self) -> &'static [u8] {
+        if self.lsm_attached {
+            b"production"
+        } else {
+            b"inactive"
+        }
+    }
+
+    fn trusted(&self) -> &[keys::TrustedCert] {
+        if self.certs_rc == 0 {
+            keys::members(&self.certs)
+        } else {
+            &[]
+        }
+    }
+
+    fn certs_enrolled(&self) -> Option<usize> {
+        self.bpf.links.is_ok().then(|| self.bpf.n_asymmetric())
+    }
+
+    fn print_human(&self, cin: &ConditionsInput, show_full: bool, include_eventlog: bool) {
+        let mut reason = [0u8; 160];
+        let mut conds: [Condition; CONDITIONS_MAX] = no_conditions();
+        let verdict = conditions::status_verdict(cin).to_bytes();
+        // SAFETY: the input and room for the reason.
+        unsafe { conditions::status_reason(cin, &mut reason) };
+        let nc = conditions::conditions(cin, &mut conds);
+        let rows = upatch_rows(&self.pins);
+        let mut folded: Vec<&[u8]> = Vec::new();
+        // A section a condition vouches for says nothing the condition
+        // did not: it unfolds when that condition is not OK on a target,
+        // or on request.
+        let (mut keyrings_open, mut tpm_open) = (show_full, show_full);
+
+        for c in conds[..nc].iter().filter(|_| self.is_target) {
+            // SAFETY: a condition's strings are C strings.
+            let (kind, status) = unsafe { (ffi::c_str(c.kind), ffi::c_str(c.status)) };
+            match (status, kind) {
+                (b"OK", _) => {}
+                (_, b"KeyringSealed") => keyrings_open = true,
+                (_, b"ChainIntact" | b"TpmMeasured") => tpm_open = true,
+                _ => {}
+            }
+        }
+        row(b"", b"Host:", &self.hostname);
+        row(b"", b"Roles:", roles(self.is_target, self.is_operator));
+        row(b"", b"Mode:", self.mode());
+        match cstr(&reason) {
+            [] => row(b"", b"Status:", verdict),
+            r => row(b"", b"Status:", &[verdict, b"  (", r, b")"].concat()),
+        }
+        row(b"", b"Version ID:", version_id());
+        print(b"\n");
+        conditions::conditions_print(&conds[..nc]);
+        self.print_tamper();
+        upatch_table::print(&rows);
+        drop(rows);
+        if keyrings_open {
+            self.print_keyrings();
+        } else {
+            folded.push(b"keyrings");
+        }
+        if tpm_open {
+            self.print_tpm();
+        } else {
+            folded.push(b"TPM measurement");
+        }
+        if include_eventlog {
+            print_events();
+        }
+        if show_full {
+            self.print_assets();
+        } else {
+            folded.push(b"assets");
+        }
+        if let Some(si) = &self.sysinfo {
+            print_system(si);
+        }
+        if !folded.is_empty() {
+            print(
+                &[
+                    b"\nFolded: ",
+                    &folded.join(&b", "[..])[..],
+                    b" (--show-full)\n",
+                ]
+                .concat(),
+            );
+        }
+    }
+
+    fn print_tamper(&self) {
+        print(b"\nTamper attempts (this boot):\n");
+        match &self.tamper {
+            Err(err) if *err == -ENOENT => print(b"  none recorded before init\n"),
+            Err(err) => print(&[b"  unavailable: ", strerr(-err), b"\n"].concat()),
+            Ok(t) => {
+                if t.total == 0 {
+                    print(b"  none\n");
+                }
+                for (i, &n) in t.count.iter().enumerate().filter(|&(_, &n)| n != 0) {
+                    let count = format!("{n:>6}");
+                    print(
+                        &[
+                            &b"  "[..],
+                            &pad(tamper_label(i, tamper_name), 20),
+                            b" ",
+                            count.as_bytes(),
+                            b"  ",
+                            tamper_label(i, tamper_meaning),
+                            b"\n",
+                        ]
+                        .concat(),
+                    );
+                }
+            }
+        }
+    }
+
+    fn print_keyrings(&self) {
+        let (bpf, dmv) = (&self.bpf, &self.dmv);
+
+        print(b"\nKeyring (.bpf):\n");
+        bpf.print_serials();
+        if self.certs_rc == 0 {
+            let c = &self.certs;
+            let mut line = format!(
+                "{} trusted, {} revoked, {} unvouched",
+                c.len(),
+                c.n_revoked(),
+                c.n_unvouched()
+            );
+            if let Some(n) = self.certs_enrolled() {
+                line += &format!(", {n} in the bpf keyring");
+            }
+            row(b"  ", b"Certificates:", line.as_bytes());
+            bpf.print_certs(b"primary", b"enrolled at the next boot");
+        }
+        bpf.print_other_links();
+        print(b"\nKeyring (.dm-verity):\n");
+        dmv.print_serials();
+        if dmv.certs_rc == 0 {
+            let mut line = format!("{} trusted", dmv.certs.len());
+            if dmv.links.is_ok() {
+                line += &format!(", {} in the dm-verity keyring", dmv.n_asymmetric());
+            }
+            row(b"  ", b"Certificates:", line.as_bytes());
+            dmv.print_certs(b"config", b"missing");
+        } else if dmv.certs_rc != -ENOENT {
+            row(
+                b"  ",
+                b"Certificates:",
+                &[b"unreadable: ", strerr(-dmv.certs_rc)].concat(),
+            );
+        }
+        dmv.print_other_links();
+    }
+
+    fn print_tpm(&self) {
+        let c = &self.cst;
+        let field = |label: &[u8], value: &[u8]| row(b"  ", label, value);
+
+        print(b"\nTPM measurement:\n");
+        let reach: &[u8] = if c.tpm {
+            b"reachable"
+        } else {
+            b"not reachable"
+        };
+        field(b"TPM:", &[reach, b" (", &self.tcti, b")"].concat());
+        field(
+            b"NV index:",
+            &[NV_INDEX.to_bytes(), b" (anchored in PCR 9)"].concat(),
+        );
+        if let Some((chain, name)) = self.chain_hex() {
+            field(b"Chain:", &chain);
+            field(b"Register name:", &name);
+            field(
+                b"Anchored:",
+                if c.anchored {
+                    b"yes, name on record"
+                } else {
+                    b"no, the index is not the one init bound"
+                },
+            );
+        } else if !c.tpm {
+            field(b"Chain:", b"unavailable, no TPM answered");
+        } else if self.chain_rc == -ENODEV {
+            field(b"Chain:", b"unavailable, register not bound this boot");
+        } else {
+            field(
+                b"Chain:",
+                &[b"unavailable, TPM error: ", strerr(-self.chain_rc)].concat(),
+            );
+        }
+        if c.logged {
+            field(b"PCR before init:", &hex(&c.init.pcr_before));
+            field(
+                b"Phase at init:",
+                &[&hex(&c.init.phase_before)[..], b" (PCR 11)"].concat(),
+            );
+            field(
+                b"Bound in:",
+                if c.init.initrd {
+                    b"initrd"
+                } else {
+                    b"root file system"
+                },
+            );
+        }
+        if c.rebound {
+            let line = format!(
+                "{} for this TPM reset, rebound after init",
+                c.init.records_epoch
+            );
+            field(b"Init records:", line.as_bytes());
+        }
+        field(
+            b"Chain vs eventlog:",
+            match self.matches {
+                None => b"not evaluated",
+                Some(true) => b"matches",
+                Some(false) => b"mismatch",
+            },
+        );
+        match self.eventlog {
+            Some((entries, bytes)) => {
+                let counts = format!("  ({entries} entries, {bytes} bytes)");
+                field(b"Eventlog:", &[eventlog(), counts.as_bytes()].concat());
+            }
+            None => field(b"Eventlog:", b"absent"),
+        }
+    }
+
+    fn print_assets(&self) {
+        let a = &self.assets;
+        let field = |label: &[u8], value: &[u8]| row(b"  ", label, value);
+        let present = |p: bool| -> &'static [u8] { if p { b"present" } else { b"absent" } };
+
+        print(&[b"\nAssets (", VAR_LIB, b"):\n"].concat());
+        field(b"keys/cert.der", present(a.cert));
+        field(b"keys/signing_key.pem", present(a.signing_key));
+        match a.eventlog_bytes {
+            Some(n) => field(b"eventlog", format!("present ({n} bytes)").as_bytes()),
+            None => field(b"eventlog", b"absent"),
+        }
+        match a.upatches {
+            None => field(b"upatches/", b"absent"),
+            Some(n) => field(b"upatches/", format!("{n} archived").as_bytes()),
+        }
+        match a.incoming {
+            None => field(b"incoming/", b"absent"),
+            Some(0) => field(b"incoming/", b"empty"),
+            Some(n) => field(b"incoming/", format!("{n} staged").as_bytes()),
+        }
+        field(
+            b"bpffs/",
+            if a.bpffs_mounted {
+                b"mounted"
+            } else {
+                b"not mounted"
+            },
+        );
+    }
+}
+
+/// Room for the conditions, all zero until conditions() fills them.
+fn no_conditions() -> [Condition; CONDITIONS_MAX] {
+    // SAFETY: plain data, whose NULL strings nothing reads before
+    // conditions() sets them.
+    unsafe { mem::zeroed() }
+}
+
+fn tamper_label(i: usize, f: unsafe extern "C" fn(c_int) -> *const c_char) -> &'static [u8] {
+    // SAFETY: a tamper point below TAMPER_MAX, whose label is static.
+    unsafe { ffi::c_str(f(i as c_int)) }
+}
+
+fn roles(is_target: bool, is_operator: bool) -> &'static [u8] {
+    match (is_target, is_operator) {
+        (true, true) => b"target, operator",
+        (false, true) => b"operator",
+        (true, false) => b"target",
+        (false, false) => b"none",
+    }
+}
+
+fn version_id() -> &'static [u8] {
+    // SAFETY: the version ID, a static C string.
+    unsafe { ffi::c_str(&raw const shirudo_version_id) }
+}
+
+/// Sends the JSON report as an OTLP keepalive log.
+fn send_keepalive(otel: &Otel, r: &Report, status: &CStr, body: &[u8]) -> c_int {
+    let opts = otel.opts();
+    let refused = match &r.tamper {
+        Ok(t) => t.total as i64,
+        Err(_) => -1,
+    };
+    let mut text: *const c_char = ptr::null();
+    // SAFETY: the status, a C string, and room for the severity's text.
+    let number = unsafe { status_otel_severity(status.as_ptr(), &mut text) };
+    let version = message(&[version_id()]);
+
+    // SAFETY: the options, C strings and the body's bytes.
+    unsafe {
+        otel_send_log_json(
+            &opts,
+            c"shirudo.keepalive".as_ptr(),
+            c"shirudo.keepalive".as_ptr(),
+            number,
+            text,
+            status.as_ptr(),
+            version.as_ptr(),
+            refused,
+            body.as_ptr().cast(),
+            body.len(),
+        )
+    }
+}
+
+fn status(args: &[&[u8]]) -> c_int {
+    let (mut json_stdout, mut otel, mut check, mut show_full) = (false, false, false, false);
+    let (mut include_system, mut include_eventlog) = (false, false);
+
+    for &a in &args[1..] {
+        match a {
+            b"--json" => json_stdout = true,
+            b"--otel" => otel = true,
+            b"--include-system" => include_system = true,
+            b"--include-eventlog" => include_eventlog = true,
+            b"--check" => check = true,
+            b"--show-full" => show_full = true,
+            _ if is_help(Some(a)) => {
+                help();
+                return 0;
+            }
+            _ => {
+                eprint(&[b"status: unknown option '", a, b"'\n"].concat());
+                eprint(&[b"usage: ", USAGE.to_bytes(), b"\n"].concat());
+                return 2;
+            }
+        }
+    }
+    let exporter = match otel.then(Otel::load).transpose() {
+        Ok(o) => o,
+        Err(ret) => return ret,
+    };
+    if show_full {
+        include_system = true;
+        include_eventlog = true;
+    }
+    let r = Report::gather(include_system);
+    let cin = r.input();
+    let mut ret = 0;
+
+    if json_stdout || otel {
+        let mut buf = vec![0u8; r.json_cap(include_eventlog)];
+        let mut e = JsonEmit::fixed(buf.as_mut_ptr().cast(), buf.len());
+
+        r.emit_json(&mut e, &cin, include_eventlog);
+        if e.err() != 0 {
+            eprint(&[b"status: json encode failed: ", strerr(-e.err()), b"\n"].concat());
+            ret = 1;
+        } else {
+            let body = &buf[..e.written()];
+            let verdict = conditions::status_verdict(&cin);
+            let configured = exporter.as_ref().is_some_and(Otel::endpoint_configured);
+
+            if let Some(o) = exporter.as_ref().filter(|_| configured) {
+                let err = send_keepalive(o, &r, verdict, body);
+                if err != 0 {
+                    let msg = message(&[b"status: OTEL export failed: ", strerr(-err)]);
+                    // SAFETY: a "%s" format with a C string.
+                    unsafe { pr_err(c"%s".as_ptr(), msg.as_ptr()) };
+                    ret = 1;
+                }
+            }
+            let state = r.config_state;
+            if otel && !configured && state != 0 && state != -ENODEV {
+                let why: &[u8] = if state == -EINPROGRESS {
+                    b"pending"
+                } else {
+                    b"unverifiable"
+                };
+                let msg = message(&[
+                    b"status: no keepalive is sent: with the config activation ",
+                    why,
+                    b", no export endpoint is known, since a config image is used only when its activation record vouches for it; OTEL_EXPORTER_OTLP_ENDPOINT in /etc/shirudo/map-export.env still names one",
+                ]);
+                // SAFETY: a "%s" format with a C string.
+                unsafe { pr_warn(c"%s".as_ptr(), msg.as_ptr()) };
+            }
+            if json_stdout {
+                print(&[body, b"\n"].concat());
+            }
+        }
+    } else {
+        r.print_human(&cin, show_full, include_eventlog);
+    }
+    if check && ret == 0 && conditions::status_verdict(&cin) == c"tampered" {
+        ret = 1;
+    }
+    ret
+}
+
+mod capi {
+    use core::ffi::{c_char, c_int};
+
+    /// `shirudo status`.
+    ///
+    /// # Safety
+    ///
+    /// `argv` holds `argc` C strings.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn cmd_status(argc: c_int, argv: *const *const c_char) -> c_int {
+        // SAFETY: the caller's arguments.
+        let raw = unsafe { super::words(argc, argv) };
+        // SAFETY: each a C string.
+        let args: Vec<&[u8]> = raw
+            .iter()
+            .map(|&a| unsafe { crate::ffi::c_str(a) })
+            .collect();
+
+        super::status(&args)
+    }
+}

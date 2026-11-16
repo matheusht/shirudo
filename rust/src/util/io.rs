@@ -486,7 +486,7 @@ fn kernel_dev(dev: u64) -> u32 {
 /// # Safety
 ///
 /// `path` is a C string.
-unsafe fn bpffs_mounted_at(path: *const c_char) -> c_int {
+pub(crate) unsafe fn bpffs_mounted_at(path: *const c_char) -> c_int {
     let mut stx = Statx::zeroed();
     let mut fs = Statfs::zeroed();
 

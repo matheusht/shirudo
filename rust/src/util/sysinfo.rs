@@ -21,20 +21,20 @@ use crate::util::kernel_build_id::read_build_id;
 /// `struct sysinfo`.
 #[repr(C)]
 pub struct Sysinfo {
-    hostname: [u8; 256],
-    os_pretty: [u8; 256],
-    kernel_release: [u8; 96],
-    kernel_version: [u8; 256],
-    kernel_build_id: [u8; 129],
-    machine: [u8; 96],
-    machine_id: [u8; 64],
-    boot_id: [u8; 64],
-    nproc: c_long,
-    mem_total_kb: c_long,
-    mem_avail_kb: c_long,
-    uptime_sec: c_long,
-    disk_total_kb: c_long,
-    disk_used_kb: c_long,
+    pub(crate) hostname: [u8; 256],
+    pub(crate) os_pretty: [u8; 256],
+    pub(crate) kernel_release: [u8; 96],
+    pub(crate) kernel_version: [u8; 256],
+    pub(crate) kernel_build_id: [u8; 129],
+    pub(crate) machine: [u8; 96],
+    pub(crate) machine_id: [u8; 64],
+    pub(crate) boot_id: [u8; 64],
+    pub(crate) nproc: c_long,
+    pub(crate) mem_total_kb: c_long,
+    pub(crate) mem_avail_kb: c_long,
+    pub(crate) uptime_sec: c_long,
+    pub(crate) disk_total_kb: c_long,
+    pub(crate) disk_used_kb: c_long,
 }
 
 const _: () = assert!(size_of::<Sysinfo>() == 1272);
@@ -476,6 +476,8 @@ fn emit_json(e: &mut JsonEmit, si: &Sysinfo) {
     e.kv_int(b"uptime_seconds", si.uptime_sec);
     e.obj_close();
 }
+
+pub(crate) use capi::{sysinfo_emit_json, sysinfo_gather};
 
 mod capi {
     use core::ffi::{c_char, c_int, c_void};

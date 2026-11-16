@@ -39,16 +39,16 @@ pub(super) type UpatchFn = unsafe extern "C" fn(
 #[repr(C)]
 pub struct EventlogInit {
     pub(crate) writer_public: [u8; NV_RSA_BYTES],
-    pcr: u32,
+    pub(crate) pcr: u32,
     pub(crate) initrd: bool,
     pub(crate) pcr_before: [u8; 32],
     pub(crate) phase_before: [u8; 32],
     pub(crate) name: [u8; NAME_LEN],
-    name_len: usize,
+    pub(crate) name_len: usize,
     pub(crate) anchor_digest: [u8; 32],
     pub(crate) have_reset_count: bool,
     pub(crate) reset_count: u32,
-    records: u32,
+    pub(crate) records: u32,
     pub(crate) records_epoch: u32,
 }
 

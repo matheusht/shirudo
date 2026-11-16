@@ -5,6 +5,7 @@
 //! libcurl, zlib, OpenSSL, libelf, and the util/ modules not ported yet, one
 //! module for each header, each to go when what it declares is Rust.
 
+pub mod bpf;
 pub mod btf;
 pub mod curl;
 pub mod elf;
@@ -17,10 +18,12 @@ pub mod loader;
 pub mod log;
 pub mod malloc;
 pub mod openssl;
+pub mod otel;
 pub mod paths;
 pub mod seal;
 pub mod ssl;
 pub mod string;
+pub mod tamper;
 pub mod tss2;
 pub mod upatch;
 pub mod version;

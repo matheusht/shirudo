@@ -273,10 +273,8 @@ UTIL_SRCS := \
 
 BUILTIN_SRCS := \
     builtin-init.c \
-    builtin-status.c \
-    builtin-upatch.c \
-     \
-    
+    builtin-upatch.c
+
 
 # BPF-side libbpf headers, used straight from vendor/libbpf (the BPF
 # compile rule adds it to the include path so <bpf/...> resolves) and
@@ -463,7 +461,7 @@ else
 override TREE_LIMIT_CFLAGS :=
 endif
 TREE_LIMIT_STAMP := build/tree-limits-$(PROFILE)
-TREE_LIMIT_OBJS :=  $(call obj,builtin-status.o)
+TREE_LIMIT_OBJS :=  $(call obj,)
 
 .PHONY: FORCE_TREE_LIMITS
 FORCE_TREE_LIMITS:
@@ -968,7 +966,8 @@ testing/helper/test-signed-load: testing/helper/test-signed-load.c
 	    -o $@ $^ -lcrypto
 
 testing/helper/test-otel-map: testing/helper/test-otel-map.c util/upatch_maps.o \
-                        util/upatch_maps_otel.o util/curl.o \
+                        util/upatch_maps_otel.o util/keepalive_quote.o \
+                        util/identity.o util/curl.o \
                         util/seal.o \
                         util/upatch_decode.o util/upatch_pins.o \
                         util/upatch_resolve.o \
@@ -1365,7 +1364,7 @@ $(FUZZ_OUT)/fuzz-serializer: FUZZ_INCLUDED := util/upatch_maps.c
 $(FUZZ_OUT)/fuzz-decoder: FUZZ_INCLUDED := util/upatch_decode.c
 $(FUZZ_OUT)/fuzz-upatch-info: FUZZ_INCLUDED := builtin-upatch.c
 $(FUZZ_OUT)/fuzz-bpm-info: FUZZ_INCLUDED :=
-$(FUZZ_OUT)/fuzz-attest-report: FUZZ_INCLUDED := 
+$(FUZZ_OUT)/fuzz-attest-report: FUZZ_INCLUDED :=
 
 # A target compiles its sources and links in one step, so it depends on
 # every header a source may include, and on the compiler and flags it was

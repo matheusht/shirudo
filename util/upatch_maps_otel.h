@@ -70,6 +70,12 @@ int otel_send_log_string(const struct otel_opts *opts,
 			 const char *body, size_t body_len,
 			 const char *attr_key,
 			 const char *attr_value) __must_check;
+int otel_send_log_json(const struct otel_opts *opts,
+		       const char *scope_name, const char *event_name,
+		       int severity_number, const char *severity_text,
+		       const char *status, const char *version_id,
+		       __s64 tamper_attempts, const char *body_json,
+		       size_t body_len) __must_check;
 int otel_retry_after(const char *value, time_t now, __u64 *seconds);
 int status_otel_severity(const char *status, const char **text);
 

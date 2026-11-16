@@ -16,6 +16,7 @@ mod config;
 mod genkey;
 mod image;
 mod keys;
+mod status;
 mod version;
 
 /// The `argc` words of a command line at `argv`.

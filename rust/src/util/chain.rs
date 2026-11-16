@@ -69,16 +69,16 @@ pub struct ChainInitInfo {
 /// `struct chain_status`: the register as a status report sees it.
 #[repr(C)]
 pub struct ChainStatus {
-    tpm: bool,
-    defined: bool,
-    written: bool,
-    logged: bool,
-    anchored: bool,
-    rebound: bool,
-    value: [u8; DIGEST_LEN],
-    name: [u8; NAME_LEN],
-    name_len: usize,
-    init: EventlogInit,
+    pub(crate) tpm: bool,
+    pub(crate) defined: bool,
+    pub(crate) written: bool,
+    pub(crate) logged: bool,
+    pub(crate) anchored: bool,
+    pub(crate) rebound: bool,
+    pub(crate) value: [u8; DIGEST_LEN],
+    pub(crate) name: [u8; NAME_LEN],
+    pub(crate) name_len: usize,
+    pub(crate) init: EventlogInit,
 }
 
 /// The live register as reported directly by the TPM.
@@ -983,7 +983,7 @@ fn bound() -> bool {
 }
 
 /// The register as the TPM and this boot's records show it: chain_status().
-fn status(st: &mut ChainStatus) -> c_int {
+pub(crate) fn status(st: &mut ChainStatus) -> c_int {
     let mut tpm: *mut Tpm = ptr::null_mut();
 
     // SAFETY: the caller's structure, all of whose bits zeroed are one.
