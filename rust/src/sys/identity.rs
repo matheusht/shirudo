@@ -12,16 +12,16 @@ use core::ffi::c_int;
 pub struct Identity {
     sb_dev: u32,
     run_dev: u32,
-    keyring_serial: i32,
-    keyring_type: u32,
-    n_keys: u32,
-    key_serials: [i32; 16],
+    pub keyring_serial: i32,
+    pub keyring_type: u32,
+    pub n_keys: u32,
+    pub key_serials: [i32; 16],
     runtime_root: [u8; 32],
     pub nv_writer_seed: [u8; 32],
     pub nv_writer_public: [u8; 384],
     pub ek_name: [u8; 34],
-    dm_verity_ring: i32,
-    dm_verity_key: i32,
+    pub dm_verity_ring: i32,
+    pub dm_verity_key: i32,
     nv_index: u32,
 }
 

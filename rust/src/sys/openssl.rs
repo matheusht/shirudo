@@ -151,6 +151,18 @@ unsafe extern "C" {
         u: *mut c_void,
     ) -> *mut X509;
     pub fn X509_free(x509: *mut X509);
+    pub fn X509_digest(x: *const X509, md: *const EvpMd, out: *mut u8, len: *mut c_uint) -> c_int;
+    pub fn X509_get_issuer_name(x: *const X509) -> *mut X509Name;
+    pub fn X509_NAME_oneline(name: *const X509Name, buf: *mut c_char, size: c_int) -> *mut c_char;
+    pub fn X509_NAME_cmp(a: *const X509Name, b: *const X509Name) -> c_int;
+    pub fn i2d_PUBKEY(key: *const EvpPkey, out: *mut *mut u8) -> c_int;
+    pub fn EVP_PKEY_get_bits(key: *const EvpPkey) -> c_int;
+    pub fn PEM_read_bio_PrivateKey(
+        bio: *mut Bio,
+        key: *mut *mut EvpPkey,
+        cb: Option<PemPasswordCb>,
+        u: *mut c_void,
+    ) -> *mut EvpPkey;
     pub fn OPENSSL_init_crypto(opts: u64, settings: *const InitSettings) -> c_int;
     pub fn BIO_new_fd(fd: c_int, close_flag: c_int) -> *mut Bio;
     pub fn BIO_new(method: *const BioMethod) -> *mut Bio;

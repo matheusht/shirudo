@@ -763,7 +763,11 @@ pub(crate) unsafe fn verify_detached(
 ///
 /// `signature` holds `signature_len` bytes, and `cert` is NULL or points
 /// to a cert.
-unsafe fn cms_signed_by(signature: *const u8, signature_len: usize, cert: *const Cert) -> c_int {
+pub(crate) unsafe fn cms_signed_by(
+    signature: *const u8,
+    signature_len: usize,
+    cert: *const Cert,
+) -> c_int {
     // SAFETY: the caller passes NULL or a cert.
     let Some(x509) = (unsafe { x509_of(cert) }) else {
         return -EINVAL;

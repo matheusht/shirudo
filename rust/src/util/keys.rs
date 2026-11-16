@@ -30,7 +30,7 @@ use crate::util::image_config;
 use crate::util::io::{check_trusted, open_beneath, read_fd};
 
 /// `KEYS_MAX`: the most certificates a set holds.
-const KEYS_MAX: usize = 16;
+pub(crate) const KEYS_MAX: usize = 16;
 /// `KEYS_DER_MAX`: the largest certificate or vouch read.
 const DER_MAX: usize = 1024 * 1024;
 /// `KEYS_VOUCH_PREFIX` with the NUL sizeof() counts, which the payload
@@ -535,6 +535,44 @@ unsafe fn verify_vouch(
     unsafe { xfree(payload.cast(), payload_sz) };
     ret
 }
+
+impl TrustedCert {
+    pub(crate) fn sha256(&self) -> &[u8; 32] {
+        &self.sha256
+    }
+
+    pub(crate) fn fingerprint(&self) -> &[u8; 32] {
+        &self.fingerprint
+    }
+
+    pub(crate) fn voucher(&self) -> &[u8; 32] {
+        &self.voucher
+    }
+
+    pub(crate) fn primary(&self) -> bool {
+        self.primary
+    }
+}
+
+impl TrustedSet {
+    /// How many certificates the set holds.
+    pub(crate) fn len(&self) -> usize {
+        self.n.min(KEYS_MAX)
+    }
+
+    pub(crate) fn n_revoked(&self) -> usize {
+        self.n_revoked
+    }
+
+    pub(crate) fn n_unvouched(&self) -> usize {
+        self.n_unvouched
+    }
+}
+
+pub(crate) use capi::{
+    keys_cert_der, keys_digest_der, keys_install, keys_is_revoked, keys_load, keys_read_der,
+    keys_verify_vouch,
+};
 
 /// The members of a set.
 pub(crate) fn members(set: &TrustedSet) -> &[TrustedCert] {

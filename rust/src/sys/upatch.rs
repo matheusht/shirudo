@@ -4,7 +4,7 @@
 //! Loading and unloading upatches, of `util/upatch.h`, which
 //! builtin-upatch.c implements.
 
-use core::ffi::{c_char, c_int};
+use core::ffi::{c_char, c_int, c_void};
 
 /// What upatch_install() gives for a valid upatch whose target module
 /// is not loaded.
@@ -16,4 +16,9 @@ unsafe extern "C" {
     pub fn upatch_install(path: *const c_char) -> c_int;
     /// Runs the unload directive at `path`: 0 or -errno.
     pub fn upatch_remove(path: *const c_char) -> c_int;
+    /// Unloads, when loaded, and purges from the archive upatch `name`
+    /// that the certificate at `signer` signed: 1 unloaded, 0 purged
+    /// alone, -ESTALE for one the signer no longer signed, or -errno.
+    pub fn upatch_purge(name: *const c_char, signer: *const c_void, reason: *const c_char)
+    -> c_int;
 }

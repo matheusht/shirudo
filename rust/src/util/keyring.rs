@@ -442,7 +442,29 @@ unsafe fn add_cert(spec: i32, cert: *const u8, cert_len: usize) -> i32 {
     if ret < 0 { -errno() } else { ret as i32 }
 }
 
-pub(crate) use capi::keyring_unlink_key;
+pub(crate) use capi::{
+    keyring_bpf_serial, keyring_dm_verity_serial, keyring_find_cert, keyring_holds_cert,
+    keyring_links, keyring_unlink_key,
+};
+
+impl KeyringLink {
+    pub(crate) fn serial(&self) -> i32 {
+        self.serial
+    }
+
+    /// The errno that kept the key from being described, or 0.
+    pub(crate) fn err(&self) -> c_int {
+        self.err
+    }
+
+    pub(crate) fn ty(&self) -> &[u8] {
+        cstr(&self.ty)
+    }
+
+    pub(crate) fn description(&self) -> &[u8] {
+        cstr(&self.description)
+    }
+}
 
 mod capi {
     use core::ffi::{c_char, c_int, c_long, c_void};

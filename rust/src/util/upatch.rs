@@ -970,7 +970,7 @@ unsafe fn specs_parse(
 
 pub(crate) use capi::{
     upatch_close, upatch_header_name, upatch_member_valid, upatch_name_valid, upatch_open,
-    upatch_open_memory, upatch_select,
+    upatch_open_memory, upatch_select, upatch_signature,
 };
 
 mod capi {

@@ -13,6 +13,7 @@ mod bpm;
 mod build;
 mod config;
 mod genkey;
+mod keys;
 mod version;
 
 /// The `argc` words of a command line at `argv`.

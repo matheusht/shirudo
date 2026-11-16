@@ -274,7 +274,6 @@ UTIL_SRCS := \
 BUILTIN_SRCS := \
     builtin-init.c \
     builtin-status.c \
-    builtin-keys.c \
     builtin-image.c \
     builtin-upatch.c \
      \
@@ -1050,9 +1049,9 @@ testing/helper/test-config-attest: testing/helper/test-config-attest.c \
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(REGISTER_LIBS)
 
-# The helper stands in for keyring_holds_cert() and keyring_bpf_serial(),
-# which the Rust library defines too: the link keeps the first
-# definition, the helper's.
+# The helper stands in for keyring_holds_cert(), keyring_bpf_serial() and
+# keys_revoke_image(), which the Rust library defines too: the link keeps
+# the first definition, the helper's.
 testing/helper/test-image-keys: testing/helper/test-image-keys.c \
 		util/image_keys.o $(REGISTER_OBJS)
 	@printf '  CC      $@\n'

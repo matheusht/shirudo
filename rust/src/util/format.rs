@@ -57,7 +57,7 @@ fn human_size(bytes: u64, out: &mut [u8]) -> c_int {
 /// # Safety
 ///
 /// `f` is an open stream.
-unsafe fn fputs_sanitized(s: &[u8], f: *mut File) {
+pub(crate) unsafe fn fputs_sanitized(s: &[u8], f: *mut File) {
     let mut shown = [0u8; 512];
     let n = strscpy(&mut shown, s).unwrap_or(shown.len() - 1);
 
