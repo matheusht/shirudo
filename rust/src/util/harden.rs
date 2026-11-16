@@ -18,7 +18,7 @@ use crate::sys::openssl::{OPENSSL_INIT_NO_LOAD_CONFIG, OPENSSL_init_crypto};
 /// Started with standard input, output or error closed, the process gives
 /// that number to the next file it opens, and what it prints lands in
 /// that file: point each closed one at /dev/null before anything opens.
-fn harden_stdio() {
+pub(crate) fn harden_stdio() {
     for fd in 0..=2 {
         // SAFETY: a call that takes no pointer.
         if unsafe { fcntl(fd, F_GETFD) } != -1 || errno() != EBADF {
@@ -39,7 +39,7 @@ fn harden_stdio() {
 /// dlopen()ed from paths root controls whatever secure-exec mode does to
 /// the environment. glibc's own files and dns services answer host
 /// lookups without a module, in a static binary too.
-fn harden_self() -> c_int {
+pub(crate) fn harden_self() -> c_int {
     let no_core = Rlimit { cur: 0, max: 0 };
     let (zero, one): (c_ulong, c_ulong) = (0, 1);
 

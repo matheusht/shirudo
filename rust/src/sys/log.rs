@@ -8,6 +8,8 @@
 use core::ffi::c_char;
 
 unsafe extern "C" {
+    /// Opens the log: syslog with the process's name, and stderr.
+    pub fn log_init();
     pub fn pr_err(fmt: *const c_char, ...);
     pub fn pr_warn(fmt: *const c_char, ...);
     pub fn pr_info(fmt: *const c_char, ...);

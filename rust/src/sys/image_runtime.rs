@@ -8,6 +8,9 @@ use core::ffi::{c_char, c_int, c_void};
 use crate::util::keys::TrustedSet;
 
 unsafe extern "C" {
+    /// Enters the image state `command` needs before it runs with the
+    /// `argc` words at `argv`: 0 or -errno.
+    pub fn image_enter(command: *const c_char, argc: c_int, argv: *const *const c_char) -> c_int;
     /// Reads the authenticated image settings the bootstrap names: 0, a
     /// positive count, or -errno.
     pub fn image_bootstrap_load() -> c_int;

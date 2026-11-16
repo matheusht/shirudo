@@ -16,6 +16,8 @@ pub const UPATCH_INSTALL_TARGET_MISSING: c_int = 2;
 pub enum MapSummary {}
 
 unsafe extern "C" {
+    /// `shirudo upatch`, still C in builtin-upatch.c.
+    pub fn cmd_upatch(argc: c_int, argv: *const *const c_char) -> c_int;
     /// Where upatch `name` attaches, as a C string into the `cap` bytes at
     /// `out`, looked up in `vbtf`, the vmlinux BTF or NULL: 0 or -errno.
     pub fn upatch_resolve_location(

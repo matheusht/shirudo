@@ -694,6 +694,8 @@ fn init(args: &[&[u8]]) -> c_int {
     if ret != 0 { 1 } else { 0 }
 }
 
+pub(super) use capi::cmd_init;
+
 mod capi {
     use core::ffi::{c_char, c_int};
 

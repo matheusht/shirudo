@@ -13,6 +13,9 @@
 #include <stdbool.h>
 
 /* Operator-side. */
+/* The dispatch of `shirudo <command>`, for main(). */
+int shirudo_main(int argc, const char **argv);
+
 int cmd_genkey(int argc, const char **argv);
 int cmd_build(int argc, const char **argv);
 

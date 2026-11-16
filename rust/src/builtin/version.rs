@@ -64,6 +64,8 @@ unsafe fn version(args: &[*const c_char]) -> c_int {
     0
 }
 
+pub(super) use capi::cmd_version;
+
 mod capi {
     use core::ffi::{c_char, c_int};
 

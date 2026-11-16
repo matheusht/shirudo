@@ -1931,6 +1931,8 @@ fn status(args: &[&[u8]]) -> c_int {
     ret
 }
 
+pub(super) use capi::cmd_status;
+
 mod capi {
     use core::ffi::{c_char, c_int};
 

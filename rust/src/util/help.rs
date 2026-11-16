@@ -174,7 +174,7 @@ pub(crate) unsafe fn print_help(h: &Help) {
 /// # Safety
 ///
 /// `bad` and each of `names` are C strings.
-unsafe fn help_suggest(bad: *const c_char, names: &[*const c_char]) {
+pub(crate) unsafe fn help_suggest(bad: *const c_char, names: &[*const c_char]) {
     let mut sugg = [Suggestion {
         name: core::ptr::null::<c_char>(),
         dist: 0,

@@ -376,12 +376,13 @@ Project layout
    * - Path
      - Contents
    * - :src:`shirudo.c`
-     - The command dispatch table.
-   * - ``builtin-*.c``, :src:`builtin.h`
-     - One file per top-level command: ``attest``, ``bpm``,
-       ``image``, ``init``, ``keys``, ``status`` and ``upatch``, and
-       ``build``, ``config``, ``genkey`` and ``version`` in
-       :src:`rust/src/builtin/`.
+     - ``main()``, which hands the command line to the dispatch table
+       in :src:`rust/src/builtin/commands.rs`.
+   * - :src:`builtin-upatch.c`, :src:`builtin.h`
+     - One file or module per top-level command: ``upatch`` in
+       :src:`builtin-upatch.c`, and ``attest``, ``bpm``, ``build``,
+       ``config``, ``genkey``, ``image``, ``init``, ``keys``,
+       ``status`` and ``version`` in :src:`rust/src/builtin/`.
    * - :src:`util/`
      - The userspace library both binaries link. :src:`util/sign.c` is
        linked into ``shirudo-build`` only.

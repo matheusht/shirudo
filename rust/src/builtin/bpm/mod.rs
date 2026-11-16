@@ -522,6 +522,8 @@ fn source_key_open(name: &[u8]) -> c_int {
     }
 }
 
+pub(super) use capi::cmd_bpm;
+
 mod capi {
     use core::ffi::{c_char, c_int};
 

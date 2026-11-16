@@ -96,6 +96,8 @@ unsafe fn image(argc: c_int, argv: *const *const c_char) -> c_int {
     if ret != 0 { 1 } else { 0 }
 }
 
+pub(super) use capi::cmd_image;
+
 mod capi {
     use core::ffi::{c_char, c_int};
 

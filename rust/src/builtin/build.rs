@@ -201,6 +201,8 @@ unsafe fn build(argc: c_int, argv: *mut *const c_char) -> c_int {
     unsafe { exec(c"build".as_ptr(), argv) }
 }
 
+pub(super) use capi::cmd_build;
+
 mod capi {
     use core::ffi::{c_char, c_int};
 

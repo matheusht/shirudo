@@ -243,6 +243,8 @@ unsafe fn config(args: &[*const c_char]) -> c_int {
     c_int::from(!(c.map_export_valid && c.tls_classical_hosts_valid))
 }
 
+pub(super) use capi::cmd_config;
+
 mod capi {
     use core::ffi::{c_char, c_int};
 

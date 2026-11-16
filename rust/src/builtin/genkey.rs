@@ -760,6 +760,8 @@ unsafe fn genkey(args: &[*const c_char]) -> c_int {
     ret
 }
 
+pub(super) use capi::cmd_genkey;
+
 mod capi {
     use core::ffi::{c_char, c_int};
 
