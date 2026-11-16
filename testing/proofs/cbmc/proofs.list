@@ -12,12 +12,6 @@ string-sanitize		--unwind 8 LEN=0-6
 hex			--unwind 12
 paths-bpffs-name	--unwind 18
 string-number-model	--unwind 6
-bpm-tree-follows	--unwind 4
-bpm-tree-sync-model	--object-bits 10 --unwind 8 --unwindset memcmp.0:33,memneq_explicit.0:33,hex_encode.0:33,hex_decode.0:33,model_hash.0:33,model_history.0:33,want_outcome.0:33,want_outcome.1:33,same_history.0:33,any_node.0:33,run.0:33,same_digest.0:33,history_ok.0:33,want_write.0:33,want_write.1:33,strcmp.0:66,strlen.0:66,run.1:2,run.2:2,tree_walk_back.0:2,tree_walk_forward.0:1 --max-field-sensitivity-array-size 257 --slice-formula LEN=0-1
-bpm-tree-sync-application	--object-bits 10 --unwind 8 --unwindset memcmp.0:33,memneq_explicit.0:33,hex_encode.0:33,hex_decode.0:33,model_hash.0:33,model_history.0:33,want_outcome.0:33,want_outcome.1:33,same_history.0:33,any_node.0:33,run.0:33,same_digest.0:33,history_ok.0:33,want_write.0:33,want_write.1:33,strcmp.0:66,strlen.0:66,run.1:2,run.2:2,tree_walk_back.0:2,tree_walk_forward.0:1 --max-field-sensitivity-array-size 257 --slice-formula LEN=2
-bpm-tree-sync-pending	--object-bits 10 --unwind 8 --unwindset memcmp.0:33,memneq_explicit.0:33,hex_encode.0:33,hex_decode.0:33,model_hash.0:33,model_history.0:33,want_outcome.0:33,want_outcome.1:33,same_history.0:33,any_node.0:33,run.0:33,same_digest.0:33,history_ok.0:33,want_write.0:33,want_write.1:33,strcmp.0:66,strlen.0:66,run.1:2,run.2:2,tree_walk_back.0:2,tree_walk_forward.0:1 --max-field-sensitivity-array-size 257 --slice-formula LEN=2
-bpm-tree-sync-walk	--object-bits 10 --unwind 8 --unwindset memcmp.0:33,memneq_explicit.0:33,hex_encode.0:33,hex_decode.0:33,model_hash.0:33,model_history.0:33,want_outcome.0:33,want_outcome.1:33,same_history.0:33,any_node.0:33,run.0:33,same_digest.0:33,history_ok.0:33,want_write.0:33,want_write.1:33,strcmp.0:66,strlen.0:66,run.1:3,run.2:3,tree_walk_back.0:3,tree_walk_forward.0:2 --max-field-sensitivity-array-size 257 --slice-formula LEN=1
-bpm-tree-recovery-model	--object-bits 10 --unwind 8 --unwindset memcmp.0:33,memneq_explicit.0:33,hex_encode.0:33,hex_decode.0:33,model_hash.0:33,model_history.0:33,want_outcome.0:33,want_outcome.1:33,same_history.0:33,any_node.0:33,same_digest.0:33,history_ok.0:33,want_write.0:33,want_write.1:33,strcmp.0:66,strlen.0:66,recovery_start.0:33,recovery_state_matches.0:33 --max-field-sensitivity-array-size 257 --slice-formula LEN=0-2
 bpm-tree-signers	--unwind 8
 tpm-signer		--unwind 35
 attest-replay-model	--slice-formula --unwind 20 --unwindset memneq_explicit.0:33,strlen.0:70 LEN=1-3
@@ -27,9 +21,6 @@ keepalive-snapshot	--unwind 4 --unwindset strcmp.0:2
 keepalive-quote		--unwind 24 LEN=1,19,20,21
 otel-header-fields	-D__NO_CTYPE --unwind 34 --unwindset strchr.0:17 LEN=32
 otel-retry-after	-D__NO_CTYPE --unwind 1 --unwindset response_header.0:33,response_header.1:33,otel_retry_after.0:131,otel_retry_after.1:131,delay.0:33,strlen.0:131,strncasecmp.0:13,long_line.0:143 LEN=32,142
-bpm-tree-selector	--unwind 10 --malloc-may-fail --malloc-fail-null LEN=0,1
-bpm-tree-reader		--unwind 6 --unwindset hex_digits.0:65,hex_decode.0:33,strlen.0:129,strncmp.0:8 --malloc-may-fail --malloc-fail-null LEN=0,1
-bpm-tree-reserve	--unwind 1
 bpm-tree-manifest	--max-field-sensitivity-array-size 768 --unwind 80 --unwindset memcmp.0:770 LEN=0-2
 hex-model		--unwind 20
 paths-bpffs-name-model	--unwind 20
@@ -70,7 +61,6 @@ bpm-beefile-members	--unwind 11 LEN=0-6
 bpm-beefile-fixes	--unwind 5 --unwindset strchr.0:67 LEN=0-2
 bpm-index-writer	--unwind 26 --unwindset strlen.0:64,strnlen.0:64,memcpy.0:64,put_string_n.1:64 --max-field-sensitivity-array-size 512 LEN=0-3
 bpm-index-append	--unwind 26 --unwindset strlen.0:260,strcmp.0:64,strnlen.0:64,memcpy.0:64,put_string_n.1:64 --max-field-sensitivity-array-size 512 LEN=0-2
-bpm-tree-writer		--unwind 80 --max-field-sensitivity-array-size 512 LEN=0-4
 conditions-verdict	--unwind 66
 conditions-rows		--object-bits 12 --max-field-sensitivity-array-size 192 --unwind 1 --unwindset vsnprintf.0:3,vsnprintf.1:67,memcpy.0:65,strnlen.0:65,strcmp.0:18,spells.0:65,harness.0:8,harness.1:8,conditions_print.0:8 LEN=0-8
 conditions-detail	--object-bits 12 --unwind 195 --unwindset vsnprintf.2:836 LEN=193,1024

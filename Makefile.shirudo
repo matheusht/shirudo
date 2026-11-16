@@ -249,9 +249,9 @@ UTIL_SRCS := \
     util/chain_history.c \
     util/hex.c \
     util/string.c \
-    util/bpm_tree.c \
     util/bpm_tree_outcomes.c \
     util/bpm_tree_overlap.c \
+    util/bpm_tree_sync_compat.c \
     util/curl.c \
     util/kconfig.c \
      \
@@ -465,8 +465,7 @@ else
 override TREE_LIMIT_CFLAGS :=
 endif
 TREE_LIMIT_STAMP := build/tree-limits-$(PROFILE)
-TREE_LIMIT_OBJS := $(call obj,builtin-bpm.o) $(call obj,builtin-status.o) \
-		   $(call obj,util/bpm_tree.o)
+TREE_LIMIT_OBJS := $(call obj,builtin-bpm.o) $(call obj,builtin-status.o)
 
 .PHONY: FORCE_TREE_LIMITS
 FORCE_TREE_LIMITS:
@@ -559,7 +558,8 @@ tools/shirudo-build/shirudo-build: $(BUILD_OBJS) $(SIGN_OBJ) \
                                    util/seal.o util/string.o \
                                    util/curl.o \
                                     \
-                                   util/bpm_tree.o util/bpm_tree_overlap.o \
+                                    util/bpm_tree_overlap.o \
+                                   util/bpm_tree_sync_compat.o \
                                    util/chain_history.o util/options.o \
                                    $(VERSION_OBJ) \
                                    $(LIBBPF_A) $(RUST_LIB)
@@ -1212,7 +1212,7 @@ FUZZ_LIBS := $(RUST_FUZZ_LIB) $(LIBCRYPTO_LIBS) $(LIBSSL_LIBS) \
 FUZZ_BASE := util/string.c util/hex.c util/malloc.c testing/fuzz/log.c
 FUZZ_SEAL := util/seal.c
 FUZZ_OCI := util/curl.c  $(FUZZ_SEAL)
-FUZZ_PACKAGE := util/bpm_tree.c util/chain_history.c \
+FUZZ_PACKAGE :=  util/chain_history.c \
                  $(FUZZ_OCI)
 
 FUZZ_TARGETS := $(patsubst testing/fuzz/%.c,$(FUZZ_OUT)/%, \
@@ -1227,7 +1227,7 @@ $(FUZZ_OUT)/fuzz-oci-manifest: testing/fuzz/fuzz-oci-manifest.c \
 $(FUZZ_OUT)/fuzz-bpm-index: testing/fuzz/fuzz-bpm-index.c \
                              $(FUZZ_BASE) $(FUZZ_PACKAGE)
 $(FUZZ_OUT)/fuzz-tree: testing/fuzz/fuzz-tree.c $(FUZZ_BASE) \
-                        util/bpm_tree.c util/chain_history.c \
+                         util/chain_history.c \
                          $(FUZZ_OCI)
 $(FUZZ_OUT)/fuzz-upatch: testing/fuzz/fuzz-upatch.c $(FUZZ_BASE) \
 
@@ -1300,7 +1300,7 @@ $(FUZZ_OUT)/fuzz-image: testing/fuzz/fuzz-image.c $(FUZZ_BASE) \
 $(FUZZ_OUT)/fuzz-config-update: testing/fuzz/fuzz-config-update.c \
                                  $(FUZZ_BASE) \
                                   $(FUZZ_SEAL)
-FUZZ_TREE_STATE := util/bpm_tree.c \
+FUZZ_TREE_STATE :=  \
                    util/chain_history.c  $(FUZZ_OCI) \
                    util/kconfig.c
 $(FUZZ_OUT)/fuzz-tree-state: testing/fuzz/fuzz-tree-state.c $(FUZZ_BASE) \

@@ -24,6 +24,10 @@ use crate::sys::zlib::{
     inflateEnd, inflateInit2_,
 };
 use crate::text::{cstr, find, strscpy, strsprintf};
+use crate::util::bpm_tree::{
+    MAX_KCONFIG, MAX_LABELS, MAX_VALUES, STRING_MAX, TreeKv, TreeOperation, TreePending,
+    TreeSelector, TreeSelectorKv, TreeState, count, pairs,
+};
 use crate::util::crypto_openssl::sha256_calc;
 use crate::util::image_config;
 use crate::util::io::{read_file, read_text_line};
@@ -32,14 +36,6 @@ use crate::util::kernel_build_id::read_build_id;
 use crate::util::kernel_release::prefix_matches;
 use crate::util::upatch::upatch_name_valid;
 
-/// `TREE_MAX_KCONFIG` and `TREE_MAX_LABELS`: the most kernel config and
-/// label pairs a selector names, and the most labels a node has.
-const MAX_KCONFIG: usize = 64;
-const MAX_LABELS: usize = 64;
-/// `TREE_MAX_SELECTOR_VALUES`: the most values one selector key takes.
-const MAX_VALUES: usize = 16;
-/// `TREE_STRING_MAX`.
-const STRING_MAX: usize = 256;
 /// The open-addressed index of a selector's kconfig keys.
 const HASH_SIZE: usize = 128;
 /// The largest kernel config read: a distribution's is some 300 KiB.
@@ -57,83 +53,6 @@ const TREE_STATE_PATH: &CStr = c"/var/lib/shirudo/bpm/upatch-tree/state.json";
 const TREE_EVENTLOG_PATH: &CStr = c"/var/lib/shirudo/bpm/upatch-tree/tree-eventlog";
 const TREE_PENDING_PATH: &CStr = c"/var/lib/shirudo/bpm/upatch-tree/pending.json";
 const NODE_LABELS_PATH: &CStr = c"/etc/shirudo/node.labels";
-
-/// `struct tree_kv`.
-#[repr(C)]
-pub struct TreeKv {
-    key: [u8; STRING_MAX],
-    value: [u8; STRING_MAX],
-}
-
-/// `struct tree_selector_kv`.
-#[repr(C)]
-pub struct TreeSelectorKv {
-    key: [u8; STRING_MAX],
-    values: [[u8; STRING_MAX]; MAX_VALUES],
-    n_values: c_int,
-}
-
-/// `struct tree_selector`, whose pairs util/bpm_tree.c allocates.
-#[repr(C)]
-pub struct TreeSelector {
-    kernel_release_prefix: [[u8; STRING_MAX]; MAX_VALUES],
-    n_kernel_release_prefix: c_int,
-    kernel_build_id: [[u8; STRING_MAX]; MAX_VALUES],
-    n_kernel_build_id: c_int,
-    architecture: [[u8; STRING_MAX]; MAX_VALUES],
-    n_architecture: c_int,
-    kconfig: *mut TreeSelectorKv,
-    n_kconfig: c_int,
-    labels: *mut TreeSelectorKv,
-    n_labels: c_int,
-}
-
-/// `struct tree_artifact`.
-#[repr(C)]
-struct TreeArtifact {
-    repository: [u8; 512],
-    manifest_digest: [u8; 128],
-    layer_digest: [u8; 128],
-    payload_sha256: [u8; 128],
-}
-
-/// `struct tree_operation`.
-#[repr(C)]
-pub struct TreeOperation {
-    seq: i64,
-    op: [u8; 16],
-    id: [u8; STRING_MAX],
-    selector: TreeSelector,
-    artifact: TreeArtifact,
-    operation_digest: [u8; 128],
-}
-
-/// `struct tree_pending`.
-#[repr(C)]
-pub struct TreePending {
-    seq: i64,
-    id: [u8; STRING_MAX],
-    operation_digest: [u8; 128],
-}
-
-/// `struct tree_state`.
-#[repr(C)]
-pub struct TreeState {
-    schema: c_int,
-    tree_id: [u8; STRING_MAX],
-    generation: i64,
-    last_seq: i64,
-    projection_root: [u8; 65],
-    projection_root_tpm: [u8; 65],
-    manifest_digest: [u8; 128],
-}
-
-const _: () = assert!(size_of::<TreeKv>() == 512);
-const _: () = assert!(size_of::<TreeSelectorKv>() == 4356);
-const _: () = assert!(size_of::<TreeSelector>() == 12336);
-const _: () = assert!(size_of::<TreeOperation>() == 13640);
-const _: () = assert!(size_of::<TreePending>() == 392);
-const _: () = assert!(size_of::<TreeState>() == 544);
 
 /// isspace() in the C locale, which shirudo runs in.
 fn is_space(c: u8) -> bool {
@@ -160,28 +79,6 @@ fn trim_end(mut s: &[u8]) -> &[u8] {
         s = rest;
     }
     s
-}
-
-/// How many of the `cap` entries of a selector array its count `n`
-/// stands for: none below one, and no more than the array holds, which
-/// util/bpm_tree.c never exceeds.
-fn count(n: c_int, cap: usize) -> usize {
-    usize::try_from(n).map_or(0, |n| n.min(cap))
-}
-
-/// The pairs a selector holds at `kvs`, as many as its count `n` says up
-/// to `cap`.
-///
-/// # Safety
-///
-/// `kvs` is NULL or points to the pairs of a live selector, at least as
-/// many as `n` and `cap` allow.
-unsafe fn pairs<'a>(kvs: *const TreeSelectorKv, n: c_int, cap: usize) -> &'a [TreeSelectorKv] {
-    if kvs.is_null() {
-        return &[];
-    }
-    // SAFETY: the caller's pairs.
-    unsafe { ffi::slice(kvs, count(n, cap)) }
 }
 
 /// Whether one of the values of `v` is `want`.

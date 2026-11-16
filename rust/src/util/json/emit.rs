@@ -368,7 +368,7 @@ impl JsonEmit {
         self.put_raw(value);
     }
 
-    fn str(&mut self, val: &[u8]) {
+    pub(crate) fn str(&mut self, val: &[u8]) {
         self.sep();
         self.put_string(val, false);
     }

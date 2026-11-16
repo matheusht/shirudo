@@ -1,5 +1,10 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
-/* Copyright (c) 2026 Authors of shirudo */
+/*
+ * Copyright (c) 2026 Authors of shirudo
+ *
+ * The signed upatch tree's publications, which rust/src/util/bpm_tree.rs
+ * implements, and a target's state of the tree.
+ */
 
 #ifndef SHIRUDO_BPM_TREE_H
 #define SHIRUDO_BPM_TREE_H

@@ -81,20 +81,9 @@ measure leaves the operation pending and unmeasured, so the next sync
 applies it again, and that goes on to measure it: `upatch_install()` takes
 the payload already loaded under the name as installed, and
 `upatch_remove()` an upatch already gone as removed.
-testing/proofs/cbmc/bpm-tree-follows.c proves
-`tree_publication_follows()` returns 0 exactly when `Follows` holds and asks
-for a walk exactly when the publication starts past the cursor.
-bpm-tree-sync-model.c restates `run`, `recover` and `loop` in C, which
-review alone ties to the definitions here, and the CBMC proofs built on it,
-all of which CI runs, check `cmd_bpm_tree_sync()` against that
-restatement: it makes the same writes in the same order, none after a
-failure or a refusal and all of them when nothing fails, and refuses
-exactly where the restatement refuses. They do so for publications of no,
-one and two operations, the last with and without a pending record
-(bpm-tree-sync-model, -application, -pending), and through a walk back over
-one sealed segment of one operation (bpm-tree-sync-walk);
-bpm-tree-recovery-model checks `tree_recover_pending()` alone on
-publications of up to two operations.
+The CBMC harnesses for the former C tree implementation were removed
+when that implementation moved to Rust. This model remains a review
+reference for the Rust implementation.
 
 A publication that starts past the cursor is a segment the node reaches by
 walking back through the sealed segments before it. The sync then takes
@@ -240,8 +229,7 @@ instance (pub : Pub T M I D) : Decidable (Checked pub) := by
   unfold Checked; infer_instance
 
 /-- What the sync takes of `tree_publication_follows()`, a return of 0,
-as `bpm-tree-follows.c` states it and proves the C meets for every
-`__s64`. A publication that starts past the cursor, for which the function
+as represented by `Follows` here. A publication that starts past the cursor, for which the function
 asks for a walk, is applied as the segments of the walk, each of which
 returns 0 in its turn; see `run`. Without a state, a base of 0; with
 one, the same tree, a later generation unless it is the same manifest, the

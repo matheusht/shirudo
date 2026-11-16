@@ -102,6 +102,21 @@ impl JsonField {
         f
     }
 
+    /// A map whose members' values each take the one field at `sub`,
+    /// each of which `sink` hears about with its key.
+    pub(crate) const fn map(
+        key: &'static CStr,
+        sink: *mut JsonMap,
+        sub: *mut JsonField,
+        n: usize,
+    ) -> Self {
+        let mut f = Self::new(key, T_MAP, sink.cast(), 0);
+
+        f.sub = sub;
+        f.n_sub = n;
+        f
+    }
+
     pub(crate) fn seen(&self) -> bool {
         self.seen != 0
     }
@@ -121,9 +136,21 @@ impl JsonArray {
 
 /// `struct json_map`: what a map field calls after each member.
 #[repr(C)]
-struct JsonMap {
+pub struct JsonMap {
     on_member: Option<unsafe extern "C" fn(ctx: *mut c_void, key: *const c_char) -> c_int>,
     ctx: *mut c_void,
+}
+
+impl JsonMap {
+    pub(crate) const fn new(
+        on_member: unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int,
+        ctx: *mut c_void,
+    ) -> Self {
+        JsonMap {
+            on_member: Some(on_member),
+            ctx,
+        }
+    }
 }
 
 /// `struct json_visitor`: what a walk calls for each token.

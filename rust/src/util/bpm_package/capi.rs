@@ -9,8 +9,8 @@ use super::archive::{self, Found};
 use super::publication::{self, Signed};
 use super::{IndexEntry, PackageInfo, UpatchMember, index, info, semver, tar};
 use crate::ffi;
-use crate::sys::bpm_tree::TreePublication;
 use crate::util::bpm_oci::{BpmBuffer, Descriptor, OciClient};
+use crate::util::bpm_tree::TreePublication;
 
 /// The `bpm_pkg_member_fn` a member walk calls.
 type MemberFn = unsafe extern "C" fn(ctx: *mut c_void, member: *const c_char, ty: c_char) -> c_int;

@@ -158,24 +158,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
      - 0 exactly when the document fits with its NUL, then the state
        document byte for byte and its length; nothing written past the
        buffer, nor to the length on ``-E2BIG``
-   * - ``bpm-tree-selector``
-     - ``tree_selector_kv_add()``, ``tree_selector_copy()``,
-       ``tree_selector_free()``, ``tree_text()``
-     - 0 or 1 pairs, every limit, allocations allowed to fail
-     - ``-E2BIG`` exactly at the limit with nothing changed; a copy owns
-       its arrays, a failed one holds nothing; text without controls
-   * - ``bpm-tree-reader``
-     - ``tree_map_pair()``, ``tree_take_operation()``,
-       ``tree_publication_check()``
-     - Every pair and operation, into an empty or a full publication;
-       every base and head with 0 or 1 operation at any seq, and a
-       parent and segment keys of every content the parser leaves
-     - A key taken once, with a value, below its limit; an operation
-       taken exactly when whole and with room; a publication accepted
-       exactly with a parent that is none or a ``sha256:`` digest, a
-       base of 0 without the segment keys or a later one with an
-       operation, a ``sha256:`` digest and a root of 64 hex digits, and
-       operations that run from the base to the head
    * - ``bpm-tree-manifest``
      - ``bpm_tree_manifest()``, ``tree_manifest_canonical()``, against
        ``bpm_oci_parse_manifest()``
@@ -185,27 +167,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
      - The manifest bpm tree append writes reads back as its two
        layers, and a node takes it as their canonical form; the layers
        swapped, or two payloads in the publisher's own form, refused
-   * - ``bpm-tree-reserve``
-     - ``tree_operations_reserve()``, the allocator a stub that may fail
-     - Every count and capacity up to ``TREE_MAX_OPS``
-     - Room kept as it is; a full array grown to 16 operations or twice
-       its size, never past ``TREE_MAX_OPS``, with one more slot free;
-       ``-E2BIG`` at ``TREE_MAX_OPS`` and ``-ENOMEM`` without memory,
-       nothing changed then
-   * - ``bpm-tree-follows``
-     - ``tree_publication_follows()``, ``tree_segment_precedes()``,
-       ``tree_walk_within()``
-     - Every sequence number and generation; strings up to 2 bytes
-     - Refuses exactly a publication of another tree, of an earlier
-       generation unless the same manifest, naming another parent when
-       the next generation, or with its head before the node's cursor;
-       asks for a walk exactly when one it accepts starts past the
-       cursor, or past 0 without a state. A step of the walk accepts
-       exactly the segment the successor names, of its tree, ending at
-       its base and of a lower generation. The walk is allowed exactly
-       ``TREE_MAX_JOIN_OPS`` operations back from 0 and
-       ``TREE_MAX_WALK_OPS`` from any other cursor, and a negative number
-       is ``-EINVAL``
    * - ``bpm-tree-signers``
      - ``tree_source_open()``, ``tree_fetch_checked()``,
        ``tree_source_clear()``
@@ -215,66 +176,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
      - An active image fetch receives the same set whose load and check
        succeeded, only when it is nonempty and fully vouched; preflight
        failures refuse the fetch and every allocated set is released
-   * - ``bpm-tree-sync-model``
-     - ``cmd_bpm_tree_sync()``, ``tree_recover_pending()``,
-       ``tree_publication_check()``, ``tree_publication_follows()``,
-       the walk back and forwards, the base and prefix checks,
-       ``tree_history_at()``
-     - The full command with 0 or 1 operation at any base, every pending
-       state, selector answer, install answer and first failing I/O
-       call, or no failure; a publication past the cursor asks for a walk
-       the registry cannot serve. Names have one byte, and the previous
-       root and the history roots the outcomes record holds at the cursor
-       and at any other seq have 32 symbolic bytes each.
-     - Writes match the C restatement of the Lean model
-       ``Shirudo.TreeSync`` in ``bpm-tree-sync-model.c`` in order, the
-       cut of the outcomes record, each outcome line with its code and
-       both roots, and the state written at acceptance with the
-       publication's head and base included; a publication whose base
-       or prefix is not the node's history writes nothing past the cut;
-       nothing is written after a failure or a refusal, every expected
-       write happens when nothing fails, and sync refuses exactly what
-       the model refuses
-   * - ``bpm-tree-sync-application``
-     - ``cmd_bpm_tree_sync()``
-     - Two operations with no pending record; every selector answer
-       and first failing I/O call, or no failure. The previous root
-       has 32 symbolic bytes.
-     - The same ordered-write properties as ``bpm-tree-sync-model``
-   * - ``bpm-tree-sync-pending``
-     - ``cmd_bpm_tree_sync()``, ``tree_recover_pending()``
-     - Two operations with a pending record; every selector answer,
-       measured state and first failing I/O call, or no failure. TPM
-       replay equals the previous root, the next root, or neither;
-       the previous root has 32 symbolic bytes.
-     - The same ordered-write properties as ``bpm-tree-sync-model``
-   * - ``bpm-tree-sync-walk``
-     - ``cmd_bpm_tree_sync()``, ``tree_walk_back()``,
-       ``tree_walk_forward()``, ``tree_recover_pending()``
-     - The publication the tag names and a sealed segment the registry
-       serves by its digest, one operation each, at any bases and
-       generations; every pending state, selector answer, walk limit,
-       link between the two and first failing I/O call, or no failure
-     - The same ordered-write properties as ``bpm-tree-sync-model``,
-       through a walk: the sealed segment is applied first, with
-       recovery, then the tag's, each recorded before its operations;
-       a walk past its limit, a segment the registry does not serve or
-       one that is not the predecessor its successor names writes
-       nothing past the cut
-   * - ``bpm-tree-recovery-model``
-     - ``tree_recover_pending()``
-     - Publications with 0 to 2 operations, a pending record at, below
-       or above the cursor that matches an operation or none, each TPM
-       replay class, the measured flag,
-       whether the upatch is loaded and every first failing I/O call.
-       The previous root and the history root have all 32 symbolic
-       bytes.
-     - The return decision, a record at or below the cursor removed
-       whatever the publication holds included, ordered writes, the
-       outcome lines of the operations passed over and of the pending
-       one, cursor, tree ID,
-       manifest, recorded head and base, both projection roots and the
-       history root match the independent recovery model
    * - ``bpm-tree-overlap-model``
      - ``tree_selectors_disjoint()``, ``selector_covers()`` and the list,
        prefix and pair checks under them
@@ -455,16 +356,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
      - The index signed next is one the target reads, with the pushed
        package once and before the one listed, which is kept as it was;
        a version with other content is refused and nothing signed
-   * - ``bpm-tree-writer``
-     - ``tree_emit_publication()``, against ``tree_parse()`` and
-       ``tree_publication_check()``
-     - Five fixed publications without operations: the first of a tree,
-       the last generation and sequence number, one past each, and one
-       without a tree ID
-     - Tree, generation, parent, base and head read back as written;
-       the target reads up to generation and sequence number
-       2\ :sup:`63` - 2 and refuses the three ``bpm tree append`` does
-       not write
    * - ``upatch-writer-header``
      - ``pack_header()`` of :src:`tools/shirudo-build/package.c`, read
        back by ``parse_header()``
