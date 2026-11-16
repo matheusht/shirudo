@@ -7,7 +7,6 @@
 
 pub mod bpf;
 pub mod btf;
-pub mod build;
 pub mod curl;
 pub mod elf;
 pub mod hex;

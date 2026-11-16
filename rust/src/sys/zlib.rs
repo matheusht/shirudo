@@ -70,6 +70,9 @@ unsafe extern "C" {
     pub fn gzread(file: *mut GzFileS, buf: *mut c_void, len: c_uint) -> c_int;
     /// Z_OK, or what went wrong reading the file, its trailer included.
     pub fn gzclose(file: *mut GzFileS) -> c_int;
+    /// Compresses the `len` bytes at `buf` into the file: how many, 0 on
+    /// error.
+    pub fn gzwrite(file: *mut GzFileS, buf: *const c_void, len: c_uint) -> c_int;
     /// inflateInit2(): the macro passes the version and size of the
     /// stream it was compiled with.
     pub fn inflateInit2_(

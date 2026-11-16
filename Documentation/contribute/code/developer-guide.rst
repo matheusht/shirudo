@@ -400,7 +400,8 @@ Project layout
        container layout, TPM types and the enforcement definitions
        shared between userspace and BPF.
    * - :src:`tools/shirudo-build/`
-     - The operator-only helper: compile, sign, unload directives,
+     - The ``main()`` of the operator-only helper, whose commands are in
+       :src:`rust/src/shirudo_build/`: compile, sign, unload directives,
        image signing, ``keys vouch``, ``bpm build``, ``push``,
        ``tree append``, ``tree show`` and ``config update``.
    * - :src:`tools/quote-check/`

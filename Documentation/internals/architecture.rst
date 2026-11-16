@@ -46,7 +46,7 @@ show``, ``shirudo bpm config update``, ``shirudo image build``,
 ``shirudo image verify`` and ``shirudo keys vouch``, execute the separate
 ``shirudo-build`` helper. Only that helper
 links the CMS signer (:src:`util/sign.c`) and the package builder and
-publisher (:src:`tools/shirudo-build/`). It runs ``clang`` to compile BPF,
+publisher (:src:`rust/src/shirudo_build/`). It runs ``clang`` to compile BPF,
 libbpf's gen_loader to produce the signed loader, and ``veritysetup`` to
 format and check images. The core binary finds it through
 ``SHIRUDO_BUILD``, the compiled-in libexec directory or ``PATH``.

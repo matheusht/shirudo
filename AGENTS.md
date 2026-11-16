@@ -210,7 +210,7 @@ one usually still compiles and passes tests.
   Do not add a target shell-out or a custom userspace verity hash-tree
   implementation.
 - **Operator code does not ship to targets.** Signing (`util/sign.c`)
-  and the package builder and publisher (`tools/shirudo-build/`) are
+  and the package builder and publisher (`rust/src/shirudo_build/`) are
   linked only into `shirudo-build`. The core binary only dispatches.
 - **The signature-gated `BPF_PROG_LOAD` is the upatch trust boundary.**
   Every signed load and unload directive goes through the same load path.

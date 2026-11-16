@@ -7,6 +7,7 @@
 //! and keys commands. It runs on the operator only, and is the one
 //! binary that links the CMS signer.
 
+mod bpm;
 mod compile;
 mod image;
 mod package;
@@ -18,7 +19,6 @@ use std::ffi::CString;
 
 use crate::errno::{EIO, ENAMETOOLONG, EPERM};
 use crate::ffi;
-use crate::sys::build::{build_bpm, build_upatch_name};
 use crate::sys::hex::hex_decode;
 use crate::sys::libc::{access, close, fwrite, mkstemps, stderr, stdout, strerror, unlink};
 use crate::sys::log::{log_init, pr_err, pr_info};
@@ -240,6 +240,32 @@ impl Default for KeyFiles {
 }
 
 impl KeyFiles {
+    /// The key and certificate under the directory `dir`, as key_paths()
+    /// spells them.
+    fn under(dir: &[u8]) -> Result<Self, c_int> {
+        let d = CString::new(dir.to_vec()).map_err(|_| -crate::errno::EINVAL)?;
+        let (mut pkey, mut cert) = ([0u8; PATH_MAX], [0u8; PATH_MAX]);
+        // SAFETY: a C string and the rooms for the two paths.
+        let ret = unsafe {
+            key_paths(
+                d.as_ptr(),
+                pkey.as_mut_ptr().cast(),
+                pkey.len(),
+                cert.as_mut_ptr().cast(),
+                cert.len(),
+            )
+        };
+        if ret != 0 {
+            return Err(ret);
+        }
+        Ok(KeyFiles {
+            pkey: CString::new(cstr(&pkey).to_vec()).unwrap_or_default(),
+            cert: CString::new(cstr(&cert).to_vec()).unwrap_or_default(),
+            pkey_named: false,
+            cert_named: false,
+        })
+    }
+
     fn set_pkey(&mut self, path: &CStr) {
         self.pkey = path.into();
         self.pkey_named = true;
@@ -528,19 +554,18 @@ fn load(o: &Opts, input: &CStr, pkey: &CStr, cert: &CStr) -> c_int {
         error(b"input must be .bpf.c or .bpf.o");
         return 2;
     };
-    let mut name_buf = [0u8; 256];
+    let derived_name;
     let name = match o.name {
         Some(n) => n,
         None => {
-            // SAFETY: a C string and the room for the name.
-            if unsafe {
-                build_upatch_name(input.as_ptr(), name_buf.as_mut_ptr().cast(), name_buf.len())
-            } != 0
-            {
-                error(&[b"upatch name from ", input.to_bytes(), b" too long"].concat());
-                return 2;
-            }
-            CStr::from_bytes_until_nul(&name_buf).unwrap_or_default()
+            derived_name = match bpm::upatch_name(input.to_bytes()) {
+                Ok(n) => CString::new(n).unwrap_or_default(),
+                Err(_) => {
+                    error(&[b"upatch name from ", input.to_bytes(), b" too long"].concat());
+                    return 2;
+                }
+            };
+            &derived_name
         }
     };
     let ret = package::load_object(bpf_o, src, output, name, pkey, cert);
@@ -585,10 +610,6 @@ unsafe fn run(argc: c_int, argv: *mut *mut c_char) -> c_int {
     let words = unsafe { ffi::slice(argv.cast_const(), n) };
     // SAFETY: each a C string.
     let word = |i: usize| unsafe { CStr::from_ptr(words[i]) };
-    // SAFETY: the words from `from` on, passed on as main() would.
-    let sub = |f: unsafe extern "C" fn(c_int, *mut *mut c_char) -> c_int, from: usize| unsafe {
-        f(argc - from as c_int, argv.add(from))
-    };
 
     harden_stdio();
     // SAFETY: opens the log once, before anything logs.
@@ -600,7 +621,7 @@ unsafe fn run(argc: c_int, argv: *mut *mut c_char) -> c_int {
     match all.get(1).map(|w| w.to_bytes()) {
         Some(b"image") => return image::run(&all[1..]),
         Some(b"upatch") => return package::upatch_cli(&all[1..]),
-        Some(b"bpm") => return sub(build_bpm, 1),
+        Some(b"bpm") => return bpm::run(&all[1..]),
         Some(b"keys") if n >= 3 && all[2].to_bytes() == b"vouch" => return vouch::run(&all[2..]),
         _ => {}
     }
@@ -674,7 +695,7 @@ unsafe fn run(argc: c_int, argv: *mut *mut c_char) -> c_int {
 }
 
 mod capi {
-    use core::ffi::{CStr, c_char, c_int};
+    use core::ffi::{c_char, c_int};
 
     /// `shirudo-build`, from its main(): the command line, whole.
     ///
@@ -685,17 +706,5 @@ mod capi {
     pub unsafe extern "C" fn shirudo_build_main(argc: c_int, argv: *mut *mut c_char) -> c_int {
         // SAFETY: the caller's command line.
         unsafe { super::run(argc, argv) }
-    }
-
-    /// Whether the signing key and the certificate are usable: 0, or 1
-    /// with the reason logged.
-    ///
-    /// # Safety
-    ///
-    /// `pkey` and `cert` are C strings.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn build_check_keys(pkey: *const c_char, cert: *const c_char) -> c_int {
-        // SAFETY: the caller passes C strings.
-        unsafe { super::check_keys(CStr::from_ptr(pkey), CStr::from_ptr(cert)) }
     }
 }

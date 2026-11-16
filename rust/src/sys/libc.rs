@@ -135,7 +135,7 @@ const _: () = assert!(core::mem::offset_of!(Dirent, d_name) == 19);
 /// lays them out.
 #[repr(C)]
 pub struct Utsname {
-    sysname: [u8; 65],
+    pub sysname: [u8; 65],
     pub nodename: [u8; 65],
     pub release: [u8; 65],
     pub version: [u8; 65],

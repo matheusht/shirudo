@@ -132,8 +132,7 @@ parser of input from outside the host gets a target in `testing/fuzz/`.
   for, `SHIRUDO_CLANG_PATH`, `/usr/bin/clang` unless set. It must be
   clang 23; an older one stops at a release store with
   `Cannot select: ... AtomicStore`. Make does not rebuild the helper
-  when only that variable changes: remove
-  `tools/shirudo-build/compile.o` first.
+  when only that variable changes: rebuild the Rust library first.
 - `end2end` prepares the operator VM's image on first use, with network
   access for clang 23 from apt.llvm.org, and caches it beside the
   runtime image; every run then builds the operator package in that VM,

@@ -15,6 +15,7 @@ mod publication;
 mod semver;
 mod tar;
 
+pub(crate) use capi::{bpm_pkg_load_info, bpm_pkg_read_member, bpm_semver_valid};
 pub(crate) use facade::{
     Member, extract, fetch_publication, index_parse, read_member_in, verify_cms, verify_cms_fd,
     visit_members,
@@ -33,7 +34,7 @@ pub struct IndexEntry {
     pub(crate) repository: [u8; MAX_ENDPOINT],
     pub(crate) manifest_digest: [u8; MAX_DIGEST],
     pub(crate) package_digest: [u8; MAX_DIGEST],
-    signer: [u8; MAX_DIGEST],
+    pub(crate) signer: [u8; MAX_DIGEST],
     pub(crate) package_size: i64,
 }
 
@@ -42,11 +43,11 @@ pub struct IndexEntry {
 /// releases.
 #[repr(C)]
 pub struct PackageInfo {
-    name: [u8; MAX_NAME],
-    version: [u8; MAX_NAME],
-    signer: [u8; MAX_DIGEST],
-    cert: *mut u8,
-    cert_len: usize,
+    pub(crate) name: [u8; MAX_NAME],
+    pub(crate) version: [u8; MAX_NAME],
+    pub(crate) signer: [u8; MAX_DIGEST],
+    pub(crate) cert: *mut u8,
+    pub(crate) cert_len: usize,
 }
 
 /// `enum bpm_upatch_member`: what a file of a package's upatches/ is.

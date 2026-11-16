@@ -473,7 +473,7 @@ impl Drop for Temp {
 
 /// Sets `symbol` in the .rodata of the package at `input` to `value` and
 /// signs the result into `output`.
-fn patch_rodata(
+pub(super) fn patch_rodata(
     input: &CStr,
     output: &CStr,
     symbol: &CStr,
@@ -537,7 +537,7 @@ fn patch_rodata(
     resign(input, &temp.0, output, &allowed, &[symbol], keys)
 }
 
-fn verify_package(input: &CStr, cert: &CStr) -> c_int {
+pub(super) fn verify_package(input: &CStr, cert: &CStr) -> c_int {
     match Opened::open(input) {
         Ok(u) if u.is_unload() => -EINVAL,
         Ok(u) => verify_payload(&u, cert),
@@ -934,7 +934,7 @@ fn policy_labels(obj: &Object, policies: &[u8], nr: u32) -> Result<Vec<u8>, c_in
 }
 
 /// Packages the object at `bpf_o` as upatch `name` at `out`.
-fn load(
+pub(super) fn load(
     bpf_o: &CStr,
     src_path: Option<&CStr>,
     out: &CStr,
@@ -987,7 +987,7 @@ const UNLOAD_PARAMS: usize = NAME_MAX + PAYLOAD_HASH_LEN;
 
 /// Signs the directive that unloads upatch `name`, whose payload has
 /// the digest `payload`, at `out`.
-fn unload(name: &CStr, payload: &[u8; 32], out: &CStr, keys: (&CStr, &CStr)) -> c_int {
+pub(super) fn unload(name: &CStr, payload: &[u8; 32], out: &CStr, keys: (&CStr, &CStr)) -> c_int {
     let err = check_name(name.to_bytes());
     if err != 0 {
         return err;
@@ -1058,115 +1058,4 @@ pub(super) fn unload_directive(
     cert: &CStr,
 ) -> c_int {
     unload(name, payload, out, (pkey, cert))
-}
-
-mod capi {
-    use core::ffi::{CStr, c_char, c_int, c_void};
-
-    use super::super::KeyFiles;
-    use crate::ffi;
-
-    fn opt<'a>(p: *const c_char) -> Option<&'a CStr> {
-        // SAFETY: NULL or a C string of the caller's.
-        (!p.is_null()).then(|| unsafe { CStr::from_ptr(p) })
-    }
-
-    fn cstr<'a>(p: *const c_char) -> &'a CStr {
-        // SAFETY: a C string of the caller's.
-        unsafe { CStr::from_ptr(p) }
-    }
-
-    fn keys(pkey: *const c_char, cert: *const c_char) -> KeyFiles {
-        let mut k = KeyFiles::default();
-        k.set_pkey(cstr(pkey));
-        k.set_cert(cstr(cert));
-        k
-    }
-
-    /// # Safety
-    ///
-    /// The paths are C strings, `src_path` NULL or one, and `policies`
-    /// holds `nr_policies` `struct upatch_policy_label_entry`.
-    #[unsafe(no_mangle)]
-    #[allow(clippy::too_many_arguments)]
-    pub unsafe extern "C" fn build_package_load(
-        bpf_o: *const c_char,
-        src_path: *const c_char,
-        out_upatch: *const c_char,
-        name: *const c_char,
-        policies: *const c_void,
-        nr_policies: u32,
-        pkey_path: *const c_char,
-        cert_path: *const c_char,
-    ) -> c_int {
-        let len = nr_policies as usize * crate::util::upatch::POLICY_LABEL_ENTRY;
-        let policies: &[u8] = if nr_policies == 0 || policies.is_null() {
-            &[]
-        } else {
-            // SAFETY: the caller's entries.
-            unsafe { ffi::slice(policies.cast::<u8>(), len) }
-        };
-        let k = keys(pkey_path, cert_path);
-        super::load(
-            cstr(bpf_o),
-            opt(src_path),
-            cstr(out_upatch),
-            cstr(name),
-            policies,
-            nr_policies,
-            (&k.pkey, &k.cert),
-        )
-    }
-
-    /// # Safety
-    ///
-    /// The strings are C strings and `payload_sha256` holds 32 bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn build_package_unload(
-        name: *const c_char,
-        payload_sha256: *const u8,
-        out_upatch: *const c_char,
-        pkey_path: *const c_char,
-        cert_path: *const c_char,
-    ) -> c_int {
-        // SAFETY: the caller's digest.
-        let payload = unsafe { &*payload_sha256.cast::<[u8; 32]>() };
-        let k = keys(pkey_path, cert_path);
-        super::unload(cstr(name), payload, cstr(out_upatch), (&k.pkey, &k.cert))
-    }
-
-    /// # Safety
-    ///
-    /// The strings are NULL or C strings and `value` holds `value_len`
-    /// bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn build_package_patch_rodata(
-        input: *const c_char,
-        output: *const c_char,
-        symbol: *const c_char,
-        value: *const u8,
-        value_len: usize,
-        pkey_path: *const c_char,
-        cert_path: *const c_char,
-    ) -> c_int {
-        let (Some(i), Some(o), Some(s), false) =
-            (opt(input), opt(output), opt(symbol), value.is_null())
-        else {
-            return -crate::errno::EINVAL;
-        };
-        // SAFETY: the caller's bytes.
-        let v = unsafe { ffi::slice(value, value_len) };
-        super::patch_rodata(i, o, s, v, &keys(pkey_path, cert_path))
-    }
-
-    /// # Safety
-    ///
-    /// `input` and `cert_path` are C strings.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn build_package_verify(
-        input: *const c_char,
-        cert_path: *const c_char,
-    ) -> c_int {
-        super::verify_package(cstr(input), cstr(cert_path))
-    }
 }

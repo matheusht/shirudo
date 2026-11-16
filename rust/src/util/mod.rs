@@ -42,7 +42,7 @@ mod report;
 mod serializer;
 pub(crate) mod similar;
 pub(crate) mod sysinfo;
-mod timefmt;
+pub(crate) mod timefmt;
 mod tls_openssl;
 pub(crate) mod tpm;
 pub(crate) mod tpm_wire;
