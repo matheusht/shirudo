@@ -307,8 +307,6 @@ BUILD_SRCS := \
     tools/shirudo-build/bpm-build.c \
     tools/shirudo-build/bpm-publish.c \
     tools/shirudo-build/bpm-show.c \
-    tools/shirudo-build/vouch.c \
-    tools/shirudo-build/image.c \
     util/elf_target_func.c
 
 # shirudo-quote-check is a backend's program: it checks keepalive quotes

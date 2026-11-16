@@ -14,7 +14,7 @@ pub(crate) mod chain;
 pub(crate) mod conditions;
 pub(crate) mod config;
 mod config_attest;
-mod config_image;
+pub(crate) mod config_image;
 pub(crate) mod config_measure;
 mod config_update;
 pub(crate) mod crypto_openssl;

@@ -8,6 +8,8 @@
 //! binary that links the CMS signer.
 
 mod compile;
+mod image;
+mod vouch;
 
 use core::ffi::{CStr, c_char, c_int};
 use core::ptr;
@@ -16,13 +18,13 @@ use std::ffi::CString;
 use crate::errno::{EIO, ENAMETOOLONG, EPERM};
 use crate::ffi;
 use crate::sys::build::{
-    build_bpm, build_image, build_keys_vouch, build_package_load, build_package_unload,
-    build_upatch_cli, build_upatch_name,
+    build_bpm, build_package_load, build_package_unload, build_upatch_cli, build_upatch_name,
 };
 use crate::sys::hex::hex_decode;
 use crate::sys::libc::{access, close, fwrite, mkstemps, stderr, stdout, strerror, unlink};
 use crate::sys::log::{log_init, pr_err, pr_info};
-use crate::sys::paths::{format_key_path, keys_dir_resolve};
+use crate::sys::malloc::xfree;
+use crate::sys::paths::{format_key_path, key_paths, keys_dir_resolve};
 use crate::sys::sign::open_signing_key;
 use crate::sys::string::name_has_suffix;
 use crate::text::cstr;
@@ -216,6 +218,128 @@ fn check_keys(pkey: &CStr, cert: &CStr) -> c_int {
         return 1;
     }
     0
+}
+
+/// The signing key and certificate a command signs with: named on its
+/// command line, else under the keys directory, else the defaults.
+struct KeyFiles {
+    pkey: CString,
+    cert: CString,
+    pkey_named: bool,
+    cert_named: bool,
+}
+
+impl Default for KeyFiles {
+    fn default() -> Self {
+        KeyFiles {
+            pkey: SIGNING_KEY_PATH.into(),
+            cert: CERT_PATH.into(),
+            pkey_named: false,
+            cert_named: false,
+        }
+    }
+}
+
+impl KeyFiles {
+    fn set_pkey(&mut self, path: &CStr) {
+        self.pkey = path.into();
+        self.pkey_named = true;
+    }
+
+    fn set_cert(&mut self, path: &CStr) {
+        self.cert = path.into();
+        self.cert_named = true;
+    }
+
+    /// The keys directory: `dir`, else SHIRUDO_KEYS_DIR, else the
+    /// default; NULL for none.
+    fn dir(dir: Option<&CStr>) -> *const c_char {
+        // SAFETY: NULL or a C string.
+        unsafe { keys_dir_resolve(dir.map_or(ptr::null(), CStr::as_ptr)) }
+    }
+
+    /// The key and the certificate under the keys directory, those not
+    /// named; the directory and the error when one does not fit.
+    fn resolve(&mut self, dir: Option<&CStr>) -> Result<(), (Vec<u8>, c_int)> {
+        let dir = Self::dir(dir);
+
+        if dir.is_null() {
+            return Ok(());
+        }
+        // SAFETY: the directory, a C string.
+        let name = || unsafe { ffi::c_str(dir) }.to_vec();
+        if !self.pkey_named {
+            self.pkey = key_path(dir, SIGNING_KEY_FILE).map_err(|e| (name(), e))?;
+        }
+        if !self.cert_named {
+            self.cert = key_path(dir, CERT_FILE).map_err(|e| (name(), e))?;
+        }
+        Ok(())
+    }
+
+    /// As resolve(), but both must fit under the directory, named or
+    /// not, as key_paths() has them.
+    fn resolve_both(&mut self, dir: Option<&CStr>) -> Result<(), c_int> {
+        let dir = Self::dir(dir);
+        let (mut pkey, mut cert) = ([0u8; PATH_MAX], [0u8; PATH_MAX]);
+
+        if dir.is_null() {
+            return Ok(());
+        }
+        // SAFETY: a C string and the rooms for the two paths.
+        let ret = unsafe {
+            key_paths(
+                dir,
+                pkey.as_mut_ptr().cast(),
+                pkey.len(),
+                cert.as_mut_ptr().cast(),
+                cert.len(),
+            )
+        };
+        if ret != 0 {
+            return Err(ret);
+        }
+        if !self.pkey_named {
+            self.pkey = CString::new(cstr(&pkey).to_vec()).unwrap_or_default();
+        }
+        if !self.cert_named {
+            self.cert = CString::new(cstr(&cert).to_vec()).unwrap_or_default();
+        }
+        Ok(())
+    }
+}
+
+/// A buffer the C allocated, freed when it goes.
+struct Bytes(*mut u8, usize);
+
+impl Bytes {
+    fn bytes(&self) -> &[u8] {
+        if self.0.is_null() {
+            return &[];
+        }
+        // SAFETY: the buffer's bytes.
+        unsafe { ffi::slice(self.0, self.1) }
+    }
+}
+
+impl Drop for Bytes {
+    fn drop(&mut self) {
+        // SAFETY: the buffer, of its length, or NULL.
+        unsafe { xfree(self.0.cast(), self.1) };
+    }
+}
+
+fn hex(bytes: &[u8]) -> Vec<u8> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    bytes
+        .iter()
+        .flat_map(|b| [HEX[usize::from(b >> 4)], HEX[usize::from(b & 0xf)]])
+        .collect()
+}
+
+fn path(p: &[u8]) -> &std::ffi::OsStr {
+    std::os::unix::ffi::OsStrExt::from_bytes(p)
 }
 
 #[derive(Default)]
@@ -494,13 +618,12 @@ unsafe fn run(argc: c_int, argv: *mut *mut c_char) -> c_int {
     if harden_self() != 0 {
         return 1;
     }
-    match (n >= 2).then(|| word(1).to_bytes()) {
-        Some(b"image") => return sub(build_image, 1),
+    let all: Vec<&CStr> = (0..n).map(word).collect();
+    match all.get(1).map(|w| w.to_bytes()) {
+        Some(b"image") => return image::run(&all[1..]),
         Some(b"upatch") => return sub(build_upatch_cli, 1),
         Some(b"bpm") => return sub(build_bpm, 1),
-        Some(b"keys") if n >= 3 && word(2).to_bytes() == b"vouch" => {
-            return sub(build_keys_vouch, 2);
-        }
+        Some(b"keys") if n >= 3 && all[2].to_bytes() == b"vouch" => return vouch::run(&all[2..]),
         _ => {}
     }
 
@@ -548,41 +671,28 @@ unsafe fn run(argc: c_int, argv: *mut *mut c_char) -> c_int {
         i += 1;
     }
 
-    // SAFETY: NULL or a C string.
-    let keys_dir = unsafe { keys_dir_resolve(o.keys_dir.map_or(ptr::null(), CStr::as_ptr)) };
-    let (mut pkey_buf, mut cert_buf) = (None, None);
-    if !keys_dir.is_null() {
-        for (explicit, file, buf) in [
-            (o.pkey.is_some(), SIGNING_KEY_FILE, &mut pkey_buf),
-            (o.cert.is_some(), CERT_FILE, &mut cert_buf),
-        ] {
-            if explicit {
-                continue;
-            }
-            match key_path(keys_dir, file) {
-                Ok(p) => *buf = Some(p),
-                Err(err) => {
-                    // SAFETY: the directory, a C string.
-                    let dir = unsafe { ffi::c_str(keys_dir) };
-                    error(&[b"invalid keys dir ", dir, b": ", strerr(-err)].concat());
-                    return 2;
-                }
-            }
-        }
+    let mut keys = KeyFiles::default();
+    if let Some(p) = o.pkey {
+        keys.set_pkey(p);
     }
-    let pkey = o.pkey.or(pkey_buf.as_deref()).unwrap_or(SIGNING_KEY_PATH);
-    let cert = o.cert.or(cert_buf.as_deref()).unwrap_or(CERT_PATH);
-    if check_keys(pkey, cert) != 0 {
+    if let Some(c) = o.cert {
+        keys.set_cert(c);
+    }
+    if let Err((dir, err)) = keys.resolve(o.keys_dir) {
+        error(&[b"invalid keys dir ", &dir[..], b": ", strerr(-err)].concat());
+        return 2;
+    }
+    if check_keys(&keys.pkey, &keys.cert) != 0 {
         return 1;
     }
     if let Some(name) = o.unload {
-        return unload(&o, name, pkey, cert);
+        return unload(&o, name, &keys.pkey, &keys.cert);
     }
     let Some(input) = o.input else {
         usage(false);
         return 2;
     };
-    load(&o, input, pkey, cert)
+    load(&o, input, &keys.pkey, &keys.cert)
 }
 
 mod capi {

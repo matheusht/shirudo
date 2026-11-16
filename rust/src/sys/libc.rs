@@ -19,6 +19,7 @@ pub const F_OK: c_int = 0;
 pub const R_OK: c_int = 4;
 pub const W_OK: c_int = 2;
 pub const X_OK: c_int = 1;
+pub const F_SETFD: c_int = 2;
 pub const O_RDONLY: c_int = 0;
 pub const O_WRONLY: c_int = 0o1;
 pub const O_RDWR: c_int = 0o2;

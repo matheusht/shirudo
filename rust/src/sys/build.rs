@@ -2,19 +2,15 @@
 // Copyright (c) 2026 Authors of shirudo
 
 //! The parts of `shirudo-build` in tools/shirudo-build/ that are still
-//! C: the packager, and the image, upatch, bpm and keys commands.
+//! C: the packager, and the upatch and bpm commands.
 
 use core::ffi::{c_char, c_int, c_void};
 
 unsafe extern "C" {
-    /// `shirudo-build image ...`, from its command word on.
-    pub fn build_image(argc: c_int, argv: *mut *mut c_char) -> c_int;
     /// `shirudo-build upatch ...`, from its command word on.
     pub fn build_upatch_cli(argc: c_int, argv: *mut *mut c_char) -> c_int;
     /// `shirudo-build bpm ...`, from its command word on.
     pub fn build_bpm(argc: c_int, argv: *mut *mut c_char) -> c_int;
-    /// `shirudo-build keys vouch ...`, from `vouch` on.
-    pub fn build_keys_vouch(argc: c_int, argv: *mut *mut c_char) -> c_int;
     /// Packages and signs the object at `bpf_o` as upatch `name` at
     /// `out_upatch`, with `nr_policies` policy labels at `policies`;
     /// `src_path`, NULL for none, anchors relative decoder paths. 0 or
