@@ -384,8 +384,7 @@ Project layout
        ``config``, ``genkey``, ``image``, ``init``, ``keys``,
        ``status`` and ``version`` in :src:`rust/src/builtin/`.
    * - :src:`util/`
-     - The userspace library both binaries link. :src:`util/sign.c` is
-       linked into ``shirudo-build`` only.
+     - The userspace library both binaries link.
    * - :src:`bpf/`
      - The embedded BPF programs: ``bpf2.c`` (admission, mount, image
        and device guards), ``seal.c`` (the seal) and ``unload.c`` (the

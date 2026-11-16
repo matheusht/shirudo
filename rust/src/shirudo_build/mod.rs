@@ -11,6 +11,7 @@ mod bpm;
 mod compile;
 mod image;
 mod package;
+mod sign;
 mod vouch;
 
 use core::ffi::{CStr, c_char, c_int};
@@ -24,7 +25,6 @@ use crate::sys::libc::{access, close, fwrite, mkstemps, stderr, stdout, strerror
 use crate::sys::log::{log_init, pr_err, pr_info};
 use crate::sys::malloc::xfree;
 use crate::sys::paths::{format_key_path, key_paths, keys_dir_resolve};
-use crate::sys::sign::open_signing_key;
 use crate::sys::string::name_has_suffix;
 use crate::text::cstr;
 use crate::util::harden::{harden_self, harden_stdio};
@@ -198,17 +198,12 @@ fn compile_to_temp(
 /// Whether the signing key opens as one and the certificate reads: 0,
 /// or 1 with the reason logged.
 fn check_keys(pkey: &CStr, cert: &CStr) -> c_int {
-    // SAFETY: a C string.
-    let fd = unsafe { open_signing_key(pkey.as_ptr()) };
-
-    if fd < 0 {
-        if fd != -EPERM {
+    if let Err(err) = sign::open_signing_key(pkey) {
+        if err != -EPERM {
             error(b"run `shirudo genkey` on the operator (or pass --key).");
         }
         return 1;
     }
-    // SAFETY: the descriptor opened above.
-    unsafe { close(fd) };
     // SAFETY: a C string.
     if unsafe { access(cert.as_ptr(), R_OK) } != 0 {
         let err = last_err();

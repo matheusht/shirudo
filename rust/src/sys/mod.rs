@@ -21,7 +21,6 @@ pub mod openssl;
 pub mod otel;
 pub mod paths;
 pub mod seal;
-pub mod sign;
 pub mod ssl;
 pub mod string;
 pub mod tamper;

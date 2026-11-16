@@ -294,9 +294,9 @@ BPF_SRCS := \
     bpf/seal.c \
     bpf/unload.c
 
-# shirudo-build is operator-only and links util/sign.c (CMS signer)
+# shirudo-build is operator-only and links Rust CMS signer (CMS signer)
 # plus a small subset of util/. The core shirudo binary does NOT
-# link util/sign.c.
+# link Rust CMS signer.
 BUILD_SRCS := \
     tools/shirudo-build/shirudo-build.c \
      \
@@ -322,14 +322,13 @@ QUOTE_CHECK_OBJS := $(foreach s,$(QUOTE_CHECK_SRCS),$(call obj,$(s:.c=.o)))
 
 MAIN_OBJ     := $(call obj,shirudo.o)
 VERSION_OBJ  := $(call obj,util/version_id.o)
-SIGN_OBJ     := $(call obj,util/sign.o)
 
 # Header-dependency tracking (-MMD -MP writes a .d per .o). Without this,
 # changing a header would leave dependent .o files stale -- e.g. a struct
 # whose size grew in a header but whose .c was not re-touched, producing
 # an ABI mismatch and memory corruption at runtime.
 DEP_OBJS := $(MAIN_OBJ) $(BUILTIN_OBJS) $(UTIL_OBJS) $(VERSION_OBJ) \
-            $(BUILD_OBJS) $(SIGN_OBJ) $(QUOTE_CHECK_OBJS)
+            $(BUILD_OBJS)  $(QUOTE_CHECK_OBJS)
 DEPS     := $(DEP_OBJS:.o=.d)
 
 # ----- top-level goals --------------------------------------------
@@ -378,11 +377,8 @@ RUST_TARGET := build/rust
 RUST_LIB    := $(RUST_TARGET)/release/libshirudo_rs.a
 RUST_SRCS   := $(shell find $(RUST_DIR)/src -name '*.rs') \
                $(RUST_DIR)/Cargo.toml $(RUST_DIR)/Cargo.lock
-RUST_LDLIBS := -static-libgcc
-# LTO leaves one object in the archive, which a link of a few util
-# objects, a test's or shirudo-build's, pulls in whole: the sections it
-# does not reach go, and with them the references to C it does not link.
-RUST_TEST_LDLIBS := $(RUST_LDLIBS) -Wl,--gc-sections
+RUST_LDLIBS := -static-libgcc -Wl,--gc-sections
+RUST_TEST_LDLIBS := $(RUST_LDLIBS)
 RUSTFLAGS_WERROR := $(if $(filter 1,$(WERROR)),-D warnings)
 RUST_LIBEXEC_DIR := $(RUST_TARGET)/.libexec-dir
 ifneq ($(SHIRUDO_LIBEXEC_DIR),$(shell cat $(RUST_LIBEXEC_DIR) 2>/dev/null))
@@ -535,12 +531,12 @@ shirudo-target: $(MAIN_OBJ) $(BUILTIN_OBJS) $(UTIL_OBJS) $(VERSION_OBJ) $(LIBBPF
 util/loader.o: $(BPF_OBJS)
 build/target/util/loader.o: $(BPF_OBJS)
 
-# shirudo-build links util/sign.c (CMS signer) plus a subset of util,
+# shirudo-build links Rust CMS signer (CMS signer) plus a subset of util,
 # util/loader.o for its .incbin of bpf/unload.bpf.o (used by the
 # --unload directive emission path), and the OCI client for the
 # operator-only `bpm build|push|tree append|tree show`. Not linked into
 # the core shirudo binary.
-tools/shirudo-build/shirudo-build: $(BUILD_OBJS) $(SIGN_OBJ) \
+tools/shirudo-build/shirudo-build: $(BUILD_OBJS)  \
                                    util/log.o util/loader.o \
                                     util/malloc.o util/paths.o \
                                     \
@@ -1380,7 +1376,7 @@ clean:
 	$(Q)rm -f shirudo shirudo-target tools/shirudo-build/shirudo-build $(TEST_HELPERS)
 	$(Q)rm -f tools/quote-check/shirudo-quote-check
 	$(Q)rm -f $(MAIN_OBJ) $(BUILTIN_OBJS) $(UTIL_OBJS) \
-	          $(BUILD_OBJS) $(SIGN_OBJ) $(QUOTE_CHECK_OBJS) $(VERSION_OBJ) \
+	          $(BUILD_OBJS)  $(QUOTE_CHECK_OBJS) $(VERSION_OBJ) \
 	          util/version_id.c
 	$(Q)rm -rf build/target build/unit build/quote-check build/fuzz-afl \
 	    build/fuzz-afl-cmplog $(RUST_TARGET) $(RUST_FUZZ_TARGET)

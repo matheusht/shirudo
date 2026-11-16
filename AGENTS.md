@@ -209,9 +209,9 @@ one usually still compiles and passes tests.
   exactly the 64 lowercase ASCII root bytes and never authorize executables.
   Do not add a target shell-out or a custom userspace verity hash-tree
   implementation.
-- **Operator code does not ship to targets.** Signing (`util/sign.c`)
-  and the package builder and publisher (`rust/src/shirudo_build/`) are
-  linked only into `shirudo-build`. The core binary only dispatches.
+- **Operator code does not ship to targets.** Signing and the package
+  builder and publisher (`rust/src/shirudo_build/`) are linked only into
+  `shirudo-build`. The core binary only dispatches.
 - **The signature-gated `BPF_PROG_LOAD` is the upatch trust boundary.**
   Every signed load and unload directive goes through the same load path.
   The embedded LSM bootstrap loads during `init`, before its admission
@@ -364,8 +364,9 @@ one usually still compiles and passes tests.
   `libsubcmd`, `libkeyutils`, `libcap` and any JSON/YAML/TOML parser
   are refused; whiteroom or open-code instead.
 - Every line in the binary is fresh BSD-2-Clause or vendored from a
-  permissive OR-branch with its SPDX header kept (`vendor/libbpf`,
-  `util/sign.c`). Never copy or link GPL-2.0 code; study a pattern,
+  permissive OR-branch with its SPDX header kept (`vendor/libbpf`; the
+  CMS signer keeps the notice of bpftool's it was re-implemented from).
+  Never copy or link GPL-2.0 code; study a pattern,
   then write it from scratch without the GPL source open.
 - No kernel tree or submodule is needed to build: libbpf and the BPF
   UAPI headers live in `vendor/libbpf/` and `vmlinux.h` is generated

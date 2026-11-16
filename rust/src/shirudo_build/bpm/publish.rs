@@ -16,7 +16,6 @@ use super::{archive, error, print, strerr};
 use crate::errno::{E2BIG, EEXIST, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT};
 use crate::shirudo_build::{check_keys, key_path};
 use crate::sys::curl::{CURL_GLOBAL_DEFAULT, curl_global_cleanup, curl_global_init};
-use crate::sys::sign::{SignIo, cms_sign};
 use crate::util::bpm_oci::{
     Client, Descriptor, MANIFEST_MEDIA, bpm_oci_emit_descriptor, bpm_oci_push_blob,
     bpm_oci_put_manifest, digest_matches, manifest_layers, sha256_hex,
@@ -58,23 +57,7 @@ pub(super) fn fail(action: &str, ret: c_int) -> c_int {
 /// Detached CMS over `payload` with the operator key, the form of a
 /// loader signature, so the target verifies both with one code path.
 pub(super) fn sign_detached(payload: &[u8], keys: (&CStr, &CStr)) -> Result<Vec<u8>, c_int> {
-    let mut sig = vec![0u8; SIGN_MAX];
-    let mut io = SignIo {
-        insns: payload.as_ptr().cast(),
-        insns_sz: payload.len(),
-        data: ptr::null(),
-        data_sz: 0,
-        signature: sig.as_mut_ptr().cast(),
-        signature_sz: sig.len(),
-        payload_sha256: [0; 32],
-    };
-    // SAFETY: the payload, the room for the signature and C strings.
-    let ret = unsafe { cms_sign(&mut io, keys.0.as_ptr(), keys.1.as_ptr()) };
-    if ret != 0 {
-        return Err(ret);
-    }
-    sig.truncate(io.signature_sz);
-    Ok(sig)
+    crate::shirudo_build::sign::cms_sign(payload, &[], SIGN_MAX, keys.0, keys.1).map(|(sig, _)| sig)
 }
 
 /// Uploads `body` as a blob of `media` to `repo`.

@@ -20,7 +20,6 @@ use std::process::Command;
 use super::{KeyFiles, error, hex, print, strerr};
 use crate::errno::{EINVAL, EIO, EKEYREJECTED, ENOENT};
 use crate::sys::libc::{F_SETFD, O_NOFOLLOW, O_NONBLOCK, access, fcntl};
-use crate::sys::sign::{SignIo, cms_sign};
 use crate::util::config_image::{self, ConfigImageOpen, config_image_close, config_image_open};
 use crate::util::crypto_openssl::{
     Cert, cert_free, cert_key_algorithm, cert_read_file, cms_signed_by, verify_detached,
@@ -252,22 +251,11 @@ fn sign_root(input: &CStr, output: &CStr, keys: &KeyFiles) -> c_int {
     if !root.iter().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f')) {
         return -EINVAL;
     }
-    let mut signature = vec![0u8; SIG_MAX];
-    let mut io = SignIo {
-        insns: root.as_ptr().cast(),
-        insns_sz: root.len(),
-        data: core::ptr::null(),
-        data_sz: 0,
-        signature: signature.as_mut_ptr().cast(),
-        signature_sz: signature.len(),
-        payload_sha256: [0; 32],
+    let signature = match super::sign::cms_sign(&root[..], &[], SIG_MAX, &keys.pkey, &keys.cert) {
+        Ok((signature, _)) => signature,
+        Err(err) => return err,
     };
-    // SAFETY: the root, the room for the signature and C strings.
-    let mut ret = unsafe { cms_sign(&mut io, keys.pkey.as_ptr(), keys.cert.as_ptr()) };
-    let signature = &signature[..io.signature_sz.min(SIG_MAX)];
-    if ret == 0 {
-        ret = verify_root_signature(&root, signature, &keys.cert);
-    }
+    let ret = verify_root_signature(&root, &signature, &keys.cert);
     if ret != 0 {
         return ret;
     }
@@ -281,7 +269,7 @@ fn sign_root(input: &CStr, output: &CStr, keys: &KeyFiles) -> c_int {
         Ok(f) => f,
         Err(e) => return errno_of(&e),
     };
-    let ret = match file.write_all(signature).and_then(|()| file.sync_all()) {
+    let ret = match file.write_all(&signature).and_then(|()| file.sync_all()) {
         Ok(()) => 0,
         Err(e) => errno_of(&e),
     };

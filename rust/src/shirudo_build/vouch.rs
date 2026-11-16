@@ -15,7 +15,6 @@ use std::os::unix::io::IntoRawFd;
 use super::{Bytes, KeyFiles, error, hex, info, last_err, print, strerr};
 use crate::errno::{EINVAL, EIO, EKEYREJECTED};
 use crate::sys::libc::close;
-use crate::sys::sign::{SignIo, cms_sign};
 use crate::util::crypto_openssl::{Cert, cert_free, cert_key_algorithm, cert_read_der};
 use crate::util::keys::{keys_digest_der, keys_read_der, keys_vouch_payload};
 
@@ -186,23 +185,15 @@ fn vouch(input: &CStr, output: &CStr, keys: &KeyFiles) -> c_int {
         return ret;
     }
     let payload = Bytes(payload, payload_len);
-    let mut signature = vec![0u8; SIG_MAX];
-    let mut io = SignIo {
-        insns: payload.0.cast_const().cast(),
-        insns_sz: payload.1,
-        data: ptr::null(),
-        data_sz: 0,
-        signature: signature.as_mut_ptr().cast(),
-        signature_sz: signature.len(),
-        payload_sha256: [0; 32],
-    };
-    // SAFETY: the payload, the room for the signature and C strings.
-    let ret = unsafe { cms_sign(&mut io, keys.pkey.as_ptr(), keys.cert.as_ptr()) };
-    if ret != 0 {
-        error(&[b"keys vouch: sign: ", strerr(-ret)].concat());
-        return ret;
-    }
-    let ret = write_file(output, &signature[..io.signature_sz]);
+    let signature =
+        match super::sign::cms_sign(payload.bytes(), &[], SIG_MAX, &keys.pkey, &keys.cert) {
+            Ok((signature, _)) => signature,
+            Err(ret) => {
+                error(&[b"keys vouch: sign: ", strerr(-ret)].concat());
+                return ret;
+            }
+        };
+    let ret = write_file(output, &signature);
     if ret != 0 {
         error(
             &[

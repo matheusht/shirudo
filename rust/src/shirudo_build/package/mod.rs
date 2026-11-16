@@ -28,7 +28,6 @@ use crate::sys::libbpf::{
     GenLoaderOpts, libbpf_register_prog_handler, libbpf_unregister_prog_handler,
 };
 use crate::sys::loader::unload_blob;
-use crate::sys::sign::{SignIo, cms_sign};
 use crate::sys::string::{digits, parse_u64};
 use crate::util::bpm_package::verify_cms;
 use crate::util::crypto_openssl::sha256_calc;
@@ -168,27 +167,7 @@ fn compose_signed_data(data: &[u8], sections: &[Section]) -> Result<Vec<u8>, c_i
 /// CMS over `insns` and `data`: the signature, and the SHA-256 of the
 /// two the header carries.
 fn sign(insns: &[u8], data: &[u8], keys: (&CStr, &CStr)) -> Result<(Vec<u8>, [u8; 32]), c_int> {
-    let mut sig = vec![0u8; MAX_SIG_SIZE];
-    let mut io = SignIo {
-        insns: insns.as_ptr().cast(),
-        insns_sz: insns.len(),
-        data: if data.is_empty() {
-            ptr::null()
-        } else {
-            data.as_ptr().cast()
-        },
-        data_sz: data.len(),
-        signature: sig.as_mut_ptr().cast(),
-        signature_sz: sig.len(),
-        payload_sha256: [0; 32],
-    };
-    // SAFETY: the bytes, the room for the signature and C strings.
-    let ret = unsafe { cms_sign(&mut io, keys.0.as_ptr(), keys.1.as_ptr()) };
-    if ret != 0 {
-        return Err(ret);
-    }
-    sig.truncate(io.signature_sz);
-    Ok((sig, io.payload_sha256))
+    super::sign::cms_sign(insns, data, MAX_SIG_SIZE, keys.0, keys.1)
 }
 
 /// The parts of an open container.

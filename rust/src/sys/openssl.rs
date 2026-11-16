@@ -441,3 +441,46 @@ unsafe extern "C" {
     ) -> c_int;
     pub fn i2d_X509_bio(bio: *mut Bio, x: *const X509) -> c_int;
 }
+
+// What the CMS signer of shirudo-build calls.
+unsafe extern "C" {
+    pub fn BIO_new_file(filename: *const c_char, mode: *const c_char) -> *mut Bio;
+    pub fn BIO_read(b: *mut Bio, data: *mut c_void, dlen: c_int) -> c_int;
+    pub fn EVP_PKEY_is_a(pkey: *const EvpPkey, name: *const c_char) -> c_int;
+    pub fn EVP_sha512() -> *const EvpMd;
+    pub fn CMS_sign(
+        signcert: *mut X509,
+        pkey: *mut EvpPkey,
+        certs: *mut Stack,
+        data: *mut Bio,
+        flags: c_uint,
+    ) -> *mut CmsContentInfo;
+    pub fn CMS_add1_signer(
+        cms: *mut CmsContentInfo,
+        signer: *mut X509,
+        pk: *mut EvpPkey,
+        md: *const EvpMd,
+        flags: c_uint,
+    ) -> *mut CmsSignerInfo;
+    pub fn CMS_final(
+        cms: *mut CmsContentInfo,
+        data: *mut Bio,
+        dcont: *mut Bio,
+        flags: c_uint,
+    ) -> c_int;
+    pub fn i2d_CMS_bio_stream(
+        out: *mut Bio,
+        cms: *mut CmsContentInfo,
+        input: *mut Bio,
+        flags: c_int,
+    ) -> c_int;
+    pub fn ERR_get_error_all(
+        file: *mut *const c_char,
+        line: *mut c_int,
+        func: *mut *const c_char,
+        data: *mut *const c_char,
+        flags: *mut c_int,
+    ) -> c_ulong;
+    pub fn ERR_peek_error() -> c_ulong;
+    pub fn OpenSSL_version_num() -> c_ulong;
+}
