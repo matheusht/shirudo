@@ -20,15 +20,14 @@ use crate::sys::libc::{
     LOCK_UN, O_APPEND, O_CREAT, O_RDWR, STDOUT_FILENO, close, errno, ferror, flock, stdout,
 };
 use crate::sys::malloc::xfree;
-use crate::sys::upatch_maps::{
-    MAP_ENTRIES_DEFAULT, MAP_READ_PEEK, MapView, map_view_free, upatch_maps_read,
-};
+use crate::sys::upatch_maps::{MAP_ENTRIES_DEFAULT, MAP_READ_PEEK, MapView};
 use crate::text::{cstr, parse_u64};
 use crate::util::config::{self, Scrubbed};
 use crate::util::decode;
 use crate::util::help::{HelpItem, is_help};
 use crate::util::io::{lock_exclusive, write_complete};
 use crate::util::json::JsonEmit;
+use crate::util::map_read;
 use crate::util::map_render;
 use crate::util::otel::{self, OtelOpts};
 use crate::util::seal::seal_output_open;
@@ -342,16 +341,9 @@ fn export(
     };
     // SAFETY: an all-zero view is an empty one.
     let mut v: Box<MapView> = Box::new(unsafe { core::mem::zeroed() });
-    // SAFETY: two C strings and the view to fill.
-    let r = unsafe {
-        upatch_maps_read(
-            upatch,
-            map,
-            cap,
-            if a.peek { MAP_READ_PEEK } else { 0 },
-            &mut *v,
-        )
-    };
+    // SAFETY: the caller's C strings.
+    let (u, m) = unsafe { (crate::ffi::c_str(upatch), crate::ffi::c_str(map)) };
+    let r = map_read::read(u, m, cap, if a.peek { MAP_READ_PEEK } else { 0 }, &mut v);
     // SAFETY: the caller's C strings.
     let (u, m) = unsafe { (crate::ffi::c_str(upatch), crate::ffi::c_str(map)) };
     let mut ret = 0;
@@ -387,8 +379,7 @@ fn export(
             }
         }
     }
-    // SAFETY: the view, freed once.
-    unsafe { map_view_free(&mut *v) };
+    map_read::view_free(&mut v);
     ret
 }
 

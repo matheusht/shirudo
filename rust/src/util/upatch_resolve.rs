@@ -287,32 +287,3 @@ pub(crate) fn payload_sha256(name: &[u8], out: &mut [u8]) {
     }
     out[64] = 0;
 }
-
-mod capi {
-    use core::ffi::{c_char, c_int};
-
-    use crate::sys::btf::Btf;
-
-    /// Where upatch `name` attaches, for util/upatch_maps.c.
-    ///
-    /// # Safety
-    ///
-    /// `vbtf` is a BTF or NULL, `name` a C string, and `out` room for
-    /// `cap` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_resolve_location(
-        vbtf: *mut Btf,
-        name: *const c_char,
-        out: *mut c_char,
-        cap: usize,
-    ) -> c_int {
-        // SAFETY: the caller's BTF, C string and room.
-        unsafe {
-            super::resolve_location(
-                vbtf,
-                crate::ffi::c_str(name),
-                crate::ffi::bytes_mut(out.cast(), cap),
-            )
-        }
-    }
-}

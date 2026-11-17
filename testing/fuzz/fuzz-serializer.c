@@ -7,22 +7,27 @@
  */
 
 #include <errno.h>
+#include <string.h>
 
 #include "fuzz.h"
+
+#include "malloc.h"
+#include "upatch_maps.h"
+#include "bpf/lib/serializer.h"
 
 static const __u8 *chunks;
 static size_t chunks_len;
 
-/* <bpf/bpf.h> declares it under the name it replaces. */
-#define bpf_map_lookup_elem fuzz_lookup
-#include "upatch_maps.c"
+int __wrap_bpf_map_lookup_elem(int fd, const void *key, void *value);
 
-int fuzz_lookup(int fd, const void *key, void *value)
+/* The output map the reader looks the page's chunks up in: the input. */
+int __wrap_bpf_map_lookup_elem(int fd, const void *key, void *value)
 {
 	size_t off = (size_t)*(const __u32 *)key *
 		     sizeof(struct serial_chunk);
 	size_t n;
 
+	(void)fd;
 	if (off >= chunks_len) {
 		errno = ENOENT;
 		return -1;
@@ -37,7 +42,6 @@ int fuzz_lookup(int fd, const void *key, void *value)
 
 int LLVMFuzzerTestOneInput(const __u8 *data, size_t size)
 {
-	struct bpf_map_info info = { .max_entries = 64 };
 	struct serial_chunk first = {};
 	struct serial_page page;
 
@@ -45,8 +49,8 @@ int LLVMFuzzerTestOneInput(const __u8 *data, size_t size)
 	chunks_len = size;
 	/* The page the reader asks for is the one a consistent serializer wrote. */
 	memcpy(&first, data, min(size, sizeof(first)));
-	if (!read_serial_page(0, &info, first.page_index, first.cursor,
-			      first.invocation_id, &page))
+	if (!upatch_maps_read_serial_page(0, 64, first.page_index, first.cursor,
+					  first.invocation_id, &page))
 		xfree(page.data, page.bytes);
 	return 0;
 }

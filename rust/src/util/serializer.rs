@@ -29,20 +29,20 @@ const LOCKS_DIR: &CStr = c"/var/lib/shirudo/locks";
 /// writes.
 #[repr(C)]
 pub struct SerialChunk {
-    magic: u32,
-    version: u32,
-    flags: u32,
-    status: c_int,
-    chunk_index: u32,
-    total_chunks: u32,
-    bytes_total: u32,
-    bytes_in_chunk: u32,
-    page_index: u32,
-    reserved: u32,
-    cursor: u64,
-    next_cursor: u64,
-    invocation_id: u64,
-    data: [u8; SERIAL_CHUNK_PAYLOAD as usize],
+    pub(crate) magic: u32,
+    pub(crate) version: u32,
+    pub(crate) flags: u32,
+    pub(crate) status: c_int,
+    pub(crate) chunk_index: u32,
+    pub(crate) total_chunks: u32,
+    pub(crate) bytes_total: u32,
+    pub(crate) bytes_in_chunk: u32,
+    pub(crate) page_index: u32,
+    pub(crate) reserved: u32,
+    pub(crate) cursor: u64,
+    pub(crate) next_cursor: u64,
+    pub(crate) invocation_id: u64,
+    pub(crate) data: [u8; SERIAL_CHUNK_PAYLOAD as usize],
 }
 
 const _: () = assert!(size_of::<SerialChunk>() == 4096);
@@ -143,7 +143,7 @@ fn lock_acquire_at(dir: &CStr, map_id: u32) -> c_int {
 }
 
 /// A random ID for one read of a map, never 0.
-fn new_invocation_id(out: &mut u64) -> c_int {
+pub(crate) fn new_invocation_id(out: &mut u64) -> c_int {
     let mut id = [0u8; 8];
 
     loop {
@@ -174,7 +174,7 @@ fn new_invocation_id(out: &mut u64) -> c_int {
 
 /// Whether the chunk is the one asked for, of this read: 0, -EINVAL or
 /// -EBADMSG.
-fn chunk_validate(
+pub(crate) fn chunk_validate(
     c: Option<&SerialChunk>,
     want_index: u32,
     total_chunks: u32,
@@ -201,6 +201,8 @@ fn chunk_validate(
     }
     0
 }
+
+pub(crate) use capi::serializer_lock_acquire;
 
 mod capi {
     use core::ffi::{CStr, c_char, c_int};

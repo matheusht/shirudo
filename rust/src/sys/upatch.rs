@@ -25,18 +25,6 @@ const _: () = assert!(size_of::<MapSummary>() == 296);
 const _: () = assert!(core::mem::offset_of!(MapSummary, type_name) == 280);
 
 unsafe extern "C" {
-    /// The maps of upatch `name` into `*out`, their count into `*n`, which
-    /// map_summary_free() frees: 0 or -errno.
-    pub fn upatch_maps_list_one(
-        upatch: *const c_char,
-        out: *mut *mut MapSummary,
-        n: *mut usize,
-    ) -> c_int;
-    /// The maps of every loaded upatch into `*out`, their count into
-    /// `*n`, which map_summary_free() frees: 0 or -errno.
-    pub fn upatch_maps_list_all(out: *mut *mut MapSummary, n: *mut usize) -> c_int;
-    /// Frees the `n` summaries at `list`, NULL for none.
-    pub fn map_summary_free(list: *mut MapSummary, n: usize);
     /// Loads the archived upatch at `path`: 0 or -errno.
     pub fn upatch_apply(path: *const c_char) -> c_int;
 }

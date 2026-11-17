@@ -17,13 +17,12 @@ use crate::sys::btf::{
 };
 use crate::sys::libc::{close, errno};
 use crate::sys::upatch::MapSummary;
-use crate::sys::upatch_maps::{
-    MAP_ENTRIES_DEFAULT, MAP_READ_PEEK, MapView, map_view_free, upatch_maps_read,
-};
+use crate::sys::upatch_maps::{MAP_ENTRIES_DEFAULT, MAP_READ_PEEK, MapView};
 use crate::text::cstr;
 use crate::util::bpf_info::{Info, LINK_INFO_SIZE, PROG_INFO_SIZE};
 use crate::util::help::{HelpItem, is_help};
 use crate::util::json::JsonEmit;
+use crate::util::map_read;
 use crate::util::map_render;
 use crate::util::timefmt::format_duration;
 use crate::util::upatch::name_valid;
@@ -207,19 +206,9 @@ fn age(ts: &[u8]) -> Vec<u8> {
 fn read_map(upatch: &CStr, m: &MapSummary, cap: u32, f: impl FnOnce(Result<&MapView, c_int>)) {
     // SAFETY: an all-zero view is an empty one.
     let mut v: Box<MapView> = Box::new(unsafe { core::mem::zeroed() });
-    // SAFETY: two C strings and the view to fill.
-    let r = unsafe {
-        upatch_maps_read(
-            upatch.as_ptr(),
-            m.name.as_ptr().cast(),
-            cap,
-            MAP_READ_PEEK,
-            &mut *v,
-        )
-    };
+    let r = map_read::read(upatch.to_bytes(), cstr(&m.name), cap, MAP_READ_PEEK, &mut v);
     f(if r == 0 { Ok(&v) } else { Err(r) });
-    // SAFETY: the view, freed once.
-    unsafe { map_view_free(&mut *v) };
+    map_read::view_free(&mut v);
 }
 
 fn text(name: &CStr, l: &Loaded, maps: &[MapSummary], cap: u32) {

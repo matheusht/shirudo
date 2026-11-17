@@ -4,7 +4,7 @@
 //! The map reading of `util/upatch_maps.h`, which hands an export what
 //! a map holds.
 
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_char, c_void};
 
 use crate::sys::btf::Btf;
 
@@ -41,7 +41,7 @@ pub struct SerialPage {
     pub data: *mut c_void,
 }
 
-/// `struct map_view`: one map's contents, as upatch_maps_read() reads
+/// `struct map_view`: one map's contents, as util::map_read reads
 /// them.
 #[repr(C)]
 pub struct MapView {
@@ -90,18 +90,3 @@ const _: () = assert!(core::mem::offset_of!(MapView, value_type_def) == 1680);
 const _: () = assert!(core::mem::offset_of!(MapView, key_type_id) == 2704);
 const _: () = assert!(core::mem::offset_of!(MapView, btf) == 2712);
 const _: () = assert!(core::mem::offset_of!(MapView, entries_cap) == 2728);
-
-unsafe extern "C" {
-    /// Map `map` of upatch `upatch` into `out`, at most `cap` entries or
-    /// all for 0, MAP_READ_PEEK in `flags` to leave a serializer's
-    /// interval for the exporter: 0 or -errno; map_view_free() frees it.
-    pub fn upatch_maps_read(
-        upatch: *const c_char,
-        map: *const c_char,
-        cap: u32,
-        flags: u32,
-        out: *mut MapView,
-    ) -> c_int;
-    /// Frees what a read put in `v`.
-    pub fn map_view_free(v: *mut MapView);
-}

@@ -262,7 +262,7 @@ UTIL_SRCS := \
     util/keepalive.c \
     util/keepalive_quote.c \
      \
-    util/upatch_maps.c \
+     \
      \
      \
      \
@@ -952,7 +952,7 @@ testing/helper/test-signed-load: testing/helper/test-signed-load.c
 	$(Q)$(CC) $(CFLAGS) -I$(BPF_UAPI_INCLUDE) \
 	    -o $@ $^ -lcrypto
 
-testing/helper/test-otel-map: testing/helper/test-otel-map.c util/upatch_maps.o \
+testing/helper/test-otel-map: testing/helper/test-otel-map.c \
                         util/curl.o util/upatch_pins.o \
                          util/string.o util/log.o \
                         util/paths.o \
@@ -973,7 +973,7 @@ testing/helper/test-upatch-prog-metadata: testing/helper/test-upatch-prog-metada
 		$(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
 testing/helper/test-upatch-serializer-pages: testing/helper/test-upatch-serializer-pages.c \
-                                       util/upatch_maps.o util/upatch_pins.o  \
+                                        util/upatch_pins.o  \
                                         \
                                        util/string.o \
                                        util/malloc.o  util/paths.o \
@@ -1243,11 +1243,12 @@ $(FUZZ_OUT)/fuzz-elf: testing/fuzz/fuzz-elf.c $(FUZZ_BASE) $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-elf: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-elf: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS)
 $(FUZZ_OUT)/fuzz-serializer: testing/fuzz/fuzz-serializer.c $(FUZZ_BASE) \
-                              util/upatch_maps.c util/upatch_pins.c \
+                               util/upatch_pins.c \
                                $(FUZZ_SEAL)  util/paths.c \
                               $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-serializer: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
-$(FUZZ_OUT)/fuzz-serializer: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS)
+$(FUZZ_OUT)/fuzz-serializer: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS) \
+	-Wl,--wrap=bpf_map_lookup_elem
 $(FUZZ_OUT)/fuzz-cms: testing/fuzz/fuzz-cms.c $(FUZZ_BASE) \
                         $(FUZZ_SEAL)
 $(FUZZ_OUT)/fuzz-decoder: testing/fuzz/fuzz-decoder.c $(FUZZ_BASE) \
@@ -1294,7 +1295,7 @@ $(FUZZ_OUT)/fuzz-upatch-info: testing/fuzz/fuzz-upatch-info.c $(FUZZ_BASE) \
                               util/options.c util/paths.c \
                               util/similar.c \
                                \
-                               util/upatch_maps.c \
+                                \
                                util/upatch_pins.c \
                                \
                               util/upatch_verify.c util/version_id.c \
@@ -1331,7 +1332,7 @@ $(FUZZ_OUT)/fuzz-attest-report: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) \
 
 # A target that reaches static parsers or printers includes their source,
 # which it then depends on without linking it a second time.
-$(FUZZ_OUT)/fuzz-serializer: FUZZ_INCLUDED := util/upatch_maps.c
+$(FUZZ_OUT)/fuzz-serializer: FUZZ_INCLUDED :=
 $(FUZZ_OUT)/fuzz-upatch-info: FUZZ_INCLUDED := builtin-upatch.c
 $(FUZZ_OUT)/fuzz-bpm-info: FUZZ_INCLUDED :=
 $(FUZZ_OUT)/fuzz-attest-report: FUZZ_INCLUDED :=

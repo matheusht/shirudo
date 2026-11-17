@@ -85,8 +85,6 @@ struct map_view {
 	size_t		entries_cap;
 };
 
-void map_view_free(struct map_view *v);
-
 /* Name, type and max_entries alone, without reading entries. */
 struct map_summary {
 	char		upatch[UPATCH_NAME_MAX + 1];
@@ -97,27 +95,13 @@ struct map_summary {
 	__u32		n_cpus;
 };
 
-int  upatch_maps_list_all(struct map_summary **out,
-			  size_t *n_out);
-int  upatch_maps_list_one(const char *upatch,
-			  struct map_summary **out,
-			  size_t *n_out);
-void map_summary_free(struct map_summary *list, size_t n);
-
 /*
- * Read one map's contents. <max_entries_cap> bounds the number of
- * (key, value) pairs returned; MAP_ENTRIES_DEFAULT for the
- * default, 0 for unlimited (--show-full). Returns 0/-errno.
- *
- * Serializer-backed maps are drained by a read, as the map-export timer
- * expects. MAP_READ_PEEK asks the serializer for the interval
- * being collected without taking it from the exporter.
+ * A read, in rust/src/util/map_read.rs, takes MAP_ENTRIES_DEFAULT
+ * entries, or all for --show-full. It drains a serializer, as the
+ * map-export timer expects; MAP_READ_PEEK asks for the interval being
+ * collected without taking it from the exporter.
  */
 #define MAP_READ_PEEK	(1u << 0)
-
-int  upatch_maps_read(const char *upatch, const char *map,
-		      __u32 max_entries_cap, __u32 flags,
-		      struct map_view *out);
 
 /* In rust/src/util/map_render.rs. */
 void upatch_maps_print_summary(const struct map_summary *list,
@@ -132,14 +116,6 @@ void upatch_maps_emit_json_object(struct json_emit *e,
 
 bool upatch_map_is_percpu(__u32 type);
 
-/*
- * In rust/src/util/map_format.rs: the name and the definition of type id
- * of btf, each into the cap bytes at out, empty for none.
- */
-void upatch_map_btf_type_name(const struct btf *btf, __u32 id, char *out,
-			      size_t cap);
-void upatch_map_btf_type_def(const struct btf *btf, __u32 id, char *out,
-			     size_t cap);
 __u32 upatch_map_value_stride(const struct map_view *v);
 char *upatch_map_format_cell(const struct map_view *v,
 			     __u32 type_id, const void *value,
@@ -148,6 +124,15 @@ char *upatch_map_format_cell(const struct map_view *v,
 char *upatch_map_format_percpu_sum(const struct map_view *v,
 				   const void *values_per_cpu,
 				   const char *btf_type);
+
+/*
+ * For the fuzzer: the page the reader takes from output map fd of
+ * max_entries chunks for page_index at cursor of invocation_id, into
+ * out, its data for xfree(data, bytes): 0 or -errno.
+ */
+int upatch_maps_read_serial_page(int fd, __u32 max_entries, __u32 page_index,
+				 __u64 cursor, __u64 invocation_id,
+				 struct serial_page *out);
 
 int prog_test_run(int prog_fd, void *ctx, __u32 ctx_sz,
 		  __u32 *retval);

@@ -497,7 +497,6 @@ mod capi {
     use core::ffi::{c_char, c_void};
 
     use super::{MapView, to_xstr};
-    use crate::sys::btf::Btf;
 
     #[unsafe(no_mangle)]
     pub extern "C" fn upatch_map_is_percpu(ty: u32) -> bool {
@@ -555,38 +554,5 @@ mod capi {
         // SAFETY: the caller's values, one per CPU.
         let values = unsafe { crate::ffi::slice(values.cast::<u8>(), len) };
         to_xstr(&super::percpu_sum(v, values))
-    }
-
-    /// For util/upatch_maps.c while it reads maps: the name of a type.
-    ///
-    /// # Safety
-    ///
-    /// `btf` is a BTF or NULL, and `out` room for `cap` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_map_btf_type_name(
-        btf: *const Btf,
-        id: u32,
-        out: *mut c_char,
-        cap: usize,
-    ) {
-        // SAFETY: the caller's room.
-        super::type_name(btf, id, unsafe { crate::ffi::bytes_mut(out.cast(), cap) });
-    }
-
-    /// For util/upatch_maps.c while it reads maps: the definition of a
-    /// type.
-    ///
-    /// # Safety
-    ///
-    /// `btf` is a BTF or NULL, and `out` room for `cap` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_map_btf_type_def(
-        btf: *const Btf,
-        id: u32,
-        out: *mut c_char,
-        cap: usize,
-    ) {
-        // SAFETY: the caller's room.
-        super::type_def(btf, id, unsafe { crate::ffi::bytes_mut(out.cast(), cap) });
     }
 }

@@ -18,14 +18,13 @@ use std::ffi::CString;
 use crate::sys::libc::{fwrite, stderr, stdout};
 use crate::sys::log::{pr_audit, pr_err, pr_info, pr_warn};
 use crate::sys::malloc::xfree;
-use crate::sys::upatch::{
-    MapSummary, map_summary_free, upatch_maps_list_all, upatch_maps_list_one,
-};
+use crate::sys::upatch::MapSummary;
 use crate::util::help::{
     Help, HelpItem, HelpSection, is_help, is_list_cmds, print_help, print_subcmd_list,
     resolve_subcommand,
 };
 use crate::util::json::JsonEmit;
+use crate::util::map_read;
 
 /// JSON_MAX_BYTES of util/json.h: the most a document grows to.
 const JSON_MAX: usize = 8 * 1024 * 1024;
@@ -158,37 +157,15 @@ fn opt<'a>(name: &[u8], args: &[&'a CStr], i: &mut usize) -> Opt<'a> {
 
 /// The maps the loaded upatches pin: upatch `upatch`'s, or every
 /// upatch's for none.
-struct Summaries {
-    list: *mut MapSummary,
-    n: usize,
-}
+struct Summaries(Vec<MapSummary>);
 
 impl Summaries {
     fn of(upatch: Option<&CStr>) -> Self {
-        let mut s = Summaries {
-            list: core::ptr::null_mut(),
-            n: 0,
-        };
-        // SAFETY: a C string and the room for the list and its length.
-        unsafe {
-            match upatch {
-                Some(u) => upatch_maps_list_one(u.as_ptr(), &mut s.list, &mut s.n),
-                None => upatch_maps_list_all(&mut s.list, &mut s.n),
-            }
-        };
-        s
+        Summaries(map_read::list(upatch.map(CStr::to_bytes)))
     }
 
     fn as_slice(&self) -> &[MapSummary] {
-        // SAFETY: the n summaries listed, or none.
-        unsafe { crate::ffi::slice(self.list, self.n) }
-    }
-}
-
-impl Drop for Summaries {
-    fn drop(&mut self) {
-        // SAFETY: the list, freed once.
-        unsafe { map_summary_free(self.list, self.n) };
+        &self.0
     }
 }
 

@@ -25,7 +25,6 @@ use crate::sys::libc::{
 use crate::sys::log::{pr_err, pr_warn};
 use crate::sys::malloc::xfree;
 use crate::sys::string::name_has_suffix;
-use crate::sys::upatch::{MapSummary, map_summary_free, upatch_maps_list_one};
 use crate::sys::version::shirudo_version_id;
 use crate::text::cstr;
 use crate::util::bpm_tree_state::tree_emit_status;
@@ -48,6 +47,7 @@ use crate::util::keyring::{
     self, KeyringLink, keyring_bpf_serial, keyring_dm_verity_serial, keyring_links,
 };
 use crate::util::keys::{self, TrustedSet, keys_digest_der, keys_read_der};
+use crate::util::map_read;
 use crate::util::measured::{
     MeasuredSet, measured_set_boot, measured_set_free, measured_unmeasured_archives,
     measured_unmeasured_pins,
@@ -465,7 +465,6 @@ fn upatch_rows(pins: &[Vec<u8>]) -> Vec<UpatchTableRow> {
             // SAFETY: an all-zero row is an empty one.
             let mut r: UpatchTableRow = unsafe { mem::zeroed() };
             let name = message(&[&name_from_pin(pin).unwrap_or_else(|| pin.clone())]);
-            let (mut list, mut n): (*mut MapSummary, usize) = (ptr::null_mut(), 0);
 
             let bytes = name.as_bytes_with_nul();
             let n_name = bytes.len().min(r.name.len());
@@ -488,11 +487,9 @@ fn upatch_rows(pins: &[Vec<u8>]) -> Vec<UpatchTableRow> {
                     upatch,
                     ffi::bytes_mut(r.payload_sha256.as_mut_ptr().cast(), r.payload_sha256.len()),
                 );
-                upatch_maps_list_one(name.as_ptr(), &mut list, &mut n);
-                map_summary_free(list, n);
                 r.age_sec = upatch_table::age_sec(r.loaded_at.as_ptr());
             }
-            r.n_maps = n as u32;
+            r.n_maps = map_read::list(Some(name.to_bytes())).len() as u32;
             r
         })
         .collect();
