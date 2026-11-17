@@ -14,13 +14,13 @@ use std::ffi::CString;
 use super::{word, words};
 use crate::errno::{EACCES, EINVAL, EKEYREJECTED, ENODEV, ENOENT, ENOKEY, ESTALE};
 use crate::ffi;
+use crate::heap::{libc_free, xfree};
 use crate::sys::identity::Identity;
 use crate::sys::libc::{
     Dirent, O_CLOEXEC, O_RDONLY, PATH_MAX, Tm, alphasort, close, errno, fwrite, open, scandir,
     stdout, strerror, strftime,
 };
 use crate::sys::log::{pr_audit, pr_err, pr_info, pr_warn};
-use crate::sys::malloc::{libc_free, xfree};
 use crate::sys::openssl::{
     ASN1_TIME_to_tm, Asn1Time, BIO_free, BIO_new_fd, Bio, CRYPTO_free, EVP_Digest, EVP_PKEY_free,
     EVP_PKEY_get_base_id, EVP_PKEY_get_bits, EVP_PKEY_get0_type_name, EVP_sha256, EvpPkey,

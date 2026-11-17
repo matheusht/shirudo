@@ -9,6 +9,7 @@ use core::ffi::{c_char, c_int, c_ulong};
 use core::ptr;
 
 use crate::errno::{E2BIG, EINVAL, ENOENT, ENOMEM};
+use crate::heap::{libc_free, xcalloc, xfree};
 use crate::sys::elf::{
     ELF_C_READ_MMAP, ELF_K_ELF, ELF_T_NHDR, EV_CURRENT, EV_NONE, Elf, ElfData, ElfScn, GElfEhdr,
     GElfNhdr, GElfPhdr, GElfShdr, NT_GNU_BUILD_ID, PT_NOTE, SHT_NOTE, elf_begin, elf_end,
@@ -17,7 +18,6 @@ use crate::sys::elf::{
     gelf_getshdr,
 };
 use crate::sys::libc::{O_CLOEXEC, O_RDONLY, close, errno, open};
-use crate::sys::malloc::{libc_free, xcalloc, xfree};
 
 /// `UPATCH_BUILD_ID_MAX`: the longest build ID a upatch names.
 const BUILD_ID_MAX: usize = 64;

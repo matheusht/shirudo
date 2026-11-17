@@ -1,0 +1,176 @@
+// SPDX-License-Identifier: BSD-2-Clause
+// Copyright (c) 2026 Authors of shirudo
+
+//! Hex: each byte as two lowercase digits, the high nibble first, and
+//! decoded from digits of either case. The Lean model `Shirudo.Hex`
+//! states what an encoding and a decode are.
+
+use core::ffi::c_int;
+
+use crate::errno::EINVAL;
+
+const DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+/// The lowercase hex of `bytes`.
+pub(crate) fn encode(bytes: &[u8]) -> Vec<u8> {
+    bytes
+        .iter()
+        .flat_map(|b| [DIGITS[usize::from(b >> 4)], DIGITS[usize::from(b & 0xf)]])
+        .collect()
+}
+
+/// The value of hex digit `c` of either case.
+fn nibble(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// The bytes the digits `hex` spell into `out`, two digits a byte, in
+/// order until a byte that is not a digit: -EINVAL unless `hex` holds
+/// exactly twice as many digits as `out` has bytes.
+pub(crate) fn decode(hex: &[u8], out: &mut [u8]) -> Result<(), c_int> {
+    if Some(hex.len()) != out.len().checked_mul(2) {
+        return Err(-EINVAL);
+    }
+    for (o, pair) in out.iter_mut().zip(hex.chunks_exact(2)) {
+        match (nibble(pair[0]), nibble(pair[1])) {
+            (Some(hi), Some(lo)) => *o = (hi << 4) | lo,
+            _ => return Err(-EINVAL),
+        }
+    }
+    Ok(())
+}
+
+mod capi {
+    use core::ffi::{CStr, c_char, c_int, c_void};
+
+    use crate::errno::EINVAL;
+    use crate::heap::xmalloc;
+    use crate::sys::libc::{strlen, strnlen};
+
+    /// # Safety
+    ///
+    /// `inp` holds `n` bytes, and `out` room for `2 * n + 1`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn hex_encode(inp: *const u8, n: usize, out: *mut c_char) {
+        // SAFETY: the caller's bytes and room.
+        let (inp, out) = unsafe {
+            (
+                crate::ffi::slice(inp, n),
+                core::slice::from_raw_parts_mut(out.cast::<u8>(), 2 * n + 1),
+            )
+        };
+        let hex = super::encode(inp);
+        out[..hex.len()].copy_from_slice(&hex);
+        out[hex.len()] = 0;
+    }
+
+    /// The hex of the `n` bytes at `inp`, xmalloc()'d to `2 * n + 1`
+    /// bytes; NULL when the allocation fails.
+    ///
+    /// # Safety
+    ///
+    /// `inp` holds `n` bytes.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn hex_alloc(inp: *const c_void, n: usize) -> *mut c_char {
+        let size = n.saturating_mul(2).saturating_add(1);
+        // SAFETY: a size alone.
+        let out = unsafe { xmalloc(size) }.cast::<c_char>();
+        if !out.is_null() {
+            // SAFETY: the caller's bytes, and the room just allocated.
+            unsafe { hex_encode(inp.cast(), n, out) };
+        }
+        out
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn hex_nibble(c: c_int) -> c_int {
+        u8::try_from(c)
+            .ok()
+            .and_then(super::nibble)
+            .map_or(-1, c_int::from)
+    }
+
+    /// # Safety
+    ///
+    /// `hex` is a C string, and `out` room for `n` bytes.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn hex_decode(hex: *const c_char, out: *mut u8, n: usize) -> c_int {
+        // SAFETY: the caller's C string.
+        let len = unsafe { strlen(hex) };
+        if Some(len) != n.checked_mul(2) {
+            return -EINVAL;
+        }
+        // SAFETY: the string's digits, and the caller's room.
+        let (hex, out) = unsafe {
+            (
+                crate::ffi::slice(hex.cast::<u8>(), len),
+                core::slice::from_raw_parts_mut(out, n),
+            )
+        };
+        super::decode(hex, out).map_or_else(|e| e, |()| 0)
+    }
+
+    /// # Safety
+    ///
+    /// `hex` is a C string or holds `2 * cap + 1` bytes, `out` is room for
+    /// `cap` bytes and `len` for their count.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn hex_decode_max(
+        hex: *const c_char,
+        out: *mut u8,
+        cap: usize,
+        len: *mut usize,
+    ) -> c_int {
+        // SAFETY: the caller's string, read no further than one digit
+        // past the most it may hold.
+        let n = unsafe { strnlen(hex, cap.saturating_mul(2).saturating_add(1)) };
+        if n % 2 != 0 || n / 2 > cap {
+            return -EINVAL;
+        }
+        // SAFETY: the string's digits, and the caller's room.
+        let (digits, room) = unsafe {
+            (
+                crate::ffi::slice(hex.cast::<u8>(), n),
+                core::slice::from_raw_parts_mut(out, n / 2),
+            )
+        };
+        match super::decode(digits, room) {
+            Ok(()) => {
+                // SAFETY: the caller's room for the count.
+                unsafe { *len = n / 2 };
+                0
+            }
+            Err(e) => e,
+        }
+    }
+
+    /// The 32 bytes of a `sha256:<64 hex digits>` digest.
+    ///
+    /// # Safety
+    ///
+    /// `digest` is NULL or a C string, and `out` room for 32 bytes.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn sha256_digest_decode(digest: *const c_char, out: *mut u8) -> c_int {
+        if digest.is_null() {
+            return -EINVAL;
+        }
+        // SAFETY: the caller's C string and room.
+        let (digest, out) = unsafe {
+            (
+                CStr::from_ptr(digest).to_bytes(),
+                core::slice::from_raw_parts_mut(out, 32),
+            )
+        };
+        match digest.strip_prefix(b"sha256:") {
+            Some(hex) => super::decode(hex, out).map_or_else(|e| e, |()| 0),
+            None => -EINVAL,
+        }
+    }
+}
+
+pub(crate) use capi::{hex_decode, hex_decode_max, hex_encode, sha256_digest_decode};

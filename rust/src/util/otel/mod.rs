@@ -13,11 +13,11 @@ mod s3;
 use core::ffi::{CStr, c_char, c_int};
 
 use crate::errno::{E2BIG, EINVAL, ENODATA, EOPNOTSUPP};
+use crate::heap::{xfree, xmalloc};
 use crate::sys::btf::{
     BtfType, KIND_INT, KIND_TYPEDEF, btf__type_by_id, int_bits, int_encoding, int_offset,
 };
 use crate::sys::libc::{fwrite, stderr};
-use crate::sys::malloc::{xfree, xmalloc};
 use crate::sys::upatch_maps::MapView;
 use crate::util::json::JsonEmit;
 use crate::util::map_format;

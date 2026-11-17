@@ -10,9 +10,9 @@
 use core::ffi::{CStr, c_char, c_int, c_long, c_uint, c_ulong, c_void};
 
 use crate::errno::{EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOMEM, ENOPKG, EPROTONOSUPPORT};
+use crate::heap::{xfree, xmalloc};
 use crate::sys::libc::{O_CLOEXEC, O_RDONLY, Tm, close, errno, open, strftime};
 use crate::sys::log::pr_err;
-use crate::sys::malloc::{xfree, xmalloc};
 use crate::sys::openssl::*;
 use crate::text::{cstr, strscpy};
 use crate::util::io::{check_trusted, read_fd};

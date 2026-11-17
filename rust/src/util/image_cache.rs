@@ -17,7 +17,6 @@ use crate::sys::curl::{
     CURLOPT_REDIR_PROTOCOLS_STR, CURLOPT_URL, CURLOPT_WRITEDATA, CURLOPT_WRITEFUNCTION,
     WriteCallback, curl_easy_cleanup, curl_easy_init, curl_easy_perform, curl_easy_setopt,
 };
-use crate::sys::hex::hex_encode;
 use crate::sys::libc::{
     AT_EMPTY_PATH, O_CLOEXEC, O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_NONBLOCK, O_RDONLY,
     O_WRONLY, PATH_MAX, S_IFMT, S_IFREG, STATX_BASIC_STATS, Statx, close, errno, fsetxattr, fsync,
@@ -32,6 +31,7 @@ use crate::util::config_update::ConfigUpdateTarget;
 use crate::util::dm_verity::{
     DmVerity, dm_verity_close, dm_verity_create, dm_verity_remove, dm_verity_verify,
 };
+use crate::util::hex::hex_encode;
 use crate::util::io::write_complete;
 use crate::util::seal::seal_label;
 use crate::util::tls_openssl::tls_curl_policy;

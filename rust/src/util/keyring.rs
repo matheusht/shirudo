@@ -9,8 +9,8 @@
 use core::ffi::{CStr, c_char, c_int, c_long, c_void};
 
 use crate::errno::{ENOMEM, ERANGE};
+use crate::heap::{xcalloc, xfree, xmalloc, xreallocarray};
 use crate::sys::libc::{SYS_ADD_KEY, SYS_KEYCTL, abort, errno, syscall};
-use crate::sys::malloc::{xcalloc, xfree, xmalloc, xreallocarray};
 use crate::text::{cstr, strscpy};
 
 /// `KEYRING_DESC_MAX`.

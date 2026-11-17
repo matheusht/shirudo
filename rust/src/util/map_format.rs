@@ -482,7 +482,7 @@ pub(crate) fn percpu_sum(v: &MapView, values: &[u8]) -> Vec<u8> {
 /// The text, as a C string the C library frees with xstrfree().
 fn to_xstr(s: &[u8]) -> *mut c_char {
     // SAFETY: a size alone.
-    let p = unsafe { crate::sys::malloc::xmalloc(s.len() + 1) }.cast::<u8>();
+    let p = unsafe { crate::heap::xmalloc(s.len() + 1) }.cast::<u8>();
     if !p.is_null() {
         // SAFETY: the allocation, of the text and its NUL.
         unsafe {

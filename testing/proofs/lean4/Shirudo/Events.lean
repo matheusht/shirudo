@@ -447,7 +447,7 @@ structure Member where
 /-- `"0123456789abcdef"[n]` of `hex_encode()`. -/
 def hexDigit (n : Nat) : UInt8 := (ascii "0123456789abcdef").getD n 0
 
-/-- `hex_encode()` of util/hex.c: each byte as two lowercase digits, the
+/-- `hex_encode()` of rust/src/util/hex.rs: each byte as two lowercase digits, the
 high nibble first. -/
 def hexEncode (bs : List UInt8) : List UInt8 :=
   bs.flatMap fun b => [hexDigit (b.toNat >>> 4), hexDigit (b.toNat &&& 15)]

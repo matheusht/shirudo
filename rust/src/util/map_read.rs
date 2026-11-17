@@ -20,6 +20,7 @@ use std::os::unix::fs::MetadataExt;
 use crate::errno::{
     E2BIG, EBADMSG, EINVAL, EIO, ENAMETOOLONG, ENOENT, ENOMEM, EOPNOTSUPP, EOVERFLOW,
 };
+use crate::heap::{xcalloc, xfree, xmalloc, xreallocarray};
 use crate::sys::bpf::{
     bpf_map_get_next_key, bpf_map_lookup_elem, bpf_map_update_elem, bpf_obj_get,
 };
@@ -27,7 +28,6 @@ use crate::sys::btf::{
     btf__free, btf__load_from_kernel_by_id, btf__load_vmlinux_btf, libbpf_get_error,
 };
 use crate::sys::libc::{close, errno, syscall};
-use crate::sys::malloc::{xcalloc, xfree, xmalloc, xreallocarray};
 use crate::sys::upatch::MapSummary;
 use crate::sys::upatch_maps::{MAP_READ_PEEK, MapEntry, MapView, SerialPage};
 use crate::text::strscpy;

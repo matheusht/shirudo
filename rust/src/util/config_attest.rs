@@ -9,14 +9,14 @@
 use core::ffi::{CStr, c_int, c_void};
 
 use crate::errno::{E2BIG, EINVAL, EKEYREJECTED, ENOMEM, EOVERFLOW, EUCLEAN};
-use crate::sys::hex::{hex_decode, hex_encode};
-use crate::sys::malloc::{xfree, xreallocarray};
+use crate::heap::{xfree, xreallocarray};
 use crate::text::cstr;
 use crate::util::chain::chain_fold;
 use crate::util::config_measure::{EVENT_BOOT, EVENT_UPDATE, event as measure_event, pcr_valid};
 use crate::util::config_update::{
     ConfigUpdate, ConfigUpdateRecord, config_update_check, config_update_events,
 };
+use crate::util::hex::{hex_decode, hex_encode};
 use crate::util::json::{JsonArray, JsonEmit, JsonField, parse_schema};
 
 /// `CONFIG_EVIDENCE_EVENTS_MAX`.

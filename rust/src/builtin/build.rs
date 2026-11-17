@@ -11,9 +11,9 @@ use core::ptr;
 use super::word;
 use crate::errno::ENOMEM;
 use crate::ffi::c_splice;
+use crate::heap::{xcalloc, xfree};
 use crate::sys::libc::{PATH_MAX, X_OK, access, env, errno, execv, execvp, strerror};
 use crate::sys::log::pr_err;
-use crate::sys::malloc::{xcalloc, xfree};
 use crate::util::help::{Help, is_help, print_help};
 
 /// LIBEXEC_DIR: where packages install the helper, which the build

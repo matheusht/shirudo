@@ -1243,7 +1243,7 @@ pub(crate) fn run(d: &DecoderView, v: &MapView, otel: bool, max: usize) -> Resul
     let (buf, cap, len) = e.parts();
     if ret != 0 || e.err() != 0 {
         // SAFETY: the emitter's buffer, or NULL.
-        unsafe { crate::sys::malloc::xfree(buf.cast(), cap) };
+        unsafe { crate::heap::xfree(buf.cast(), cap) };
         return Err(if ret != 0 { ret } else { e.err() });
     }
     drop(states);

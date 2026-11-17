@@ -10,12 +10,12 @@ use core::ffi::{CStr, c_int};
 use std::ffi::CString;
 
 use crate::errno::{EINVAL, EKEYREJECTED, ENOENT, ENOKEY};
+use crate::heap::xfree;
 use crate::sys::libc::{
     O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW, O_NONBLOCK, S_IFMT, S_IFREG, Statx, close, closedir,
     fdopendir, openat, readdir, set_errno,
 };
 use crate::sys::log::pr_err;
-use crate::sys::malloc::xfree;
 use crate::util::image_config;
 use crate::util::io::stat_fd;
 use crate::util::keyring::{keyring_bpf_serial, keyring_holds_cert};

@@ -16,6 +16,7 @@ use std::os::unix::ffi::OsStrExt;
 use super::words;
 use crate::errno::{EINPROGRESS, ENODEV, ENOENT, ENOKEY};
 use crate::ffi;
+use crate::heap::xfree;
 use crate::sys::bpf::bpf_obj_get;
 use crate::sys::btf::{btf__free, btf__load_vmlinux_btf};
 use crate::sys::identity::Identity;
@@ -23,7 +24,6 @@ use crate::sys::libc::{
     access, close, explicit_bzero, fwrite, gethostname, stderr, stdout, strerror,
 };
 use crate::sys::log::{pr_err, pr_warn};
-use crate::sys::malloc::xfree;
 use crate::sys::string::name_has_suffix;
 use crate::sys::version::shirudo_version_id;
 use crate::text::cstr;

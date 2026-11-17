@@ -21,15 +21,15 @@ pub(crate) use records::{EventlogInit, UPATCH_INIT, UPATCH_UNLOAD};
 use core::ffi::{CStr, c_int};
 
 use crate::errno::{EFBIG, EINVAL, ENAMETOOLONG, ENOENT, ENOMEM};
-use crate::sys::hex::hex_encode;
+use crate::heap::{xfree, xmalloc};
 use crate::sys::libc::{
     AT_FDCWD, F_OK, O_CLOEXEC, O_RDONLY, PATH_MAX, STATX_SIZE, Statx, access, close, env, errno,
     open, read, statx, strerror, time, unlink,
 };
 use crate::sys::log::pr_err;
-use crate::sys::malloc::{xfree, xmalloc};
 use crate::text::{cstr, strsprintf};
 use crate::util::crypto_openssl::sha256_calc;
+use crate::util::hex::hex_encode;
 use crate::util::image_config;
 use crate::util::io::read_file;
 use crate::util::json::{JsonEmit, JsonField, MAX_BYTES, parse_schema};

@@ -13,13 +13,12 @@ use crate::errno::{
     E2BIG, EAGAIN, EFBIG, EINTR, EINVAL, EIO, EKEYREJECTED, ENODEV, ENOMEM, ENXIO, EUCLEAN,
 };
 use crate::ffi;
-use crate::sys::hex::{hex_decode, hex_decode_max, hex_encode, sha256_digest_decode};
+use crate::heap::{xcalloc, xfree, xmalloc};
 use crate::sys::libc::{
     AT_FDCWD, O_CLOEXEC, O_RDONLY, STATX_BASIC_STATS, Statx, close, errno, explicit_bzero,
     getrandom, open, read, scrub, statx,
 };
 use crate::sys::log::pr_err;
-use crate::sys::malloc::{xcalloc, xfree, xmalloc};
 use crate::sys::string::{digits, parse_u64, parse_x64, strscpy as c_strscpy, strsprintf};
 use crate::sys::tss2::NV_WRITTEN;
 use crate::sys::version::shirudo_version_id;
@@ -42,6 +41,7 @@ use crate::util::crypto_openssl::{
 use crate::util::eventlog::{
     NV_INDEX, eventlog_boot_id, eventlog_boot_lines, eventlog_path, eventlog_timestamp,
 };
+use crate::util::hex::{hex_decode, hex_decode_max, hex_encode, sha256_digest_decode};
 use crate::util::io::read_file;
 use crate::util::json::{
     JsonArray, JsonEmit, JsonField, MAX_BYTES as JSON_MAX_BYTES, parse_schema,

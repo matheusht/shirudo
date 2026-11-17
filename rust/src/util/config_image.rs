@@ -8,12 +8,12 @@
 use core::ffi::{CStr, c_int};
 
 use crate::errno::{EFBIG, EINTR, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG};
-use crate::sys::hex::hex_decode;
 use crate::sys::libc::{
     AT_EMPTY_PATH, O_CLOEXEC, O_NOFOLLOW, O_NONBLOCK, O_RDONLY, PATH_MAX, S_IFMT, S_IFREG,
     STATX_SIZE, STATX_TYPE, Statx, close, errno, open, pread, statx,
 };
 use crate::text::strsprintf;
+use crate::util::hex::hex_decode;
 
 pub(crate) const BLOCK_SIZE: u64 = 4096;
 const SALT_SIZE: usize = 32;

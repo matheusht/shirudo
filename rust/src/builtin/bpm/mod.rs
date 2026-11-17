@@ -20,13 +20,13 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 use crate::errno::{E2BIG, EINVAL, EIO, ENAMETOOLONG};
 use crate::ffi;
+use crate::heap::libc_free;
 use crate::sys::curl::{CURL_GLOBAL_DEFAULT, CURLE_OK, curl_global_cleanup, curl_global_init};
 use crate::sys::libc::{
     Dir, File, LOCK_UN, PATH_MAX, closedir, errno, fclose, fdopen, fdopendir, flock, fopen, fwrite,
     mkstemp, opendir, readdir, stderr, stdout, strerror, unlink,
 };
 use crate::sys::log::{pr_err, pr_warn};
-use crate::sys::malloc::libc_free;
 use crate::util::help::{
     Help, HelpItem, HelpSection, is_help, is_list_cmds, print_help, print_subcmd_list,
     resolve_subcommand,

@@ -7,8 +7,8 @@
 use core::ffi::{CStr, c_char, c_int, c_void};
 
 use crate::errno::{E2BIG, EINVAL, ENOENT, ENOMEM};
+use crate::heap::{xfree, xmalloc};
 use crate::sys::libc::PATH_MAX;
-use crate::sys::malloc::{xfree, xmalloc};
 use crate::text::{cstr, strsprintf};
 use crate::util::bpm_oci::{MAX_NAME, name_ok, version_ok};
 use crate::util::io::read_file;

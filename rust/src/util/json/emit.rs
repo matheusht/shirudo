@@ -9,7 +9,7 @@ use core::ffi::{c_char, c_int};
 
 use super::{EMIT_MAX_DEPTH, utf8_width};
 use crate::errno::{E2BIG, EILSEQ, ENOMEM, ENOSPC};
-use crate::sys::malloc::xreallocarray;
+use crate::heap::xreallocarray;
 
 /// `struct json_emit`, which C callers set up and read. `buf` and `cap`
 /// are the caller's, or with `max` set the emitter's: it grows `buf`,

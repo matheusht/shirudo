@@ -15,7 +15,6 @@ use crate::errno::{
     EUCLEAN,
 };
 use crate::ffi;
-use crate::sys::hex::{hex_decode, hex_encode};
 use crate::sys::libc::{
     AT_EMPTY_PATH, EOF, File, LOCK_EX, LOCK_NB, O_APPEND, O_CLOEXEC, O_CREAT, O_DIRECTORY, O_EXCL,
     O_NOFOLLOW, O_NONBLOCK, O_RDONLY, O_RDWR, O_WRONLY, S_IFMT, S_IFREG, STATX_BASIC_STATS, Statx,
@@ -26,6 +25,7 @@ use crate::sys::log::{pr_err, pr_info, pr_warn};
 use crate::text::cstr;
 use crate::util::chain::chain_fold;
 use crate::util::config_measure::{self, EVENT_BOOT, EVENT_UPDATE};
+use crate::util::hex::{hex_decode, hex_encode};
 use crate::util::io::write_complete;
 use crate::util::json::{JsonEmit, JsonField, parse_schema};
 

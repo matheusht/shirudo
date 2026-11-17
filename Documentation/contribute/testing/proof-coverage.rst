@@ -99,25 +99,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
        where it lies nowhere; nothing past the span is read; a string
        holds a needle where it lies in it; two strings are equal in
        either case exactly with the same letters and length
-   * - ``hex``
-     - ``hex_encode()``, ``hex_alloc()``, ``hex_decode()``,
-       ``hex_decode_max()``
-     - Up to 4 bytes, strings up to 9 characters
-     - Lowercase hex that decodes back to the input, in the caller's
-       buffer or one ``hex_alloc()`` allocates; a decode takes
-       exactly ``2 * n`` hex digits of either case and yields their
-       value, and ``hex_decode_max()`` any even count up to ``2 * cap``,
-       reading no further than the digit after them
-   * - ``hex-model``
-     - ``hex_encode()``, ``hex_decode()``, ``hex_decode_max()``
-     - Up to 8 bytes, strings up to 17 characters, counts and capacities
-       up to 8 and past ``SIZE_MAX / 2``
-     - The result and the bytes of the Lean model ``Shirudo.Hex``
-   * - ``hex-digest``
-     - ``sha256_digest_decode()``
-     - Strings of 0, 6 to 8 and 70 to 72 bytes
-     - Accepted exactly as ``sha256:`` and 64 hex digits of either case,
-       into their value; a null pointer refused
    * - ``paths-bpffs-name``
      - ``upatch_bpffs_name()``, ``upatch_name_from_bpffs()``
      - Names up to 4 bytes, pin names up to 8

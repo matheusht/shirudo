@@ -533,7 +533,7 @@ fn append(args: &[&CStr]) -> c_int {
     // SAFETY: the JSON's len bytes.
     let body = unsafe { crate::ffi::slice(payload.cast::<u8>(), len) }.to_vec();
     // SAFETY: the JSON tree_emit_publication() allocated.
-    unsafe { crate::sys::malloc::xfree(payload.cast(), len) };
+    unsafe { crate::heap::xfree(payload.cast(), len) };
     let result = (|| {
         let sig = sign_detached(&body, (&key, &cert))?;
         let config = push_blob(&mut c, &repo, b"{}", EMPTY_CONFIG_MEDIA)?;

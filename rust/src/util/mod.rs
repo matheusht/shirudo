@@ -26,6 +26,7 @@ pub(crate) mod eventlog;
 pub(crate) mod format;
 pub(crate) mod harden;
 pub(crate) mod help;
+pub(crate) mod hex;
 pub(crate) mod identity;
 pub(crate) mod image_bootstrap;
 mod image_cache;

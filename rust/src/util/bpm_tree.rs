@@ -11,7 +11,7 @@ use core::{mem, ptr};
 
 use crate::errno::{E2BIG, EINVAL, EIO, EKEYREJECTED, ENOMEM, EOPNOTSUPP, ERANGE};
 use crate::ffi;
-use crate::sys::malloc::{xcalloc, xfree, xmalloc, xreallocarray};
+use crate::heap::{xcalloc, xfree, xmalloc, xreallocarray};
 use crate::text::{cstr, strscpy};
 use crate::util::crypto_openssl::sha256_calc;
 use crate::util::json::{JsonArray, JsonEmit, JsonField, JsonMap, MAX_BYTES, parse_schema};

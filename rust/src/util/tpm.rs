@@ -15,9 +15,9 @@ use crate::errno::{
     E2BIG, EACCES, EINVAL, EIO, EKEYREJECTED, ENODATA, ENODEV, ENOENT, ENOMEM, EPROTO,
     EPROTONOSUPPORT,
 };
+use crate::heap::{xcalloc, xfree};
 use crate::sys::identity::Identity;
 use crate::sys::libc::{errno, explicit_bzero, getenv, setenv, strerror, unsetenv};
-use crate::sys::malloc::{xcalloc, xfree};
 use crate::sys::tss2::*;
 use crate::text::strscpy;
 use crate::util::config::{self, Scrubbed};

@@ -2,7 +2,7 @@
 /*
  * Copyright (c) 2026 Authors of shirudo
  *
- * Lowercase hex encoding of digests.
+ * Lowercase hex encoding of digests, in rust/src/util/hex.rs.
  */
 
 #ifndef SHIRUDO_HEX_H

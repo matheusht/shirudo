@@ -12,9 +12,9 @@ use std::ffi::CString;
 use super::words;
 use crate::errno::{EEXIST, EINVAL, EIO, EKEYREJECTED, ENODATA, ENODEV, ENXIO};
 use crate::ffi;
+use crate::heap::xfree;
 use crate::sys::libc::{fwrite, stdout, strerror};
 use crate::sys::log::{pr_err, pr_warn};
-use crate::sys::malloc::xfree;
 use crate::text::{cstr, parse_u64};
 use crate::util::attest::{
     AttestChallenge, AttestChallengePolicy, AttestExpect, attest_challenge_make,

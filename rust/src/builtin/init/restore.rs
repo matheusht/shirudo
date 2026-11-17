@@ -12,7 +12,6 @@ use std::ffi::CString;
 use super::{Init, cat, error, hex, info, strerr, warn};
 use crate::builtin::upatch::loader;
 use crate::errno::{EACCES, EEXIST, EINVAL, ENAMETOOLONG, ENODEV, ENOENT, ENOSPC, EPERM};
-use crate::sys::hex::hex_decode;
 use crate::sys::libc::{close, explicit_bzero};
 use crate::sys::string::name_has_suffix;
 use crate::text::cstr;
@@ -24,6 +23,7 @@ use crate::util::eventlog::{
     eventlog_append_to, eventlog_lock, eventlog_path, eventlog_pending_path, eventlog_record_open,
     eventlog_unlock, eventlog_would_exceed,
 };
+use crate::util::hex::hex_decode;
 use crate::util::json::JsonEmit;
 use crate::util::keys::{self, keys_set_digest};
 use crate::util::measured::{

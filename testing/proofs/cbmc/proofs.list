@@ -9,7 +9,6 @@ string-prefix		--unwind 8
 string-tokens		--unwind 8 LEN=0-4
 string-search		--unwind 8 LEN=0-5
 string-sanitize		--unwind 8 LEN=0-6
-hex			--unwind 12
 paths-bpffs-name	--unwind 18
 string-number-model	--unwind 6
 bpm-tree-signers	--unwind 8
@@ -20,9 +19,7 @@ keepalive-emit		--object-bits 12 --max-field-sensitivity-array-size 960 --unwind
 keepalive-snapshot	--unwind 4 --unwindset strcmp.0:2
 keepalive-quote		--unwind 24 LEN=1,19,20,21
 bpm-tree-manifest	--max-field-sensitivity-array-size 768 --unwind 80 --unwindset memcmp.0:770 LEN=0-2
-hex-model		--unwind 20
 paths-bpffs-name-model	--unwind 20
-hex-digest		--unwind 74 LEN=0,6-8,70-72
 serializer-chunk	--unwind 1
 paths-join		--unwind 12
 paths-pin		--unwind 32 LEN=0,1,28-35

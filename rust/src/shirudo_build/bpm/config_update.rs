@@ -16,8 +16,8 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use super::build::{self, Override, cstring};
 use super::{archive, error, path, print};
 use crate::errno::{EACCES, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT, ENOTDIR};
+use crate::heap::xfree;
 use crate::shirudo_build::{KeyFiles, check_keys, package};
-use crate::sys::malloc::xfree;
 use crate::util::bpm_oci::{Client, MANIFEST_MEDIA, digest_matches, manifest_layers, sha256_hex};
 use crate::util::bpm_package::{
     PackageInfo, bpm_pkg_load_info, bpm_pkg_read_member, semver_compare,

@@ -9,8 +9,8 @@ use core::ptr;
 
 use crate::errno::{E2BIG, EBADMSG, EINVAL, ENAMETOOLONG, ENOMEM};
 use crate::ffi;
+use crate::heap::{xcalloc, xfree};
 use crate::sys::libc::PATH_MAX;
-use crate::sys::malloc::{xcalloc, xfree};
 use crate::text::{contains, cstr, strsprintf};
 use crate::util::bpm_oci::{
     BpmBuffer, Descriptor, EMPTY_CONFIG_MEDIA, MANIFEST_MEDIA, MAX_ENTRIES, OciClient,

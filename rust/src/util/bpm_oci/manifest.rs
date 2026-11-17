@@ -8,7 +8,7 @@ use core::ffi::{c_int, c_void};
 
 use super::{Descriptor, MAX_DIGEST, MAX_MEDIA, MAX_NAME, PATH_MAX, copy_string, cstr};
 use crate::errno::{E2BIG, EINVAL};
-use crate::sys::hex::sha256_digest_decode;
+use crate::util::hex::sha256_digest_decode;
 use crate::util::json::{JsonArray, JsonEmit, JsonField, parse_schema};
 
 /// Where the layers go, and the scratch descriptor the schema fills for

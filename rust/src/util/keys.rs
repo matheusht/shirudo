@@ -12,19 +12,19 @@ use core::ptr;
 
 use crate::errno::{E2BIG, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT, ENOKEY, ENOMEM, EPERM};
 use crate::ffi;
-use crate::sys::hex::hex_encode;
+use crate::heap::{libc_free, xcalloc, xfree, xmalloc};
 use crate::sys::libc::{
     AT_EMPTY_PATH, Dirent, F_OK, O_CLOEXEC, O_DIRECTORY, O_RDONLY, PATH_MAX, S_IFMT, S_IFREG,
     STATX_SIZE, STATX_TYPE, Statx, access, alphasort, close, errno, faccessat, open, read, scandir,
     scandirat, statx, strerror, unlink,
 };
 use crate::sys::log::pr_err;
-use crate::sys::malloc::{libc_free, xcalloc, xfree, xmalloc};
 use crate::sys::string::name_has_suffix;
 use crate::text::{cstr, strscpy, strsprintf};
 use crate::util::crypto_openssl::{
     Cert, cert_free, cert_pubkey_digest, cert_read_der, sha256_buffer, verify_detached,
 };
+use crate::util::hex::hex_encode;
 use crate::util::image_config;
 use crate::util::io::{check_trusted, open_beneath, read_fd};
 use crate::util::seal::{seal_mkdir_p, seal_write_file};

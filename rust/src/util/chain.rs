@@ -10,10 +10,9 @@ use core::mem::MaybeUninit;
 use core::ptr;
 
 use crate::errno::{E2BIG, EACCES, EEXIST, EIO, EKEYREJECTED, ENODEV, ENOENT, ENOMEM, EPROTO};
-use crate::sys::hex::hex_encode;
+use crate::heap::{xfree, xmalloc};
 use crate::sys::libc::{qsort, strcmp, strerror, strlen, strnlen};
 use crate::sys::log::{pr_err, pr_warn};
-use crate::sys::malloc::{xfree, xmalloc};
 use crate::sys::tss2::NV_WRITTEN;
 use crate::text::{cstr, strsprintf};
 use crate::util::config::{self, Scrubbed};
@@ -21,6 +20,7 @@ use crate::util::crypto_openssl::{
     Sha256Ctx, sha256_buffer, sha256_final, sha256_free, sha256_init, sha256_update,
 };
 use crate::util::eventlog::{EventlogInit, NV_INDEX, eventlog_boot_init, eventlog_path};
+use crate::util::hex::hex_encode;
 use crate::util::initrd::in_initrd;
 use crate::util::nv_writer;
 use crate::util::tpm::{

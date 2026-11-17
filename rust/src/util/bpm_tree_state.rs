@@ -11,13 +11,12 @@ use core::ptr;
 
 use crate::errno::{E2BIG, EFBIG, EINVAL, ENAMETOOLONG, ENOENT, ENOMEM, ENOSPC};
 use crate::ffi;
-use crate::sys::hex::{hex_decode, hex_encode, sha256_digest_decode};
+use crate::heap::{libc_free, xfree, xreallocarray};
 use crate::sys::libc::{
     File, O_RDONLY, PATH_MAX, R_OK, Utsname, access, close, errno, fclose, fdopen, fopen, strerror,
     uname,
 };
 use crate::sys::log::pr_err;
-use crate::sys::malloc::{libc_free, xfree, xreallocarray};
 use crate::sys::zlib::{
     MAX_WBITS, Z_MEM_ERROR, Z_NO_FLUSH, Z_OK, Z_STREAM_END, ZLIB_VERSION, ZStream, inflate,
     inflateEnd, inflateInit2_,
@@ -28,6 +27,7 @@ use crate::util::bpm_tree::{
     TreeSelector, TreeSelectorKv, TreeState, count, pairs,
 };
 use crate::util::crypto_openssl::sha256_calc;
+use crate::util::hex::{hex_decode, hex_encode, sha256_digest_decode};
 use crate::util::image_config;
 use crate::util::io::{read_file, read_text_line};
 use crate::util::json::{JsonEmit, JsonField, MAX_BYTES, parse_schema};

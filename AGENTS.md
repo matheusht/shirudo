@@ -131,7 +131,7 @@ message that carries a change.
   builds offline, and what std lacks through `extern` declarations. It
   builds with overflow checks and LTO, unwinds only so that a Lua error
   can cross a Rust callback, logs a panic and aborts, allocates through
-  a global allocator that zeroes and scrubs as `util/malloc.c` does,
+  a global allocator that zeroes and scrubs as `xmalloc()` does,
   and every `unsafe` block says why it is sound in a `// SAFETY:`
   comment, which clippy enforces. BPF programs stay in C.
 - C, no C++. Zero-initialise with `= {}`. Integers are `__u8` to

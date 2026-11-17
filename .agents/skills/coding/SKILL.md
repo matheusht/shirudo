@@ -625,9 +625,8 @@ its contract while any C caller uses it.
 - std, and a crate only where it replaces a large binding layer and
   AGENTS.md's dependency rules admit it, vendored and pinned in
   `rust/Cargo.lock` so that cargo builds offline. Rust allocations go through the allocator of
-  `rust/src/heap.rs`, which zeroes and scrubs as `util/malloc.c` does; a
-  buffer C frees with `xfree()` comes from the xmalloc family
-  `rust/src/sys/malloc.rs` declares. A panic reports through `pr_err()`
+  `rust/src/heap.rs`, which zeroes and scrubs as its `xmalloc()` family
+  for C does; a buffer C frees with `xfree()` comes from that family. A panic reports through `pr_err()`
   and aborts: the crate unwinds only so that a Lua error can cross a
   `"C-unwind"` callback. Overflow checks and LTO hold in every release
   build, and arithmetic that input can overflow is checked.

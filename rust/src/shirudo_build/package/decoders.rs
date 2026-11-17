@@ -13,7 +13,7 @@ use std::ffi::CString;
 use super::bpf::Object;
 use super::{error, strerr};
 use crate::errno::{EEXIST, EINVAL, EOPNOTSUPP, EOVERFLOW};
-use crate::sys::malloc::xfree;
+use crate::heap::xfree;
 use crate::text::cstr;
 use crate::util::io::read_file;
 use crate::util::upatch::{DECODER_BLOB, DECODER_ENTRY, DECODER_MAGIC, DECODER_VERSION};

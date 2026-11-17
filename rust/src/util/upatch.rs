@@ -10,9 +10,9 @@ use core::ptr;
 
 use crate::errno::{EFBIG, EINTR, EINVAL, EIO, ENOENT, ENOMEM, EOPNOTSUPP, EOVERFLOW};
 use crate::ffi;
-use crate::sys::hex::hex_decode;
+use crate::heap::{xcalloc, xfree, xmalloc, xstrfree, xstrndup};
 use crate::sys::libc::{O_CLOEXEC, O_RDONLY, S_IFMT, S_IFREG, Statx, close, errno, open, pread};
-use crate::sys::malloc::{xcalloc, xfree, xmalloc, xstrfree, xstrndup};
+use crate::util::hex::hex_decode;
 use crate::util::io::stat_fd;
 
 pub(crate) const NAME_MAX: usize = 256;

@@ -27,10 +27,9 @@ use super::{Opt, help, hex, log_audit, log_err, log_info, log_warn, opt, strerr}
 use crate::errno::{
     EACCES, EINVAL, ENAMETOOLONG, ENODEV, ENOENT, ENOSPC, EOPNOTSUPP, EPERM, ESTALE,
 };
+use crate::heap::xfree;
 use crate::sys::bpf::bpf_obj_get;
-use crate::sys::hex::hex_decode;
 use crate::sys::libc::{close, errno, getxattr};
-use crate::sys::malloc::xfree;
 use crate::sys::upatch::UPATCH_INSTALL_TARGET_MISSING;
 use crate::sys::version::shirudo_version_id;
 use crate::text::cstr;
@@ -42,6 +41,7 @@ use crate::util::eventlog::{
     eventlog_would_exceed,
 };
 use crate::util::help::is_help;
+use crate::util::hex::hex_decode;
 use crate::util::io::read_file;
 use crate::util::json::JsonEmit;
 use crate::util::kernel_abi::kernel_abi_check;

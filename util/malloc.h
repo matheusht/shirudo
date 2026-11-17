@@ -2,7 +2,8 @@
 /*
  * Copyright (c) 2026 Authors of shirudo
  *
- * Zeroing allocator: zero on alloc, scrub on free.
+ * Zeroing allocator: zero on alloc, scrub on free. In rust/src/heap.rs,
+ * but for xasprintf() in util/malloc.c.
  */
 
 #ifndef SHIRUDO_MALLOC_H
@@ -64,8 +65,8 @@ void libc_free(void *p);
 
 /*
  * Refused once the headers included above have declared them, so that a
- * later include of those still works; util/malloc.c opts out with
- * MALLOC_INTERNAL.
+ * later include of those still works; a file that must name them opts
+ * out with MALLOC_INTERNAL.
  */
 #ifndef MALLOC_INTERNAL
 /* Fortified glibc makes these macros for clang; poison the names alone. */

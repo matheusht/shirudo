@@ -9,6 +9,7 @@ use core::ffi::{CStr, c_char, c_int, c_void};
 
 use crate::errno::{E2BIG, EFBIG, EINTR, EINVAL, EIO, ENOENT, ENOMEM, EPERM};
 use crate::ffi;
+use crate::heap::{xfree, xmalloc};
 use crate::sys::libc::{
     AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, File, LOCK_EX, O_CLOEXEC, O_DIRECTORY,
     O_NOFOLLOW, O_PATH, O_RDONLY, PATH_MAX, S_IFDIR, S_IFMT, S_IFREG, S_ISVTX,
@@ -16,7 +17,6 @@ use crate::sys::libc::{
     ftruncate, geteuid, getline, open, pread, realpath, set_errno, statx, strerror, syscall, write,
 };
 use crate::sys::log::{pr_err, pr_warn};
-use crate::sys::malloc::{xfree, xmalloc};
 use crate::util::seal::seal_open_read;
 
 /// `ETC_DIR` of util/paths.h.

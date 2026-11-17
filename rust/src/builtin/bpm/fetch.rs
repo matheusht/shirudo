@@ -340,7 +340,7 @@ pub(super) fn cached_index(name: &[u8]) -> Result<Vec<IndexEntry>> {
     // SAFETY: read_file() gives len bytes.
     let parsed = index_parse(unsafe { core::slice::from_raw_parts(body, len) });
     // SAFETY: read_file()'s buffer of len + 1 bytes.
-    unsafe { crate::sys::malloc::xfree(body.cast(), len + 1) };
+    unsafe { crate::heap::xfree(body.cast(), len + 1) };
     parsed
 }
 

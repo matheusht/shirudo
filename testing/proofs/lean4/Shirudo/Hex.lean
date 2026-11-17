@@ -2,7 +2,7 @@
 -- Copyright (c) 2026 Authors of shirudo
 
 /-!
-The hex codec of util/hex.c. `hex_encode()` writes each byte as two
+The hex codec of rust/src/util/hex.rs. `hex_encode()` writes each byte as two
 lowercase digits from the table `0123456789abcdef`, the high nibble
 first. `hex_nibble()` gives the value of one digit of either case, or -1.
 `hex_decode()` takes a string of exactly `2 * n` digits into `n` bytes,
@@ -18,9 +18,9 @@ the strings of `2 * n` hex digits and `hex_decode_max()` exactly the even
 runs of hex digits of at most `2 * cap`, and what either yields is bytes.
 A string is its bytes before the NUL, each byte its value; a string with
 its NUL fits in memory, so it is shorter than `SIZE_MAX`. The CBMC proof
-testing/proofs/cbmc/hex-model.c checks the C against the model on every
-input of up to 8 bytes, strings of up to 17 digits, and counts and
-capacities both small and past `SIZE_MAX / 2`.
+that checked util/hex.c against the model, on every input of up to 8 bytes,
+strings of up to 17 digits, and counts and capacities both small and past
+`SIZE_MAX / 2`, went with the C in the port to Rust.
 -/
 
 namespace Shirudo.Hex

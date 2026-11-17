@@ -16,10 +16,10 @@ use std::os::unix::fs::FileExt;
 
 use super::{JSON_MAX, Opt, Summaries, err, help, item, log_err, log_warn, opt, strerr, type_name};
 use crate::errno::{EINVAL, EIO, ENODATA};
+use crate::heap::xfree;
 use crate::sys::libc::{
     LOCK_UN, O_APPEND, O_CREAT, O_RDWR, STDOUT_FILENO, close, errno, ferror, flock, stdout,
 };
-use crate::sys::malloc::xfree;
 use crate::sys::upatch_maps::{MAP_ENTRIES_DEFAULT, MAP_READ_PEEK, MapView};
 use crate::text::{cstr, parse_u64};
 use crate::util::config::{self, Scrubbed};

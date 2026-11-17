@@ -8,9 +8,9 @@
 use core::ffi::{CStr, c_char, c_int};
 
 use crate::errno::{E2BIG, ENOMEM};
+use crate::heap::{xfree, xmalloc, xstrfree, xstrndup};
 use crate::sys::libc::{Utsname, printf, strerror, strerrorname_np, uname};
 use crate::sys::log::pr_err;
-use crate::sys::malloc::{xfree, xmalloc, xstrfree, xstrndup};
 use crate::text::{cstr, strsprintf};
 use crate::util::eventlog::NV_INDEX;
 use crate::util::json::JsonEmit;
@@ -279,7 +279,7 @@ mod capi {
         let r = unsafe { &mut *r };
 
         // SAFETY: the log is NULL or from xstrndup().
-        unsafe { crate::sys::malloc::xstrfree(r.verifier_log) };
+        unsafe { crate::heap::xstrfree(r.verifier_log) };
         r.verifier_log = core::ptr::null_mut();
     }
 }

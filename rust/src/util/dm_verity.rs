@@ -14,17 +14,17 @@ use crate::errno::{
     EEXIST, EINTR, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENODEV, ENOENT, ENOMEM, EOVERFLOW,
     ESTALE,
 };
-use crate::sys::hex::hex_encode;
+use crate::heap::{xcalloc, xfree};
 use crate::sys::libc::{
     AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, O_CLOEXEC, O_DIRECT, O_NOFOLLOW, O_NONBLOCK,
     O_RDONLY, O_RDWR, PATH_MAX, S_IFBLK, S_IFCHR, S_IFMT, S_IFREG, STATX_BASIC_STATS, SYS_ADD_KEY,
     SYS_KEYCTL, Statx, close, errno, getrandom, ioctl, mknod, mount, open, pread, statx, syscall,
     umount2,
 };
-use crate::sys::malloc::{xcalloc, xfree};
 use crate::sys::string::{parse_u64, strsprintf};
 use crate::text::{cstr, strscpy};
 use crate::util::config_image::{BLOCK_SIZE, ConfigImage, ConfigImageOpen, SIG_MAX, check_files};
+use crate::util::hex::hex_encode;
 use crate::util::image_guards::{ConfigRootGuard, config_root_begin, config_root_end};
 use crate::util::keyring::keyring_unlink_key;
 

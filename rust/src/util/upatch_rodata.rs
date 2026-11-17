@@ -11,6 +11,7 @@ use core::ptr;
 
 use crate::errno::{E2BIG, EEXIST, EINVAL, ENODATA, ENOENT, ENOMEM, ENOSPC, EOPNOTSUPP};
 use crate::ffi;
+use crate::heap::{xcalloc, xfree, xmalloc};
 use crate::sys::btf::{
     self, Btf, BtfDumpTypeDataOpts, BtfType, KIND_ARRAY, KIND_CONST, KIND_DATASEC, KIND_ENUM,
     KIND_ENUM64, KIND_FLOAT, KIND_FWD, KIND_INT, KIND_PTR, KIND_RESTRICT, KIND_STRUCT,
@@ -20,7 +21,6 @@ use crate::sys::btf::{
 };
 use crate::sys::libc::{STDOUT_FILENO, VaList, printf, putchar, stdout, vfprintf};
 use crate::sys::log::pr_err;
-use crate::sys::malloc::{xcalloc, xfree, xmalloc};
 use crate::sys::string::{strsprintf, text_sanitize};
 use crate::util::io::write_complete;
 use crate::util::json::{JsonEmit, MAX_BYTES};

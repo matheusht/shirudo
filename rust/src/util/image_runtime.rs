@@ -27,6 +27,7 @@ use crate::errno::{
     E2BIG, EACCES, EBADF, EBUSY, EEXIST, EINPROGRESS, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG,
     ENODEV, ENOENT, ENOKEY, ENXIO, EPERM, EPROTO, ESTALE, EUCLEAN,
 };
+use crate::heap::xfree;
 use crate::sys::bpf::{bpf_map_get_next_key, bpf_map_lookup_elem, bpf_obj_get};
 use crate::sys::identity::{DEVICE_CONFIG, DEVICE_RUNTIME, DeviceAuthority, Identity};
 use crate::sys::libc::{
@@ -34,7 +35,6 @@ use crate::sys::libc::{
     fwrite, ioctl, nanosleep, stdout, umount2,
 };
 use crate::sys::log::{pr_err, pr_warn};
-use crate::sys::malloc::xfree;
 use crate::text::cstr;
 use crate::util::config::{CONF_PATH, Config, config_load_fd, config_load_path};
 use crate::util::config_image::{

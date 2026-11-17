@@ -10,9 +10,9 @@ use core::ptr;
 
 use super::{sha256_calc, walk_boot, walk_log};
 use crate::errno::{EINVAL, ENOENT};
-use crate::sys::hex::hex_decode;
 use crate::sys::libc::abort;
 use crate::text::cstr;
+use crate::util::hex::hex_decode;
 use crate::util::json::{JsonArray, JsonField, parse_schema};
 use crate::util::upatch::{NAME_MAX, PAYLOAD_HASH_LEN, upatch_member_valid};
 

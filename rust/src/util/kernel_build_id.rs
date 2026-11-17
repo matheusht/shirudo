@@ -7,8 +7,8 @@
 use core::ffi::{c_char, c_int};
 
 use crate::errno::{E2BIG, EINVAL, ENOENT};
-use crate::sys::hex::hex_encode;
 use crate::sys::libc::{O_CLOEXEC, O_RDONLY, close, errno, open, read};
+use crate::util::hex::hex_encode;
 
 const BUILD_ID_MAX: usize = 64;
 const NOTES_MAX: usize = 64 * 1024;

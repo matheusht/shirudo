@@ -10,7 +10,7 @@ use super::archive::{self, Found};
 use super::publication::{self, Signed};
 use super::{IndexEntry, index};
 use crate::errno::EINVAL;
-use crate::sys::malloc::xfree;
+use crate::heap::xfree;
 use crate::util::bpm_oci::{Client, MAX_ENTRIES};
 use crate::util::bpm_tree::TreePublication;
 

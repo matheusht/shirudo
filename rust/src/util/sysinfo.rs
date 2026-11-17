@@ -9,11 +9,11 @@
 
 use core::ffi::{CStr, c_char, c_int, c_long, c_void};
 
+use crate::heap::{xfree, xreallocarray, xstrdup, xstrfree};
 use crate::sys::libc::{
     O_CLOEXEC, O_RDONLY, SC_NPROCESSORS_ONLN, Statvfs, Utsname, close, fclose, fgets, fopen,
     gethostname, open, qsort, read, sscanf, statvfs, strcmp, sysconf, uname,
 };
-use crate::sys::malloc::{xfree, xreallocarray, xstrdup, xstrfree};
 use crate::text::{cstr, digits, parse_u64, strscpy, strsprintf};
 use crate::util::json::JsonEmit;
 use crate::util::kernel_build_id::read_build_id;

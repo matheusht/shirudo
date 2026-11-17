@@ -11,9 +11,9 @@ use core::ptr;
 use super::config_measure::pcr_valid;
 use crate::errno::{EINVAL, EIO, ENAMETOOLONG, EPERM};
 use crate::ffi;
-use crate::sys::hex::hex_decode;
 use crate::sys::libc::{File, PATH_MAX, fclose, ferror, free};
 use crate::text::{contains, parse_u64, strscpy, trim_blanks};
+use crate::util::hex::hex_decode;
 use crate::util::io::read_text_line;
 
 const RUNTIME_DIR_PREFIX: &[u8] = b"/run/shirudo/runtime/";

@@ -20,14 +20,14 @@ use std::ffi::CString;
 
 use crate::errno::{EIO, ENAMETOOLONG, EPERM};
 use crate::ffi;
-use crate::sys::hex::hex_decode;
+use crate::heap::xfree;
 use crate::sys::libc::{access, close, fwrite, mkstemps, stderr, stdout, strerror, unlink};
 use crate::sys::log::{log_init, pr_err, pr_info};
-use crate::sys::malloc::xfree;
 use crate::sys::paths::{format_key_path, key_paths, keys_dir_resolve};
 use crate::sys::string::name_has_suffix;
 use crate::text::cstr;
 use crate::util::harden::{harden_self, harden_stdio};
+use crate::util::hex::hex_decode;
 use crate::util::upatch::{Upatch, upatch_close, upatch_open};
 
 const KEYS_DIR_ENV: &str = "SHIRUDO_KEYS_DIR";

@@ -15,9 +15,9 @@ mod ops;
 use core::ffi::{CStr, c_char, c_int};
 use std::ffi::CString;
 
+use crate::heap::xfree;
 use crate::sys::libc::{fwrite, stderr, stdout};
 use crate::sys::log::{pr_audit, pr_err, pr_info, pr_warn};
-use crate::sys::malloc::xfree;
 use crate::sys::upatch::MapSummary;
 use crate::util::help::{
     Help, HelpItem, HelpSection, is_help, is_list_cmds, print_help, print_subcmd_list,
