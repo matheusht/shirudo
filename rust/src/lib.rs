@@ -6,6 +6,7 @@
 
 extern crate alloc;
 
+mod bpf;
 mod builtin;
 mod errno;
 mod ffi;

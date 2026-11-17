@@ -12,6 +12,7 @@ mod compile;
 mod image;
 mod package;
 mod sign;
+mod skeleton;
 mod vouch;
 
 use core::ffi::{CStr, c_char, c_int};
@@ -93,6 +94,8 @@ fn usage(to_stdout: bool) {
   shirudo-build image build <filesystem.img> -o <prefix> ...
   shirudo-build bpm <build|push|tree append> ...
   shirudo-build keys vouch <cert.der> [-o <file>] ...
+  shirudo-build skeleton <object.bpf.o> [name <name>]
+                [--key <signing_key.pem> --cert <cert.der>] [-o <out.lskel.h>]
 
 <input> is .bpf.c (compiled via clang) or .bpf.o.
 -o defaults to <input> with a trailing .c/.o replaced by
@@ -614,6 +617,7 @@ unsafe fn run(argc: c_int, argv: *mut *mut c_char) -> c_int {
         Some(b"image") => return image::run(&all[1..]),
         Some(b"upatch") => return package::upatch_cli(&all[1..]),
         Some(b"bpm") => return bpm::run(&all[1..]),
+        Some(b"skeleton") => return skeleton::run(&all[1..]),
         Some(b"keys") if n >= 3 && all[2].to_bytes() == b"vouch" => return vouch::run(&all[2..]),
         _ => {}
     }

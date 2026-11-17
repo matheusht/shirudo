@@ -48,7 +48,9 @@ show``, ``shirudo bpm config update``, ``shirudo image build``,
 links the CMS signer and the package builder and publisher
 (:src:`rust/src/shirudo_build/`). It runs ``clang`` to compile BPF,
 libbpf's gen_loader to produce the signed loader, and ``veritysetup`` to
-format and check images. The core binary finds it through
+format and check images. Its ``skeleton`` command writes an object's C
+light skeleton from shirudo's own reading of the object and port of
+gen_loader (:src:`rust/src/bpf/`), without libbpf. The core binary finds it through
 ``SHIRUDO_BUILD``, the compiled-in libexec directory or ``PATH``.
 
 On the target, commands use linked libraries and kernel interfaces only:

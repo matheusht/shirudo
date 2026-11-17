@@ -132,8 +132,8 @@ Other helper commands
 ~~~~~~~~~~~~~~~~~~~~~
 
 The helper also serves ``keys vouch``, ``image build``, ``image verify``
-and the operator ``bpm`` commands, and two commands that only scripts and
-tooling call:
+and the operator ``bpm`` commands, and three commands that only scripts
+and tooling call:
 
 .. code-block:: none
 
@@ -142,11 +142,17 @@ tooling call:
    shirudo-build upatch rewrite-rodata <original> <modified> -o <output>
                  --data-range <offset>:<length> [--data-range ...]
                  [--keys-dir <dir>] [--key <signing-key>] [--cert <certificate>]
+   shirudo-build skeleton <object.bpf.o> [name <name>]
+                 [--key <signing-key> --cert <certificate>] [-o <output.lskel.h>]
 
 ``image sign-root`` signs the 64 lowercase hexadecimal characters of a
 dm-verity root hash. ``shirudo-gen-verity`` calls it. ``upatch
 rewrite-rodata`` re-signs an artifact whose ``.rodata`` changed inside the
-given ranges.
+given ranges. ``skeleton`` writes the C light skeleton of a compiled BPF
+object, byte for byte the header ``bpftool gen skeleton -L`` writes, to
+standard output or ``-o``, named after the object or ``name``; with
+``--key`` and ``--cert``, an ML-DSA-87 pair, it signs the loader as
+bpftool's ``-S`` does.
 
 Options
 -------
