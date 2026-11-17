@@ -28,11 +28,11 @@ use crate::errno::{
     EACCES, EINVAL, ENAMETOOLONG, ENODEV, ENOENT, ENOSPC, EOPNOTSUPP, EPERM, ESTALE,
 };
 use crate::heap::xfree;
-use crate::sys::bpf::bpf_obj_get;
 use crate::sys::libc::{close, errno, getxattr};
 use crate::sys::upatch::UPATCH_INSTALL_TARGET_MISSING;
 use crate::sys::version::shirudo_version_id;
 use crate::text::cstr;
+use crate::util::bpf_sys::bpf_obj_get;
 use crate::util::chain::{chain_extend, chain_read, chain_upatch_event, memneq_explicit};
 use crate::util::config::{self, Scrubbed};
 use crate::util::crypto_openssl::{Cert, cms_signed_by};

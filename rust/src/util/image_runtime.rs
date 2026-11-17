@@ -28,13 +28,13 @@ use crate::errno::{
     ENODEV, ENOENT, ENOKEY, ENXIO, EPERM, EPROTO, ESTALE, EUCLEAN,
 };
 use crate::heap::xfree;
-use crate::sys::bpf::{bpf_map_get_next_key, bpf_map_lookup_elem, bpf_obj_get};
 use crate::sys::identity::{DEVICE_CONFIG, DEVICE_RUNTIME, DeviceAuthority, Identity};
 use crate::sys::libc::{
     O_DIRECTORY, O_NOFOLLOW, O_PATH, Statvfs, Timespec, explicit_bzero, fsetxattr, fstatvfs,
     fwrite, ioctl, nanosleep, stdout, umount2,
 };
 use crate::text::cstr;
+use crate::util::bpf_sys::{bpf_map_get_next_key, bpf_map_lookup_elem, bpf_obj_get};
 use crate::util::config::{CONF_PATH, Config, config_load_fd, config_load_path};
 use crate::util::config_image::{
     ConfigImageOpen, config_image_close, config_image_open, config_image_open_root,

@@ -11,16 +11,16 @@
 use core::ffi::{CStr, c_char, c_int};
 
 use crate::errno::{EBUSY, ENAMETOOLONG, ENOENT, EPROTO};
-use crate::sys::bpf::{
-    bpf_btf_get_fd_by_id, bpf_map_get_fd_by_id, bpf_map_lookup_elem, bpf_map_update_elem,
-    bpf_obj_get, bpf_prog_get_fd_by_id,
-};
 use crate::sys::btf::{
     Btf, btf__find_by_name_kind, btf__free, btf__load_from_kernel_by_id, libbpf_get_error,
 };
 use crate::sys::libc::{SYS_PIDFD_OPEN, close, errno, strerror, syscall};
 use crate::text::cstr;
 use crate::util::bpf_info::{Info, LINK_INFO_SIZE, MAP_INFO_SIZE, PROG_INFO_SIZE};
+use crate::util::bpf_sys::{
+    bpf_btf_get_fd_by_id, bpf_map_get_fd_by_id, bpf_map_lookup_elem, bpf_map_update_elem,
+    bpf_obj_get, bpf_prog_get_fd_by_id,
+};
 use crate::util::identity;
 
 /// `struct image_guard`: a program and where its link is pinned.
@@ -617,8 +617,7 @@ fn guard_map_ids() -> Result<[u32; GUARD_MAP_COUNT], c_int> {
 /// the one pinned: 0, -EPROTO, or -errno.
 fn guard_program_maps(map_ids: &[u32], expected: &[u32; GUARD_MAP_COUNT]) -> c_int {
     for &id in map_ids {
-        // SAFETY: a call that takes no pointer.
-        let fd = unsafe { bpf_map_get_fd_by_id(id) };
+        let fd = bpf_map_get_fd_by_id(id);
         if fd < 0 {
             return -errno();
         }
@@ -644,8 +643,7 @@ fn guard_program_maps(map_ids: &[u32], expected: &[u32; GUARD_MAP_COUNT]) -> c_i
 /// The kernel's vmlinux BTF of object `id`, or -errno: -EPROTO for one
 /// that is a module's or not the kernel's.
 fn guard_kernel_btf(id: u32) -> Result<*mut Btf, c_int> {
-    // SAFETY: a call that takes no pointer.
-    let fd = unsafe { bpf_btf_get_fd_by_id(id) };
+    let fd = bpf_btf_get_fd_by_id(id);
     if fd < 0 {
         return Err(-errno());
     }
@@ -707,8 +705,7 @@ fn guard_link(guard: &ImageGuard, maps: &[u32; GUARD_MAP_COUNT], kernel: &mut Ke
     {
         return -EPROTO;
     }
-    // SAFETY: a call that takes no pointer.
-    let prog = unsafe { bpf_prog_get_fd_by_id(link.u32_at(LINK_PROG_ID)) };
+    let prog = bpf_prog_get_fd_by_id(link.u32_at(LINK_PROG_ID));
     if prog < 0 {
         return -errno();
     }

@@ -17,7 +17,6 @@ use super::words;
 use crate::errno::{EINPROGRESS, ENODEV, ENOENT, ENOKEY};
 use crate::ffi;
 use crate::heap::xfree;
-use crate::sys::bpf::bpf_obj_get;
 use crate::sys::btf::{btf__free, btf__load_vmlinux_btf};
 use crate::sys::identity::Identity;
 use crate::sys::libc::{
@@ -25,6 +24,7 @@ use crate::sys::libc::{
 };
 use crate::sys::version::shirudo_version_id;
 use crate::text::{cstr, name_has_suffix};
+use crate::util::bpf_sys::bpf_obj_get;
 use crate::util::bpm_tree_state::tree_emit_status;
 use crate::util::chain::{self, ChainStatus};
 use crate::util::conditions::{self, Condition, ConditionsInput};

@@ -21,9 +21,6 @@ use crate::errno::{
     E2BIG, EBADMSG, EINVAL, EIO, ENAMETOOLONG, ENOENT, ENOMEM, EOPNOTSUPP, EOVERFLOW,
 };
 use crate::heap::{xcalloc, xfree, xmalloc, xreallocarray};
-use crate::sys::bpf::{
-    bpf_map_get_next_key, bpf_map_lookup_elem, bpf_map_update_elem, bpf_obj_get,
-};
 use crate::sys::btf::{
     btf__free, btf__load_from_kernel_by_id, btf__load_vmlinux_btf, libbpf_get_error,
 };
@@ -32,6 +29,10 @@ use crate::sys::upatch::MapSummary;
 use crate::sys::upatch_maps::{MAP_READ_PEEK, MapEntry, MapView, SerialPage};
 use crate::text::strscpy;
 use crate::util::bpf_info::{Info, MAP_INFO_SIZE};
+use crate::util::bpf_sys::{
+    BPF_ANY, bpf_map_get_next_key, bpf_map_lookup_elem, bpf_map_update_elem, bpf_obj_get,
+    prog_test_run,
+};
 use crate::util::map_format::{is_percpu, type_def, type_name, value_stride};
 use crate::util::serializer::{
     SerialChunk, chunk_validate, new_invocation_id, serializer_lock_acquire,
@@ -75,21 +76,9 @@ const MAP_BTF_KEY_TYPE_ID: usize = 68;
 const MAP_BTF_VALUE_TYPE_ID: usize = 72;
 
 #[cfg(target_arch = "x86_64")]
-const SYS_BPF: c_long = 321;
-#[cfg(target_arch = "x86_64")]
 const SYS_SCHED_GETAFFINITY: c_long = 204;
 #[cfg(target_arch = "aarch64")]
-const SYS_BPF: c_long = 280;
-#[cfg(target_arch = "aarch64")]
 const SYS_SCHED_GETAFFINITY: c_long = 123;
-const BPF_PROG_TEST_RUN: c_long = 10;
-const BPF_ANY: u64 = 0;
-/// `union bpf_attr`: its size and where the test run's fields sit.
-const ATTR_SIZE: usize = 168;
-const ATTR_PROG_FD: usize = 0;
-const ATTR_RETVAL: usize = 4;
-const ATTR_CTX_SIZE_IN: usize = 40;
-const ATTR_CTX_IN: usize = 48;
 
 /// The name status and the table give BPF_MAP_TYPE_* `ty`.
 fn map_type_name(ty: u32) -> &'static CStr {
@@ -206,35 +195,6 @@ fn open_serializer_pin(upatch: &[u8], map: &[u8]) -> c_int {
     // SAFETY: a C string.
     let fd = unsafe { bpf_obj_get(path.as_ptr()) };
     if fd < 0 { -errno() } else { fd }
-}
-
-/// One BPF_PROG_TEST_RUN of `prog_fd` over `ctx`: its return value, or
-/// -errno.
-pub(crate) fn prog_test_run(prog_fd: c_int, ctx: *mut c_void, ctx_size: u32) -> Result<u32, c_int> {
-    #[repr(C, align(8))]
-    struct Attr([u8; ATTR_SIZE]);
-    let mut attr = Attr([0; ATTR_SIZE]);
-    attr.0[ATTR_PROG_FD..ATTR_PROG_FD + 4].copy_from_slice(&(prog_fd as u32).to_ne_bytes());
-    attr.0[ATTR_CTX_IN..ATTR_CTX_IN + 8].copy_from_slice(&(ctx as u64).to_ne_bytes());
-    attr.0[ATTR_CTX_SIZE_IN..ATTR_CTX_SIZE_IN + 4].copy_from_slice(&ctx_size.to_ne_bytes());
-    // SAFETY: the bpf() syscall with an attribute of its size, whose
-    // context the caller passes.
-    let ret = unsafe {
-        syscall(
-            SYS_BPF,
-            BPF_PROG_TEST_RUN,
-            attr.0.as_mut_ptr(),
-            ATTR_SIZE as c_long,
-        )
-    };
-    if ret < 0 {
-        return Err(-errno());
-    }
-    Ok(u32::from_ne_bytes(
-        attr.0[ATTR_RETVAL..ATTR_RETVAL + 4]
-            .try_into()
-            .unwrap_or_default(),
-    ))
 }
 
 /// The output map of a serializer: an array of 4-byte keys and chunk

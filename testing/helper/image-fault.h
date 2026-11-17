@@ -8,12 +8,8 @@
 
 #include <shirudo/misc.h>
 
-int __real_bpf_obj_get(const char *path);
-int __wrap_bpf_obj_get(const char *path);
-int __real_bpf_map_update_elem(int fd, const void *key, const void *value,
-			       __u64 flags);
-int __wrap_bpf_map_update_elem(int fd, const void *key, const void *value,
-			       __u64 flags);
+long __real_syscall(long number, ...);
+long __wrap_syscall(long number, ...);
 
 int __real_main(int argc, const char **argv);
 int __wrap_main(int argc, const char **argv);

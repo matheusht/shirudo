@@ -11,103 +11,24 @@
 //! context and leaves their descriptors in its context; it can neither
 //! attach nor pin them, which its caller does.
 
-use core::ffi::{c_int, c_long};
+use core::ffi::c_int;
 use std::io::Write;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::AsRawFd;
 
 use crate::bpf::lskel::Lskel;
 use crate::errno::{E2BIG, ENOENT};
-use crate::sys::libc::{close, errno, fcntl, syscall};
-use crate::util::map_read::prog_test_run;
+use crate::sys::libc::{close, errno, fcntl};
+use crate::util::bpf_sys::{
+    Attr, BPF_MAP_CREATE, BPF_MAP_FREEZE, BPF_MAP_UPDATE_ELEM, BPF_PROG_LOAD, prog_test_run,
+};
 
 /// VERIFIER_LOG_MAX of util/report.h: the room for the verifier's log.
 pub(crate) const VERIFIER_LOG_MAX: usize = 16 * 1024 * 1024;
-
-#[cfg(target_arch = "x86_64")]
-const SYS_BPF: c_long = 321;
-#[cfg(target_arch = "aarch64")]
-const SYS_BPF: c_long = 280;
-
-/// The bpf() commands the loaders issue.
-pub(crate) const BPF_MAP_CREATE: c_long = 0;
-pub(crate) const BPF_MAP_UPDATE_ELEM: c_long = 2;
-pub(crate) const BPF_PROG_LOAD: c_long = 5;
-pub(crate) const BPF_OBJ_PIN: c_long = 6;
-pub(crate) const BPF_RAW_TRACEPOINT_OPEN: c_long = 17;
-pub(crate) const BPF_MAP_FREEZE: c_long = 22;
-pub(crate) const BPF_LINK_CREATE: c_long = 28;
 
 pub(crate) const MAP_TYPE_ARRAY: u32 = 2;
 pub(crate) const PROG_TYPE_SYSCALL: u32 = 31;
 pub(crate) const F_SLEEPABLE: u32 = 16;
 const F_DUPFD_CLOEXEC: c_int = 1030;
-
-/// `union bpf_attr`, filled by hand: libbpf's wrappers take no signature,
-/// keyring or exclusive map.
-#[repr(C, align(8))]
-pub(crate) struct Attr([u8; Attr::SIZE]);
-
-impl Attr {
-    const SIZE: usize = 168;
-
-    pub(crate) fn new() -> Self {
-        Attr([0; Self::SIZE])
-    }
-
-    pub(crate) fn put(mut self, off: usize, v: &[u8]) -> Self {
-        self.0[off..off + v.len()].copy_from_slice(v);
-        self
-    }
-
-    pub(crate) fn u32(self, off: usize, v: u32) -> Self {
-        self.put(off, &v.to_ne_bytes())
-    }
-
-    pub(crate) fn u64(self, off: usize, v: u64) -> Self {
-        self.put(off, &v.to_ne_bytes())
-    }
-
-    pub(crate) fn ptr<T>(self, off: usize, p: *const T) -> Self {
-        self.u64(off, p as u64)
-    }
-
-    /// bpf() command `cmd` on the attribute, whose pointers the caller
-    /// keeps live: what it returns, or the errno.
-    pub(crate) fn run(mut self, cmd: c_long) -> Result<c_int, c_int> {
-        // SAFETY: an attribute of the size the kernel takes, its
-        // pointers to what the caller keeps live across the call.
-        let ret = unsafe { syscall(SYS_BPF, cmd, self.0.as_mut_ptr(), Self::SIZE as c_long) };
-        if ret < 0 {
-            Err(errno())
-        } else {
-            Ok(ret as c_int)
-        }
-    }
-
-    /// As run(), for a command that makes a descriptor.
-    pub(crate) fn fd(self, cmd: c_long) -> Result<OwnedFd, c_int> {
-        let fd = self.run(cmd)?;
-        // SAFETY: a descriptor the kernel just made, owned here alone.
-        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-    }
-}
-
-/// The link program `prog` makes with BPF_LINK_CREATE at `target` as
-/// attach type `ty`, what `with` puts in the union besides.
-pub(crate) fn link_create(
-    prog: c_int,
-    target: c_int,
-    ty: u32,
-    with: impl FnOnce(Attr) -> Attr,
-) -> Result<OwnedFd, c_int> {
-    with(
-        Attr::new()
-            .u32(0, prog as u32)
-            .u32(4, target as u32)
-            .u32(8, ty),
-    )
-    .fd(BPF_LINK_CREATE)
-}
 
 /// `struct loader_ctx` of tools/lib/bpf/skel_internal.h, which the
 /// loader reads, and the map and program descriptors after it, which it

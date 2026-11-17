@@ -7,7 +7,13 @@
  */
 
 #include <errno.h>
+#include <stdarg.h>
+#include <stdint.h>
 #include <string.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+
+#include <linux/bpf.h>
 
 #include "fuzz.h"
 
@@ -18,16 +24,29 @@
 static const __u8 *chunks;
 static size_t chunks_len;
 
-int __wrap_bpf_map_lookup_elem(int fd, const void *key, void *value);
+long __real_syscall(long number, ...);
+long __wrap_syscall(long number, ...);
 
-/* The output map the reader looks the page's chunks up in: the input. */
-int __wrap_bpf_map_lookup_elem(int fd, const void *key, void *value)
+/*
+ * The output map the reader looks the page's chunks up in, faked at the
+ * bpf() syscall: the input.
+ */
+long __wrap_syscall(long number, ...)
 {
-	size_t off = (size_t)*(const __u32 *)key *
-		     sizeof(struct serial_chunk);
-	size_t n;
+	union bpf_attr *attr;
+	size_t off, n;
+	va_list ap;
+	long a[6];
+	int i;
 
-	(void)fd;
+	va_start(ap, number);
+	for (i = 0; i < 6; i++)
+		a[i] = va_arg(ap, long);
+	va_end(ap);
+	if (number != SYS_bpf || a[0] != BPF_MAP_LOOKUP_ELEM)
+		return __real_syscall(number, a[0], a[1], a[2], a[3], a[4], a[5]);
+	attr = (union bpf_attr *)a[1];
+	off = (size_t)*(const __u32 *)(uintptr_t)attr->key * sizeof(struct serial_chunk);
 	if (off >= chunks_len) {
 		errno = ENOENT;
 		return -1;
@@ -35,8 +54,8 @@ int __wrap_bpf_map_lookup_elem(int fd, const void *key, void *value)
 	n = chunks_len - off;
 	if (n > sizeof(struct serial_chunk))
 		n = sizeof(struct serial_chunk);
-	memset(value, 0, sizeof(struct serial_chunk));
-	memcpy(value, chunks + off, n);
+	memset((void *)(uintptr_t)attr->value, 0, sizeof(struct serial_chunk));
+	memcpy((void *)(uintptr_t)attr->value, chunks + off, n);
 	return 0;
 }
 

@@ -5,7 +5,6 @@
 //! libcurl, zlib, OpenSSL, libelf, and the util/ modules not ported yet, one
 //! module for each header, each to go when what it declares is Rust.
 
-pub mod bpf;
 pub mod btf;
 pub mod curl;
 pub mod elf;

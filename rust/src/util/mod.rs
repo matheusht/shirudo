@@ -5,6 +5,7 @@
 
 pub(crate) mod attest;
 pub(crate) mod bpf_info;
+pub(crate) mod bpf_sys;
 pub(crate) mod bpm_oci;
 pub(crate) mod bpm_package;
 pub(crate) mod bpm_source_config;

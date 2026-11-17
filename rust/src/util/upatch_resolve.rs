@@ -5,18 +5,18 @@
 //! attaches to as a SEC()-style string, when it was loaded and the
 //! payload digest bpf2's xattr guard keeps on them.
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
 use std::ffi::{CString, OsStr};
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 
 use crate::errno::{EINVAL, ENAMETOOLONG, ENOENT};
-use crate::sys::bpf::{bpf_obj_get, bpf_prog_get_fd_by_id, libbpf_bpf_prog_type_str};
 use crate::sys::btf::{Btf, btf__name_by_offset, btf__type_by_id, btf__type_cnt};
 use crate::sys::libc::{close, errno, getxattr};
 use crate::text::{strscpy, strsprintf};
 use crate::util::bpf_info::{Info, LINK_INFO_SIZE, PROG_INFO_SIZE};
+use crate::util::bpf_sys::{bpf_obj_get, bpf_prog_get_fd_by_id, prog_type_name};
 use crate::util::timefmt::iso8601;
 use crate::util::upatch::{NAME_MAX, pin_name};
 
@@ -185,8 +185,7 @@ pub(crate) fn resolve_location(vbtf: *const Btf, name: &[u8], out: &mut [u8]) ->
         return 0;
     }
 
-    // SAFETY: a call that takes no pointer.
-    let prog = unsafe { bpf_prog_get_fd_by_id(prog_id) };
+    let prog = bpf_prog_get_fd_by_id(prog_id);
     if prog < 0 {
         return -errno();
     }
@@ -219,16 +218,8 @@ pub(crate) fn resolve_location(vbtf: *const Btf, name: &[u8], out: &mut [u8]) ->
             }
         }
     };
-    let prefix = sec_prefix(prog_type, attach_type).unwrap_or_else(|| {
-        // SAFETY: libbpf's static name of the type, or NULL.
-        let s: *const c_char = unsafe { libbpf_bpf_prog_type_str(prog_type) };
-        if s.is_null() {
-            b"?"
-        } else {
-            // SAFETY: as above.
-            unsafe { crate::ffi::c_str(s) }
-        }
-    });
+    let prefix = sec_prefix(prog_type, attach_type)
+        .unwrap_or_else(|| prog_type_name(prog_type).unwrap_or(b"?"));
     // The kernel names an LSM hook's attach point bpf_lsm_<hook>.
     if prog_type == BPF_PROG_TYPE_LSM {
         attach = attach.strip_prefix(b"bpf_lsm_").unwrap_or(attach);

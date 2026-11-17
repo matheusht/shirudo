@@ -19,14 +19,15 @@ use super::{NV_INDEX, SIG_KEYRING_BPF, cat, error, info, last_err, strerr};
 use crate::bpf::lskel::{Lskel, Program};
 use crate::errno::{E2BIG, EACCES, EINVAL, EKEYREJECTED, ENOENT, ENOKEY};
 use crate::ffi;
-use crate::sys::bpf::{
-    BPF_ANY, bpf_map_freeze, bpf_map_lookup_elem, bpf_map_update_elem, bpf_obj_pin,
-};
 use crate::sys::identity::Identity;
 use crate::sys::libc::{
     O_CLOEXEC, O_DIRECTORY, O_RDONLY, SYS_PIDFD_OPEN, access, close, open, syscall, unlink,
 };
 use crate::sys::loader::{EmbeddedBpf, bpf2_blob, seal_blob};
+use crate::util::bpf_sys::{
+    Attr, BPF_ANY, BPF_OBJ_PIN, bpf_map_freeze, bpf_map_lookup_elem, bpf_map_update_elem,
+    bpf_obj_pin, link_create,
+};
 use crate::util::identity;
 use crate::util::image_guards::{
     GATE_GUARDS, GATE_HOOK_COUNT, GUARD_BPF, GUARD_BPF_MAP, GUARD_KEY_PERMISSION, GUARD_MAP_COUNT,
@@ -37,7 +38,7 @@ use crate::util::image_guards::{
 use crate::util::image_runtime;
 use crate::util::io::kernel_dev;
 use crate::util::keyring::{self, keyring_bpf_serial, keyring_dm_verity_serial};
-use crate::util::lskel::{self as runner, Attr, BPF_OBJ_PIN, Ctx, link_create};
+use crate::util::lskel::{self as runner, Ctx};
 use crate::util::nv_writer::nv_writer_create;
 use crate::util::tpm::{Tpm, tpm_close, tpm_ek_name, tpm_open};
 
@@ -331,8 +332,7 @@ fn freeze_task_maps(obj: &Loaded) -> c_int {
             }
         }
         // Expected roots change for each mapping.
-        // SAFETY: the map's fd.
-        let frozen = i == GUARD_ROOTS || unsafe { bpf_map_freeze(fd) } == 0;
+        let frozen = i == GUARD_ROOTS || bpf_map_freeze(fd) == 0;
         // SAFETY: the map's fd and a C string.
         if !frozen || unsafe { bpf_obj_pin(fd, m.pin) } != 0 {
             ret = last_err();
@@ -367,8 +367,7 @@ fn record_bpffs_mount(obj: &Loaded) -> c_int {
     if mount == 0 {
         return -ENOENT;
     }
-    // SAFETY: the map's fd.
-    if unsafe { bpf_map_freeze(m) } != 0 {
+    if bpf_map_freeze(m) != 0 {
         last_err()
     } else {
         0
@@ -441,8 +440,7 @@ impl Attached {
         };
         let err = match obj.map(c"seal_scratch_map".as_ptr()) {
             None => -ENOENT,
-            // SAFETY: the map's fd.
-            Some(scratch) if unsafe { bpf_map_freeze(scratch) } != 0 => last_err(),
+            Some(scratch) if bpf_map_freeze(scratch) != 0 => last_err(),
             Some(_) => 0,
         };
         if err != 0 {
@@ -567,8 +565,7 @@ impl Attached {
             error(&cat!("populate sb-identity map: ", strerr(-err)));
             return err;
         }
-        // SAFETY: the map's fd.
-        if unsafe { bpf_map_freeze(fd) } != 0 {
+        if bpf_map_freeze(fd) != 0 {
             let err = last_err();
             error(&cat!("freeze sb-identity map: ", strerr(-err)));
             return err;

@@ -4,6 +4,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/fs.h>
+#include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
@@ -35,50 +37,86 @@ static int consumed_valid = -1;
 
 static int roots_fd = -1;
 
-/* The map of the roots tasks expect, which the staging writes go to. */
-int __wrap_bpf_obj_get(const char *path)
-{
-	int fd = __real_bpf_obj_get(path);
 
-	if (fd >= 0 && !strcmp(path, BPFFS_DIR "/config_roots"))
-		roots_fd = fd;
-	return fd;
+static long real_bpf(long cmd, void *attr, long size)
+{
+	return __real_syscall(SYS_bpf, cmd, (long)attr, size, 0L, 0L, 0L);
 }
 
 /*
- * The writes of config_root_begin() and config_root_end() to that map:
- * the staging of the image's root is left out, or staged off by a bit;
- * its clearing first notes whether the guard consumed it.
+ * The writes of config_root_begin() and config_root_end() to the map of
+ * the roots tasks expect: the staging of the image's root is left out,
+ * or staged off by a bit; its clearing first notes whether the guard
+ * consumed it.
  */
-int __wrap_bpf_map_update_elem(int fd, const void *key, const void *value,
-			       __u64 flags)
+static long roots_update(union bpf_attr *attr, long size)
 {
-	const struct expected_root *want = value;
+	const struct expected_root *want = (const void *)(uintptr_t)attr->value;
 	struct expected_root staged, current = {};
-	int lookup, ret;
+	unsigned char changed[256];
+	int lookup;
+	long ret;
 
-	if (root_mode == ROOT_NORMAL || fd != roots_fd)
-		return __real_bpf_map_update_elem(fd, key, value, flags);
 	if (want->valid) {
 		begin_calls++;
 		if (root_mode == ROOT_MISSING)
 			return 0;
+		if (size < 0 || (size_t)size > sizeof(changed)) {
+			errno = E2BIG;
+			return -1;
+		}
 		staged = *want;
 		if (root_mode == ROOT_WRONG)
 			staged.root[0] ^= 1;
-		return __real_bpf_map_update_elem(fd, key, &staged, flags);
+		memcpy(changed, attr, size);
+		((union bpf_attr *)changed)->value = (uintptr_t)&staged;
+		return real_bpf(BPF_MAP_UPDATE_ELEM, changed, size);
 	}
 	end_calls++;
-	lookup = bpf_map_lookup_elem(fd, key, &current) ? -errno : 0;
+	lookup = bpf_map_lookup_elem(attr->map_fd, (const void *)(uintptr_t)attr->key,
+				     &current) ? -errno : 0;
 	if (root_mode == ROOT_MISSING && lookup == -ENOENT)
 		lookup = 0;
 	consumed_valid = current.valid;
-	ret = __real_bpf_map_update_elem(fd, key, value, flags);
+	ret = real_bpf(BPF_MAP_UPDATE_ELEM, attr, size);
 	if (lookup) {
 		errno = -lookup;
-		return lookup;
+		return -1;
 	}
 	return ret;
+}
+
+/*
+ * The bpf() syscalls of the image's config root: the map of the roots
+ * tasks expect, opened, which the staging writes go to, and those writes.
+ */
+long __wrap_syscall(long number, ...)
+{
+	union bpf_attr *attr;
+	long ret;
+	va_list ap;
+	long a[6];
+	int i;
+
+	va_start(ap, number);
+	for (i = 0; i < 6; i++)
+		a[i] = va_arg(ap, long);
+	va_end(ap);
+	if (number != SYS_bpf)
+		goto real;
+	attr = (union bpf_attr *)a[1];
+	if (a[0] == BPF_OBJ_GET) {
+		ret = real_bpf(BPF_OBJ_GET, attr, a[2]);
+		if (ret >= 0 &&
+		    !strcmp((const char *)(uintptr_t)attr->pathname, BPFFS_DIR "/config_roots"))
+			roots_fd = ret;
+		return ret;
+	}
+	if (a[0] == BPF_MAP_UPDATE_ELEM && root_mode != ROOT_NORMAL &&
+	    (int)attr->map_fd == roots_fd)
+		return roots_update(attr, a[2]);
+real:
+	return __real_syscall(number, a[0], a[1], a[2], a[3], a[4], a[5]);
 }
 
 static int check_root_cleared(void)

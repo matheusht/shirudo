@@ -11,7 +11,6 @@ use std::ffi::CString;
 
 use super::{JSON_MAX, Summaries, err, help, item, log_err, out, print_json, strerr, type_name};
 use crate::ffi;
-use crate::sys::bpf::bpf_prog_get_fd_by_id;
 use crate::sys::btf::{
     Btf, btf__free, btf__load_from_kernel_by_id, btf__load_vmlinux_btf, btf__name_by_offset,
 };
@@ -20,6 +19,7 @@ use crate::sys::upatch::MapSummary;
 use crate::sys::upatch_maps::{MAP_ENTRIES_DEFAULT, MAP_READ_PEEK, MapView};
 use crate::text::cstr;
 use crate::util::bpf_info::{Info, LINK_INFO_SIZE, PROG_INFO_SIZE};
+use crate::util::bpf_sys::bpf_prog_get_fd_by_id;
 use crate::util::help::{HelpItem, is_help};
 use crate::util::json::JsonEmit;
 use crate::util::map_read;
@@ -167,8 +167,7 @@ fn collect(name: &CStr) -> Result<Loaded, c_int> {
     // SAFETY: the BTF loaded above, or NULL, freed once.
     unsafe { btf__free(vbtf) };
 
-    // SAFETY: a call that takes no pointer.
-    let prog = unsafe { bpf_prog_get_fd_by_id(prog_id) };
+    let prog = bpf_prog_get_fd_by_id(prog_id);
     if prog < 0 {
         return Err(prog);
     }

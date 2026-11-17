@@ -7,10 +7,10 @@
 use core::ffi::{CStr, c_int};
 
 use crate::errno::{EINVAL, ENOSYS, EPROTO};
-use crate::sys::bpf::{bpf_map_lookup_elem, bpf_obj_get};
 use crate::sys::identity::Identity;
 use crate::sys::libc::{close, errno, prctl};
 use crate::util::bpf_info::{Info, MAP_INFO_SIZE, MAP_VALUE_SIZE};
+use crate::util::bpf_sys::{bpf_map_lookup_elem, bpf_obj_get};
 
 /// IDENTITY_PIN of util/paths.h.
 const IDENTITY_PIN: &CStr = c"/run/shirudo/bpffs/identity";

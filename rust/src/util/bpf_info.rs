@@ -7,7 +7,7 @@
 
 use core::ffi::c_int;
 
-use crate::sys::bpf::bpf_obj_get_info_by_fd;
+use crate::util::bpf_sys::bpf_obj_get_info_by_fd;
 
 /// The sizes of `struct bpf_link_info`, `struct bpf_prog_info` and
 /// `struct bpf_map_info`.

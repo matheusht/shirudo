@@ -28,24 +28,22 @@ use crate::errno::{
     E2BIG, EACCES, EINVAL, EIO, ENAMETOOLONG, ENODATA, ENOENT, ENOKEY, ENOPKG, ENOTDIR, EOPNOTSUPP,
     EPERM, ERANGE, ESTALE, EXDEV,
 };
-use crate::sys::bpf::bpf_obj_get;
 use crate::sys::btf::{
     btf__free, btf__load_from_kernel_by_id, btf__name_by_offset, btf__type_by_id,
 };
 use crate::sys::libc::{close, errno, fcntl, fgetxattr, fsetxattr, getsockopt, setxattr, syscall};
 use crate::text::{digits, parse_u64};
 use crate::util::bpf_info::{Info, LINK_INFO_SIZE, MAP_INFO_SIZE, PROG_INFO_SIZE};
+use crate::util::bpf_sys::{
+    Attr, BPF_MAP_CREATE, BPF_MAP_FREEZE, BPF_MAP_UPDATE_ELEM, BPF_OBJ_PIN, BPF_PROG_LOAD,
+    BPF_RAW_TRACEPOINT_OPEN, bpf_obj_get, link_create, prog_test_run,
+};
 use crate::util::chain::{memneq_explicit, sha256_2};
 use crate::util::crypto_openssl::sha256_calc;
 use crate::util::elf_target::build_id_fd;
 use crate::util::identity;
 use crate::util::keyring;
-use crate::util::lskel::{
-    Attr, BPF_MAP_CREATE, BPF_MAP_FREEZE, BPF_MAP_UPDATE_ELEM, BPF_OBJ_PIN, BPF_PROG_LOAD,
-    BPF_RAW_TRACEPOINT_OPEN, Ctx, F_SLEEPABLE, MAP_TYPE_ARRAY, PROG_TYPE_SYSCALL, VERIFIER_LOG_MAX,
-    link_create,
-};
-use crate::util::map_read::prog_test_run;
+use crate::util::lskel::{Ctx, F_SLEEPABLE, MAP_TYPE_ARRAY, PROG_TYPE_SYSCALL, VERIFIER_LOG_MAX};
 use crate::util::report::{OpReport, report_set_log};
 use crate::util::upatch::{
     self, ATTACH_CGROUP_SKB_EGRESS, ATTACH_CGROUP_SKB_INGRESS, ATTACH_FMOD_RET, ATTACH_KPROBE,

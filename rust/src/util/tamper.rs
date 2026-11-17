@@ -8,9 +8,9 @@
 use core::ffi::{CStr, c_int};
 
 use crate::errno::EPROTO;
-use crate::sys::bpf::{bpf_map_lookup_elem, bpf_obj_get};
 use crate::sys::libc::{close, errno};
 use crate::util::bpf_info::{Info, MAP_INFO_SIZE, MAP_MAX_ENTRIES, MAP_VALUE_SIZE};
+use crate::util::bpf_sys::{bpf_map_lookup_elem, bpf_obj_get};
 
 /// `TAMPER_MAX` of `bpf/lib/tamper.h`: the tamper points there are.
 pub(crate) const TAMPER_MAX: usize = 37;
