@@ -76,12 +76,10 @@
 /testing/fuzz/crash-*
 
 # Local config (PLAN.md "Build system": Makefile.config is a committed
-# probe file that writes the cached config.mk; util/version_id.c is
-# regenerated every build).
+# probe file that writes the cached config.mk).
 .config
 config.mk
 config-target.mk
-util/version_id.c
 
 # Editor / OS noise
 *.swp

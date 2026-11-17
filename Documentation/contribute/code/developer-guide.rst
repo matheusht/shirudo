@@ -375,9 +375,11 @@ Project layout
 
    * - Path
      - Contents
-   * - :src:`shirudo.c`
+   * - :src:`shirudo.rs`
      - ``main()``, which hands the command line to the dispatch table
-       in :src:`rust/src/builtin/commands.rs`.
+       in :src:`rust/src/builtin/commands.rs`: an object of its own,
+       built with no std, as the tests link the Rust library with a
+       ``main()`` of their own.
    * - :src:`builtin.h`
      - The C declarations of the commands, one module per top-level
        command in :src:`rust/src/builtin/`: ``attest``, ``bpm``,

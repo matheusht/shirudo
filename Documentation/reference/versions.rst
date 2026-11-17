@@ -57,7 +57,8 @@ Version ID
 ----------
 
 ``SHIRUDO_VERSION_ID`` is the SHA-256 that the build writes into the
-generated ``util/version_id.c`` (:src:`Makefile.shirudo`). Its input:
+generated ``build/main/version_id.rs`` (:src:`Makefile.shirudo`). Its
+input:
 
 .. list-table::
    :header-rows: 1

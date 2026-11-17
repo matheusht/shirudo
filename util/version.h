@@ -2,7 +2,8 @@
 /*
  * Copyright (c) 2026 Authors of shirudo
  *
- * Build identity strings, defined in the generated util/version_id.c.
+ * Build identity strings, defined in the generated
+ * build/main/version_id.rs.
  */
 
 #ifndef SHIRUDO_VERSION_H
