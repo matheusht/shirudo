@@ -20,6 +20,7 @@
 
 #include "json.h"
 #include "io.h"
+#include "kernel_btf.h"
 #include "malloc.h"
 #include "upatch_decode.h"
 #include "upatch_maps.h"
@@ -34,6 +35,7 @@ struct fixture {
 	struct map_view view;
 	struct map_entry entry;
 	struct btf *btf;
+	struct shirudo_btf *parsed;
 	__u32 key;
 	__u8 values[16];
 };
@@ -163,6 +165,8 @@ static int fixture_init(struct fixture *f, __u32 map_type, bool is_signed,
 {
 	int key_int, value_int, key_type, value_type;
 	__u32 cpu0 = 5, cpu1 = 7, poison = 0xdeadbeef;
+	const void *raw;
+	__u32 raw_size;
 
 	memset(f, 0, sizeof(*f));
 	snprintf(f->view.upatch, sizeof(f->view.upatch), "test-upatch");
@@ -199,7 +203,12 @@ static int fixture_init(struct fixture *f, __u32 map_type, bool is_signed,
 				      is_signed ? "__s32" : "__u32", value_int);
 	if (key_int < 0 || value_int < 0 || key_type < 0 || value_type < 0)
 		return -EINVAL;
-	f->view.btf = f->btf;
+	/* The view reads BTF as shirudo parses it: the fixture's bytes. */
+	raw = btf__raw_data(f->btf, &raw_size);
+	f->parsed = raw ? shirudo_btf_new(raw, raw_size) : NULL;
+	if (!f->parsed)
+		return -EINVAL;
+	f->view.btf = f->parsed;
 	f->view.key_type_id = (__u32)key_type;
 	f->view.value_type_id = (__u32)value_type;
 	snprintf(f->view.btf_key_type, sizeof(f->view.btf_key_type), "__u32");
@@ -210,6 +219,7 @@ static int fixture_init(struct fixture *f, __u32 map_type, bool is_signed,
 
 static void fixture_destroy(struct fixture *f)
 {
+	shirudo_btf_free(f->parsed);
 	btf__free(f->btf);
 }
 

@@ -17,7 +17,6 @@ use super::words;
 use crate::errno::{EINPROGRESS, ENODEV, ENOENT, ENOKEY};
 use crate::ffi;
 use crate::heap::xfree;
-use crate::sys::btf::{btf__free, btf__load_vmlinux_btf};
 use crate::sys::identity::Identity;
 use crate::sys::libc::{
     access, close, explicit_bzero, fwrite, gethostname, stderr, stdout, strerror,
@@ -41,6 +40,7 @@ use crate::util::image_runtime;
 use crate::util::initrd;
 use crate::util::io::{bpffs_mounted_at, read_file};
 use crate::util::json::{JsonEmit, JsonField, MAX_BYTES, parse_schema};
+use crate::util::kernel_btf;
 use crate::util::keyring::{
     self, KeyringLink, keyring_bpf_serial, keyring_dm_verity_serial, keyring_links,
 };
@@ -453,10 +453,8 @@ fn upatch_rows(pins: &[Vec<u8>]) -> Vec<UpatchTableRow> {
         return Vec::new();
     }
     // vmlinux BTF loaded once; every shirudo upatch attaches to vmlinux.
-    // SAFETY: libbpf's loader, NULL when there is none.
-    let vbtf = unsafe { btf__load_vmlinux_btf() };
-    let rows = pins
-        .iter()
+    let vbtf = kernel_btf::vmlinux();
+    pins.iter()
         .map(|pin| {
             // SAFETY: an all-zero row is an empty one.
             let mut r: UpatchTableRow = unsafe { mem::zeroed() };
@@ -467,7 +465,7 @@ fn upatch_rows(pins: &[Vec<u8>]) -> Vec<UpatchTableRow> {
             for (d, &s) in r.name.iter_mut().zip(&bytes[..n_name]) {
                 *d = s as c_char;
             }
-            // SAFETY: the BTF or NULL, a C string and each field's room.
+            // SAFETY: each field's room.
             unsafe {
                 let upatch = name.to_bytes();
                 upatch_resolve::resolve_location(
@@ -488,10 +486,7 @@ fn upatch_rows(pins: &[Vec<u8>]) -> Vec<UpatchTableRow> {
             r.n_maps = map_read::list(Some(name.to_bytes())).len() as u32;
             r
         })
-        .collect();
-    // SAFETY: the BTF loaded above, or NULL.
-    unsafe { btf__free(vbtf) };
-    rows
+        .collect()
 }
 
 /// A link of a keyring: what it is and whether init froze it.

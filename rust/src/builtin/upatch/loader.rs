@@ -28,9 +28,6 @@ use crate::errno::{
     E2BIG, EACCES, EINVAL, EIO, ENAMETOOLONG, ENODATA, ENOENT, ENOKEY, ENOPKG, ENOTDIR, EOPNOTSUPP,
     EPERM, ERANGE, ESTALE, EXDEV,
 };
-use crate::sys::btf::{
-    btf__free, btf__load_from_kernel_by_id, btf__name_by_offset, btf__type_by_id,
-};
 use crate::sys::libc::{close, errno, fcntl, fgetxattr, fsetxattr, getsockopt, setxattr, syscall};
 use crate::text::{digits, parse_u64};
 use crate::util::bpf_info::{Info, LINK_INFO_SIZE, MAP_INFO_SIZE, PROG_INFO_SIZE};
@@ -42,6 +39,7 @@ use crate::util::chain::{memneq_explicit, sha256_2};
 use crate::util::crypto_openssl::sha256_calc;
 use crate::util::elf_target::build_id_fd;
 use crate::util::identity;
+use crate::util::kernel_btf;
 use crate::util::keyring;
 use crate::util::lskel::{Ctx, F_SLEEPABLE, MAP_TYPE_ARRAY, PROG_TYPE_SYSCALL, VERIFIER_LOG_MAX};
 use crate::util::report::{OpReport, report_set_log};
@@ -280,26 +278,13 @@ fn prog_func_name(prog: c_int, base: &Info<PROG_INFO_SIZE>) -> Result<Vec<u8>, c
     info.set(PROG_FUNC_INFO, &(recs.as_mut_ptr() as u64).to_ne_bytes());
     info.read(prog).map_err(|e| -e)?;
     let type_id = u32::from_ne_bytes([recs[4], recs[5], recs[6], recs[7]]);
-    // SAFETY: a call that takes no pointer.
-    let btf = unsafe { btf__load_from_kernel_by_id(btf_id) };
-    if btf.is_null() {
-        return Err(errno());
-    }
-    // SAFETY: the BTF loaded, its type or NULL, and its string.
-    let name = unsafe {
-        let t = btf__type_by_id(btf, type_id);
-        let name = if t.is_null() {
-            core::ptr::null()
-        } else {
-            btf__name_by_offset(btf, (*t).name_off)
-        };
-        let name = if name.is_null() {
-            Vec::new()
-        } else {
-            CStr::from_ptr(name).to_bytes().to_vec()
-        };
-        btf__free(btf);
-        name
+    let btf = kernel_btf::by_id(btf_id).map_err(|e| -e)?;
+    let name = if btf.has(type_id) {
+        btf.str_at(btf.name_off(type_id))
+            .unwrap_or_default()
+            .to_vec()
+    } else {
+        Vec::new()
     };
     match name.len() {
         0 => Err(ENOENT),

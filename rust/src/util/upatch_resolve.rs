@@ -11,8 +11,8 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 
+use crate::bpf::btf::Btf;
 use crate::errno::{EINVAL, ENAMETOOLONG, ENOENT};
-use crate::sys::btf::{Btf, btf__name_by_offset, btf__type_by_id, btf__type_cnt};
 use crate::sys::libc::{close, errno, getxattr};
 use crate::text::{strscpy, strsprintf};
 use crate::util::bpf_info::{Info, LINK_INFO_SIZE, PROG_INFO_SIZE};
@@ -144,9 +144,9 @@ fn uprobe_multi(link: c_int, first: &Info<LINK_INFO_SIZE>, out: &mut [u8]) -> c_
 }
 
 /// Where upatch `name` attaches, as a C string into `out`: the SEC()-style
-/// hook, its attach target named from `vbtf`, the vmlinux BTF or NULL,
-/// when there is one. 0, or -errno and as the C left it.
-pub(crate) fn resolve_location(vbtf: *const Btf, name: &[u8], out: &mut [u8]) -> c_int {
+/// hook, its attach target named from `vbtf`, the vmlinux BTF, when there
+/// is one. 0, or -errno and as the C left it.
+pub(crate) fn resolve_location(vbtf: Option<&Btf>, name: &[u8], out: &mut [u8]) -> c_int {
     if let Some(first) = out.first_mut() {
         *first = 0;
     }
@@ -199,25 +199,10 @@ pub(crate) fn resolve_location(vbtf: *const Btf, name: &[u8], out: &mut [u8]) ->
     let prog_type = info.u32_at(PROG_TYPE);
     let btf_id = info.u32_at(PROG_ATTACH_BTF_ID);
 
-    // SAFETY: the BTF, which bounds the ID checked against its count and
-    // the offset of the type's name; a C string in it or NULL.
-    let mut attach: &[u8] = unsafe {
-        if vbtf.is_null() || btf_id == 0 || btf_id >= btf__type_cnt(vbtf) {
-            b""
-        } else {
-            let t = btf__type_by_id(vbtf, btf_id);
-            let n = if t.is_null() {
-                core::ptr::null()
-            } else {
-                btf__name_by_offset(vbtf, (*t).name_off)
-            };
-            if n.is_null() {
-                b""
-            } else {
-                crate::ffi::c_str(n)
-            }
-        }
-    };
+    let mut attach: &[u8] = vbtf
+        .filter(|b| btf_id != 0 && b.has(btf_id))
+        .and_then(|b| b.str_at(b.name_off(btf_id)))
+        .unwrap_or_default();
     let prefix = sec_prefix(prog_type, attach_type)
         .unwrap_or_else(|| prog_type_name(prog_type).unwrap_or(b"?"));
     // The kernel names an LSM hook's attach point bpf_lsm_<hook>.

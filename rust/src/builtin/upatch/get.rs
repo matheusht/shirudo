@@ -10,11 +10,8 @@ use core::ffi::{CStr, c_int, c_long};
 use std::ffi::CString;
 
 use super::{JSON_MAX, Summaries, err, help, item, log_err, out, print_json, strerr, type_name};
-use crate::ffi;
-use crate::sys::btf::{
-    Btf, btf__free, btf__load_from_kernel_by_id, btf__load_vmlinux_btf, btf__name_by_offset,
-};
-use crate::sys::libc::{close, errno};
+use crate::bpf::btf::Btf;
+use crate::sys::libc::close;
 use crate::sys::upatch::MapSummary;
 use crate::sys::upatch_maps::{MAP_ENTRIES_DEFAULT, MAP_READ_PEEK, MapView};
 use crate::text::cstr;
@@ -22,6 +19,7 @@ use crate::util::bpf_info::{Info, LINK_INFO_SIZE, PROG_INFO_SIZE};
 use crate::util::bpf_sys::bpf_prog_get_fd_by_id;
 use crate::util::help::{HelpItem, is_help};
 use crate::util::json::JsonEmit;
+use crate::util::kernel_btf;
 use crate::util::map_read;
 use crate::util::map_render;
 use crate::util::timefmt::format_duration;
@@ -75,16 +73,11 @@ struct Loaded {
 
 /// The source lines the `rec_size`-byte line_info records `recs` name in
 /// `btf`, skipping any blank.
-fn lines(btf: *const Btf, recs: &[u8], rec_size: usize) -> Vec<Line> {
+fn lines(btf: &Btf, recs: &[u8], rec_size: usize) -> Vec<Line> {
     if rec_size < LINE_INFO_SIZE {
         return Vec::new();
     }
-    let string = |off: u32| -> Option<&[u8]> {
-        // SAFETY: the BTF, which bounds the offset; NULL or a C string in it.
-        let p = unsafe { btf__name_by_offset(btf, off) };
-        // SAFETY: as above.
-        (!p.is_null()).then(|| unsafe { ffi::c_str(p) })
-    };
+    let string = |off: u32| btf.str_at(off);
     let mut v: Vec<Line> = recs
         .chunks_exact(rec_size)
         .filter_map(|r| {
@@ -122,15 +115,8 @@ fn source(prog: c_int) -> Result<Vec<Line>, c_int> {
     info.set(PROG_LINE_INFO_REC_SIZE, &rec_size.to_ne_bytes());
     info.set(PROG_LINE_INFO, &(recs.as_mut_ptr() as u64).to_ne_bytes());
     info.read(prog)?;
-    // SAFETY: a call that takes no pointer.
-    let btf = unsafe { btf__load_from_kernel_by_id(btf_id) };
-    if btf.is_null() {
-        return Err(-errno());
-    }
-    let lines = lines(btf, &recs, rec_size as usize);
-    // SAFETY: the BTF loaded above, freed once.
-    unsafe { btf__free(btf) };
-    Ok(lines)
+    let btf = kernel_btf::by_id(btf_id)?;
+    Ok(lines(&btf, &recs, rec_size as usize))
 }
 
 /// A C string the call writes into `N` bytes.
@@ -159,13 +145,10 @@ fn collect(name: &CStr) -> Result<Loaded, c_int> {
     let n = name.to_bytes();
     let loaded_at = filled::<32>(|o| loaded_at(n, o));
     let payload = filled::<65>(|o| payload_sha256(n, o));
-    // SAFETY: libbpf's loader, NULL when there is none.
-    let vbtf = unsafe { btf__load_vmlinux_btf() };
+    let vbtf = kernel_btf::vmlinux();
     let location = filled::<160>(|o| {
         resolve_location(vbtf, n, o);
     });
-    // SAFETY: the BTF loaded above, or NULL, freed once.
-    unsafe { btf__free(vbtf) };
 
     let prog = bpf_prog_get_fd_by_id(prog_id);
     if prog < 0 {

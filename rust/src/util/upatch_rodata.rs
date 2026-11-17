@@ -3,23 +3,23 @@
 
 //! The `.rodata` of a upatch behind `util/upatch_rodata.h`: found through
 //! the loader's own sys_bpf() calls, the BTF it loads and the map update
-//! that fills the section, then printed as text through libbpf's dumper
-//! or as JSON from the BTF.
+//! that fills the section, then printed as text as libbpf's dumper
+//! prints it, or as JSON from the BTF.
 
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_char, c_int};
 use core::ptr;
 
+use crate::bpf::btf::{
+    Btf, INT_BOOL, INT_SIGNED, KIND_ARRAY, KIND_CONST, KIND_DATASEC, KIND_ENUM, KIND_ENUM64,
+    KIND_FLOAT, KIND_FWD, KIND_INT, KIND_PTR, KIND_RESTRICT, KIND_STRUCT, KIND_TYPE_TAG,
+    KIND_TYPEDEF, KIND_UNION, KIND_VAR, KIND_VOLATILE,
+};
+use crate::bpf::btf_dump::Dump;
 use crate::errno::{E2BIG, EEXIST, EINVAL, ENODATA, ENOENT, ENOMEM, ENOSPC, EOPNOTSUPP};
 use crate::ffi;
-use crate::heap::{xcalloc, xfree, xmalloc};
-use crate::sys::btf::{
-    self, Btf, BtfDumpTypeDataOpts, BtfType, KIND_ARRAY, KIND_CONST, KIND_DATASEC, KIND_ENUM,
-    KIND_ENUM64, KIND_FLOAT, KIND_FWD, KIND_INT, KIND_PTR, KIND_RESTRICT, KIND_STRUCT,
-    KIND_TYPE_TAG, KIND_TYPEDEF, KIND_UNION, KIND_VAR, KIND_VOLATILE, btf__find_by_name_kind,
-    btf__free, btf__name_by_offset, btf__new, btf__resolve_size, btf__type_by_id, btf__type_cnt,
-    btf_dump__dump_type_data, btf_dump__free, btf_dump__new, libbpf_get_error,
-};
-use crate::sys::libc::{STDOUT_FILENO, VaList, printf, putchar, stdout, vfprintf};
+use crate::heap::{xfree, xmalloc};
+use crate::sys::libc::{STDOUT_FILENO, fwrite, printf, putchar, stdout};
+use crate::text::strsprintf;
 use crate::util::io::write_complete;
 use crate::util::json::{JsonEmit, MAX_BYTES};
 use crate::util::upatch::{NAME_MAX, Upatch, header_name, is_unload};
@@ -71,7 +71,7 @@ pub struct RodataRange {
 /// The `.rodata` the loader fills: its BTF, its bytes in the loader
 /// data, and its DATASEC.
 struct View {
-    btf: *mut Btf,
+    btf: Option<Btf>,
     bytes: *const u8,
     data_offset: u32,
     size: u32,
@@ -81,19 +81,12 @@ struct View {
 impl View {
     const fn new() -> Self {
         View {
-            btf: ptr::null_mut(),
+            btf: None,
             bytes: ptr::null(),
             data_offset: 0,
             size: 0,
             type_id: 0,
         }
-    }
-}
-
-impl Drop for View {
-    fn drop(&mut self) {
-        // SAFETY: NULL or the BTF btf__new() gave, freed once.
-        unsafe { btf__free(self.btf) };
     }
 }
 
@@ -303,24 +296,18 @@ fn map_name_rodata(name: &[u8]) -> bool {
 
 /// The `.rodata` the loader fills with the BTF's DATASEC `datasec_id`:
 /// the bytes of the map update of a `.rodata` map it creates.
-///
-/// # Safety
-///
-/// `btf` is a BTF.
-unsafe fn find_rodata_data(u: &Upatch, btf: *const Btf, datasec_id: u32, view: &mut View) -> c_int {
+fn find_rodata_data(u: &Upatch, btf: &Btf, datasec_id: u32, view: &mut View) -> c_int {
     let mut maps = [(0u32, false); MAPS_MAX];
     let l = Loader::of(u);
     let count = l.count();
 
-    // SAFETY: the caller's BTF.
-    let sec = unsafe { btf__type_by_id(btf, datasec_id) };
-    // SAFETY: NULL, or a type of the BTF.
-    if sec.is_null() || unsafe { (*sec).kind() } != KIND_DATASEC || u.hdr.loader_insns_len % 8 != 0
+    if !btf.has(datasec_id)
+        || btf.kind(datasec_id) != KIND_DATASEC
+        || u.hdr.loader_insns_len % 8 != 0
     {
         return -EINVAL;
     }
-    // SAFETY: as above.
-    let sec_size = unsafe { (*sec).size_type };
+    let sec_size = btf.size_or_type(datasec_id);
     for i in 4..count {
         let Some((cmd, attr_off, attr_size)) = l.sys_bpf_call(i) else {
             continue;
@@ -415,26 +402,21 @@ fn btf_rodata_btf(u: &Upatch, view: &mut View) -> c_int {
         Err(ret) => return ret,
     };
     let data = Loader::of(u).data;
-    // SAFETY: btf_size bytes of the loader data at btf_off, which
-    // loader_btf() kept inside it.
-    let btf = unsafe { btf__new(data[btf_off as usize..].as_ptr().cast(), btf_size) };
-    // SAFETY: what btf__new() returned.
-    if unsafe { libbpf_get_error(btf.cast_const().cast()) } != 0 {
+    // loader_btf() kept the btf_size bytes at btf_off inside the data.
+    let Ok(btf) = Btf::parse(&data[btf_off as usize..][..btf_size as usize]) else {
         return -ENOENT;
-    }
-    // SAFETY: the BTF, a C string and a kind.
-    let id = unsafe { btf__find_by_name_kind(btf, c".rodata".as_ptr(), u32::from(KIND_DATASEC)) };
-    if id <= 0 {
-        // SAFETY: the BTF btf__new() gave, freed once.
-        unsafe { btf__free(btf) };
+    };
+    let Some(id) = btf
+        .find_by_name_kind(b".rodata", KIND_DATASEC)
+        .filter(|&id| id != 0)
+    else {
         return -ENOENT;
-    }
-    view.btf = btf;
+    };
     // The header is not signed: .rodata is where the signed loader
     // takes it from, and a header that names another offset would aim a
     // rewrite the operator then signs at other bytes.
-    // SAFETY: the BTF.
-    let ret = unsafe { find_rodata_data(u, btf, id as u32, view) };
+    let ret = find_rodata_data(u, &btf, id, view);
+    view.btf = Some(btf);
     if ret == 0 && u.rodata_offset_in_header && view.data_offset != u.hdr.rodata_data_off {
         return -EINVAL;
     }
@@ -452,13 +434,13 @@ fn data_offset(u: &Upatch, offset: &mut u32) -> c_int {
 }
 
 /// The variables of the DATASEC `sec`: (type, offset, size) each.
-///
-/// # Safety
-///
-/// `sec` is a DATASEC of a BTF that stays alive for `'a`.
-unsafe fn secinfo<'a>(sec: *const BtfType) -> &'a [[u32; 3]] {
-    // SAFETY: the vlen btf_var_secinfo records behind the DATASEC.
-    unsafe { ffi::slice(sec.add(1).cast::<[u32; 3]>(), (*sec).vlen() as usize) }
+fn secinfo(btf: &Btf, sec: u32) -> Vec<[u32; 3]> {
+    (0..btf.vlen(sec))
+        .map(|i| {
+            let (ty, offset, size) = btf.secinfo(sec, i);
+            [ty, offset, size]
+        })
+        .collect()
 }
 
 fn symbol_range(u: &Upatch, symbol: &[u8], range: &mut RodataRange) -> c_int {
@@ -469,24 +451,17 @@ fn symbol_range(u: &Upatch, symbol: &[u8], range: &mut RodataRange) -> c_int {
     if ret != 0 {
         return ret;
     }
-    // SAFETY: the BTF, and its DATASEC.
-    let sec = unsafe { btf__type_by_id(view.btf, view.type_id) };
-    // SAFETY: NULL, or a type of the BTF.
-    if sec.is_null() || unsafe { (*sec).kind() } != KIND_DATASEC {
+    let Some(btf) = view.btf.as_ref() else {
+        return -EINVAL;
+    };
+    if !btf.has(view.type_id) || btf.kind(view.type_id) != KIND_DATASEC {
         return -EINVAL;
     }
-    // SAFETY: the DATASEC of the BTF, which view keeps.
-    for &[ty, offset, size] in unsafe { secinfo(sec) } {
-        // SAFETY: the BTF, and a type ID of it.
-        let var = unsafe { btf__type_by_id(view.btf, ty) };
-        // SAFETY: NULL, or a type of the BTF.
-        if var.is_null() || unsafe { (*var).kind() } != KIND_VAR {
+    for [ty, offset, size] in secinfo(btf, view.type_id) {
+        if !btf.has(ty) || btf.kind(ty) != KIND_VAR {
             continue;
         }
-        // SAFETY: the BTF, and a name offset of it.
-        let name = unsafe { btf__name_by_offset(view.btf, (*var).name_off) };
-        // SAFETY: NULL, or a name of the BTF.
-        if name.is_null() || unsafe { ffi::c_str(name) } != symbol {
+        if btf.str_at(btf.name_off(ty)) != Some(symbol) {
             continue;
         }
         if found {
@@ -509,38 +484,20 @@ fn symbol_range(u: &Upatch, symbol: &[u8], range: &mut RodataRange) -> c_int {
 
 /// The name at `off` of `btf`, when it is printable ASCII alone: the BTF
 /// may come from an unsigned package, and its names go to the terminal.
-///
-/// # Safety
-///
-/// `btf` is a BTF.
-unsafe fn name_printable(btf: *const Btf, off: u32) -> bool {
-    // SAFETY: the caller's BTF, and an offset.
-    let name = unsafe { btf__name_by_offset(btf, off) };
-
-    // SAFETY: NULL, or a name of the BTF.
-    !name.is_null()
-        && unsafe { ffi::c_str(name) }
-            .iter()
-            .all(|&c| (0x20..=0x7e).contains(&c))
+fn name_printable(btf: &Btf, off: u32) -> bool {
+    btf.str_at(off)
+        .is_some_and(|name| name.iter().all(|&c| (0x20..=0x7e).contains(&c)))
 }
 
 /// The type `id` resolves to through typedefs and modifiers, or 0.
-///
-/// # Safety
-///
-/// `btf` is a BTF.
-unsafe fn unwrap(btf: *const Btf, mut id: u32) -> u32 {
+fn unwrap(btf: &Btf, mut id: u32) -> u32 {
     for _ in 0..JSON_MAX_DEPTH {
-        // SAFETY: the caller's BTF.
-        let t = unsafe { btf__type_by_id(btf, id) };
-        if t.is_null() {
+        if !btf.has(id) {
             return 0;
         }
-        // SAFETY: a type of the BTF.
-        let t = unsafe { &*t };
-        match t.kind() {
+        match btf.kind(id) {
             KIND_TYPEDEF | KIND_VOLATILE | KIND_CONST | KIND_RESTRICT | KIND_TYPE_TAG => {
-                id = t.size_type;
+                id = btf.size_or_type(id);
             }
             _ => return id,
         }
@@ -548,147 +505,74 @@ unsafe fn unwrap(btf: *const Btf, mut id: u32) -> u32 {
     0
 }
 
-/// `fmt` with one argument appended at `*off` of `buf`, as strsprintf()
-/// writes it: -ENOSPC when it does not fit.
-///
-/// # Safety
-///
-/// `fmt` and its argument are as strsprintf() takes them.
-unsafe fn append(
-    buf: &mut [u8],
-    off: &mut usize,
-    fmt: &core::ffi::CStr,
-    arg: *const c_void,
-) -> c_int {
-    // SAFETY: the room left in buf, and the caller's format and argument.
-    let n = unsafe {
-        crate::text::csprintf!(
-            buf[*off..].as_mut_ptr().cast(),
-            buf.len() - *off,
-            fmt.as_ptr(),
-            arg,
-        )
-    };
-    if n < 0 {
-        return -ENOSPC;
+/// `parts` appended at `*off` of `buf`, as strsprintf() writes them:
+/// -ENOSPC when they do not fit.
+fn append(buf: &mut [u8], off: &mut usize, parts: &[&[u8]]) -> c_int {
+    match strsprintf(&mut buf[*off..], parts) {
+        Ok(n) => {
+            *off += n;
+            0
+        }
+        Err(_) => -ENOSPC,
     }
-    *off += n as usize;
-    0
 }
 
 /// The name of type `id`, its modifiers dropped, after `*off` in `buf`.
-///
-/// # Safety
-///
-/// `btf` is a BTF.
-unsafe fn append_type_name(
-    btf: *const Btf,
-    id: u32,
-    buf: &mut [u8],
-    off: &mut usize,
-    depth: u32,
-) -> c_int {
+fn append_type_name(btf: &Btf, id: u32, buf: &mut [u8], off: &mut usize, depth: u32) -> c_int {
     if depth >= JSON_MAX_DEPTH || *off >= buf.len() {
         return -E2BIG;
     }
-    // SAFETY: the caller's BTF.
-    let t = unsafe { btf__type_by_id(btf, id) };
-    if t.is_null() {
+    if !btf.has(id) {
         return -EINVAL;
     }
-    // SAFETY: a type of the BTF.
-    let (t, tp) = (unsafe { &*t }, t);
-    let kind = t.kind();
-    // SAFETY: the caller's BTF.
-    if !unsafe { name_printable(btf, t.name_off) } {
+    let kind = btf.kind(id);
+    if !name_printable(btf, btf.name_off(id)) {
         return -EINVAL;
     }
-    // SAFETY: as above.
-    let name = unsafe { btf__name_by_offset(btf, t.name_off) };
-    // SAFETY: NULL, or a name of the BTF.
-    let named = !name.is_null() && unsafe { *name } != 0;
-    // SAFETY: the BTF, the caller's room, and the formats with their
-    // arguments: C strings and integers.
-    unsafe {
-        if kind == KIND_TYPEDEF && named {
-            return append(buf, off, c"%s", name.cast());
+    let name = btf.str_at(btf.name_off(id)).unwrap_or_default();
+    let named = !name.is_empty();
+    if kind == KIND_TYPEDEF && named {
+        return append(buf, off, &[name]);
+    }
+    if matches!(
+        kind,
+        KIND_TYPEDEF | KIND_VOLATILE | KIND_CONST | KIND_RESTRICT | KIND_TYPE_TAG
+    ) {
+        return append_type_name(btf, btf.size_or_type(id), buf, off, depth + 1);
+    }
+    if kind == KIND_ARRAY {
+        let a = btf.array(id);
+        if append_type_name(btf, a.ty, buf, off, depth + 1) != 0 {
+            return -EINVAL;
         }
-        if matches!(
-            kind,
-            KIND_TYPEDEF | KIND_VOLATILE | KIND_CONST | KIND_RESTRICT | KIND_TYPE_TAG
-        ) {
-            return append_type_name(btf, t.size_type, buf, off, depth + 1);
+        return append(buf, off, &[format!("[{}]", a.nelems).as_bytes()]);
+    }
+    if kind == KIND_PTR {
+        if append_type_name(btf, btf.size_or_type(id), buf, off, depth + 1) != 0 {
+            return -EINVAL;
         }
-        if kind == KIND_ARRAY {
-            let a = &*btf::array(tp);
-
-            if append_type_name(btf, a.ty, buf, off, depth + 1) != 0 {
-                return -EINVAL;
-            }
-            let n = crate::text::csprintf!(
-                buf[*off..].as_mut_ptr().cast(),
-                buf.len() - *off,
-                c"[%u]".as_ptr(),
-                a.nelems,
-            );
-            if n < 0 {
-                return -ENOSPC;
-            }
-            *off += n as usize;
-            return 0;
-        }
-        if kind == KIND_PTR {
-            if append_type_name(btf, t.size_type, buf, off, depth + 1) != 0 {
-                return -EINVAL;
-            }
-            let n = crate::text::csprintf!(
-                buf[*off..].as_mut_ptr().cast(),
-                buf.len() - *off,
-                c" *".as_ptr(),
-            );
-            if n < 0 {
-                return -ENOSPC;
-            }
-            *off += n as usize;
-            return 0;
-        }
-        let n = if named {
-            let prefix = match kind {
-                KIND_STRUCT => c"struct ",
-                KIND_UNION => c"union ",
-                KIND_ENUM => c"enum ",
-                _ => c"",
-            };
-            crate::text::csprintf!(
-                buf[*off..].as_mut_ptr().cast(),
-                buf.len() - *off,
-                c"%s%s".as_ptr(),
-                prefix.as_ptr(),
-                name,
-            )
-        } else {
-            let fallback = match kind {
-                KIND_INT => c"integer",
-                KIND_STRUCT => c"struct",
-                KIND_UNION => c"union",
-                KIND_ENUM | KIND_ENUM64 => c"enum",
-                KIND_FLOAT => c"float",
-                KIND_FWD => c"forward declaration",
-                _ => c"?",
-            };
-            crate::text::csprintf!(
-                buf[*off..].as_mut_ptr().cast(),
-                buf.len() - *off,
-                c"%s".as_ptr(),
-                fallback.as_ptr(),
-            )
+        return append(buf, off, &[b" *"]);
+    }
+    if named {
+        let prefix: &[u8] = match kind {
+            KIND_STRUCT => b"struct ",
+            KIND_UNION => b"union ",
+            KIND_ENUM => b"enum ",
+            _ => b"",
         };
-        if n < 0 {
-            return -ENOSPC;
-        }
-        *off += n as usize;
+        append(buf, off, &[prefix, name])
+    } else {
+        let fallback: &[u8] = match kind {
+            KIND_INT => b"integer",
+            KIND_STRUCT => b"struct",
+            KIND_UNION => b"union",
+            KIND_ENUM | KIND_ENUM64 => b"enum",
+            KIND_FLOAT => b"float",
+            KIND_FWD => b"forward declaration",
+            _ => b"?",
+        };
+        append(buf, off, &[fallback])
     }
-    0
 }
 
 fn json_number(e: &mut JsonEmit, value: u64, signed: bool) -> c_int {
@@ -721,23 +605,15 @@ fn json_number(e: &mut JsonEmit, value: u64, signed: bool) -> c_int {
 
 /// The integer of the INT `t` in `bytes`: its value, sign-extended when
 /// signed, and whether it is signed and a bool.
-///
-/// # Safety
-///
-/// `t` is an INT of a BTF.
-unsafe fn btf_integer(t: *const BtfType, bytes: &[u8]) -> Result<(u64, bool, bool), c_int> {
-    // SAFETY: the caller's INT.
-    let (size, enc_signed, enc_bool, bits, bit_off) = unsafe {
-        let enc = btf::int_encoding(t);
-
-        (
-            (*t).size_type,
-            enc & btf::INT_SIGNED != 0,
-            enc & btf::INT_BOOL != 0,
-            u32::from(btf::int_bits(t)),
-            u32::from(btf::int_offset(t)),
-        )
-    };
+fn btf_integer(btf: &Btf, t: u32, bytes: &[u8]) -> Result<(u64, bool, bool), c_int> {
+    let enc = btf.int_encoding(t);
+    let (size, enc_signed, enc_bool, bits, bit_off) = (
+        btf.size_or_type(t),
+        enc & INT_SIGNED != 0,
+        enc & INT_BOOL != 0,
+        u32::from(btf.int_bits(t)),
+        u32::from(btf.int_offset(t)),
+    );
     let mut result = 0u64;
 
     if size as usize > bytes.len() || size == 0 || size > 8 {
@@ -791,35 +667,18 @@ fn json_hex(e: &mut JsonEmit, bytes: &[u8]) {
 }
 
 /// The value of type `type_id` in `bytes` as JSON.
-///
-/// # Safety
-///
-/// `btf` is a BTF.
-unsafe fn json_btf_value(
-    e: &mut JsonEmit,
-    btf: *const Btf,
-    type_id: u32,
-    bytes: &[u8],
-    depth: u32,
-) -> c_int {
+fn json_btf_value(e: &mut JsonEmit, btf: &Btf, type_id: u32, bytes: &[u8], depth: u32) -> c_int {
     if depth >= JSON_MAX_DEPTH || type_id == 0 {
         return -EINVAL;
     }
-    // SAFETY: the caller's BTF.
-    let type_id = unsafe { unwrap(btf, type_id) };
-    // SAFETY: as above.
-    let tp = unsafe { btf__type_by_id(btf, type_id) };
-    if tp.is_null() {
+    let t = unwrap(btf, type_id);
+    if !btf.has(t) {
         return -EINVAL;
     }
-    // SAFETY: a type of the BTF, with the records its kind and vlen give
-    // behind it.
-    let t = unsafe { &*tp };
     let size = bytes.len();
-    match t.kind() {
+    match btf.kind(t) {
         KIND_INT => {
-            // SAFETY: an INT of the BTF.
-            let (value, signed, boolean) = match unsafe { btf_integer(tp, bytes) } {
+            let (value, signed, boolean) = match btf_integer(btf, t, bytes) {
                 Ok(v) => v,
                 Err(ret) => return ret,
             };
@@ -831,10 +690,10 @@ unsafe fn json_btf_value(
             e.err()
         }
         KIND_ENUM | KIND_ENUM64 => {
-            let signed = t.kflag();
-            let tsize = t.size_type as usize;
+            let signed = btf.kflag(t);
+            let tsize = btf.size_or_type(t) as usize;
             let mut value = 0u64;
-            let mut enum_name: *const c_char = ptr::null();
+            let mut enum_name: &[u8] = b"";
 
             if tsize == 0 || tsize > 8 || tsize > size {
                 return -EINVAL;
@@ -845,31 +704,22 @@ unsafe fn json_btf_value(
             if signed && tsize < 8 && value & (1u64 << (tsize * 8 - 1)) != 0 {
                 value |= !((1u64 << (tsize * 8)) - 1);
             }
-            // SAFETY: the enumerators behind the type, vlen of them, of
-            // the BTF.
-            unsafe {
-                if t.kind() == KIND_ENUM {
-                    let vals = ffi::slice(tp.add(1).cast::<[u32; 2]>(), t.vlen() as usize);
-
-                    if let Some(v) = vals.iter().find(|v| v[1] == value as u32) {
-                        enum_name = btf__name_by_offset(btf, v[0]);
+            let is_enum = btf.kind(t) == KIND_ENUM;
+            let found = (0..btf.vlen(t))
+                .map(|i| btf.enum_value(t, i))
+                .find(|&(_, v)| {
+                    if is_enum {
+                        v as u32 == value as u32
+                    } else {
+                        v == value
                     }
-                } else {
-                    let vals = ffi::slice(tp.add(1).cast::<[u32; 3]>(), t.vlen() as usize);
-
-                    if let Some(v) = vals
-                        .iter()
-                        .find(|v| (u64::from(v[1]) | u64::from(v[2]) << 32) == value)
-                    {
-                        enum_name = btf__name_by_offset(btf, v[0]);
-                    }
-                }
+                });
+            if let Some((name_off, _)) = found {
+                enum_name = btf.str_at(name_off).unwrap_or_default();
             }
             e.obj_value_open();
-            // SAFETY: NULL, or a name of the BTF.
-            if !enum_name.is_null() && unsafe { *enum_name } != 0 {
-                // SAFETY: as above.
-                e.kv_string(b"name", unsafe { ffi::c_str(enum_name) });
+            if !enum_name.is_empty() {
+                e.kv_string(b"name", enum_name);
             }
             e.key(b"value");
             json_number(e, value, signed);
@@ -877,35 +727,20 @@ unsafe fn json_btf_value(
             e.err()
         }
         KIND_STRUCT => {
-            let kflag = t.kflag();
-            // SAFETY: the members behind the struct, vlen of them.
-            let members = unsafe { ffi::slice(btf::members(tp), t.vlen() as usize) };
-
             e.obj_value_open();
-            for (i, m) in members.iter().enumerate() {
+            for (i, m) in btf.members(t).enumerate() {
                 if e.err() != 0 {
                     break;
                 }
-                let bit_off = if kflag {
-                    m.offset & 0xff_ffff
-                } else {
-                    m.offset
-                };
-                let bit_size = if kflag { m.offset >> 24 } else { 0 };
+                let bit_off = m.bit_offset();
+                let bit_size = m.bitfield_size();
                 let byte_off = (bit_off / 8) as usize;
-                // SAFETY: the BTF, and a name offset and a type of it.
-                let (name, member_size) = unsafe {
-                    (
-                        btf__name_by_offset(btf, m.name_off),
-                        btf__resolve_size(btf, m.ty),
-                    )
-                };
+                let name = btf.str_at(m.name_off).unwrap_or_default();
+                let member_size = btf.resolve_size(m.ty).map_or(-1i64, i64::from);
                 let mut fallback = [0u8; 24];
 
-                // SAFETY: NULL, or a name of the BTF.
-                if !name.is_null() && unsafe { *name } != 0 {
-                    // SAFETY: as above.
-                    e.key(unsafe { ffi::c_str(name) });
+                if !name.is_empty() {
+                    e.key(name);
                 } else {
                     // SAFETY: the room of fallback, the C's format and
                     // an integer.
@@ -924,15 +759,12 @@ unsafe fn json_btf_value(
                 }
                 if bit_size != 0 {
                     let n = (bit_off % 8 + bit_size).div_ceil(8) as usize;
-                    // SAFETY: the BTF, and a type of it.
-                    let mt = unsafe { btf__type_by_id(btf, unwrap(btf, m.ty)) };
-                    // SAFETY: NULL, or a type of the BTF.
-                    let int = !mt.is_null() && unsafe { (*mt).kind() } == KIND_INT;
+                    let mt = unwrap(btf, m.ty);
+                    let int = btf.has(mt) && btf.kind(mt) == KIND_INT;
                     if bit_size > 64 || byte_off + n > size || !int {
                         return -EINVAL;
                     }
-                    // SAFETY: an INT of the BTF.
-                    let signed = unsafe { btf::int_encoding(mt) } & btf::INT_SIGNED != 0;
+                    let signed = btf.int_encoding(mt) & INT_SIGNED != 0;
                     let mut val = 0u64;
                     for j in 0..bit_size {
                         let pos = bit_off + j;
@@ -951,8 +783,7 @@ unsafe fn json_btf_value(
                         return -EINVAL;
                     }
                     let member = &bytes[byte_off..][..member_size as usize];
-                    // SAFETY: the BTF.
-                    let ret = unsafe { json_btf_value(e, btf, m.ty, member, depth + 1) };
+                    let ret = json_btf_value(e, btf, m.ty, member, depth + 1);
                     if ret != 0 {
                         return ret;
                     }
@@ -962,10 +793,8 @@ unsafe fn json_btf_value(
             e.err()
         }
         KIND_ARRAY => {
-            // SAFETY: the array record behind the type.
-            let a = unsafe { &*btf::array(tp) };
-            // SAFETY: the BTF, and a type of it.
-            let elem_size = unsafe { btf__resolve_size(btf, a.ty) };
+            let a = btf.array(t);
+            let elem_size = btf.resolve_size(a.ty).map_or(-1i64, i64::from);
             let total = (elem_size as u64).checked_mul(u64::from(a.nelems));
 
             if elem_size < 0 || total.is_none_or(|total| total > size as u64) {
@@ -980,8 +809,7 @@ unsafe fn json_btf_value(
                     return -EINVAL;
                 }
                 let elem = &bytes[i * elem_size as usize..][..elem_size as usize];
-                // SAFETY: the BTF.
-                let ret = unsafe { json_btf_value(e, btf, a.ty, elem, depth + 1) };
+                let ret = json_btf_value(e, btf, a.ty, elem, depth + 1);
                 if ret != 0 {
                     return ret;
                 }
@@ -1021,46 +849,17 @@ unsafe fn json_btf_value(
 
 /// The name of the variable of `var`, when it is a VAR with a printable
 /// name.
-///
-/// # Safety
-///
-/// `btf` is a BTF.
-unsafe fn var_name(btf: *const Btf, var: &[u32; 3]) -> *const c_char {
-    // SAFETY: the caller's BTF.
-    unsafe {
-        let t = btf__type_by_id(btf, var[0]);
-
-        if !t.is_null() && (*t).kind() == KIND_VAR && name_printable(btf, (*t).name_off) {
-            btf__name_by_offset(btf, (*t).name_off)
-        } else {
-            ptr::null()
-        }
-    }
+fn var_name<'b>(btf: &'b Btf, var: &[u32; 3]) -> Option<&'b [u8]> {
+    let t = var[0];
+    (btf.has(t) && btf.kind(t) == KIND_VAR && name_printable(btf, btf.name_off(t)))
+        .then(|| btf.str_at(btf.name_off(t)))
+        .flatten()
 }
 
 /// The type of the variable of `var`.
-///
-/// # Safety
-///
-/// `btf` is a BTF.
-unsafe fn var_type(btf: *const Btf, var: &[u32; 3]) -> Option<u32> {
-    // SAFETY: the caller's BTF.
-    let t = unsafe { btf__type_by_id(btf, var[0]) };
-
-    // SAFETY: NULL, or a type of the BTF.
-    if t.is_null() || unsafe { (*t).kind() } != KIND_VAR {
-        return None;
-    }
-    // SAFETY: as above.
-    Some(unsafe { (*t).size_type })
-}
-
-/// libbpf's dumper prints through this: the C library's vfprintf() onto
-/// the stream in `ctx`, with the format and the va_list it was handed.
-unsafe extern "C" fn print_text(ctx: *mut c_void, fmt: *const c_char, args: VaList) {
-    // SAFETY: the stream print_rodata_text() handed the dumper, and its
-    // format and arguments.
-    unsafe { vfprintf(ctx.cast(), fmt, args) };
+fn var_type(btf: &Btf, var: &[u32; 3]) -> Option<u32> {
+    let t = var[0];
+    (btf.has(t) && btf.kind(t) == KIND_VAR).then(|| btf.size_or_type(t))
 }
 
 /// The cast libbpf's dumper writes before a value spells its type
@@ -1068,33 +867,21 @@ unsafe extern "C" fn print_text(ctx: *mut c_void, fmt: *const c_char, args: VaLi
 /// pointer to itself grows its stack until memory runs out, and a
 /// function prototype whose parameter leads back to it recurses until
 /// the stack does.
-///
-/// # Safety
-///
-/// `btf` is a BTF.
-unsafe fn decl_printable(btf: *const Btf, mut id: u32) -> bool {
+fn decl_printable(btf: &Btf, mut id: u32) -> bool {
     for _ in 0..DECL_MAX {
         if id == 0 {
             return true;
         }
-        // SAFETY: the caller's BTF.
-        let t = unsafe { btf__type_by_id(btf, id) };
-        if t.is_null() {
+        if !btf.has(id) {
             return false;
         }
-        // SAFETY: a type of the BTF.
-        let t_ref = unsafe { &*t };
-        match t_ref.kind() {
+        match btf.kind(id) {
             KIND_PTR | KIND_VOLATILE | KIND_CONST | KIND_RESTRICT | KIND_TYPE_TAG => {
-                id = t_ref.size_type;
+                id = btf.size_or_type(id);
             }
-            // SAFETY: the array record behind the type.
-            KIND_ARRAY => id = unsafe { (*btf::array(t)).ty },
+            KIND_ARRAY => id = btf.array(id).ty,
             KIND_INT | KIND_ENUM | KIND_ENUM64 | KIND_FWD | KIND_STRUCT | KIND_UNION
-            | KIND_TYPEDEF | KIND_FLOAT => {
-                // SAFETY: the caller's BTF.
-                return unsafe { name_printable(btf, t_ref.name_off) };
-            }
+            | KIND_TYPEDEF | KIND_FLOAT => return name_printable(btf, btf.name_off(id)),
             _ => return false,
         }
     }
@@ -1121,59 +908,45 @@ struct DumpCost {
 /// TEXT_MAX_VALUES values. `cost` keeps the counts of the types found
 /// fine, so a type reached again brings its depth and values along.
 ///
-/// # Safety
-///
-/// `btf` is a BTF, and `cost` has a slot for each of its types.
-unsafe fn dump_cost(btf: *const Btf, id: u32, depth: u32, cost: &mut [DumpCost]) -> c_int {
-    // SAFETY: the caller's BTF.
-    let tp = unsafe { btf__type_by_id(btf, id) };
+/// `cost` has a slot for each of the BTF's types.
+fn dump_cost(btf: &Btf, id: u32, depth: u32, cost: &mut [DumpCost]) -> c_int {
     let mut c = DumpCost {
         values: 1,
         height: 1,
     };
 
-    if tp.is_null() || depth >= JSON_MAX_DEPTH {
+    if !btf.has(id) || depth >= JSON_MAX_DEPTH {
         return -EINVAL;
     }
     if cost[id as usize].values != 0 {
         return 0;
     }
-    // SAFETY: the caller's BTF.
-    if !unsafe { decl_printable(btf, id) } {
+    if !decl_printable(btf, id) {
         return -EINVAL;
     }
-    // SAFETY: a type of the BTF, with the records its kind and vlen give
-    // behind it; the caller's BTF and costs.
-    unsafe {
-        let t = &*tp;
-        match t.kind() {
+    {
+        match btf.kind(id) {
             KIND_INT | KIND_PTR | KIND_FLOAT => {}
-            KIND_ENUM => {
-                for v in ffi::slice(tp.add(1).cast::<[u32; 2]>(), t.vlen() as usize) {
-                    if !name_printable(btf, v[0]) {
-                        return -EINVAL;
-                    }
-                }
-            }
-            KIND_ENUM64 => {
-                for v in ffi::slice(tp.add(1).cast::<[u32; 3]>(), t.vlen() as usize) {
-                    if !name_printable(btf, v[0]) {
+            KIND_ENUM | KIND_ENUM64 => {
+                for i in 0..btf.vlen(id) {
+                    if !name_printable(btf, btf.enum_value(id, i).0) {
                         return -EINVAL;
                     }
                 }
             }
             KIND_TYPEDEF | KIND_VOLATILE | KIND_CONST | KIND_RESTRICT | KIND_TYPE_TAG => {
-                let ret = dump_cost(btf, t.size_type, depth + 1, cost);
+                let next = btf.size_or_type(id);
+                let ret = dump_cost(btf, next, depth + 1, cost);
                 if ret != 0 {
                     return ret;
                 }
-                c.values = cost[t.size_type as usize].values;
-                c.height = cost[t.size_type as usize].height + 1;
+                c.values = cost[next as usize].values;
+                c.height = cost[next as usize].height + 1;
             }
             KIND_ARRAY => {
-                let a = &*btf::array(tp);
+                let a = btf.array(id);
 
-                if a.nelems != 0 && btf__resolve_size(btf, a.ty) <= 0 {
+                if a.nelems != 0 && btf.resolve_size(a.ty).unwrap_or(0) == 0 {
                     return -EINVAL;
                 }
                 let ret = dump_cost(btf, a.ty, depth + 1, cost);
@@ -1191,7 +964,7 @@ unsafe fn dump_cost(btf: *const Btf, id: u32, depth: u32, cost: &mut [DumpCost])
                 c.height = cost[a.ty as usize].height + 1;
             }
             KIND_STRUCT | KIND_UNION => {
-                for m in ffi::slice(btf::members(tp), t.vlen() as usize) {
+                for m in btf.members(id) {
                     if !name_printable(btf, m.name_off) {
                         return -EINVAL;
                     }
@@ -1220,30 +993,22 @@ unsafe fn dump_cost(btf: *const Btf, id: u32, depth: u32, cost: &mut [DumpCost])
 }
 
 /// The DATASEC's variables of `view`, each checked to lie inside it: its
-/// name, its type, and the name of its type.
-///
-/// # Safety
-///
-/// `view` holds a BTF with its DATASEC.
-unsafe fn variable(
-    view: &View,
+/// name, its type, and the length of the name of its type.
+fn variable<'v>(
+    view: &'v View,
+    btf: &'v Btf,
     var: &[u32; 3],
     type_name: &mut [u8; 256],
-) -> Result<(*const c_char, u32, usize), c_int> {
+) -> Result<(&'v [u8], u32, usize), c_int> {
     let mut type_off = 0;
 
-    // SAFETY: the view's BTF.
-    let name = unsafe { var_name(view.btf, var) };
-    // SAFETY: NULL, or a name of the BTF.
-    if name.is_null() || unsafe { *name } == 0 {
-        return Err(-EINVAL);
-    }
-    // SAFETY: the view's BTF.
-    let Some(type_id) = (unsafe { var_type(view.btf, var) }) else {
+    let Some(name) = var_name(btf, var).filter(|n| !n.is_empty()) else {
         return Err(-EINVAL);
     };
-    // SAFETY: the view's BTF.
-    let ret = unsafe { append_type_name(view.btf, type_id, type_name, &mut type_off, 0) };
+    let Some(type_id) = var_type(btf, var) else {
+        return Err(-EINVAL);
+    };
+    let ret = append_type_name(btf, type_id, type_name, &mut type_off, 0);
     if ret != 0 {
         return Err(ret);
     }
@@ -1251,16 +1016,6 @@ unsafe fn variable(
         return Err(-EINVAL);
     }
     Ok((name, type_id, type_off))
-}
-
-/// The view's DATASEC and its variables.
-///
-/// # Safety
-///
-/// `view` holds a BTF with its DATASEC.
-unsafe fn datasec(view: &View) -> &[[u32; 3]] {
-    // SAFETY: the view's BTF and the DATASEC btf_rodata_btf() found.
-    unsafe { secinfo(btf__type_by_id(view.btf, view.type_id)) }
 }
 
 /// The bytes of a variable at `offset` of `size` in the view.
@@ -1273,21 +1028,14 @@ fn var_bytes(view: &View, offset: u32, size: u32) -> &[u8] {
 ///
 /// `path` is a C string, and `view` holds a BTF with its DATASEC.
 unsafe fn print_rodata_text(u: &Upatch, path: *const c_char, view: &View) -> c_int {
-    let opts = BtfDumpTypeDataOpts {
-        sz: size_of::<BtfDumpTypeDataOpts>(),
-        indent_str: c"  ".as_ptr(),
-        indent_level: 0,
-        compact: false,
-        skip_names: false,
-        emit_zeroes: true,
-        emit_strings: true,
+    let Some(btf) = view.btf.as_ref() else {
+        return -EINVAL;
     };
     let mut name = [0u8; NAME_MAX + 1];
     let mut values = 0u32;
     let mut ret = 0;
 
-    // SAFETY: the view's BTF.
-    let (vars, types) = unsafe { (datasec(view), btf__type_cnt(view.btf)) };
+    let (vars, types) = (secinfo(btf, view.type_id), btf.type_cnt());
     header_name(u, &mut name);
     let len = name.iter().position(|&c| c == 0).unwrap_or(NAME_MAX);
     // SAFETY: the name, a C string of len bytes, sanitised in place; the
@@ -1303,34 +1051,29 @@ unsafe fn print_rodata_text(u: &Upatch, path: *const c_char, view: &View) -> c_i
             u.hdr.data_off.wrapping_add(view.data_offset),
         );
     }
-    // SAFETY: a count of costs.
-    let cost = unsafe { xcalloc(types as usize, size_of::<DumpCost>()) }.cast::<DumpCost>();
-    if cost.is_null() {
-        return -ENOMEM;
-    }
-    // SAFETY: the view's BTF, the printer and its stream, no options.
-    let dump = unsafe { btf_dump__new(view.btf, Some(print_text), stdout.cast(), ptr::null()) };
-    // SAFETY: what btf_dump__new() returned.
-    if unsafe { libbpf_get_error(dump.cast_const().cast()) } != 0 {
-        // SAFETY: the costs xcalloc() gave, freed once.
-        unsafe { xfree(cost.cast(), types as usize * size_of::<DumpCost>()) };
-        return -EINVAL;
-    }
-    // SAFETY: the types costs, zeroed, one per type of the BTF.
-    let costs = unsafe { core::slice::from_raw_parts_mut(cost, types as usize) };
-    for var in vars {
+    let mut costs = vec![
+        DumpCost {
+            values: 0,
+            height: 0,
+        };
+        types as usize
+    ];
+    // The container's mapping, which the variables' bytes lie in and the
+    // dumper reads past a bitfield into, as libbpf's did.
+    // SAFETY: the mapping of the open container.
+    let mem = unsafe { ffi::slice(u.map, u.map_size) };
+    let mut dump = Dump::new(btf);
+    for var in &vars {
         let mut type_name = [0u8; 256];
 
-        // SAFETY: the view.
-        let (var_name, type_id, _) = match unsafe { variable(view, var, &mut type_name) } {
+        let (var_name, type_id, type_len) = match variable(view, btf, var, &mut type_name) {
             Ok(v) => v,
             Err(err) => {
                 ret = err;
                 break;
             }
         };
-        // SAFETY: the view's BTF, and its costs.
-        ret = unsafe { dump_cost(view.btf, type_id, 0, costs) };
+        ret = dump_cost(btf, type_id, 0, &mut costs);
         if ret == 0 {
             match values.checked_add(costs[type_id as usize].values) {
                 Some(v) if v <= TEXT_MAX_VALUES => values = v,
@@ -1350,38 +1093,33 @@ unsafe fn print_rodata_text(u: &Upatch, path: *const c_char, view: &View) -> c_i
         if ret != 0 {
             break;
         }
-        // SAFETY: the C's format with C strings and integers; the dumper,
-        // a type of its BTF, the variable's bytes and the options.
-        unsafe {
-            printf(
-                c"\n%s: %s, size=%u, rodata+%u, data+%u, file+%u = ".as_ptr(),
-                var_name,
-                type_name.as_ptr(),
-                var[2],
-                var[1],
-                view.data_offset + var[1],
-                u.hdr
-                    .data_off
-                    .wrapping_add(view.data_offset)
-                    .wrapping_add(var[1]),
-            );
-            let bytes = var_bytes(view, var[1], var[2]);
-            ret =
-                btf_dump__dump_type_data(dump, type_id, bytes.as_ptr().cast(), bytes.len(), &opts);
-            if ret < 0 {
-                break;
-            }
-            putchar(c_int::from(b'\n'));
+        let header = format!(
+            "\n{}: {}, size={}, rodata+{}, data+{}, file+{} = ",
+            String::from_utf8_lossy(var_name),
+            String::from_utf8_lossy(&type_name[..type_len]),
+            var[2],
+            var[1],
+            view.data_offset + var[1],
+            u.hdr
+                .data_off
+                .wrapping_add(view.data_offset)
+                .wrapping_add(var[1]),
+        );
+        let bytes = var_bytes(view, var[1], var[2]);
+        let start = bytes.as_ptr() as usize - mem.as_ptr() as usize;
+        let mut out = header.into_bytes();
+        let dumped = dump.dump_type_data(&mut out, type_id, mem, start, bytes.len());
+        out.extend_from_slice(if dumped.is_ok() { b"\n" } else { b"" });
+        // SAFETY: the text, onto the stream the C's printf() writes.
+        unsafe { fwrite(out.as_ptr().cast(), 1, out.len(), stdout) };
+        if let Err(err) = dumped {
+            ret = err;
+            break;
         }
     }
-    // SAFETY: the dumper btf_dump__new() gave and the costs xcalloc()
-    // gave, each freed once.
-    unsafe {
-        if ret >= 0 {
-            putchar(c_int::from(b'\n'));
-        }
-        btf_dump__free(dump);
-        xfree(cost.cast(), types as usize * size_of::<DumpCost>());
+    if ret >= 0 {
+        // SAFETY: a character onto stdout.
+        unsafe { putchar(c_int::from(b'\n')) };
     }
     ret.min(0)
 }
@@ -1394,8 +1132,10 @@ unsafe fn print_rodata_json(u: &Upatch, path: *const c_char, view: &View) -> c_i
     let mut name = [0u8; NAME_MAX + 1];
     let mut ret = 0;
 
-    // SAFETY: the view.
-    let vars = unsafe { datasec(view) };
+    let Some(btf) = view.btf.as_ref() else {
+        return -EINVAL;
+    };
+    let vars = secinfo(btf, view.type_id);
     header_name(u, &mut name);
     let name = &name[..name.iter().position(|&c| c == 0).unwrap_or(NAME_MAX)];
     e.obj_open();
@@ -1413,14 +1153,13 @@ unsafe fn print_rodata_json(u: &Upatch, path: *const c_char, view: &View) -> c_i
         i64::from(u.hdr.data_off.wrapping_add(view.data_offset)),
     );
     e.arr_open(b"variables");
-    for var in vars {
+    for var in &vars {
         let mut type_name = [0u8; 256];
 
         if e.err() != 0 {
             break;
         }
-        // SAFETY: the view.
-        let (var_name, type_id, type_len) = match unsafe { variable(view, var, &mut type_name) } {
+        let (var_name, type_id, type_len) = match variable(view, btf, var, &mut type_name) {
             Ok(v) => v,
             Err(err) => {
                 ret = err;
@@ -1428,8 +1167,7 @@ unsafe fn print_rodata_json(u: &Upatch, path: *const c_char, view: &View) -> c_i
             }
         };
         e.obj_open();
-        // SAFETY: a name of the view's BTF.
-        e.kv_string(b"name", unsafe { ffi::c_str(var_name) });
+        e.kv_string(b"name", var_name);
         e.kv_string(b"type", &type_name[..type_len]);
         e.kv_int(b"size", i64::from(var[2]));
         e.kv_int(b"rodata_offset", i64::from(var[1]));
@@ -1444,16 +1182,7 @@ unsafe fn print_rodata_json(u: &Upatch, path: *const c_char, view: &View) -> c_i
             ),
         );
         e.key(b"value");
-        // SAFETY: the view's BTF.
-        ret = unsafe {
-            json_btf_value(
-                &mut e,
-                view.btf,
-                type_id,
-                var_bytes(view, var[1], var[2]),
-                0,
-            )
-        };
+        ret = json_btf_value(&mut e, btf, type_id, var_bytes(view, var[1], var[2]), 0);
         e.obj_close();
         if ret != 0 {
             break;
@@ -1515,15 +1244,15 @@ mod capi {
     use core::ffi::{c_char, c_int};
 
     use super::{DumpCost, RodataRange};
+    use crate::bpf::btf::Btf;
     use crate::errno::EINVAL;
     use crate::ffi;
-    use crate::sys::btf::{Btf, btf__type_cnt};
     use crate::util::upatch::Upatch;
 
     /// # Safety
     ///
-    /// `btf` is a BTF, `buf` holds `cap` bytes, and `off` points to an
-    /// offset into them.
+    /// `btf` is NULL or a BTF shirudo_btf_new() made, `buf` holds `cap`
+    /// bytes, and `off` points to an offset into them.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn upatch_rodata_type_name(
         btf: *const Btf,
@@ -1534,6 +1263,10 @@ mod capi {
         depth: u32,
     ) -> c_int {
         // SAFETY: the caller passes the BTF, the room and the offset.
+        let Some(btf) = (unsafe { btf.as_ref() }) else {
+            return -EINVAL;
+        };
+        // SAFETY: as above.
         unsafe {
             super::append_type_name(btf, id, ffi::bytes_mut(buf.cast(), cap), &mut *off, depth)
         }
@@ -1541,7 +1274,8 @@ mod capi {
 
     /// # Safety
     ///
-    /// `btf` is a BTF, and `cost` holds a cost for each of its types.
+    /// `btf` is NULL or a BTF shirudo_btf_new() made, and `cost` holds a
+    /// cost for each of its types.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn upatch_rodata_dump_cost(
         btf: *const Btf,
@@ -1549,13 +1283,13 @@ mod capi {
         depth: u32,
         cost: *mut DumpCost,
     ) -> c_int {
-        // SAFETY: the caller passes the BTF and a cost for each of its
-        // types.
-        unsafe {
-            let costs = core::slice::from_raw_parts_mut(cost, btf__type_cnt(btf) as usize);
-
-            super::dump_cost(btf, id, depth, costs)
-        }
+        // SAFETY: the caller passes the BTF.
+        let Some(btf) = (unsafe { btf.as_ref() }) else {
+            return -EINVAL;
+        };
+        // SAFETY: the caller's cost for each of the types.
+        let costs = unsafe { core::slice::from_raw_parts_mut(cost, btf.type_cnt() as usize) };
+        super::dump_cost(btf, id, depth, costs)
     }
 
     /// # Safety

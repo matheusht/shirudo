@@ -13,6 +13,7 @@
 
 #include "kernel_abi.h"
 #include "loader.h"
+#include "kernel_btf.h"
 #include "unit.h"
 
 enum fixture {
@@ -151,11 +152,19 @@ static void check(enum fixture fixture, int want_ok, const char *want)
 {
 	char detail[KERNEL_ABI_DETAIL_MAX] = {};
 	struct btf *btf = make_fixture(fixture);
+	struct shirudo_btf *parsed;
+	const void *raw;
+	__u32 size;
 	int ret;
 
 	ASSERT_TRUE(btf);
-	ret = kernel_abi_validate_btf(btf, detail, sizeof(detail));
+	/* The check reads BTF as shirudo parses it: the fixture's bytes. */
+	raw = btf__raw_data(btf, &size);
+	parsed = raw ? shirudo_btf_new(raw, size) : NULL;
 	btf__free(btf);
+	ASSERT_TRUE(parsed);
+	ret = kernel_abi_validate_btf(parsed, detail, sizeof(detail));
+	shirudo_btf_free(parsed);
 	if (want_ok) {
 		EXPECT_EQ(ret, 0);
 		return;

@@ -21,9 +21,6 @@ use crate::errno::{
     E2BIG, EBADMSG, EINVAL, EIO, ENAMETOOLONG, ENOENT, ENOMEM, EOPNOTSUPP, EOVERFLOW,
 };
 use crate::heap::{xcalloc, xfree, xmalloc, xreallocarray};
-use crate::sys::btf::{
-    btf__free, btf__load_from_kernel_by_id, btf__load_vmlinux_btf, libbpf_get_error,
-};
 use crate::sys::libc::{close, errno, syscall};
 use crate::sys::upatch::MapSummary;
 use crate::sys::upatch_maps::{MAP_READ_PEEK, MapEntry, MapView, SerialPage};
@@ -33,6 +30,7 @@ use crate::util::bpf_sys::{
     BPF_ANY, bpf_map_get_next_key, bpf_map_lookup_elem, bpf_map_update_elem, bpf_obj_get,
     prog_test_run,
 };
+use crate::util::kernel_btf;
 use crate::util::map_format::{is_percpu, type_def, type_name, value_stride};
 use crate::util::serializer::{
     SerialChunk, chunk_validate, new_invocation_id, serializer_lock_acquire,
@@ -673,8 +671,8 @@ pub(crate) fn view_free(v: &mut MapView) {
         v.n_entries = 0;
     }
     if !v.btf.is_null() {
-        // SAFETY: the view's BTF, freed once.
-        unsafe { btf__free(v.btf) };
+        // SAFETY: the view's BTF, boxed by read(), freed once.
+        drop(unsafe { Box::from_raw(v.btf) });
         v.btf = core::ptr::null_mut();
     }
     free_pages(v);
@@ -714,16 +712,7 @@ pub(crate) fn read(upatch: &[u8], map: &[u8], cap: u32, flags: u32, out: &mut Ma
         }
         out.n_cpus = n as u32;
     }
-    // SAFETY: libbpf's loader; an error pointer libbpf_get_error() reads,
-    // NULL, or a BTF freed once.
-    unsafe {
-        let mut vbtf = btf__load_vmlinux_btf();
-        if libbpf_get_error(vbtf.cast()) != 0 {
-            vbtf = core::ptr::null_mut();
-        }
-        resolve_location(vbtf, upatch, &mut out.location);
-        btf__free(vbtf);
-    }
+    resolve_location(kernel_btf::vmlinux(), upatch, &mut out.location);
     if let Ok(dir) = pin_path(upatch, &[]) {
         if let Ok(st) = fs::metadata(os(dir.as_bytes())) {
             out.lifetime_start_ns = (st.ctime() as u64)
@@ -743,24 +732,22 @@ pub(crate) fn read(upatch: &[u8], map: &[u8], cap: u32, flags: u32, out: &mut Ma
         return 0;
     }
     let btf_id = info.u32_at(MAP_BTF_ID);
-    out.btf = if btf_id == 0 {
-        core::ptr::null_mut()
-    } else {
-        // SAFETY: a call that takes no pointer.
-        unsafe { btf__load_from_kernel_by_id(btf_id) }
-    };
-    if !out.btf.is_null() {
+    let btf = (btf_id != 0)
+        .then(|| kernel_btf::by_id(btf_id).ok())
+        .flatten();
+    if let Some(btf) = &btf {
         let (kid, vid) = (
             info.u32_at(MAP_BTF_KEY_TYPE_ID),
             info.u32_at(MAP_BTF_VALUE_TYPE_ID),
         );
         out.key_type_id = kid;
         out.value_type_id = vid;
-        type_name(out.btf, kid, &mut out.btf_key_type);
-        type_name(out.btf, vid, &mut out.btf_value_type);
-        type_def(out.btf, kid, &mut out.key_type_def);
-        type_def(out.btf, vid, &mut out.value_type_def);
+        type_name(Some(btf), kid, &mut out.btf_key_type);
+        type_name(Some(btf), vid, &mut out.btf_value_type);
+        type_def(Some(btf), kid, &mut out.key_type_def);
+        type_def(Some(btf), vid, &mut out.value_type_def);
     }
+    out.btf = btf.map_or(core::ptr::null_mut(), |b| Box::into_raw(Box::new(b)));
     read_entries(fd.0[0], out, cap)
 }
 

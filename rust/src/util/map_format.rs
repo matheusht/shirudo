@@ -8,10 +8,9 @@
 
 use core::ffi::c_char;
 
-use crate::sys::btf::{
-    Btf, BtfArray, BtfMember, BtfType, KIND_ARRAY, KIND_CONST, KIND_ENUM, KIND_ENUM64, KIND_INT,
-    KIND_PTR, KIND_RESTRICT, KIND_STRUCT, KIND_TYPE_TAG, KIND_TYPEDEF, KIND_UNION, KIND_VOLATILE,
-    btf__name_by_offset, btf__resolve_size, btf__type_by_id,
+use crate::bpf::btf::{
+    Btf, INT_SIGNED, KIND_ARRAY, KIND_CONST, KIND_ENUM, KIND_ENUM64, KIND_INT, KIND_PTR,
+    KIND_RESTRICT, KIND_STRUCT, KIND_TYPE_TAG, KIND_TYPEDEF, KIND_UNION, KIND_VOLATILE,
 };
 use crate::sys::upatch_maps::MapView;
 
@@ -37,48 +36,27 @@ pub(crate) fn value_stride(v: &MapView) -> u32 {
     }
 }
 
-/// A type of `btf`, or none.
-fn type_of<'a>(btf: *const Btf, id: u32) -> Option<&'a BtfType> {
-    // SAFETY: the BTF, which bounds the ID; NULL or one of its types,
-    // which lives as long as it.
-    unsafe { btf__type_by_id(btf, id).as_ref() }
+/// Type `id` of `btf`, void included, or none past its types.
+fn type_of(btf: &Btf, id: u32) -> Option<u32> {
+    btf.has(id).then_some(id)
 }
 
 /// The string at `off` of `btf`'s string section, "" for none.
-fn name<'a>(btf: *const Btf, off: u32) -> &'a [u8] {
-    // SAFETY: the BTF, which bounds the offset; NULL or a C string in it.
-    let p = unsafe { btf__name_by_offset(btf, off) };
-    if p.is_null() {
-        b""
-    } else {
-        // SAFETY: as above.
-        unsafe { crate::ffi::c_str(p) }
-    }
-}
-
-/// What follows type `t` in its BTF: an integer's encoding, an array's
-/// description, a struct's members or an enum's values.
-fn trailing<T>(t: &BtfType, n: usize) -> &[T] {
-    // SAFETY: the BTF lays out `n` of them right after a type of a kind
-    // that has them, which the callers check.
-    unsafe { core::slice::from_raw_parts(core::ptr::from_ref(t).add(1).cast::<T>(), n) }
-}
-
-fn kind(t: &BtfType) -> u16 {
-    t.kind()
+fn name(btf: &Btf, off: u32) -> &[u8] {
+    btf.str_at(off).unwrap_or_default()
 }
 
 /// The type `id` names past its typedefs, qualifiers and type tags.
-fn unwrap(btf: *const Btf, mut id: u32) -> u32 {
+fn unwrap(btf: &Btf, mut id: u32) -> u32 {
     for _ in 0..BTF_MAX_DEPTH {
         match type_of(btf, id) {
             Some(t)
                 if matches!(
-                    kind(t),
+                    btf.kind(t),
                     KIND_TYPEDEF | KIND_VOLATILE | KIND_CONST | KIND_RESTRICT | KIND_TYPE_TAG
                 ) =>
             {
-                id = t.size_type;
+                id = btf.size_or_type(t);
             }
             _ => return id,
         }
@@ -89,11 +67,14 @@ fn unwrap(btf: *const Btf, mut id: u32) -> u32 {
 /// The name of type `id` of `btf`, or of what an anonymous one refers
 /// to within a few hops (an unnamed pointer to a named struct, say),
 /// into `out` as strscpy() leaves it; empty for none.
-pub(crate) fn type_name(btf: *const Btf, id: u32, out: &mut [u8]) {
+pub(crate) fn type_name(btf: Option<&Btf>, id: u32, out: &mut [u8]) {
     if let Some(first) = out.first_mut() {
         *first = 0;
     }
-    if btf.is_null() || id == 0 || type_of(btf, id).is_none() {
+    let Some(btf) = btf else {
+        return;
+    };
+    if id == 0 || type_of(btf, id).is_none() {
         return;
     }
     let mut id = id;
@@ -101,19 +82,19 @@ pub(crate) fn type_name(btf: *const Btf, id: u32, out: &mut [u8]) {
         let Some(t) = type_of(btf, id) else {
             return;
         };
-        let n = name(btf, t.name_off);
+        let n = name(btf, btf.name_off(t));
         if !n.is_empty() {
             let _ = crate::text::strscpy(out, n);
             return;
         }
-        id = t.size_type;
+        id = btf.size_or_type(t);
         if id == 0 {
             return;
         }
     }
 }
 
-fn kind_prefix(k: u16) -> &'static [u8] {
+fn kind_prefix(k: u32) -> &'static [u8] {
     match k {
         KIND_STRUCT => b"struct ",
         KIND_UNION => b"union ",
@@ -160,8 +141,8 @@ fn or<'a>(s: &'a [u8], default: &'a [u8]) -> &'a [u8] {
 /// Type `id` of `btf` as a definition: a struct or union with its
 /// members by short type name, an array with its length, an enum or a
 /// name.
-fn signature(btf: *const Btf, id: u32, d: &mut Def, depth: i32) {
-    if depth >= BTF_MAX_DEPTH || btf.is_null() || id == 0 || d.buf.len() >= d.cap {
+fn signature(btf: &Btf, id: u32, d: &mut Def, depth: i32) {
+    if depth >= BTF_MAX_DEPTH || id == 0 || d.buf.len() >= d.cap {
         return;
     }
     let id = unwrap(btf, id);
@@ -169,22 +150,25 @@ fn signature(btf: *const Btf, id: u32, d: &mut Def, depth: i32) {
         d.push(b"?");
         return;
     };
-    let k = kind(t);
-    let tname = name(btf, t.name_off);
+    let k = btf.kind(t);
+    let tname = name(btf, btf.name_off(t));
     match k {
         KIND_STRUCT | KIND_UNION => {
             d.push(kind_prefix(k));
             d.push(or(tname, b"<anon>"));
             d.push(b" {\n");
-            for m in trailing::<BtfMember>(t, t.vlen() as usize) {
+            for m in btf.members(t) {
                 if d.room() < 8 {
                     d.push(b"  ...\n");
                     break;
                 }
                 d.indent(depth + 1);
                 let mt = type_of(btf, unwrap(btf, m.ty));
-                d.push(kind_prefix(mt.map_or(0, kind)));
-                d.push(or(mt.map_or(&b""[..], |mt| name(btf, mt.name_off)), b"?"));
+                d.push(kind_prefix(mt.map_or(0, |mt| btf.kind(mt))));
+                d.push(or(
+                    mt.map_or(&b""[..], |mt| name(btf, btf.name_off(mt))),
+                    b"?",
+                ));
                 d.push(b" ");
                 d.push(or(name(btf, m.name_off), b"<anon>"));
                 d.push(b";\n");
@@ -193,8 +177,9 @@ fn signature(btf: *const Btf, id: u32, d: &mut Def, depth: i32) {
             d.push(b"}");
         }
         KIND_ARRAY => {
-            let a = &trailing::<BtfArray>(t, 1)[0];
-            let en = type_of(btf, unwrap(btf, a.ty)).map_or(&b"?"[..], |et| name(btf, et.name_off));
+            let a = btf.array(t);
+            let en =
+                type_of(btf, unwrap(btf, a.ty)).map_or(&b"?"[..], |et| name(btf, btf.name_off(et)));
             d.push(or(en, b"?"));
             d.push(format!("[{}]", a.nelems).as_bytes());
         }
@@ -208,12 +193,14 @@ fn signature(btf: *const Btf, id: u32, d: &mut Def, depth: i32) {
 
 /// Type `id` of `btf` as a definition into `out`, a C string of its
 /// room.
-pub(crate) fn type_def(btf: *const Btf, id: u32, out: &mut [u8]) {
+pub(crate) fn type_def(btf: Option<&Btf>, id: u32, out: &mut [u8]) {
     let mut d = Def {
         buf: Vec::new(),
         cap: out.len(),
     };
-    signature(btf, id, &mut d, 0);
+    if let Some(btf) = btf {
+        signature(btf, id, &mut d, 0);
+    }
     if let Some(slot) = out.get_mut(..=d.buf.len()) {
         slot[..d.buf.len()].copy_from_slice(&d.buf);
         slot[d.buf.len()] = 0;
@@ -242,8 +229,8 @@ fn number(v: u64, signed: bool) -> Vec<u8> {
 }
 
 /// An integer of type `t` in the low bytes of `bytes`.
-fn format_int(t: &BtfType, bytes: &[u8]) -> Vec<u8> {
-    let enc = trailing::<u32>(t, 1)[0];
+fn format_int(btf: &Btf, t: u32, bytes: &[u8]) -> Vec<u8> {
+    let enc = btf.word(t, 0);
     let bits = enc & 0xff;
     let signed = (enc >> 24) & 0x0f & 1 != 0;
     let used = bits.div_ceil(8) as u8 as usize;
@@ -256,7 +243,7 @@ fn format_int(t: &BtfType, bytes: &[u8]) -> Vec<u8> {
 
 /// A struct member declared with a bit width, `bit_size` bits at
 /// `bit_off` of the struct's `bytes`.
-fn format_bitfield(btf: *const Btf, ty: u32, bytes: &[u8], bit_off: u32, bit_size: u32) -> Vec<u8> {
+fn format_bitfield(btf: &Btf, ty: u32, bytes: &[u8], bit_off: u32, bit_size: u32) -> Vec<u8> {
     let shift = bit_off % 8;
     let n = (shift + bit_size).div_ceil(8);
     let start = (bit_off / 8) as usize;
@@ -268,39 +255,25 @@ fn format_bitfield(btf: *const Btf, ty: u32, bytes: &[u8], bit_off: u32, bit_siz
         v &= (1u64 << bit_size) - 1;
     }
     let signed = match type_of(btf, unwrap(btf, ty)) {
-        Some(t) if kind(t) == KIND_INT => (trailing::<u32>(t, 1)[0] >> 24) & 1 != 0,
-        Some(t) if matches!(kind(t), KIND_ENUM | KIND_ENUM64) => t.kflag(),
+        Some(t) if btf.kind(t) == KIND_INT => btf.int_encoding(t) & INT_SIGNED != 0,
+        Some(t) if matches!(btf.kind(t), KIND_ENUM | KIND_ENUM64) => btf.kflag(t),
         _ => false,
     };
     number(if signed { sign_extend(v, bit_size) } else { v }, signed)
 }
 
-/// `struct btf_enum` and `struct btf_enum64`.
-#[repr(C)]
-struct Enum {
-    name_off: u32,
-    val: i32,
-}
-
-#[repr(C)]
-struct Enum64 {
-    name_off: u32,
-    lo: u32,
-    hi: u32,
-}
-
 /// The value in `bytes` as type `id` of `btf` shows it: numbers, enum
 /// names, pointers in hex, structs and unions as `{ field=value, ... }`,
 /// arrays as `[ ... ]` of up to 16. None for a type it cannot show.
-fn format_btf(btf: *const Btf, id: u32, bytes: &[u8], depth: i32) -> Option<Vec<u8>> {
-    if depth >= BTF_MAX_DEPTH || btf.is_null() || id == 0 || bytes.is_empty() {
+fn format_btf(btf: &Btf, id: u32, bytes: &[u8], depth: i32) -> Option<Vec<u8>> {
+    if depth >= BTF_MAX_DEPTH || id == 0 || bytes.is_empty() {
         return None;
     }
     let id = unwrap(btf, id);
     let t = type_of(btf, id)?;
     let size = bytes.len();
-    match kind(t) {
-        KIND_INT => Some(format_int(t, bytes)),
+    match btf.kind(t) {
+        KIND_INT => Some(format_int(btf, t, bytes)),
         KIND_PTR => {
             let v = if size >= 8 {
                 le(&bytes[..8])
@@ -312,22 +285,19 @@ fn format_btf(btf: *const Btf, id: u32, bytes: &[u8], depth: i32) -> Option<Vec<
             Some(format!("0x{v:x}").into_bytes())
         }
         KIND_ENUM => {
-            let width = t.size_type as usize;
+            let width = btf.size_or_type(t) as usize;
             if width == 0 || width > 4 || width > size {
                 return Some(b"?".to_vec());
             }
             let mut v = le(&bytes[..width]) as u32;
-            if t.kflag() && width < 4 && v & (1 << (8 * width - 1)) != 0 {
+            if btf.kflag(t) && width < 4 && v & (1 << (8 * width - 1)) != 0 {
                 v |= !((1u32 << (8 * width)) - 1);
             }
-            if let Some(e) = trailing::<Enum>(t, t.vlen() as usize)
-                .iter()
-                .find(|e| e.val as u32 == v)
-            {
-                return Some(or(name(btf, e.name_off), b"?").to_vec());
+            if let Some(i) = (0..btf.vlen(t)).find(|&i| btf.word(t, 2 * i as usize + 1) == v) {
+                return Some(or(name(btf, btf.word(t, 2 * i as usize)), b"?").to_vec());
             }
             Some(
-                if t.kflag() {
+                if btf.kflag(t) {
                     (v as i32).to_string()
                 } else {
                     v.to_string()
@@ -337,37 +307,26 @@ fn format_btf(btf: *const Btf, id: u32, bytes: &[u8], depth: i32) -> Option<Vec<
         }
         KIND_ENUM64 => {
             let v = if size >= 8 { le(&bytes[..8]) } else { 0 };
-            let found = trailing::<Enum64>(t, t.vlen() as usize)
-                .iter()
-                .find(|e| (u64::from(e.hi) << 32 | u64::from(e.lo)) == v);
+            let found = (0..btf.vlen(t))
+                .map(|i| btf.enum_value(t, i))
+                .find(|&(_, val)| val == v);
             Some(match found {
-                Some(e) => or(name(btf, e.name_off), b"?").to_vec(),
+                Some((name_off, _)) => or(name(btf, name_off), b"?").to_vec(),
                 None => format!("0x{v:x}").into_bytes(),
             })
         }
         KIND_STRUCT | KIND_UNION => {
             let mut out = b"{ ".to_vec();
-            for (i, m) in trailing::<BtfMember>(t, t.vlen() as usize)
-                .iter()
-                .enumerate()
-            {
-                let bit_off = if t.kflag() {
-                    m.offset & 0xff_ffff
-                } else {
-                    m.offset
-                };
+            for (i, m) in btf.members(t).enumerate() {
+                let bit_off = m.bit_offset();
                 let byte_off = (bit_off / 8) as usize;
                 if byte_off >= size {
                     continue;
                 }
-                let bit_size = if t.kflag() { m.offset >> 24 } else { 0 };
+                let bit_size = m.bitfield_size();
                 let mut fsize = 0usize;
                 if type_of(btf, unwrap(btf, m.ty)).is_some() {
-                    // SAFETY: the BTF and one of its type IDs.
-                    let sz = unsafe { btf__resolve_size(btf, m.ty) };
-                    if sz > 0 {
-                        fsize = sz as u32 as usize;
-                    }
+                    fsize = btf.resolve_size(m.ty).unwrap_or(0) as usize;
                 }
                 if fsize == 0 || byte_off.checked_add(fsize).is_none_or(|end| end > size) {
                     fsize = size - byte_off;
@@ -388,11 +347,10 @@ fn format_btf(btf: *const Btf, id: u32, bytes: &[u8], depth: i32) -> Option<Vec<
             Some(out)
         }
         KIND_ARRAY => {
-            let a = &trailing::<BtfArray>(t, 1)[0];
-            // SAFETY: the BTF and one of its type IDs.
-            let esz = unsafe { btf__resolve_size(btf, a.ty) };
+            let a = btf.array(t);
+            let esz = btf.resolve_size(a.ty).unwrap_or(0);
             let n = a.nelems;
-            if esz <= 0 || (esz as u128) * u128::from(n) > size as u128 {
+            if esz == 0 || u128::from(esz) * u128::from(n) > size as u128 {
                 return None;
             }
             let esz = esz as usize;
@@ -451,10 +409,10 @@ fn format_plain(value: &[u8], btf_type: &[u8]) -> Vec<u8> {
 /// A key or value of the view: through its BTF type `type_id` where the
 /// view has BTF, else as `btf_name` names it, else plain.
 pub(crate) fn format_cell(v: &MapView, type_id: u32, bytes: &[u8], btf_name: &[u8]) -> Vec<u8> {
-    let formatted = if v.btf.is_null() || type_id == 0 {
-        None
-    } else {
-        format_btf(v.btf, type_id, bytes, 0)
+    // SAFETY: the view's BTF, NULL or its own.
+    let formatted = match unsafe { v.btf.as_ref() } {
+        Some(btf) if type_id != 0 => format_btf(btf, type_id, bytes, 0),
+        _ => None,
     };
     formatted.unwrap_or_else(|| format_plain(bytes, btf_name))
 }
@@ -467,10 +425,12 @@ pub(crate) fn percpu_sum(v: &MapView, values: &[u8]) -> Vec<u8> {
         return b"(unsupported width)".to_vec();
     }
     let bits = 8 * v.value_size;
-    let signed = !v.btf.is_null()
-        && v.value_type_id != 0
-        && type_of(v.btf, unwrap(v.btf, v.value_type_id))
-            .is_some_and(|t| kind(t) == KIND_INT && (trailing::<u32>(t, 1)[0] >> 24) & 1 != 0);
+    // SAFETY: the view's BTF, NULL or its own.
+    let signed = unsafe { v.btf.as_ref() }.is_some_and(|btf| {
+        v.value_type_id != 0
+            && type_of(btf, unwrap(btf, v.value_type_id))
+                .is_some_and(|t| btf.kind(t) == KIND_INT && btf.int_encoding(t) & INT_SIGNED != 0)
+    });
     let stride = value_stride(v) as usize;
     let sum = (0..v.n_cpus as usize).fold(0u64, |sum, cpu| {
         let one = le(&values[cpu * stride..cpu * stride + width]);

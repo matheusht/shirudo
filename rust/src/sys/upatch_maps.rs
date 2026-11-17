@@ -6,7 +6,7 @@
 
 use core::ffi::{c_char, c_void};
 
-use crate::sys::btf::Btf;
+use crate::bpf::btf::Btf;
 
 /// UPATCH_NAME_MAX, MAP_NAME_MAX, UPATCH_LOCATION_MAX, MAP_TYPENAME_MAX
 /// and MAP_TYPEDEF_MAX.

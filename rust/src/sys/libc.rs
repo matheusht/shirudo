@@ -11,10 +11,6 @@ pub const F_DUPFD_CLOEXEC: c_int = 1030;
 pub const SEEK_SET: c_int = 0;
 pub const STDOUT_FILENO: c_int = 1;
 
-/// A `va_list` a C caller hands on, as x86_64 and aarch64 pass one in an
-/// argument: a pointer, to the array x86_64 makes it or to the copy of
-/// its struct aarch64 makes. Rust takes it and passes it on alone.
-pub type VaList = *mut c_void;
 pub const F_OK: c_int = 0;
 pub const R_OK: c_int = 4;
 pub const W_OK: c_int = 2;
@@ -450,7 +446,6 @@ unsafe extern "C" {
     pub fn fwrite(ptr: *const c_void, size: usize, n: usize, f: *mut File) -> usize;
     pub fn fprintf(f: *mut File, fmt: *const c_char, ...) -> c_int;
     pub fn printf(fmt: *const c_char, ...) -> c_int;
-    pub fn vfprintf(f: *mut File, fmt: *const c_char, args: VaList) -> c_int;
     pub fn putchar(c: c_int) -> c_int;
     /// The C library's standard output stream.
     pub static mut stdout: *mut File;

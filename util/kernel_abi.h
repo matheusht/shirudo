@@ -11,7 +11,7 @@
 
 #include <stddef.h>
 
-struct btf;
+struct shirudo_btf;
 
 #define KERNEL_ABI_DETAIL_MAX 256
 
@@ -20,7 +20,7 @@ struct btf;
  * structural contract can be tested with synthetic BTF without depending on
  * the kernel running the test.
  */
-int kernel_abi_validate_btf(const struct btf *btf,
+int kernel_abi_validate_btf(const struct shirudo_btf *btf,
 			    char *detail, size_t detail_sz);
 
 int kernel_abi_check(char *detail, size_t detail_sz);

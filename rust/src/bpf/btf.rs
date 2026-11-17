@@ -39,6 +39,10 @@ pub(crate) const VAR_GLOBAL_ALLOCATED: u32 = 1;
 pub(crate) const VAR_GLOBAL_EXTERN: u32 = 2;
 pub(crate) const FUNC_STATIC: u32 = 0;
 pub(crate) const FUNC_GLOBAL: u32 = 1;
+/// `BTF_INT_SIGNED`.
+pub(crate) const INT_SIGNED: u8 = 1;
+/// `BTF_INT_BOOL`.
+pub(crate) const INT_BOOL: u8 = 4;
 
 const TYPE_SIZE: usize = 12;
 /// How deep libbpf follows a chain of types before it gives up.
@@ -58,6 +62,39 @@ fn le32_of(b: &[u8]) -> u32 {
     le32(b, 0)
 }
 
+/// A member of a struct or union: its name, its type and the offset that
+/// encodes its place.
+#[derive(Clone, Copy)]
+pub(crate) struct Member {
+    pub(crate) name_off: u32,
+    pub(crate) ty: u32,
+    pub(crate) offset: u32,
+    kflag: bool,
+}
+
+impl Member {
+    /// btf_member_bit_offset()
+    pub(crate) fn bit_offset(&self) -> u32 {
+        if self.kflag {
+            self.offset & 0x00ff_ffff
+        } else {
+            self.offset
+        }
+    }
+
+    /// btf_member_bitfield_size(): 0 for a member that is no bitfield.
+    pub(crate) fn bitfield_size(&self) -> u32 {
+        if self.kflag { self.offset >> 24 } else { 0 }
+    }
+}
+
+/// `struct btf_array`, but the index type, which nothing reads.
+#[derive(Clone, Copy)]
+pub(crate) struct Array {
+    pub(crate) ty: u32,
+    pub(crate) nelems: u32,
+}
+
 /// The section as its header, types and strings, and each type's offset
 /// within the types: type ids start at 1, type 0 being void. Unchanged,
 /// the three make up the section's bytes again; a type added grows the
@@ -67,6 +104,7 @@ pub(crate) struct Btf {
     types: Vec<u8>,
     strs: Vec<u8>,
     offs: Vec<usize>,
+    ptr_sz: std::sync::OnceLock<u32>,
 }
 
 impl Btf {
@@ -130,6 +168,7 @@ impl Btf {
             types: types.to_vec(),
             strs: strs.to_vec(),
             offs,
+            ptr_sz: std::sync::OnceLock::new(),
         };
         if !(1..btf.type_cnt()).all(|id| btf.valid(id)) {
             return bad;
@@ -145,7 +184,13 @@ impl Btf {
         let n = self.vlen(id) as usize;
         // The words of each of the type's `n` elements of `w` words.
         let all = |w: usize, ok: &dyn Fn(&[u32]) -> bool| {
-            (0..n).all(|i| ok(&(0..w).map(|j| self.word(id, w * i + j)).collect::<Vec<_>>()))
+            (0..n).all(|i| {
+                let mut e = [0u32; 3];
+                for (j, x) in e.iter_mut().enumerate().take(w) {
+                    *x = self.word(id, w * i + j);
+                }
+                ok(&e[..w])
+            })
         };
         str_ok(self.name_off(id))
             && match self.kind(id) {
@@ -325,9 +370,105 @@ impl Btf {
         }
     }
 
-    /// The first type of `kind` named `name`.
+    /// btf__find_by_name_kind(): the first type of `kind` named `name`,
+    /// void for "void".
     pub(crate) fn find_by_name_kind(&self, name: &[u8], kind: u32) -> Option<u32> {
+        if name == b"void" {
+            return Some(0);
+        }
         (1..self.type_cnt()).find(|&id| self.kind(id) == kind && self.name(id) == name)
+    }
+
+    /// Whether `id` is a type of the section, void included, as
+    /// btf__type_by_id() finds one.
+    pub(crate) fn has(&self, id: u32) -> bool {
+        id < self.type_cnt()
+    }
+
+    /// A struct's or union's `i`th member.
+    pub(crate) fn member(&self, id: u32, i: u32) -> Member {
+        let i = 3 * i as usize;
+        Member {
+            name_off: self.word(id, i),
+            ty: self.word(id, i + 1),
+            offset: self.word(id, i + 2),
+            kflag: self.kflag(id),
+        }
+    }
+
+    /// A struct's or union's members, in order.
+    pub(crate) fn members(&self, id: u32) -> impl Iterator<Item = Member> + '_ {
+        (0..self.vlen(id)).map(move |i| self.member(id, i))
+    }
+
+    /// btf_array(): an array's element type and length.
+    pub(crate) fn array(&self, id: u32) -> Array {
+        Array {
+            ty: self.word(id, 0),
+            nelems: self.word(id, 2),
+        }
+    }
+
+    /// btf_int_encoding(): an INT's BTF_INT_* flags.
+    pub(crate) fn int_encoding(&self, id: u32) -> u8 {
+        ((self.word(id, 0) & 0x0f00_0000) >> 24) as u8
+    }
+
+    /// btf_int_offset(): the bit an INT's value starts at.
+    pub(crate) fn int_offset(&self, id: u32) -> u8 {
+        ((self.word(id, 0) & 0x00ff_0000) >> 16) as u8
+    }
+
+    /// btf_int_bits(): the bits of an INT's value.
+    pub(crate) fn int_bits(&self, id: u32) -> u8 {
+        (self.word(id, 0) & 0xff) as u8
+    }
+
+    /// An ENUM's `i`th value: its name and value, sign extended as kflag
+    /// says, or an ENUM64's.
+    pub(crate) fn enum_value(&self, id: u32, i: u32) -> (u32, u64) {
+        let i = i as usize;
+        if self.kind(id) == KIND_ENUM64 {
+            let (lo, hi) = (self.word(id, 3 * i + 1), self.word(id, 3 * i + 2));
+            (self.word(id, 3 * i), u64::from(hi) << 32 | u64::from(lo))
+        } else {
+            let v = self.word(id, 2 * i + 1);
+            let v = if self.kflag(id) {
+                v as i32 as i64 as u64
+            } else {
+                u64::from(v)
+            };
+            (self.word(id, 2 * i), v)
+        }
+    }
+
+    /// btf_ptr_sz(): a pointer's size, the size of the section's long, else
+    /// the host's.
+    pub(crate) fn ptr_size(&self) -> u32 {
+        *self.ptr_sz.get_or_init(|| self.long_size())
+    }
+
+    fn long_size(&self) -> u32 {
+        const LONG: [&[u8]; 11] = [
+            b"long",
+            b"long int",
+            b"int long",
+            b"unsigned long",
+            b"long unsigned",
+            b"unsigned long int",
+            b"unsigned int long",
+            b"long unsigned int",
+            b"long int unsigned",
+            b"int unsigned long",
+            b"int long unsigned",
+        ];
+        (1..self.type_cnt())
+            .find(|&id| {
+                self.kind(id) == KIND_INT
+                    && matches!(self.size_or_type(id), 4 | 8)
+                    && LONG.contains(&self.name(id))
+            })
+            .map_or(PTR_SZ, |id| self.size_or_type(id))
     }
 
     /// Skips typedefs and modifiers: the type `id` resolves to.
@@ -351,7 +492,7 @@ impl Btf {
             let size = match self.kind(id) {
                 KIND_INT | KIND_STRUCT | KIND_UNION | KIND_ENUM | KIND_ENUM64 | KIND_DATASEC
                 | KIND_FLOAT => self.size_or_type(id),
-                KIND_PTR => PTR_SZ,
+                KIND_PTR => self.ptr_size(),
                 KIND_TYPEDEF | KIND_VOLATILE | KIND_CONST | KIND_RESTRICT | KIND_VAR
                 | KIND_DECL_TAG | KIND_TYPE_TAG => {
                     id = self.size_or_type(id);
@@ -388,16 +529,17 @@ impl Btf {
         }
         match self.kind(id) {
             KIND_INT | KIND_ENUM | KIND_ENUM64 | KIND_FLOAT if id != 0 => {
-                Ok(self.size_or_type(id).min(PTR_SZ))
+                Ok(self.size_or_type(id).min(self.ptr_size()))
             }
-            KIND_PTR => Ok(PTR_SZ),
+            KIND_PTR => Ok(self.ptr_size()),
             KIND_TYPEDEF | KIND_VOLATILE | KIND_CONST | KIND_RESTRICT | KIND_TYPE_TAG => {
                 self.align_at(self.size_or_type(id), depth + 1)
             }
             KIND_ARRAY => self.align_at(self.word(id, 0), depth + 1),
             KIND_STRUCT | KIND_UNION => {
                 let mut max_align = 1;
-                for i in 0..self.vlen(id) as usize {
+                // libbpf counts the members in 16 bits.
+                for i in 0..usize::from(self.vlen(id) as u16) {
                     let (ty, off) = (self.word(id, 3 * i + 1), self.word(id, 3 * i + 2));
                     let align = self.align_at(ty, depth + 1)?;
                     if align == 0 {

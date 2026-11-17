@@ -38,7 +38,7 @@ struct map_entry {
  */
 #define MAP_TYPEDEF_MAX		1024
 
-struct btf;
+struct shirudo_btf;
 
 struct serial_page {
 	__u32		page_index;
@@ -80,7 +80,7 @@ struct map_view {
 	char		value_type_def[MAP_TYPEDEF_MAX];
 	__u32		key_type_id;
 	__u32		value_type_id;
-	struct btf	*btf;		/* heap; owned by the view */
+	struct shirudo_btf *btf;	/* heap; owned by the view */
 	struct map_entry	*entries;	/* n_entries long */
 	size_t		entries_cap;
 };

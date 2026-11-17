@@ -25,7 +25,7 @@ int upatch_rodata_symbol_range(const struct upatch *u,
 			       struct rodata_range *range);
 int upatch_rodata_data_offset(const struct upatch *u, __u32 *offset);
 
-struct btf;
+struct shirudo_btf;
 
 /*
  * For the unit test: the name the text output gives type id, appended at
@@ -37,9 +37,9 @@ struct rodata_dump_cost {
 	__u32 height;
 };
 
-int upatch_rodata_type_name(const struct btf *btf, __u32 id, char *buf,
+int upatch_rodata_type_name(const struct shirudo_btf *btf, __u32 id, char *buf,
 			    size_t cap, size_t *off, __u32 depth);
-int upatch_rodata_dump_cost(const struct btf *btf, __u32 id, __u32 depth,
+int upatch_rodata_dump_cost(const struct shirudo_btf *btf, __u32 id, __u32 depth,
 			    struct rodata_dump_cost *cost);
 
 #endif /* SHIRUDO_UTIL_UPATCH_RODATA_H */

@@ -10,10 +10,8 @@
 
 use core::ffi::{CStr, c_char, c_int};
 
+use crate::bpf::btf::{Btf, KIND_FUNC};
 use crate::errno::{EBUSY, ENAMETOOLONG, ENOENT, EPROTO};
-use crate::sys::btf::{
-    Btf, btf__find_by_name_kind, btf__free, btf__load_from_kernel_by_id, libbpf_get_error,
-};
 use crate::sys::libc::{SYS_PIDFD_OPEN, close, errno, strerror, syscall};
 use crate::text::cstr;
 use crate::util::bpf_info::{Info, LINK_INFO_SIZE, MAP_INFO_SIZE, PROG_INFO_SIZE};
@@ -22,6 +20,7 @@ use crate::util::bpf_sys::{
     bpf_obj_get, bpf_prog_get_fd_by_id,
 };
 use crate::util::identity;
+use crate::util::kernel_btf;
 
 /// `struct image_guard`: a program and where its link is pinned.
 #[repr(C)]
@@ -551,7 +550,6 @@ const MAX_PROG_MAPS: usize = 16;
 const BPF_LINK_TYPE_TRACING: u32 = 2;
 const BPF_LSM_MAC: u32 = 27;
 const BPF_PROG_TYPE_LSM: u32 = 29;
-const BTF_KIND_FUNC: u32 = 12;
 
 /// strncmp() of a kernel object's name and an expected one, over the
 /// BPF_OBJ_NAME_LEN - 1 bytes the kernel keeps: whether they agree.
@@ -642,7 +640,7 @@ fn guard_program_maps(map_ids: &[u32], expected: &[u32; GUARD_MAP_COUNT]) -> c_i
 
 /// The kernel's vmlinux BTF of object `id`, or -errno: -EPROTO for one
 /// that is a module's or not the kernel's.
-fn guard_kernel_btf(id: u32) -> Result<*mut Btf, c_int> {
+fn guard_kernel_btf(id: u32) -> Result<Btf, c_int> {
     let fd = bpf_btf_get_fd_by_id(id);
     if fd < 0 {
         return Err(-errno());
@@ -658,28 +656,13 @@ fn guard_kernel_btf(id: u32) -> Result<*mut Btf, c_int> {
     if info.u32_at(BTF_KERNEL) == 0 || !name.contains(&0) || cstr(&name) != b"vmlinux" {
         return Err(-EPROTO);
     }
-    // SAFETY: a call that takes no pointer; NULL or an error pointer
-    // libbpf_get_error() reads.
-    let btf = unsafe { btf__load_from_kernel_by_id(id) };
-    // SAFETY: as above.
-    let err = unsafe { libbpf_get_error(btf.cast()) } as c_int;
-    if err != 0 {
-        return Err(err);
-    }
-    Ok(btf)
+    kernel_btf::by_id(id)
 }
 
 /// The vmlinux BTF the guards attach through, loaded with the first.
 struct Kernel {
-    btf: *mut Btf,
+    btf: Option<Btf>,
     id: u32,
-}
-
-impl Drop for Kernel {
-    fn drop(&mut self) {
-        // SAFETY: the BTF loaded, or NULL, freed once.
-        unsafe { btf__free(self.btf) };
-    }
 }
 
 /// Whether the guard's link is pinned, an LSM link of its own program,
@@ -733,9 +716,14 @@ fn guard_link(guard: &ImageGuard, maps: &[u32; GUARD_MAP_COUNT], kernel: &mut Ke
     {
         return -EPROTO;
     }
-    if kernel.btf.is_null() {
+    if kernel.btf.is_none() {
         match guard_kernel_btf(obj_id) {
-            Ok(btf) => *kernel = Kernel { btf, id: obj_id },
+            Ok(btf) => {
+                *kernel = Kernel {
+                    btf: Some(btf),
+                    id: obj_id,
+                }
+            }
             Err(e) => return e,
         }
     }
@@ -751,12 +739,11 @@ fn guard_link(guard: &ImageGuard, maps: &[u32; GUARD_MAP_COUNT], kernel: &mut Ke
     if function.len() >= 96 {
         return -ENAMETOOLONG;
     }
-    let Ok(function) = std::ffi::CString::new(function) else {
-        return -ENAMETOOLONG;
-    };
-    // SAFETY: the BTF and a C string.
-    let type_id = unsafe { btf__find_by_name_kind(kernel.btf, function.as_ptr(), BTF_KIND_FUNC) };
-    if type_id <= 0 || type_id as u32 != btf_id {
+    let type_id = kernel
+        .btf
+        .as_ref()
+        .and_then(|b| b.find_by_name_kind(&function, KIND_FUNC));
+    if type_id.is_none_or(|t| t == 0 || t != btf_id) {
         return -EPROTO;
     }
     guard_program_maps(&map_ids[..nr_maps], maps)
@@ -770,10 +757,7 @@ pub(crate) fn image_guards_ready() -> c_int {
         Ok(m) => m,
         Err(e) => return e,
     };
-    let mut kernel = Kernel {
-        btf: core::ptr::null_mut(),
-        id: 0,
-    };
+    let mut kernel = Kernel { btf: None, id: 0 };
     let groups: [&[ImageGuard]; 6] = [
         &GATE_GUARDS,
         &OBSERVER_GUARDS,

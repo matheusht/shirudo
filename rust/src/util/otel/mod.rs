@@ -12,11 +12,12 @@ mod s3;
 
 use core::ffi::{CStr, c_char, c_int};
 
+use crate::bpf::btf::{
+    Btf, INT_SIGNED, KIND_CONST, KIND_INT, KIND_RESTRICT, KIND_TYPE_TAG, KIND_TYPEDEF,
+    KIND_VOLATILE,
+};
 use crate::errno::{E2BIG, EINVAL, ENODATA, EOPNOTSUPP};
 use crate::heap::{xfree, xmalloc};
-use crate::sys::btf::{
-    BtfType, KIND_INT, KIND_TYPEDEF, btf__type_by_id, int_bits, int_encoding, int_offset,
-};
 use crate::sys::libc::{fwrite, stderr};
 use crate::sys::upatch_maps::MapView;
 use crate::util::json::JsonEmit;
@@ -183,19 +184,18 @@ impl Drop for Decoded {
 }
 
 /// The value's BTF type with its typedefs and modifiers followed.
-fn unwrap_btf_type(v: &MapView, mut id: u32) -> Option<&BtfType> {
+fn unwrap_btf_type(btf: &Btf, mut id: u32) -> Option<u32> {
     for _ in 0..MAX_TYPE_UNWRAP {
-        // SAFETY: the view's BTF.
-        let t = unsafe { btf__type_by_id(v.btf, id) };
-        if t.is_null() {
+        if !btf.has(id) {
             return None;
         }
-        // SAFETY: a type of the BTF, which the view holds.
-        let t = unsafe { &*t };
-        if t.kind() != KIND_TYPEDEF && !t.is_mod() {
-            return Some(t);
+        if !matches!(
+            btf.kind(id),
+            KIND_TYPEDEF | KIND_VOLATILE | KIND_CONST | KIND_RESTRICT | KIND_TYPE_TAG
+        ) {
+            return Some(id);
         }
-        id = t.size_type;
+        id = btf.size_or_type(id);
     }
     None
 }
@@ -203,20 +203,20 @@ fn unwrap_btf_type(v: &MapView, mut id: u32) -> Option<&BtfType> {
 /// Whether the map's value is an integer scalar of 1, 2, 4 or 8 bytes,
 /// and signed: -ENODATA without BTF, -EOPNOTSUPP for another value.
 fn metric_type(v: &MapView) -> Result<(bool, u32), c_int> {
-    if v.btf.is_null() || v.value_type_id == 0 {
-        return Err(-ENODATA);
-    }
-    let t = unwrap_btf_type(v, v.value_type_id).ok_or(-EOPNOTSUPP)?;
-    if t.kind() != KIND_INT || t.size_type != v.value_size || !matches!(t.size_type, 1 | 2 | 4 | 8)
-    {
+    // SAFETY: the view's BTF, NULL or its own.
+    let btf = unsafe { v.btf.as_ref() }
+        .filter(|_| v.value_type_id != 0)
+        .ok_or(-ENODATA)?;
+    let t = unwrap_btf_type(btf, v.value_type_id).ok_or(-EOPNOTSUPP)?;
+    let size = btf.size_or_type(t);
+    if btf.kind(t) != KIND_INT || size != v.value_size || !matches!(size, 1 | 2 | 4 | 8) {
         return Err(-EOPNOTSUPP);
     }
-    // SAFETY: an integer type of the BTF, followed by its encoding.
-    let (offset, bits, enc) = unsafe { (int_offset(t), int_bits(t), int_encoding(t)) };
-    if offset != 0 || u32::from(bits) != t.size_type * 8 {
+    let (offset, bits, enc) = (btf.int_offset(t), btf.int_bits(t), btf.int_encoding(t));
+    if offset != 0 || u32::from(bits) != size * 8 {
         return Err(-EOPNOTSUPP);
     }
-    Ok((enc & crate::sys::btf::INT_SIGNED != 0, t.size_type))
+    Ok((enc & INT_SIGNED != 0, size))
 }
 
 /// The signal a map exports as without a decoder: a metric only for an

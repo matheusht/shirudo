@@ -39,6 +39,7 @@ pub(crate) mod initrd;
 pub(crate) mod io;
 pub(crate) mod json;
 pub(crate) mod kernel_abi;
+pub(crate) mod kernel_btf;
 mod kernel_build_id;
 mod kernel_release;
 pub(crate) mod keyring;

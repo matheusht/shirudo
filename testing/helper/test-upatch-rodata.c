@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 /* Copyright (c) 2026 Authors of shirudo */
 
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -9,8 +10,19 @@
 #include <shirudo/misc.h>
 #include <shirudo/string.h>
 
+#include "kernel_btf.h"
 #include "malloc.h"
 #include "upatch_rodata.h"
+
+/* The BTF libbpf built, as shirudo parses it: from its bytes. */
+static struct shirudo_btf *parsed(const struct btf *btf)
+{
+	const void *raw;
+	__u32 size;
+
+	raw = btf__raw_data(btf, &size);
+	return raw ? shirudo_btf_new(raw, size) : NULL;
+}
 
 /*
  * A typedef of len characters behind ptrs pointers, named into a buffer
@@ -19,6 +31,7 @@
 static int name_into(size_t len, int ptrs, size_t cap)
 {
 	char name[512], buf[512];
+	struct shirudo_btf *sbtf;
 	struct btf *btf;
 	size_t off = 0;
 	int id, ret;
@@ -40,8 +53,12 @@ static int name_into(size_t len, int ptrs, size_t cap)
 		btf__free(btf);
 		return 2;
 	}
-	ret = upatch_rodata_type_name(btf, (__u32)id, buf, cap, &off, 0);
+	sbtf = parsed(btf);
 	btf__free(btf);
+	if (!sbtf)
+		return 2;
+	ret = upatch_rodata_type_name(sbtf, (__u32)id, buf, cap, &off, 0);
+	shirudo_btf_free(sbtf);
 	printf("rc=%d off=%zu terminated=%d\n", ret, off,
 	       !!memchr(buf, '\0', cap));
 	if (!memchr(buf, '\0', cap))
@@ -87,6 +104,7 @@ static int dumpable(const char *what)
 	const char *member = "a", *value = "E", *pointee = "int";
 	int ints, en, target, ptr, st, a, b, ret = 2;
 	struct rodata_dump_cost *cost;
+	struct shirudo_btf *sbtf;
 	struct btf_type *t;
 	struct btf *btf;
 	__u32 types;
@@ -136,7 +154,9 @@ static int dumpable(const char *what)
 	cost = xcalloc(types, sizeof(*cost));
 	if (!cost)
 		goto out;
-	ret = upatch_rodata_dump_cost(btf, (__u32)st, 0, cost);
+	sbtf = parsed(btf);
+	ret = sbtf ? upatch_rodata_dump_cost(sbtf, (__u32)st, 0, cost) : -EINVAL;
+	shirudo_btf_free(sbtf);
 	printf("%s dumpable=%d rc=%d\n", what, !ret, ret);
 	ret = ret ? 1 : 0;
 	xfree(cost, types * sizeof(*cost));
