@@ -1106,7 +1106,12 @@ unsafe fn print_rodata_text(u: &Upatch, path: *const c_char, view: &View) -> c_i
                 .wrapping_add(var[1]),
         );
         let bytes = var_bytes(view, var[1], var[2]);
-        let start = bytes.as_ptr() as usize - mem.as_ptr() as usize;
+        // An empty value has no place in the mapping, its pointer a
+        // dangling one, and nothing is read of it.
+        let start = match bytes {
+            [] => 0,
+            _ => bytes.as_ptr() as usize - mem.as_ptr() as usize,
+        };
         let mut out = header.into_bytes();
         let dumped = dump.dump_type_data(&mut out, type_id, mem, start, bytes.len());
         out.extend_from_slice(if dumped.is_ok() { b"\n" } else { b"" });

@@ -632,7 +632,8 @@ impl Dump<'_> {
         let size = match self.btf.resolve_size(id) {
             Ok(s) if s < c_int::MAX as u32 => s,
             other => {
-                let shown = other.map_or(usize::MAX, |s| s as usize);
+                // As libbpf shows it: an error as the size_t it casts it to.
+                let shown = other.map_or_else(|err| err as isize as usize, |s| s as usize);
                 crate::log::warn(format!("unexpected size [{shown}] for id [{id}]").as_bytes());
                 return Err(-EINVAL);
             }
