@@ -15,7 +15,6 @@ use crate::sys::libc::{
     close, errno, fchmod, fprintf, fsync, geteuid, link, open, openat, rename, stderr, strerror,
     unlink,
 };
-use crate::sys::log::{pr_audit, pr_err, pr_info};
 use crate::sys::openssl::{
     ASN1_INTEGER_set, ASN1_TIME_set_string_X509, BIO_NOCLOSE, BIO_free, BIO_new_fd,
     EVP_PKEY_Q_keygen, EVP_PKEY_free, EvpPkey, MBSTRING_UTF8, NID_AUTHORITY_KEY_IDENTIFIER,
@@ -67,14 +66,21 @@ fn ensure_keys_dir(keys_dir: *const c_char) -> c_int {
     // SAFETY: the caller's C string.
     if unsafe { ffi::c_str(keys_dir) } == b"/" {
         // SAFETY: a message without arguments.
-        unsafe { pr_err(c"keys dir cannot be /".as_ptr()) };
+        unsafe { crate::log::log_c!(crate::log::err, c"keys dir cannot be /".as_ptr()) };
         return -EINVAL;
     }
     // SAFETY: the caller's C string, and a mode.
     let ret = unsafe { seal_mkdir_p(keys_dir, 0o700) };
     if ret != 0 {
         // SAFETY: the C's format, the path and the error's text.
-        unsafe { pr_err(c"mkdir %s: %s".as_ptr(), keys_dir, strerror(-ret)) };
+        unsafe {
+            crate::log::log_c!(
+                crate::log::err,
+                c"mkdir %s: %s".as_ptr(),
+                keys_dir,
+                strerror(-ret)
+            )
+        };
     }
     ret
 }
@@ -179,7 +185,8 @@ fn gen_keypair() -> *mut EvpPkey {
             if OPENSSL_version_major() < 3
                 || (OPENSSL_version_major() == 3 && OPENSSL_version_minor() < 5)
             {
-                pr_err(
+                crate::log::log_c!(
+                    crate::log::err,
                     c"genkey: %s needs OpenSSL 3.5 or newer (running %s); upgrade libcrypto"
                         .as_ptr(),
                     GENKEY_ALG.as_ptr(),
@@ -365,7 +372,14 @@ unsafe fn write_new(payload: Payload, path: *const c_char) -> c_int {
     };
     if fd < 0 {
         // SAFETY: the C's format, the path and the error's text.
-        unsafe { pr_err(c"open %s: %s".as_ptr(), path, strerror(errno())) };
+        unsafe {
+            crate::log::log_c!(
+                crate::log::err,
+                c"open %s: %s".as_ptr(),
+                path,
+                strerror(errno())
+            )
+        };
         return -1;
     }
     // SAFETY: the fd open() gave, closed once at the end; the BIO on it,
@@ -373,7 +387,12 @@ unsafe fn write_new(payload: Payload, path: *const c_char) -> c_int {
     unsafe {
         'out: {
             if fchmod(fd, 0o600) != 0 {
-                pr_err(c"fchmod %s: %s".as_ptr(), path, strerror(errno()));
+                crate::log::log_c!(
+                    crate::log::err,
+                    c"fchmod %s: %s".as_ptr(),
+                    path,
+                    strerror(errno())
+                );
                 break 'out;
             }
             // Unbuffered, where a FILE would keep the key in memory freed
@@ -399,7 +418,12 @@ unsafe fn write_new(payload: Payload, path: *const c_char) -> c_int {
                         break 'out;
                     }
                     if fsync(fd) != 0 {
-                        pr_err(c"flush %s: %s".as_ptr(), path, strerror(errno()));
+                        crate::log::log_c!(
+                            crate::log::err,
+                            c"flush %s: %s".as_ptr(),
+                            path,
+                            strerror(errno())
+                        );
                         break 'out;
                     }
                 }
@@ -409,7 +433,12 @@ unsafe fn write_new(payload: Payload, path: *const c_char) -> c_int {
                         break 'out;
                     }
                     if fsync(fd) != 0 {
-                        pr_err(c"fsync %s: %s".as_ptr(), path, strerror(errno()));
+                        crate::log::log_c!(
+                            crate::log::err,
+                            c"fsync %s: %s".as_ptr(),
+                            path,
+                            strerror(errno())
+                        );
                         break 'out;
                     }
                 }
@@ -449,7 +478,8 @@ unsafe fn replace_pair(
             if errno() != ENOENT {
                 let err = errno();
 
-                pr_err(
+                crate::log::log_c!(
+                    crate::log::err,
                     c"genkey: cannot keep the old key aside as %s: %s".as_ptr(),
                     pkey_old,
                     strerror(err),
@@ -461,7 +491,8 @@ unsafe fn replace_pair(
         if rename(pkey_new, pkey_path) != 0 {
             let err = errno();
 
-            pr_err(
+            crate::log::log_c!(
+                crate::log::err,
                 c"genkey: cannot move %s to %s: %s".as_ptr(),
                 pkey_new,
                 pkey_path,
@@ -475,7 +506,8 @@ unsafe fn replace_pair(
         if rename(cert_new, cert_path) != 0 {
             let err = errno();
 
-            pr_err(
+            crate::log::log_c!(
+                crate::log::err,
                 c"genkey: cannot move %s to %s: %s".as_ptr(),
                 cert_new,
                 cert_path,
@@ -487,7 +519,7 @@ unsafe fn replace_pair(
                 unlink(pkey_path)
             };
             if undo != 0 {
-                pr_err(
+                crate::log::log_c!(crate::log::err,
                     c"genkey: %s and %s are no longer a pair (%s); remove both and run genkey again"
                         .as_ptr(),
                     pkey_path,
@@ -580,7 +612,8 @@ unsafe fn write_pair(
             || strsprintf(cn, PATH_MAX, c"%s.new".as_ptr(), cert_path) < 0
             || strsprintf(po, PATH_MAX, c"%s.old".as_ptr(), pkey_path) < 0
         {
-            pr_err(
+            crate::log::log_c!(
+                crate::log::err,
                 c"genkey: no room for a temporary beside %s".as_ptr(),
                 pkey_path,
             );
@@ -637,7 +670,13 @@ unsafe fn genkey(args: &[*const c_char]) -> c_int {
             }
             _ => {
                 // SAFETY: the C's format and the caller's word.
-                unsafe { pr_err(c"genkey: unknown option '%s'".as_ptr(), args[i]) };
+                unsafe {
+                    crate::log::log_c!(
+                        crate::log::err,
+                        c"genkey: unknown option '%s'".as_ptr(),
+                        args[i]
+                    )
+                };
                 usage();
                 return 2;
             }
@@ -651,7 +690,8 @@ unsafe fn genkey(args: &[*const c_char]) -> c_int {
     if identity::enforcement_active() != 0 {
         // SAFETY: a message without arguments.
         unsafe {
-            pr_err(
+            crate::log::log_c!(
+                crate::log::err,
                 c"genkey: refusing on a target: the signing key belongs on the operator host"
                     .as_ptr(),
             )
@@ -670,7 +710,8 @@ unsafe fn genkey(args: &[*const c_char]) -> c_int {
     if ret != 0 {
         // SAFETY: the C's format, the directory and the error's text.
         unsafe {
-            pr_err(
+            crate::log::log_c!(
+                crate::log::err,
                 c"genkey: invalid keys dir %s: %s".as_ptr(),
                 keys_dir,
                 strerror(-ret),
@@ -690,16 +731,21 @@ unsafe fn genkey(args: &[*const c_char]) -> c_int {
             // SAFETY: the C's formats, the directory and the error's
             // text.
             unsafe {
-                pr_err(
+                crate::log::log_c!(
+                    crate::log::err,
                     c"genkey: default keys dir %s is not safe for user key generation: %s".as_ptr(),
                     KEYS_DIR.as_ptr(),
                     strerror(-ret),
                 );
-                pr_err(
+                crate::log::log_c!(
+                    crate::log::err,
                     c"it must be owned by the current user and not writable by group or others"
                         .as_ptr(),
                 );
-                pr_err(c"rerun with sudo or pass --keys-dir <dir>".as_ptr());
+                crate::log::log_c!(
+                    crate::log::err,
+                    c"rerun with sudo or pass --keys-dir <dir>".as_ptr()
+                );
             }
             return 1;
         }
@@ -709,7 +755,8 @@ unsafe fn genkey(args: &[*const c_char]) -> c_int {
     if !force && unsafe { path_exists(pp) || path_exists(cp) } {
         // SAFETY: the C's format and the paths.
         unsafe {
-            pr_err(
+            crate::log::log_c!(
+                crate::log::err,
                 c"genkey: %s or %s already exists; pass --force".as_ptr(),
                 pp,
                 cp,
@@ -737,16 +784,19 @@ unsafe fn genkey(args: &[*const c_char]) -> c_int {
             if build_cert(cert, pkey) != 0 || write_pair(pkey, cert, pp, cp, force) != 0 {
                 break 'out;
             }
-            pr_info(
+            crate::log::log_c!(
+                crate::log::info,
                 c"wrote %s (%s, mode 0600)".as_ptr(),
                 pp,
                 GENKEY_ALG.as_ptr(),
             );
-            pr_info(
+            crate::log::log_c!(
+                crate::log::info,
                 c"wrote %s (X.509 self-signed, no expiration date)".as_ptr(),
                 cp,
             );
-            pr_audit(
+            crate::log::log_c!(
+                crate::log::audit,
                 c"genkey: created shirudo %s signing material at %s".as_ptr(),
                 GENKEY_ALG.as_ptr(),
                 keys_dir,

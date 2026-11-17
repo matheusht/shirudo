@@ -21,7 +21,6 @@ use crate::sys::curl::{
     curl_url_set,
 };
 use crate::sys::libc::{O_CLOEXEC, O_RDONLY, close, open, strcasecmp, strncasecmp};
-use crate::sys::log::pr_warn;
 use crate::sys::openssl::{
     BIO_CLOSE, BIO_free, BIO_new_fd, ERR_clear_error, PEM_read_bio_X509, X509_STORE_add_cert,
     X509_free,
@@ -196,7 +195,8 @@ unsafe extern "C" fn info_callback(ssl: *const Ssl, kind: c_int, _ret: c_int) {
     };
     // SAFETY: the C's format, and two C strings.
     unsafe {
-        pr_warn(
+        crate::log::log_c!(
+            crate::log::warn,
             c"TLS non-hybrid key exchange with %s: %s".as_ptr(),
             host,
             group,

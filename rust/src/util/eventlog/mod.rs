@@ -26,7 +26,6 @@ use crate::sys::libc::{
     AT_FDCWD, F_OK, O_CLOEXEC, O_RDONLY, PATH_MAX, STATX_SIZE, Statx, access, close, env, errno,
     open, read, statx, strerror, time, unlink,
 };
-use crate::sys::log::pr_err;
 use crate::text::{cstr, strsprintf};
 use crate::util::crypto_openssl::sha256_calc;
 use crate::util::hex::hex_encode;
@@ -70,7 +69,8 @@ fn append_to(path: &CStr, line: &CStr) -> c_int {
     if ret != 0 {
         // SAFETY: the C's format, the path, and what strerror() gives.
         unsafe {
-            pr_err(
+            crate::log::log_c!(
+                crate::log::err,
                 c"eventlog: append to %s: %s".as_ptr(),
                 path.as_ptr(),
                 strerror(-ret),

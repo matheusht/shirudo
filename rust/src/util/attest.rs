@@ -18,7 +18,6 @@ use crate::sys::libc::{
     AT_FDCWD, O_CLOEXEC, O_RDONLY, STATX_BASIC_STATS, Statx, close, errno, explicit_bzero,
     getrandom, open, read, scrub, statx,
 };
-use crate::sys::log::pr_err;
 use crate::sys::string::strsprintf;
 use crate::sys::tss2::NV_WRITTEN;
 use crate::sys::version::shirudo_version_id;
@@ -553,7 +552,12 @@ unsafe fn evidence(
     }
     if attempt == QUOTE_ATTEMPTS {
         // SAFETY: a format without conversions.
-        unsafe { pr_err(c"attest: PCRs kept changing while quoting".as_ptr()) };
+        unsafe {
+            crate::log::log_c!(
+                crate::log::err,
+                c"attest: PCRs kept changing while quoting".as_ptr()
+            )
+        };
         return -EAGAIN;
     }
     if config.present {
@@ -618,7 +622,10 @@ unsafe fn evidence(
         if s.ak.name_len != NAME_LEN || c.ak_name != s.ak.name {
             // SAFETY: a format without conversions.
             unsafe {
-                pr_err(c"attest: the challenge was made for another attestation key".as_ptr())
+                crate::log::log_c!(
+                    crate::log::err,
+                    c"attest: the challenge was made for another attestation key".as_ptr()
+                )
             };
             return -EKEYREJECTED;
         }
@@ -641,7 +648,7 @@ unsafe fn evidence(
         if ret != 0 {
             // SAFETY: a format without conversions.
             unsafe {
-                pr_err(
+                crate::log::log_c!(crate::log::err,
                     c"attest: the TPM refused the challenge: not made for this attestation key under this endorsement key"
                         .as_ptr(),
                 )

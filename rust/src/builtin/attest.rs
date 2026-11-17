@@ -14,7 +14,6 @@ use crate::errno::{EEXIST, EINVAL, EIO, EKEYREJECTED, ENODATA, ENODEV, ENXIO};
 use crate::ffi;
 use crate::heap::xfree;
 use crate::sys::libc::{fwrite, stdout, strerror};
-use crate::sys::log::{pr_err, pr_warn};
 use crate::text::{cstr, parse_u64};
 use crate::util::attest::{
     AttestChallenge, AttestChallengePolicy, AttestExpect, attest_challenge_make,
@@ -74,13 +73,13 @@ fn message(parts: &[&[u8]]) -> CString {
 fn error(parts: &[&[u8]]) {
     let msg = message(parts);
     // SAFETY: a "%s" format with a C string.
-    unsafe { pr_err(c"%s".as_ptr(), msg.as_ptr()) };
+    unsafe { crate::log::log_c!(crate::log::err, c"%s".as_ptr(), msg.as_ptr()) };
 }
 
 fn warn(parts: &[&[u8]]) {
     let msg = message(parts);
     // SAFETY: a "%s" format with a C string.
-    unsafe { pr_warn(c"%s".as_ptr(), msg.as_ptr()) };
+    unsafe { crate::log::log_c!(crate::log::warn, c"%s".as_ptr(), msg.as_ptr()) };
 }
 
 fn strerr(err: c_int) -> &'static [u8] {

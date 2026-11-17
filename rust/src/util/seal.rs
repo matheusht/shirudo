@@ -10,7 +10,7 @@
 //! other way round: it must carry no label, so root cannot point shirudo
 //! at sealed state to overwrite.
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
 use std::ffi::{CString, OsStr};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
@@ -23,7 +23,6 @@ use crate::sys::libc::{
     O_TRUNC, S_IFMT, S_IFREG, Statx, close, fgetxattr, fsetxattr, fsync, ftruncate, lgetxattr,
     lsetxattr, mkdirat, openat, renameat, unlinkat,
 };
-use crate::sys::log::{pr_err, pr_warn};
 use crate::util::io::{append_line, lock_exclusive, stat_fd, write_complete};
 
 /// XATTR_SEAL: the attribute bpf/seal.c reads.
@@ -39,19 +38,19 @@ const O_RDONLY: c_int = 0;
 const O_WRONLY: c_int = 1;
 const O_RDWR: c_int = 2;
 
-fn say(level: unsafe extern "C" fn(*const c_char, ...), text: String) {
+fn say(level: fn(&[u8]), text: String) {
     let text = CString::new(text).unwrap_or_default();
 
     // SAFETY: a "%s" format with a C string.
-    unsafe { level(c"%s".as_ptr(), text.as_ptr()) };
+    unsafe { crate::log::log_c!(level, c"%s".as_ptr(), text.as_ptr()) };
 }
 
 fn error(text: String) {
-    say(pr_err, text);
+    say(crate::log::err, text);
 }
 
 fn warn(text: String) {
-    say(pr_warn, text);
+    say(crate::log::warn, text);
 }
 
 fn errno() -> c_int {

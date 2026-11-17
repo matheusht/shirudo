@@ -1,15 +1,13 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! A panic is a bug: say where through pr_err() and abort, as a failed
+//! A panic is a bug: say where through log::err() and abort, as a failed
 //! assertion does in C. The crate unwinds only so that a Lua error can
 //! cross a Rust callback; a panic never unwinds.
 
 use std::fmt::{self, Write};
 use std::panic::{self, PanicHookInfo};
 use std::process;
-
-use crate::sys::log::pr_err;
 
 /// A message cut to the buffer, which keeps room for its NUL.
 struct Message {
@@ -38,7 +36,7 @@ fn report(info: &PanicHookInfo<'_>) {
     // A NUL inside would only cut the message short.
     msg.buf[msg.len] = 0;
     // SAFETY: a "%s" format with the NUL-terminated message.
-    unsafe { pr_err(c"rust: %s".as_ptr(), msg.buf.as_ptr()) };
+    unsafe { crate::log::log_c!(crate::log::err, c"rust: %s".as_ptr(), msg.buf.as_ptr()) };
     process::abort()
 }
 

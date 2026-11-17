@@ -13,7 +13,6 @@ use super::words;
 use crate::errno::{EINPROGRESS, ENODEV};
 use crate::ffi;
 use crate::sys::libc::{fwrite, stderr, stdout, strerror};
-use crate::sys::log::pr_err;
 use crate::util::image_runtime;
 
 const HELP: &[u8] = b"usage: shirudo image build [image builder options]\n       \
@@ -30,7 +29,7 @@ fn error(parts: &[&[u8]]) {
     let msg = CString::new(parts.concat()).unwrap_or_default();
 
     // SAFETY: a "%s" format with a C string.
-    unsafe { pr_err(c"%s".as_ptr(), msg.as_ptr()) };
+    unsafe { crate::log::log_c!(crate::log::err, c"%s".as_ptr(), msg.as_ptr()) };
 }
 
 /// `shirudo image`.

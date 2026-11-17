@@ -10,7 +10,6 @@ use core::ffi::c_int;
 use crate::errno::{EINTR, EIO, EKEYREJECTED};
 use crate::sys::identity::Identity;
 use crate::sys::libc::{errno, getrandom, scrub, strerror};
-use crate::sys::log::pr_err;
 use crate::util::identity;
 use crate::util::tpm::{tpm_close, tpm_open, tpm_writer_create};
 use crate::util::tpm_wire::{DIGEST_LEN, NV_RSA_BYTES};
@@ -52,7 +51,8 @@ fn create(seed: &mut [u8; DIGEST_LEN], public: &mut [u8; NV_RSA_BYTES]) -> c_int
 fn failed(err: c_int, seed: &mut [u8; DIGEST_LEN], public: &mut [u8; NV_RSA_BYTES]) -> c_int {
     // SAFETY: a format of one C string, and strerror()'s.
     unsafe {
-        pr_err(
+        crate::log::log_c!(
+            crate::log::err,
             c"nv writer: TPM key creation failed: %s".as_ptr(),
             strerror(-err),
         )
@@ -74,7 +74,8 @@ pub(crate) fn read(seed: &mut [u8; DIGEST_LEN], public: &mut [u8; NV_RSA_BYTES])
     if err != 0 {
         // SAFETY: a format of one C string, and strerror()'s.
         unsafe {
-            pr_err(
+            crate::log::log_c!(
+                crate::log::err,
                 c"nv writer: public key lookup failed: %s".as_ptr(),
                 strerror(-err),
             )

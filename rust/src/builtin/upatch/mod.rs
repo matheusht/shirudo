@@ -17,7 +17,6 @@ use std::ffi::CString;
 
 use crate::heap::xfree;
 use crate::sys::libc::{fwrite, stderr, stdout};
-use crate::sys::log::{pr_audit, pr_err, pr_info, pr_warn};
 use crate::sys::upatch::MapSummary;
 use crate::util::help::{
     Help, HelpItem, HelpSection, is_help, is_list_cmds, print_help, print_subcmd_list,
@@ -102,8 +101,8 @@ fn err(text: &[u8]) {
     unsafe { fwrite(text.as_ptr().cast(), 1, text.len(), stderr) };
 }
 
-/// A message through the log function `f`, a pr_*() of util/log.h.
-fn log(f: unsafe extern "C" fn(*const c_char, ...), text: &[u8]) {
+/// A message through the log function `f`, err() or its kin.
+fn log(f: fn(&[u8]), text: &[u8]) {
     let text = CString::new(
         text.iter()
             .copied()
@@ -112,23 +111,23 @@ fn log(f: unsafe extern "C" fn(*const c_char, ...), text: &[u8]) {
     )
     .unwrap_or_default();
     // SAFETY: a "%s" format with a C string.
-    unsafe { f(c"%s".as_ptr(), text.as_ptr()) };
+    unsafe { crate::log::log_c!(f, c"%s".as_ptr(), text.as_ptr()) };
 }
 
 fn log_err(text: &[u8]) {
-    log(pr_err, text);
+    log(crate::log::err, text);
 }
 
 fn log_warn(text: &[u8]) {
-    log(pr_warn, text);
+    log(crate::log::warn, text);
 }
 
 fn log_info(text: &[u8]) {
-    log(pr_info, text);
+    log(crate::log::info, text);
 }
 
 fn log_audit(text: &[u8]) {
-    log(pr_audit, text);
+    log(crate::log::audit, text);
 }
 
 /// A valued option: its value after an equals sign or as the next

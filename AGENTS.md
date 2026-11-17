@@ -146,7 +146,8 @@ message that carries a change.
   for a search, `for_each_token()` for the tokens of a buffer, the
   `xmalloc()` family, `min()` and `max()`,
   `memzero_explicit()` and `memneq_explicit()` for secrets,
-  `util/json.h` for all JSON and `pr_*()` for all logging. The libc names
+  `util/json.h` for all JSON, `pr_*()` for C logging and
+  `rust/src/log.rs` for Rust logging. The libc names
   they replace are poisoned, and so are the string functions of libc
   that nothing calls; `<shirudo/string.h>` has the list. Code that a
   second place needs moves into `util/` with unit cases rather than

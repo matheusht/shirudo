@@ -12,7 +12,6 @@ use core::ptr;
 use crate::errno::{E2BIG, EACCES, EEXIST, EIO, EKEYREJECTED, ENODEV, ENOENT, ENOMEM, EPROTO};
 use crate::heap::{xfree, xmalloc};
 use crate::sys::libc::{qsort, strcmp, strerror, strlen, strnlen};
-use crate::sys::log::{pr_err, pr_warn};
 use crate::sys::tss2::NV_WRITTEN;
 use crate::text::{cstr, strsprintf};
 use crate::util::config::{self, Scrubbed};
@@ -459,7 +458,8 @@ fn register_expectation(
     if ret != 0 {
         // SAFETY: the C's format and its argument.
         unsafe {
-            pr_err(
+            crate::log::log_c!(
+                crate::log::err,
                 c"tpm: compute signed register policy: %s".as_ptr(),
                 strerror(-ret),
             )
@@ -582,7 +582,8 @@ fn bind(tpm: *mut Tpm, event: &[u8; DIGEST_LEN], info: &mut ChainInitInfo) -> c_
     if ret != 0 && ret != -ENOENT {
         // SAFETY: the C's format and its arguments.
         unsafe {
-            pr_err(
+            crate::log::log_c!(
+                crate::log::err,
                 c"tpm: eventlog %s unreadable: %s; not binding register 0x%08x".as_ptr(),
                 eventlog_path(),
                 strerror(-ret),
@@ -598,7 +599,8 @@ fn bind(tpm: *mut Tpm, event: &[u8; DIGEST_LEN], info: &mut ChainInitInfo) -> c_
     if nv.defined && nv.written {
         // SAFETY: the C's format and its argument.
         unsafe {
-            pr_warn(
+            crate::log::log_c!(
+                crate::log::warn,
                 c"tpm: register 0x%08x written this boot without a record; rebinding it".as_ptr(),
                 NV_INDEX,
             )
@@ -646,7 +648,8 @@ fn bind(tpm: *mut Tpm, event: &[u8; DIGEST_LEN], info: &mut ChainInitInfo) -> c_
         if !nv.defined || !name_equals(&nv, &e.unwritten) {
             // SAFETY: the C's format and its argument.
             unsafe {
-                pr_err(
+                crate::log::log_c!(
+                    crate::log::err,
                     c"tpm: register 0x%08x name does not match the computed public area".as_ptr(),
                     NV_INDEX,
                 )
@@ -688,7 +691,7 @@ fn bind(tpm: *mut Tpm, event: &[u8; DIGEST_LEN], info: &mut ChainInitInfo) -> c_
     if ret != 0 {
         // SAFETY: the C's format and its argument.
         unsafe {
-            pr_err(
+            crate::log::log_c!(crate::log::err,
                 c"tpm: register written but PCR %u not anchored; the init branch stays open until reboot"
                     .as_ptr(),
                 PCR,
@@ -720,7 +723,8 @@ fn rebind(
     if !name_equals(nv, &e.written) {
         // SAFETY: the C's format.
         unsafe {
-            pr_err(
+            crate::log::log_c!(
+                crate::log::err,
                 c"tpm: recorded register has an obsolete policy; trusted reboot required".as_ptr(),
             )
         };
@@ -728,7 +732,12 @@ fn rebind(
     }
     if memneq_explicit(&info.writer_public, &rec.writer_public) {
         // SAFETY: the C's format.
-        unsafe { pr_err(c"tpm: recorded NV writer differs from the guarded key".as_ptr()) };
+        unsafe {
+            crate::log::log_c!(
+                crate::log::err,
+                c"tpm: recorded NV writer differs from the guarded key".as_ptr()
+            )
+        };
         return -EKEYREJECTED;
     }
     if nv.defined && nv.written && name_equals(nv, &rec.name) {
@@ -760,7 +769,7 @@ fn rebind(
     };
     // SAFETY: the C's format and its arguments.
     unsafe {
-        pr_err(
+        crate::log::log_c!(crate::log::err,
             c"tpm: register 0x%08x bound this boot is %s; not binding another before the next TPM reset"
                 .as_ptr(),
             NV_INDEX,
@@ -802,7 +811,8 @@ unsafe fn extend(event: &[u8; DIGEST_LEN], out_chain: *mut u8) -> c_int {
     if ret != 0 {
         // SAFETY: the C's format and its argument.
         unsafe {
-            pr_err(
+            crate::log::log_c!(
+                crate::log::err,
                 c"tpm: compute signed register policy: %s".as_ptr(),
                 strerror(-ret),
             )
@@ -850,7 +860,8 @@ unsafe fn extend_on(
     if !name_equals(&nv, &rec.name) {
         // SAFETY: the C's format and its argument.
         unsafe {
-            pr_err(
+            crate::log::log_c!(
+                crate::log::err,
                 c"tpm: register 0x%08x is not the index init recorded (recreated?)".as_ptr(),
                 NV_INDEX,
             )
@@ -859,7 +870,12 @@ unsafe fn extend_on(
     }
     if memneq_explicit(&nv.policy, &e.policy) {
         // SAFETY: the C's format.
-        unsafe { pr_err(c"tpm: register write policy is obsolete or substituted".as_ptr()) };
+        unsafe {
+            crate::log::log_c!(
+                crate::log::err,
+                c"tpm: register write policy is obsolete or substituted".as_ptr()
+            )
+        };
         return -EACCES;
     }
     // SAFETY: the connection and room for the count.
@@ -869,7 +885,12 @@ unsafe fn extend_on(
     }
     if !rec.have_reset_count || reset != rec.reset_count {
         // SAFETY: the C's format.
-        unsafe { pr_err(c"tpm: register reset differs from the init record".as_ptr()) };
+        unsafe {
+            crate::log::log_c!(
+                crate::log::err,
+                c"tpm: register reset differs from the init record".as_ptr()
+            )
+        };
         return -EACCES;
     }
     let ret = register_writer(tpm, &mut writer_public);
@@ -878,7 +899,12 @@ unsafe fn extend_on(
     }
     if memneq_explicit(&writer_public, &rec.writer_public) {
         // SAFETY: the C's format.
-        unsafe { pr_err(c"tpm: recorded NV writer differs from the guarded key".as_ptr()) };
+        unsafe {
+            crate::log::log_c!(
+                crate::log::err,
+                c"tpm: recorded NV writer differs from the guarded key".as_ptr()
+            )
+        };
         return -EKEYREJECTED;
     }
     // SAFETY: the connection, the branches and the event.
@@ -1050,7 +1076,8 @@ fn status_on(tpm: *mut Tpm, st: &mut ChainStatus) -> c_int {
         if ret != 0 {
             // SAFETY: the C's format and its argument.
             unsafe {
-                pr_err(
+                crate::log::log_c!(
+                    crate::log::err,
                     c"tpm: compute signed register policy: %s".as_ptr(),
                     strerror(-ret),
                 )

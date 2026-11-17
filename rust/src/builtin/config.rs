@@ -12,7 +12,6 @@ use super::word;
 use crate::errno::ENOENT;
 use crate::ffi::c_splice;
 use crate::sys::libc::{F_OK, access, env, fprintf, printf, stderr, strerror};
-use crate::sys::log::pr_err;
 use crate::util::config::{CONF_PATH, Scrubbed, load};
 use crate::util::help::{Help, is_help, print_help};
 use crate::util::image_config;
@@ -61,7 +60,11 @@ unsafe fn config(args: &[*const c_char]) -> c_int {
         // SAFETY: the C's formats, the caller's word, the usage and the
         // C library's stderr.
         unsafe {
-            pr_err(c"config: unknown option '%s'".as_ptr(), arg);
+            crate::log::log_c!(
+                crate::log::err,
+                c"config: unknown option '%s'".as_ptr(),
+                arg
+            );
             fprintf(stderr, c"usage: %s\n".as_ptr(), USAGE.as_ptr());
         }
         return 2;
@@ -74,7 +77,8 @@ unsafe fn config(args: &[*const c_char]) -> c_int {
     if ret != 0 && ret != -ENOENT {
         // SAFETY: the C's format, the path and the error's text.
         unsafe {
-            pr_err(
+            crate::log::log_c!(
+                crate::log::err,
                 c"config: load %s: %s".as_ptr(),
                 CONF_PATH.as_ptr(),
                 strerror(-ret),

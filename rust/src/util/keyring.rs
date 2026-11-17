@@ -478,12 +478,12 @@ impl KeyringLink {
 
 use crate::util::keys::{self, TrustedSet};
 
-/// A line of the log, through `pr_*("%s")`.
-fn say(level: unsafe extern "C" fn(*const c_char, ...), text: &[u8]) {
+/// A line of the log at `level`, err() or its kin.
+fn say(level: fn(&[u8]), text: &[u8]) {
     let msg = std::ffi::CString::new(cstr(text).to_vec()).unwrap_or_default();
 
     // SAFETY: a "%s" format with a C string.
-    unsafe { level(c"%s".as_ptr(), msg.as_ptr()) };
+    unsafe { crate::log::log_c!(level, c"%s".as_ptr(), msg.as_ptr()) };
 }
 
 fn strerr(err: c_int) -> &'static [u8] {
@@ -522,7 +522,6 @@ fn holds_set(ring: i32, set: &TrustedSet) -> c_int {
 /// (-EKEYREJECTED).
 pub(crate) fn seal_set(spec: i32, ring: i32, set: &TrustedSet) -> c_int {
     use crate::errno::{EACCES, EEXIST, EKEYREJECTED, ENOENT, ENOKEY, ENOPKG, EPERM};
-    use crate::sys::log::{pr_err, pr_info};
 
     let n = set.len();
     let plural: &str = if n == 1 { "" } else { "s" };
@@ -533,7 +532,10 @@ pub(crate) fn seal_set(spec: i32, ring: i32, set: &TrustedSet) -> c_int {
         let der = match keys::cert_der(c) {
             Ok(der) => der,
             Err(err) => {
-                say(pr_err, &[b"read ", path, b": ", strerr(-err)].concat());
+                say(
+                    crate::log::err,
+                    &[b"read ", path, b": ", strerr(-err)].concat(),
+                );
                 return err;
             }
         };
@@ -542,17 +544,20 @@ pub(crate) fn seal_set(spec: i32, ring: i32, set: &TrustedSet) -> c_int {
         if key >= 0 {
             let head = format!("bpf keyring serial={ring}: ");
             let tail = format!(" enrolled (key serial={key})");
-            say(pr_info, &[head.as_bytes(), path, tail.as_bytes()].concat());
+            say(
+                crate::log::info,
+                &[head.as_bytes(), path, tail.as_bytes()].concat(),
+            );
             continue;
         }
         if key != -EPERM && key != -EACCES {
             say(
-                pr_err,
+                crate::log::err,
                 &[b"bpf keyring: add ", path, b": ", strerr(-key)].concat(),
             );
             if key == -ENOENT || key == -ENOPKG {
                 say(
-                    pr_err,
+                    crate::log::err,
                     b"kernel cannot verify this cert's public-key algorithm (ML-DSA needs CONFIG_CRYPTO_MLDSA=y and CONFIG_CRYPTO_SHA512=y)",
                 );
             }
@@ -562,7 +567,7 @@ pub(crate) fn seal_set(spec: i32, ring: i32, set: &TrustedSet) -> c_int {
             let msg = format!(
                 "bpf keyring serial={ring} was sealed while init enrolled the certificates (tampered)"
             );
-            say(pr_err, msg.as_bytes());
+            say(crate::log::err, msg.as_bytes());
             return -EKEYREJECTED;
         }
         sealed = true;
@@ -574,12 +579,12 @@ pub(crate) fn seal_set(spec: i32, ring: i32, set: &TrustedSet) -> c_int {
             let msg = format!(
                 "bpf keyring serial={ring} carries a restriction init did not install (tampered)"
             );
-            say(pr_err, msg.as_bytes());
+            say(crate::log::err, msg.as_bytes());
             return -EKEYREJECTED;
         }
         if ret != 0 {
             say(
-                pr_err,
+                crate::log::err,
                 &[
                     b"bpf keyring: certificates enrolled but the keyring could not be sealed: ",
                     strerr(-ret),
@@ -591,7 +596,10 @@ pub(crate) fn seal_set(spec: i32, ring: i32, set: &TrustedSet) -> c_int {
     }
     let ret = holds_set(ring, set);
     if ret < 0 {
-        say(pr_err, &[b"bpf keyring: compare: ", strerr(-ret)].concat());
+        say(
+            crate::log::err,
+            &[b"bpf keyring: compare: ", strerr(-ret)].concat(),
+        );
         return ret;
     }
     // SAFETY: no certificates.
@@ -599,25 +607,25 @@ pub(crate) fn seal_set(spec: i32, ring: i32, set: &TrustedSet) -> c_int {
         let msg = format!(
             "bpf keyring serial={ring} was sealed empty at boot; boot with bpf.keyring_unsealed=1"
         );
-        say(pr_err, msg.as_bytes());
+        say(crate::log::err, msg.as_bytes());
         return -ENOKEY;
     }
     if ret == 0 {
         let msg = format!(
             "bpf keyring serial={ring} is sealed around keys other than the {n} trusted certificate{plural} (tampered)"
         );
-        say(pr_err, msg.as_bytes());
+        say(crate::log::err, msg.as_bytes());
         return -EKEYREJECTED;
     }
     if sealed {
         let msg = format!(
             "bpf keyring serial={ring}: already holds the {n} trusted certificate{plural}, sealed this boot"
         );
-        say(pr_info, msg.as_bytes());
+        say(crate::log::info, msg.as_bytes());
         return -EEXIST;
     }
     let msg = format!("bpf keyring serial={ring}: {n} certificate{plural} enrolled and sealed");
-    say(pr_info, msg.as_bytes());
+    say(crate::log::info, msg.as_bytes());
     0
 }
 

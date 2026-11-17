@@ -15,7 +15,6 @@ use crate::sys::libc::{
     O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW, O_NONBLOCK, S_IFMT, S_IFREG, Statx, close, closedir,
     fdopendir, openat, readdir, set_errno,
 };
-use crate::sys::log::pr_err;
 use crate::util::image_config;
 use crate::util::io::stat_fd;
 use crate::util::keyring::{keyring_bpf_serial, keyring_holds_cert};
@@ -34,7 +33,7 @@ fn error(text: String) {
     let text = CString::new(text).unwrap_or_default();
 
     // SAFETY: a "%s" format with a C string.
-    unsafe { pr_err(c"%s".as_ptr(), text.as_ptr()) };
+    unsafe { crate::log::log_c!(crate::log::err, c"%s".as_ptr(), text.as_ptr()) };
 }
 
 fn strerror(err: c_int) -> String {

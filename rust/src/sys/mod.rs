@@ -13,7 +13,6 @@ pub mod identity;
 pub mod libbpf;
 pub mod libc;
 pub mod loader;
-pub mod log;
 pub mod luajit;
 pub mod openssl;
 pub mod ssl;

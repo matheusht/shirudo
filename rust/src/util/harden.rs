@@ -12,7 +12,6 @@ use crate::sys::libc::{
     PR_SET_NO_NEW_PRIVS, PR_SET_PTRACER, RLIMIT_CORE, Rlimit, errno, fcntl, mlockall, open, prctl,
     setrlimit, strerror,
 };
-use crate::sys::log::pr_err;
 use crate::sys::openssl::{OPENSSL_INIT_NO_LOAD_CONFIG, OPENSSL_init_crypto};
 
 /// Started with standard input, output or error closed, the process gives
@@ -59,7 +58,8 @@ pub(crate) fn harden_self() -> c_int {
 
         // SAFETY: a format of one C string, and strerror()'s.
         unsafe {
-            pr_err(
+            crate::log::log_c!(
+                crate::log::err,
                 c"hardening: cannot lock process memory: %s".as_ptr(),
                 strerror(-err),
             )

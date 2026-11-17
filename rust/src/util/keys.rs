@@ -18,7 +18,6 @@ use crate::sys::libc::{
     STATX_SIZE, STATX_TYPE, Statx, access, alphasort, close, errno, faccessat, open, read, scandir,
     scandirat, statx, strerror, unlink,
 };
-use crate::sys::log::pr_err;
 use crate::text::capi::name_has_suffix;
 use crate::text::{cstr, strscpy, strsprintf};
 use crate::util::crypto_openssl::{
@@ -1238,7 +1237,8 @@ unsafe fn load_image_root(
     if keys_fd < 0 && keys_fd != -ENOENT {
         // SAFETY: the C's format, and the C library's message.
         unsafe {
-            pr_err(
+            crate::log::log_c!(
+                crate::log::err,
                 c"image trust set: open config image keys/: %s".as_ptr(),
                 strerror(-keys_fd),
             )

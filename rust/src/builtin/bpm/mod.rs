@@ -26,7 +26,6 @@ use crate::sys::libc::{
     Dir, File, LOCK_UN, PATH_MAX, closedir, errno, fclose, fdopen, fdopendir, flock, fopen, fwrite,
     mkstemp, opendir, readdir, stderr, stdout, strerror, unlink,
 };
-use crate::sys::log::{pr_err, pr_warn};
 use crate::util::help::{
     Help, HelpItem, HelpSection, is_help, is_list_cmds, print_help, print_subcmd_list,
     resolve_subcommand,
@@ -109,19 +108,19 @@ fn message(parts: &[&[u8]]) -> CString {
     CString::new(text).unwrap_or_default()
 }
 
-/// An error through pr_err(), which logs and escapes it.
+/// An error, logged and escaped.
 fn error(parts: &[&[u8]]) {
     let msg = message(parts);
 
     // SAFETY: a "%s" format with a C string.
-    unsafe { pr_err(c"%s".as_ptr(), msg.as_ptr()) };
+    unsafe { crate::log::log_c!(crate::log::err, c"%s".as_ptr(), msg.as_ptr()) };
 }
 
 fn warn(parts: &[&[u8]]) {
     let msg = message(parts);
 
     // SAFETY: a "%s" format with a C string.
-    unsafe { pr_warn(c"%s".as_ptr(), msg.as_ptr()) };
+    unsafe { crate::log::log_c!(crate::log::warn, c"%s".as_ptr(), msg.as_ptr()) };
 }
 
 /// What a failed bpm command says: 1.

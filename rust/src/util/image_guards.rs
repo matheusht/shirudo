@@ -19,7 +19,6 @@ use crate::sys::btf::{
     Btf, btf__find_by_name_kind, btf__free, btf__load_from_kernel_by_id, libbpf_get_error,
 };
 use crate::sys::libc::{SYS_PIDFD_OPEN, close, errno, strerror, syscall};
-use crate::sys::log::pr_err;
 use crate::text::cstr;
 use crate::util::bpf_info::{Info, LINK_INFO_SIZE, MAP_INFO_SIZE, PROG_INFO_SIZE};
 use crate::util::identity;
@@ -600,7 +599,8 @@ fn guard_map_ids() -> Result<[u32; GUARD_MAP_COUNT], c_int> {
         if ret != 0 {
             // SAFETY: a format of two C strings.
             unsafe {
-                pr_err(
+                crate::log::log_c!(
+                    crate::log::err,
                     c"image: invalid guard map %s: %s".as_ptr(),
                     expected.pin,
                     strerror(-ret),
@@ -790,7 +790,8 @@ pub(crate) fn image_guards_ready() -> c_int {
         if ret != 0 {
             // SAFETY: a format of two C strings.
             unsafe {
-                pr_err(
+                crate::log::log_c!(
+                    crate::log::err,
                     c"image: missing or invalid guard %s: %s".as_ptr(),
                     guard.pin,
                     strerror(-ret),

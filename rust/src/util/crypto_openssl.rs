@@ -12,7 +12,6 @@ use core::ffi::{CStr, c_char, c_int, c_long, c_uint, c_ulong, c_void};
 use crate::errno::{EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOMEM, ENOPKG, EPROTONOSUPPORT};
 use crate::heap::{xfree, xmalloc};
 use crate::sys::libc::{O_CLOEXEC, O_RDONLY, Tm, close, errno, open, strftime};
-use crate::sys::log::pr_err;
 use crate::sys::openssl::*;
 use crate::text::{cstr, strscpy};
 use crate::util::io::{check_trusted, read_fd};
@@ -1216,7 +1215,12 @@ pub(crate) unsafe fn openssl_complain(where_: *const c_char) {
     // caller's and OpenSSL's.
     unsafe {
         ERR_error_string_n(ERR_get_error(), buf.as_mut_ptr().cast(), buf.len());
-        pr_err(c"openssl: %s: %s".as_ptr(), where_, buf.as_ptr());
+        crate::log::log_c!(
+            crate::log::err,
+            c"openssl: %s: %s".as_ptr(),
+            where_,
+            buf.as_ptr()
+        );
     }
 }
 

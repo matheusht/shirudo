@@ -27,7 +27,7 @@ void log_init(void);
  */
 bool log_stream_is(const char *stream, __u64 dev, __u64 ino);
 
-/* Log a formatted message from util/log.c through the Rust logger. */
+/* Log a formatted message from C through rust/src/log.rs. */
 void log_emit(int priority, const char *msg);
 
 void pr_err(const char *fmt, ...)

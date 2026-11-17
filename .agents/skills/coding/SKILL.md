@@ -407,7 +407,7 @@ already, or should. The basics:
 | Bytes on the wire | `get_le32()`, `put_be32()`, `le32_to_cpu()` and kin (`<shirudo/byteorder.h>`), `hex_encode()`, `hex_decode()`, `hex_decode_max()` (`util/hex.h`) |
 | SHA-256 | `sha256_buffer()`, or `sha256_init()`, `sha256_update()` and `sha256_final()` over pieces (`util/crypto.h`); `sha256_digest_encode()` and `sha256_digest_decode()` for the `sha256:<hex>` form (`util/hex.h`), `bpm_sha256_digest()` to hash and write it at once (`util/bpm_oci.h`) |
 | JSON | `util/json.h`: `json_parse()` with a schema, `json_walk()`, `struct json_emit` |
-| Messages | `pr_err()`, `pr_warn()`, `pr_info()`, `pr_audit()` (`util/log.h`) |
+| Messages | `pr_err()`, `pr_warn()`, `pr_info()`, `pr_audit()` from C (`util/log.h`); `log::err()`, `warn()`, `info()`, `audit()`, `log_c!` from Rust (`rust/src/log.rs`) |
 | A command's options | a table of `struct opt_spec` indexed by the command's enum, `OPT_INIT()`, a switch over `opt_next()`, `opt_u64()`, `OPT_CHOICE()` for a value from a set of names, `opt_usage()` and `EXIT_USAGE` (`util/options.h`); `HELP_OPTIONS()` lists the same table in help, and `--list-opts` for completion; never compare `argv[]` by hand |
 
 Code that a second place needs moves into `util/<m>.c`, declared in

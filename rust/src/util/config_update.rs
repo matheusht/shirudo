@@ -21,7 +21,6 @@ use crate::sys::libc::{
     Timespec, close, errno, fclose, fdopen, ferror, fgetc, flock, fsync, ftello, ftruncate,
     geteuid, nanosleep, open, openat, read, renameat, statx, strerror, unlinkat,
 };
-use crate::sys::log::{pr_err, pr_info, pr_warn};
 use crate::text::cstr;
 use crate::util::chain::chain_fold;
 use crate::util::config_measure::{self, EVENT_BOOT, EVENT_UPDATE};
@@ -384,7 +383,7 @@ fn lock_wait(fd: c_int, wait_ms: u32) -> c_int {
         if !told && waited >= 1000 {
             // SAFETY: the C's format.
             unsafe {
-                pr_info(
+                crate::log::log_c!(crate::log::info,
                     c"image: waiting for another shirudo command to release the config operation lock"
                         .as_ptr(),
                 )
@@ -476,7 +475,7 @@ unsafe fn open_journal(
             if ret == -EWOULDBLOCK {
                 // SAFETY: the C's format and its arguments.
                 unsafe {
-                    pr_err(
+                    crate::log::log_c!(crate::log::err,
                         c"image: another shirudo command still holds the config operation lock %s/lock after %u seconds"
                             .as_ptr(),
                         directory,
@@ -702,7 +701,7 @@ fn staged(
     if selection.sequence != previous.sequence || selection.reset_count != previous.reset_count {
         // SAFETY: the format string is fixed and has no arguments.
         unsafe {
-            pr_warn(c"image: ignoring staged config because the active selection changed".as_ptr())
+            crate::log::log_c!(crate::log::warn, c"image: ignoring staged config because the active selection changed".as_ptr())
         };
         return 0;
     }
@@ -1064,7 +1063,8 @@ fn complete(u: &ConfigUpdate) -> c_int {
         if restore != 0 {
             // SAFETY: the C's format and strerror()'s.
             unsafe {
-                pr_err(
+                crate::log::log_c!(
+                    crate::log::err,
                     c"image: cannot restore pending selection: %s".as_ptr(),
                     strerror(-restore),
                 )

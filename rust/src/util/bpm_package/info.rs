@@ -12,7 +12,6 @@ use super::archive::{Found, read_member_in};
 use crate::errno::{EINVAL, EKEYREJECTED};
 use crate::ffi;
 use crate::heap::xfree;
-use crate::sys::log::pr_err;
 use crate::sys::openssl::{
     BIO_CTRL_RESET, BIO_ctrl, BIO_free, BIO_new_mem_buf, PEM_read_bio_X509, X509, X509_free,
     d2i_X509_bio,
@@ -173,7 +172,7 @@ fn signed_by(cert: *mut X509, parsed: &Parsed, info: &mut PackageInfo) -> c_int 
     if parsed.signer[0] != 0 && !cstr(&parsed.signer).eq_ignore_ascii_case(hex) {
         // SAFETY: the C's format, and two terminated buffers for it.
         unsafe {
-            pr_err(
+            crate::log::log_c!(crate::log::err,
                 c"bpm: package signer fingerprint mismatch: certificate=%s build-environment.json=%s"
                     .as_ptr(),
                 hex.as_ptr(),

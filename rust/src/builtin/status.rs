@@ -23,7 +23,6 @@ use crate::sys::identity::Identity;
 use crate::sys::libc::{
     access, close, explicit_bzero, fwrite, gethostname, stderr, stdout, strerror,
 };
-use crate::sys::log::{pr_err, pr_warn};
 use crate::sys::version::shirudo_version_id;
 use crate::text::{cstr, name_has_suffix};
 use crate::util::bpm_tree_state::tree_emit_status;
@@ -1027,12 +1026,17 @@ impl Otel {
         if err != 0 {
             let msg = message(&[b"status: load OTEL configuration: ", strerr(-err)]);
             // SAFETY: a "%s" format with a C string.
-            unsafe { pr_err(c"%s".as_ptr(), msg.as_ptr()) };
+            unsafe { crate::log::log_c!(crate::log::err, c"%s".as_ptr(), msg.as_ptr()) };
             return Err(1);
         }
         if !o.cfg.map_export_valid {
             // SAFETY: a format without conversions.
-            unsafe { pr_err(c"status: invalid OTEL configuration".as_ptr()) };
+            unsafe {
+                crate::log::log_c!(
+                    crate::log::err,
+                    c"status: invalid OTEL configuration".as_ptr()
+                )
+            };
             return Err(2);
         }
         Ok(o)
@@ -1872,7 +1876,7 @@ fn status(args: &[&[u8]]) -> c_int {
                 if err != 0 {
                     let msg = message(&[b"status: OTEL export failed: ", strerr(-err)]);
                     // SAFETY: a "%s" format with a C string.
-                    unsafe { pr_err(c"%s".as_ptr(), msg.as_ptr()) };
+                    unsafe { crate::log::log_c!(crate::log::err, c"%s".as_ptr(), msg.as_ptr()) };
                     ret = 1;
                 }
             }
@@ -1889,7 +1893,7 @@ fn status(args: &[&[u8]]) -> c_int {
                     b", no export endpoint is known, since a config image is used only when its activation record vouches for it; OTEL_EXPORTER_OTLP_ENDPOINT in /etc/shirudo/map-export.env still names one",
                 ]);
                 // SAFETY: a "%s" format with a C string.
-                unsafe { pr_warn(c"%s".as_ptr(), msg.as_ptr()) };
+                unsafe { crate::log::log_c!(crate::log::warn, c"%s".as_ptr(), msg.as_ptr()) };
             }
             if json_stdout {
                 print(&[body, b"\n"].concat());

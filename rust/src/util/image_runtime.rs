@@ -34,7 +34,6 @@ use crate::sys::libc::{
     O_DIRECTORY, O_NOFOLLOW, O_PATH, Statvfs, Timespec, explicit_bzero, fsetxattr, fstatvfs,
     fwrite, ioctl, nanosleep, stdout, umount2,
 };
-use crate::sys::log::{pr_err, pr_warn};
 use crate::text::cstr;
 use crate::util::config::{CONF_PATH, Config, config_load_fd, config_load_path};
 use crate::util::config_image::{
@@ -146,19 +145,19 @@ fn journal_open() -> bool {
     JOURNAL.with_borrow(ConfigUpdate::is_open)
 }
 
-fn say(level: unsafe extern "C" fn(*const c_char, ...), text: String) {
+fn say(level: fn(&[u8]), text: String) {
     let text = CString::new(text).unwrap_or_default();
 
     // SAFETY: a "%s" format with a C string.
-    unsafe { level(c"%s".as_ptr(), text.as_ptr()) };
+    unsafe { crate::log::log_c!(level, c"%s".as_ptr(), text.as_ptr()) };
 }
 
 fn error(text: String) {
-    say(pr_err, text);
+    say(crate::log::err, text);
 }
 
 fn warn(text: String) {
-    say(pr_warn, text);
+    say(crate::log::warn, text);
 }
 
 fn strerror(err: c_int) -> String {

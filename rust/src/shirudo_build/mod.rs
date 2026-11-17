@@ -22,7 +22,6 @@ use crate::errno::{EIO, ENAMETOOLONG, EPERM};
 use crate::ffi;
 use crate::heap::xfree;
 use crate::sys::libc::{access, close, fwrite, mkstemps, stderr, stdout, strerror, unlink};
-use crate::sys::log::{pr_err, pr_info};
 use crate::text::{cstr, name_has_suffix};
 use crate::util::harden::{harden_self, harden_stdio};
 use crate::util::hex::hex_decode;
@@ -38,19 +37,19 @@ const UPATCHES_DIR: &str = "/var/lib/shirudo/upatches";
 const PATH_MAX: usize = 4096;
 const R_OK: c_int = 4;
 
-fn say(level: unsafe extern "C" fn(*const c_char, ...), text: &[u8]) {
+fn say(level: fn(&[u8]), text: &[u8]) {
     let msg = CString::new(cstr(text).to_vec()).unwrap_or_default();
 
     // SAFETY: a "%s" format with a C string.
-    unsafe { level(c"%s".as_ptr(), msg.as_ptr()) };
+    unsafe { crate::log::log_c!(level, c"%s".as_ptr(), msg.as_ptr()) };
 }
 
 fn error(text: &[u8]) {
-    say(pr_err, text);
+    say(crate::log::err, text);
 }
 
 fn info(text: &[u8]) {
-    say(pr_info, text);
+    say(crate::log::info, text);
 }
 
 fn strerr(err: c_int) -> &'static [u8] {

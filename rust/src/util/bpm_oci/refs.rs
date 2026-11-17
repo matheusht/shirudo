@@ -13,7 +13,6 @@ use super::{
 };
 use crate::errno::{EINVAL, ENAMETOOLONG, EPERM};
 use crate::sys::libc::{self, AT_FDCWD, S_IFMT, S_IFREG, STATX_SIZE, STATX_TYPE, Statx};
-use crate::sys::log::pr_err;
 use crate::util::crypto_openssl::{Cert, cert_free, cert_read_file};
 
 /// `oci://host[:port]` into the client, with the transport
@@ -32,7 +31,12 @@ pub(super) fn parse_endpoint(endpoint: &[u8], c: &mut OciClient) -> c_int {
     if let Some(scheme) = scheme.filter(|s| !s.is_empty()) {
         if scheme != b"https" && scheme != b"http" {
             // SAFETY: a C string format without conversions.
-            unsafe { pr_err(c"bpm OCI: BPM_OCI_SCHEME must be https or http".as_ptr()) };
+            unsafe {
+                crate::log::log_c!(
+                    crate::log::err,
+                    c"bpm OCI: BPM_OCI_SCHEME must be https or http".as_ptr()
+                )
+            };
             return -EINVAL;
         }
         transport = scheme;
@@ -53,7 +57,12 @@ pub(super) fn parse_endpoint(endpoint: &[u8], c: &mut OciClient) -> c_int {
         // SAFETY: a C string path and a cert to fill.
         if unsafe { cert_read_file(c_ptr(&c.ca_file), &mut ca) } != 0 {
             // SAFETY: a C string format without conversions.
-            unsafe { pr_err(c"bpm OCI: BPM_OCI_CA_FILE is not a readable certificate".as_ptr()) };
+            unsafe {
+                crate::log::log_c!(
+                    crate::log::err,
+                    c"bpm OCI: BPM_OCI_CA_FILE is not a readable certificate".as_ptr()
+                )
+            };
             return -EINVAL;
         }
         // SAFETY: the cert cert_read_file() filled.
@@ -62,7 +71,10 @@ pub(super) fn parse_endpoint(endpoint: &[u8], c: &mut OciClient) -> c_int {
     if c.ca_file[0] != 0 && !regular_nonempty(&c.ca_file) {
         // SAFETY: a C string format without conversions.
         unsafe {
-            pr_err(c"bpm OCI: BPM_OCI_CA_FILE must name a non-empty regular PEM file".as_ptr())
+            crate::log::log_c!(
+                crate::log::err,
+                c"bpm OCI: BPM_OCI_CA_FILE must name a non-empty regular PEM file".as_ptr()
+            )
         };
         return -EINVAL;
     }

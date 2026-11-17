@@ -20,7 +20,6 @@ use crate::sys::libc::{
     Dirent, O_CLOEXEC, O_RDONLY, PATH_MAX, Tm, alphasort, close, errno, fwrite, open, scandir,
     stdout, strerror, strftime,
 };
-use crate::sys::log::{pr_audit, pr_err, pr_info, pr_warn};
 use crate::sys::openssl::{
     ASN1_TIME_to_tm, Asn1Time, BIO_free, BIO_new_fd, Bio, CRYPTO_free, EVP_Digest, EVP_PKEY_free,
     EVP_PKEY_get_base_id, EVP_PKEY_get_bits, EVP_PKEY_get0_type_name, EVP_sha256, EvpPkey,
@@ -84,25 +83,25 @@ fn message(parts: &[&[u8]]) -> CString {
 fn error(parts: &[&[u8]]) {
     let msg = message(parts);
     // SAFETY: a "%s" format with a C string.
-    unsafe { pr_err(c"%s".as_ptr(), msg.as_ptr()) };
+    unsafe { crate::log::log_c!(crate::log::err, c"%s".as_ptr(), msg.as_ptr()) };
 }
 
 fn warn(parts: &[&[u8]]) {
     let msg = message(parts);
     // SAFETY: a "%s" format with a C string.
-    unsafe { pr_warn(c"%s".as_ptr(), msg.as_ptr()) };
+    unsafe { crate::log::log_c!(crate::log::warn, c"%s".as_ptr(), msg.as_ptr()) };
 }
 
 fn info(parts: &[&[u8]]) {
     let msg = message(parts);
     // SAFETY: a "%s" format with a C string.
-    unsafe { pr_info(c"%s".as_ptr(), msg.as_ptr()) };
+    unsafe { crate::log::log_c!(crate::log::info, c"%s".as_ptr(), msg.as_ptr()) };
 }
 
 fn audit(parts: &[&[u8]]) {
     let msg = message(parts);
     // SAFETY: a "%s" format with a C string.
-    unsafe { pr_audit(c"%s".as_ptr(), msg.as_ptr()) };
+    unsafe { crate::log::log_c!(crate::log::audit, c"%s".as_ptr(), msg.as_ptr()) };
 }
 
 fn strerr(err: c_int) -> &'static [u8] {

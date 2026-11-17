@@ -22,7 +22,6 @@ use crate::sys::libc::{
     O_WRONLY, PATH_MAX, S_IFMT, S_IFREG, STATX_BASIC_STATS, Statx, close, errno, fsetxattr, fsync,
     link, mkdtemp, open, read, rmdir, statx, strerror, unlink,
 };
-use crate::sys::log::pr_warn;
 use crate::sys::string::strsprintf;
 use crate::util::config_image::{
     ConfigImageOpen, MAX_BYTES, SIG_MAX, config_image_close, config_image_open,
@@ -293,7 +292,8 @@ unsafe fn verify_incoming(opened: &ConfigImageOpen, staging: *const c_char) -> c
     if cleanup != 0 {
         // SAFETY: the C's format, and the string it converts.
         unsafe {
-            pr_warn(
+            crate::log::log_c!(
+                crate::log::warn,
                 c"image: cannot remove incoming mapping: %s".as_ptr(),
                 strerror(-cleanup),
             )

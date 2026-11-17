@@ -13,7 +13,6 @@ use crate::errno::ENOMEM;
 use crate::ffi::c_splice;
 use crate::heap::{xcalloc, xfree};
 use crate::sys::libc::{PATH_MAX, X_OK, access, env, errno, execv, execvp, strerror};
-use crate::sys::log::pr_err;
 use crate::util::help::{Help, is_help, print_help};
 
 /// LIBEXEC_DIR: where packages install the helper, which the build
@@ -102,14 +101,21 @@ unsafe fn exec(label: *const c_char, argv: *mut *const c_char) -> c_int {
 
     if path.is_empty() {
         // SAFETY: the C's format and the caller's label.
-        unsafe { pr_err(c"'%s' cannot use empty SHIRUDO_BUILD".as_ptr(), label) };
+        unsafe {
+            crate::log::log_c!(
+                crate::log::err,
+                c"'%s' cannot use empty SHIRUDO_BUILD".as_ptr(),
+                label
+            )
+        };
         return 127;
     }
     // SAFETY: a path, and a mode.
     if !use_path && unsafe { access(path.as_ptr(), X_OK) } != 0 {
         // SAFETY: the C's format, the caller's label and the path.
         unsafe {
-            pr_err(
+            crate::log::log_c!(
+                crate::log::err,
                 c"'%s' is an operator-only subcommand; shirudo-build helper '%s' is not \
                   executable. Set SHIRUDO_BUILD to a helper path or put shirudo-build on PATH."
                     .as_ptr(),
@@ -128,7 +134,12 @@ unsafe fn exec(label: *const c_char, argv: *mut *const c_char) -> c_int {
         } else {
             execv(path.as_ptr(), argv.cast_const());
         }
-        pr_err(c"exec %s: %s".as_ptr(), path.as_ptr(), strerror(errno()));
+        crate::log::log_c!(
+            crate::log::err,
+            c"exec %s: %s".as_ptr(),
+            path.as_ptr(),
+            strerror(errno())
+        );
     }
     127
 }
@@ -158,7 +169,14 @@ pub(super) unsafe fn forward(
     let helper = unsafe { xcalloc(count, size_of::<*const c_char>()) }.cast::<*const c_char>();
     if helper.is_null() {
         // SAFETY: the C's format, the caller's label and the error's text.
-        unsafe { pr_err(c"'%s': %s".as_ptr(), label, strerror(ENOMEM)) };
+        unsafe {
+            crate::log::log_c!(
+                crate::log::err,
+                c"'%s': %s".as_ptr(),
+                label,
+                strerror(ENOMEM)
+            )
+        };
         return 1;
     }
     // SAFETY: room for count pointers, zeroed, so that the first and the

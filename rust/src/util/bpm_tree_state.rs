@@ -16,7 +16,6 @@ use crate::sys::libc::{
     File, O_RDONLY, PATH_MAX, R_OK, Utsname, access, close, errno, fclose, fdopen, fopen, strerror,
     uname,
 };
-use crate::sys::log::pr_err;
 use crate::sys::zlib::{
     MAX_WBITS, Z_MEM_ERROR, Z_NO_FLUSH, Z_OK, Z_STREAM_END, ZLIB_VERSION, ZStream, inflate,
     inflateEnd, inflateInit2_,
@@ -896,7 +895,8 @@ fn state_write(s: &TreeState) -> c_int {
         // SAFETY: the C's format, a C string and the C library's
         // message.
         unsafe {
-            pr_err(
+            crate::log::log_c!(
+                crate::log::err,
                 c"tree state mkdir %s: %s".as_ptr(),
                 TREE_VAR_DIR.as_ptr(),
                 strerror(-ret),

@@ -10,7 +10,7 @@
 mod lsm;
 mod restore;
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
 use core::{mem, ptr};
 use std::ffi::{CString, OsStr};
 use std::io::Write;
@@ -24,7 +24,6 @@ use crate::sys::identity::Identity;
 use crate::sys::libc::{
     Statfs, Statvfs, fwrite, mount, statfs, statvfs, stderr, stdout, strerror, umount2,
 };
-use crate::sys::log::{pr_err, pr_info, pr_warn};
 use crate::text::cstr;
 use crate::util::chain;
 use crate::util::eventlog::{
@@ -124,23 +123,23 @@ macro_rules! cat {
 }
 pub(super) use cat;
 
-fn say(level: unsafe extern "C" fn(*const c_char, ...), text: &[u8]) {
+fn say(level: fn(&[u8]), text: &[u8]) {
     let msg = CString::new(cstr(text).to_vec()).unwrap_or_default();
 
     // SAFETY: a "%s" format with a C string.
-    unsafe { level(c"%s".as_ptr(), msg.as_ptr()) };
+    unsafe { crate::log::log_c!(level, c"%s".as_ptr(), msg.as_ptr()) };
 }
 
 pub(super) fn error(text: &[u8]) {
-    say(pr_err, text);
+    say(crate::log::err, text);
 }
 
 pub(super) fn warn(text: &[u8]) {
-    say(pr_warn, text);
+    say(crate::log::warn, text);
 }
 
 pub(super) fn info(text: &[u8]) {
-    say(pr_info, text);
+    say(crate::log::info, text);
 }
 
 pub(super) fn strerr(err: c_int) -> &'static [u8] {

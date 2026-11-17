@@ -138,11 +138,11 @@ fn zeroed<T>() -> T {
     unsafe { core::mem::zeroed() }
 }
 
-/// pr_err() with the C's format.
+/// A failure logged with the C's format.
 macro_rules! err {
     ($fmt:expr $(, $arg:expr)*) => {
         // SAFETY: a format of the C's, and the arguments it takes.
-        unsafe { $crate::sys::log::pr_err($fmt.as_ptr() $(, $arg)*) }
+        unsafe { $crate::log::log_c!($crate::log::err, $fmt.as_ptr() $(, $arg)*) }
     };
 }
 

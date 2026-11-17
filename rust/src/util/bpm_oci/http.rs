@@ -21,7 +21,6 @@ use crate::ffi;
 use crate::heap::{xfree, xreallocarray};
 use crate::sys::curl::{self, Curl, CurlSlist};
 use crate::sys::libc::{self, SEEK_SET, scrub};
-use crate::sys::log::pr_err;
 use crate::util::crypto_openssl::{SHA256_LEN, sha256_buffer};
 use crate::util::hex::hex_encode;
 use crate::util::io::write_complete;
@@ -332,7 +331,8 @@ fn curl_once_headers(
         curl::set_long(handle, curl::CURLOPT_SSL_VERIFYPEER, 1);
         curl::set_long(handle, curl::CURLOPT_SSL_VERIFYHOST, 2);
         if tls_curl_policy(handle, &mut c.tls_ca) != 0 {
-            pr_err(
+            crate::log::log_c!(
+                crate::log::err,
                 c"bpm OCI request %s: cannot apply TLS policy".as_ptr(),
                 req.url.as_ptr(),
             );
@@ -378,7 +378,14 @@ fn curl_once_headers(
         };
 
         // SAFETY: the C format with two C strings.
-        unsafe { pr_err(c"bpm OCI request %s: %s".as_ptr(), req.url.as_ptr(), reason) };
+        unsafe {
+            crate::log::log_c!(
+                crate::log::err,
+                c"bpm OCI request %s: %s".as_ptr(),
+                req.url.as_ptr(),
+                reason
+            )
+        };
         status = -1;
     }
     if let Some(f) = file_ptr {
@@ -751,7 +758,8 @@ fn request(c: &mut OciClient, req: &Request, r: &mut HttpResponse) -> c_int {
                 // SAFETY: the C format, with a C string, a long, an int
                 // and n bytes of the body for %.*s.
                 unsafe {
-                    pr_err(
+                    crate::log::log_c!(
+                        crate::log::err,
                         c"bpm OCI request %s: HTTP %ld: %.*s".as_ptr(),
                         req.url.as_ptr(),
                         r.status,
@@ -762,7 +770,8 @@ fn request(c: &mut OciClient, req: &Request, r: &mut HttpResponse) -> c_int {
             } else {
                 // SAFETY: the C format, with a C string and a long.
                 unsafe {
-                    pr_err(
+                    crate::log::log_c!(
+                        crate::log::err,
                         c"bpm OCI request %s: HTTP %ld".as_ptr(),
                         req.url.as_ptr(),
                         r.status,

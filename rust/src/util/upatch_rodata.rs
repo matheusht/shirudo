@@ -20,7 +20,6 @@ use crate::sys::btf::{
     btf_dump__dump_type_data, btf_dump__free, btf_dump__new, libbpf_get_error,
 };
 use crate::sys::libc::{STDOUT_FILENO, VaList, printf, putchar, stdout, vfprintf};
-use crate::sys::log::pr_err;
 use crate::sys::string::strsprintf;
 use crate::util::io::write_complete;
 use crate::util::json::{JsonEmit, MAX_BYTES};
@@ -1342,7 +1341,8 @@ unsafe fn print_rodata_text(u: &Upatch, path: *const c_char, view: &View) -> c_i
         if ret == -E2BIG {
             // SAFETY: the C's format and an integer.
             unsafe {
-                pr_err(
+                crate::log::log_c!(
+                    crate::log::err,
                     c"BTF text output exceeds %u values".as_ptr(),
                     TEXT_MAX_VALUES,
                 )
@@ -1476,7 +1476,8 @@ unsafe fn print_rodata_json(u: &Upatch, path: *const c_char, view: &View) -> c_i
             ret = write_complete(STDOUT_FILENO, c"\n".as_ptr().cast(), 1);
         }
         if e.err() == -E2BIG {
-            pr_err(
+            crate::log::log_c!(
+                crate::log::err,
                 c"BTF JSON output exceeds %u bytes".as_ptr(),
                 MAX_BYTES as u32,
             );

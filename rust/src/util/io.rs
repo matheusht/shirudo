@@ -16,7 +16,6 @@ use crate::sys::libc::{
     STATX_ATTR_MOUNT_ROOT, STATX_BASIC_STATS, Statfs, Statx, close, errno, flock, fstatfs, fsync,
     ftruncate, geteuid, getline, open, pread, realpath, set_errno, statx, strerror, syscall, write,
 };
-use crate::sys::log::{pr_err, pr_warn};
 use crate::util::seal::seal_open_read;
 
 /// `ETC_DIR` of util/paths.h.
@@ -155,7 +154,8 @@ pub(crate) unsafe fn append_line(
         }
         // SAFETY: the C's format and its arguments.
         unsafe {
-            pr_warn(
+            crate::log::log_c!(
+                crate::log::warn,
                 c"%s: dropped %lld bytes at its end, an append that did not finish".as_ptr(),
                 path,
                 size - end,
@@ -188,7 +188,8 @@ pub(crate) unsafe fn append_line(
     if ret != 0 && unsafe { ftruncate(fd, end) } != 0 {
         // SAFETY: the C's format and its arguments.
         unsafe {
-            pr_warn(
+            crate::log::log_c!(
+                crate::log::warn,
                 c"%s: could not roll back a partial append: %s".as_ptr(),
                 path,
                 strerror(errno()),
@@ -417,7 +418,8 @@ pub(crate) unsafe fn check_trusted(fd: c_int, path: *const c_char, secret: bool)
 
         // SAFETY: the C's format and its arguments.
         unsafe {
-            pr_err(
+            crate::log::log_c!(
+                crate::log::err,
                 c"%s: owner %u, mode %04o: refusing a file another user could %s".as_ptr(),
                 path,
                 st.uid,
@@ -459,7 +461,7 @@ pub(crate) unsafe fn check_trusted(fd: c_int, path: *const c_char, secret: bool)
         {
             // SAFETY: the C's format and its arguments.
             unsafe {
-                pr_err(
+                crate::log::log_c!(crate::log::err,
                     c"%s: directory %s, owner %u, mode %04o: refusing a file another user could replace"
                         .as_ptr(),
                     path,

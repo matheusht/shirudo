@@ -10,7 +10,6 @@ use core::ffi::{CStr, c_char, c_int};
 use crate::errno::{E2BIG, ENOMEM};
 use crate::heap::{xfree, xmalloc, xstrfree, xstrndup};
 use crate::sys::libc::{Utsname, printf, strerror, strerrorname_np, uname};
-use crate::sys::log::pr_err;
 use crate::text::{cstr, strsprintf};
 use crate::util::eventlog::NV_INDEX;
 use crate::util::json::JsonEmit;
@@ -187,7 +186,13 @@ pub(crate) unsafe fn report_emit(path: *const c_char, r: &OpReport) -> c_int {
 
     if ret != 0 {
         // SAFETY: a format of one C string, and strerror()'s.
-        unsafe { pr_err(c"report: encode failed: %s".as_ptr(), strerror(-ret)) };
+        unsafe {
+            crate::log::log_c!(
+                crate::log::err,
+                c"report: encode failed: %s".as_ptr(),
+                strerror(-ret)
+            )
+        };
     } else if to_stdout {
         // SAFETY: a format of one C string, and the report, which the
         // emitter ends with a NUL.
@@ -200,7 +205,14 @@ pub(crate) unsafe fn report_emit(path: *const c_char, r: &OpReport) -> c_int {
         if ret != 0 {
             // SAFETY: a format of two C strings, the path and
             // strerror()'s.
-            unsafe { pr_err(c"report: open %s: %s".as_ptr(), path, strerror(-ret)) };
+            unsafe {
+                crate::log::log_c!(
+                    crate::log::err,
+                    c"report: open %s: %s".as_ptr(),
+                    path,
+                    strerror(-ret)
+                )
+            };
         } else {
             // SAFETY: the output just created, and the report, which
             // the emitter ends with a NUL.
@@ -210,7 +222,14 @@ pub(crate) unsafe fn report_emit(path: *const c_char, r: &OpReport) -> c_int {
             if ret != 0 {
                 // SAFETY: a format of two C strings, the path and
                 // strerror()'s.
-                unsafe { pr_err(c"report: write %s: %s".as_ptr(), path, strerror(-ret)) };
+                unsafe {
+                    crate::log::log_c!(
+                        crate::log::err,
+                        c"report: write %s: %s".as_ptr(),
+                        path,
+                        strerror(-ret)
+                    )
+                };
             }
         }
     }

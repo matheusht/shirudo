@@ -24,7 +24,6 @@ use crate::sys::curl::{
     set_callback, set_long, set_off, set_ptr,
 };
 use crate::sys::libc::{Tm, getrandom, strptime, timegm};
-use crate::sys::log::pr_err;
 use crate::sys::zlib::{ZStream, compressBound, deflate, deflateEnd, deflateInit2_};
 use crate::text::parse_s64;
 use crate::util::json::{JsonField, parse_schema};
@@ -60,7 +59,7 @@ fn say(text: String) {
     let text = CString::new(text).unwrap_or_default();
 
     // SAFETY: a "%s" format with a C string.
-    unsafe { pr_err(c"%s".as_ptr(), text.as_ptr()) };
+    unsafe { crate::log::log_c!(crate::log::err, c"%s".as_ptr(), text.as_ptr()) };
 }
 
 fn shown(b: &[u8]) -> std::borrow::Cow<'_, str> {
