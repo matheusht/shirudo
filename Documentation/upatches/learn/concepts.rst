@@ -70,8 +70,8 @@ those steps in the kernel, together with the data it loads. shirudo's LSM
 admits no other ``BPF_PROG_LOAD`` from userspace than such a signed
 loader.
 
-``shirudo build`` compiles the source with clang, then runs libbpf's loader
-generator over the object. The generator records every step that loading
+``shirudo build`` compiles the source with clang, then generates a loader
+from the object as libbpf's loader generator would. The generator records every step that loading
 the object takes, map creation, the BTF load, each program load with its
 CO-RE relocation records and the lookup of its attach target, as the
 instructions of a loader program. The author's program instructions, the

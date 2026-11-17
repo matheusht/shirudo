@@ -44,16 +44,16 @@ order and what ``data`` holds.
      - ``struct upatch_header``.
    * - ``loader_insns``
      - ``loader_insns_off``, ``loader_insns_len``
-     - The ``BPF_PROG_TYPE_SYSCALL`` loader program that libbpf's
-       ``bpf_object__gen_loader()`` generates, as 8-byte
+     - The ``BPF_PROG_TYPE_SYSCALL`` loader program that ``shirudo-build``
+       generates as libbpf's ``bpf_object__gen_loader()`` would, as 8-byte
        ``struct bpf_insn`` records. The writer places it at offset 360.
    * - ``signature``
      - ``signature_off``, ``signature_len``
      - Detached CMS signature over ``loader_insns || data``.
    * - ``data``
      - ``data_off``, ``data_len``
-     - The loader's data blob (``gen_loader_opts.data``), then the signed
-       sections, their directory and the trailer.
+     - The loader's data blob (libbpf's ``gen_loader_opts.data``), then
+       the signed sections, their directory and the trailer.
    * - ``metadata``
      - ``metadata_off``, ``metadata_len``
      - Absent. ``shirudo build`` sets both fields to 0. The target never

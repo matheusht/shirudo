@@ -6,7 +6,7 @@
 
 use core::ffi::c_int;
 
-use crate::errno::EINVAL;
+use crate::errno::{EINVAL, EOPNOTSUPP};
 
 fn le32(b: &[u8], off: usize) -> Option<u32> {
     Some(u32::from_le_bytes(b.get(off..off + 4)?.try_into().ok()?))
@@ -74,18 +74,25 @@ fn parse_info<'a>(
     Ok(Info { rec_size, groups })
 }
 
+/// Whether the section is of the other byte order, which libbpf reads
+/// and this does not.
+pub(crate) fn foreign(data: &[u8]) -> bool {
+    data.len() >= 8 && u16::from_be_bytes([data[0], data[1]]) == super::btf::MAGIC
+}
+
 impl<'a> BtfExt<'a> {
     pub(crate) fn parse(data: &'a [u8]) -> Result<Self, c_int> {
         let bad = Err(-EINVAL);
         let word = |off| le32(data, off).ok_or(-EINVAL);
-        if data.len() < 8
-            || u16::from_le_bytes([data[0], data[1]]) != super::btf::MAGIC
-            || data[2] != 1
-        {
+        if data.len() < 8 || u16::from_le_bytes([data[0], data[1]]) != super::btf::MAGIC {
             return bad;
         }
+        // Version 1 and no flags.
+        if data[2] != 1 || data[3] != 0 {
+            return Err(-EOPNOTSUPP);
+        }
         let hdr_len = word(4)? as usize;
-        if hdr_len < 24 || hdr_len > data.len() {
+        if hdr_len < 24 || hdr_len >= data.len() {
             return bad;
         }
         let func = parse_info(data, hdr_len, word(8)? as usize, word(12)? as usize, 8)?;

@@ -10,8 +10,9 @@
 use core::ffi::c_int;
 use std::ffi::CString;
 
-use super::bpf::{Object, Prog};
 use super::{error, strerr};
+use crate::bpf::MAP_ARRAY;
+use crate::bpf::object::{Object, Prog};
 use crate::errno::{EINVAL, ENAMETOOLONG, ENOENT, EOPNOTSUPP, EOVERFLOW};
 use crate::text::{parse_u64, parse_x64};
 use crate::util::elf_target::{ElfTarget, elf_target_free, elf_target_resolve};
@@ -30,11 +31,10 @@ const SERIAL_MAP_NAME: &[u8] = b"shirudo_ser";
 /// sizeof(struct serial_chunk) and SERIAL_MAX_CHUNKS.
 const SERIAL_CHUNK: u32 = 4096;
 const SERIAL_MAX_CHUNKS: u32 = 256;
-const BPF_MAP_TYPE_ARRAY: u32 = 2;
 
 /// The section without the `?` that marks it optional.
-fn bare(sec: Option<&[u8]>) -> Option<&[u8]> {
-    sec.map(|s| s.strip_prefix(b"?").unwrap_or(s))
+fn bare(sec: &[u8]) -> &[u8] {
+    sec.strip_prefix(b"?").unwrap_or(sec)
 }
 
 /// `s` starts with `prefix` and goes on after it.
@@ -173,26 +173,21 @@ fn split_probe_target(src: &[u8]) -> Result<(&[u8], u64), c_int> {
     Ok((symbol, offset))
 }
 
-fn serializer_map<'a>(p: &Prog<'a>) -> Option<&'a [u8]> {
-    p.name()?.strip_prefix(SERIALIZER_PREFIX)
+fn serializer_map(p: &Prog) -> Option<&[u8]> {
+    p.name.strip_prefix(SERIALIZER_PREFIX)
 }
 
-fn is_syscall(sec: Option<&[u8]>) -> bool {
-    sec == Some(b"syscall")
-}
-
-/// A section for a message: as printf prints a NULL one.
-fn shown(sec: Option<&[u8]>) -> &[u8] {
-    sec.unwrap_or(b"(null)")
+fn is_syscall(sec: &[u8]) -> bool {
+    sec == b"syscall"
 }
 
 fn validate_serializer_output_map(obj: &Object) -> c_int {
     let name = String::from_utf8_lossy(SERIAL_MAP_NAME);
-    let Some(m) = obj.maps().find(|m| m.name() == SERIAL_MAP_NAME) else {
+    let Some(m) = obj.map(SERIAL_MAP_NAME) else {
         error(format!("serializer upatch requires {name} output map").as_bytes());
         return -EINVAL;
     };
-    let why = if m.ty() != BPF_MAP_TYPE_ARRAY {
+    let why = if m.map_type() != MAP_ARRAY {
         format!("{name} must be BPF_MAP_TYPE_ARRAY")
     } else if m.key_size() != 4 {
         format!("{name} must use a u32 key")
@@ -244,12 +239,7 @@ impl UprobeTarget {
 
 /// The entry of one attaching program: its kind, and its target and
 /// offset, or its uprobe target, which it records into `uprobes`.
-fn attach_entry(
-    sec: Option<&[u8]>,
-    i: usize,
-    entry: &mut [u8],
-    uprobes: &mut Vec<UprobeTarget>,
-) -> c_int {
+fn attach_entry(sec: &[u8], i: usize, entry: &mut [u8], uprobes: &mut Vec<UprobeTarget>) -> c_int {
     let s = bare(sec);
     let unsupported: [Rule; 6] = [
         (
@@ -277,16 +267,16 @@ fn attach_entry(
             "unsupported fmod_ret section '{}'; use fmod_ret/<symbol> or fmod_ret.s/<symbol>",
         ),
     ];
-    let shown_sec = String::from_utf8_lossy(shown(sec)).into_owned();
+    let shown_sec = String::from_utf8_lossy(sec).into_owned();
 
     for (test, msg) in unsupported {
-        if s.is_some_and(test) {
+        if test(s) {
             error(msg.replace("{}", &shown_sec).as_bytes());
             return -EOPNOTSUPP;
         }
     }
-    let (kind, target) = s.map_or((ATTACH_RAW_TRACEPOINT, None), attach_kind);
-    if kind == ATTACH_RAW_TRACEPOINT && !s.is_some_and(default_attach) {
+    let (kind, target) = attach_kind(s);
+    if kind == ATTACH_RAW_TRACEPOINT && !default_attach(s) {
         error(format!("unsupported section '{shown_sec}'; supported are fentry, fexit, fmod_ret, lsm, tp_btf, kprobe, kretprobe, uprobe.multi, cgroup_skb and netfilter").as_bytes());
         return -EOPNOTSUPP;
     }
@@ -399,7 +389,7 @@ fn append_uprobes(md: &mut Vec<u8>, uprobes: &[UprobeTarget]) -> c_int {
 /// The attach metadata of `obj`, of `nr_maps` maps and `nr_progs`
 /// programs.
 pub(super) fn prog_metadata(obj: &Object, nr_maps: u32, nr_progs: u32) -> Result<Vec<u8>, c_int> {
-    if obj.programs().any(|p| serializer_map(&p).is_some()) {
+    if obj.programs().any(|p| serializer_map(p).is_some()) {
         let err = validate_serializer_output_map(obj);
         if err != 0 {
             return Err(err);
@@ -419,12 +409,12 @@ pub(super) fn prog_metadata(obj: &Object, nr_maps: u32, nr_progs: u32) -> Result
     let mut test_run = false;
 
     for (i, p) in obj.programs().enumerate() {
-        let sec = p.section();
+        let sec = &p.sec_name[..];
         let at = PROG_METADATA + i * PROG_ENTRY;
         let entry = &mut md[at..at + PROG_ENTRY];
-        let name = || String::from_utf8_lossy(p.name().unwrap_or(b"?")).into_owned();
+        let name = || String::from_utf8_lossy(&p.name).into_owned();
 
-        if let Some(map) = serializer_map(&p) {
+        if let Some(map) = serializer_map(p) {
             let shown_map = String::from_utf8_lossy(map);
             let why = if !is_syscall(sec) {
                 Some(format!("serializer '{}' must use SEC(\"syscall\")", name()))
@@ -438,7 +428,7 @@ pub(super) fn prog_metadata(obj: &Object, nr_maps: u32, nr_progs: u32) -> Result
                     "serializer cannot target reserved map {}",
                     String::from_utf8_lossy(SERIAL_MAP_NAME)
                 ))
-            } else if !obj.has_map(map) {
+            } else if obj.map(map).is_none() {
                 Some(format!(
                     "serializer '{}' targets missing map '{shown_map}'",
                     name()
@@ -459,8 +449,8 @@ pub(super) fn prog_metadata(obj: &Object, nr_maps: u32, nr_progs: u32) -> Result
         }
         if is_syscall(sec) {
             let named = p
-                .name()
-                .and_then(|n| n.strip_prefix(TEST_RUN_PREFIX))
+                .name
+                .strip_prefix(TEST_RUN_PREFIX)
                 .is_some_and(|id| !id.is_empty());
             let prefix = String::from_utf8_lossy(TEST_RUN_PREFIX);
             if !named {

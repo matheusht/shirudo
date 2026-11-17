@@ -283,6 +283,10 @@ impl Map {
         self.map_flags
     }
 
+    pub(crate) fn key_size(&self) -> u32 {
+        self.key_size
+    }
+
     pub(crate) fn value_size(&self) -> u32 {
         self.value_size
     }
@@ -290,6 +294,23 @@ impl Map {
     pub(crate) fn max_entries(&self) -> u32 {
         self.max_entries
     }
+
+    /// bpf_map__set_initial_value(): new contents for a map of global
+    /// data, exactly its value's size.
+    pub(crate) fn set_initial_value(&mut self, value: &[u8]) -> Result<(), c_int> {
+        if !self.is_internal() || value.len() != self.value_size as usize {
+            return Err(-EINVAL);
+        }
+        self.initial = value.to_vec();
+        Ok(())
+    }
+}
+
+/// The name libbpf gives an object it opens from `path`: the file's
+/// name up to its first '.'.
+pub(crate) fn object_name(path: &[u8]) -> &[u8] {
+    let base = path.rsplit(|&c| c == b'/').next().unwrap_or(path);
+    base.split(|&c| c == b'.').next().unwrap_or(base)
 }
 
 /// An extern of .ksyms: a kfunc or a typed kernel variable.
@@ -563,7 +584,7 @@ impl Object {
         obj.collect_externs(&cx)?;
         obj.fixup_btf(&cx)?;
         obj.init_maps(&cx)?;
-        obj.init_progs()?;
+        obj.init_progs();
         obj.collect_relos(&cx)?;
         Ok(obj)
     }
@@ -687,6 +708,12 @@ impl Object {
         }
         let (mut func_info, mut line_info, mut core_info) = (None, None, None);
         if let Some(d) = btf_ext_data {
+            if btf_ext::foreign(d) {
+                return fail(
+                    -EOPNOTSUPP,
+                    "elf: .BTF.ext of the other byte order is not supported",
+                );
+            }
             match BtfExt::parse(d) {
                 Ok(ext) => {
                     let mk = |i: &btf_ext::Info<'_>| Some(ExtInfo::new(i, &btf, &cx.elf));
@@ -1183,9 +1210,11 @@ impl Object {
     }
 
     /// bpf_object_init_progs(): each program's type, attach type and
-    /// flags from its section.
-    fn init_progs(&mut self) -> Result<(), c_int> {
-        let text = self.text_shndx;
+    /// flags from its section. A program of a section shirudo does not
+    /// build is refused when it is loaded, as libbpf refuses one it
+    /// cannot type: until then the object stays open, for its caller to
+    /// say what it supports.
+    fn init_progs(&mut self) {
         for p in &mut self.progs {
             p.def = find_sec_def(&p.sec_name);
             if let Some(d) = p.def {
@@ -1194,18 +1223,8 @@ impl Object {
                 if d.flags & SEC_SLEEPABLE != 0 {
                     p.prog_flags |= F_SLEEPABLE;
                 }
-            } else if p.sec_idx != text && p.strategy != Strategy::Disabled {
-                return fail(
-                    -EOPNOTSUPP,
-                    format!(
-                        "prog '{}': section '{}' is not supported",
-                        show(&p.name),
-                        show(&p.sec_name)
-                    ),
-                );
             }
         }
-        Ok(())
     }
 
     fn find_prog_by_sec_insn(&self, sec_idx: usize, insn_idx: usize) -> Option<usize> {
@@ -1234,6 +1253,20 @@ impl Object {
 
     pub(crate) fn btf(&self) -> &Btf {
         &self.btf
+    }
+
+    /// bpf_object__find_map_by_name()
+    pub(crate) fn map(&self, name: &[u8]) -> Option<&Map> {
+        self.maps.iter().find(|m| m.name == name)
+    }
+
+    /// The map of .rodata, "<object>.rodata" as libbpf names it.
+    pub(crate) fn rodata_mut(&mut self) -> Option<&mut Map> {
+        self.maps.iter_mut().find(|m| m.name.ends_with(b".rodata"))
+    }
+
+    pub(crate) fn rodata(&self) -> Option<&Map> {
+        self.maps.iter().find(|m| m.name.ends_with(b".rodata"))
     }
 
     fn is_subprog(&self, p: &Prog) -> bool {
@@ -1770,10 +1803,14 @@ impl Object {
                     _ => {}
                 }
             }
-            if prog.prog_type == 0 {
+            if prog.def.is_none() {
                 return fail(
-                    -EINVAL,
-                    format!("prog '{}': missing BPF prog type", show(&prog.name)),
+                    -EOPNOTSUPP,
+                    format!(
+                        "prog '{}': section '{}' is not supported",
+                        show(&prog.name),
+                        show(&prog.sec_name)
+                    ),
                 );
             }
             let mut attach_btf_id = 0;

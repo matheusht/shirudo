@@ -10,8 +10,8 @@ use core::ffi::c_int;
 use core::ptr;
 use std::ffi::CString;
 
-use super::bpf::Object;
 use super::{error, strerr};
+use crate::bpf::object::Object;
 use crate::errno::{EEXIST, EINVAL, EOPNOTSUPP, EOVERFLOW};
 use crate::heap::xfree;
 use crate::text::cstr;
@@ -145,7 +145,7 @@ fn collect(
     let Some(rodata) = obj.rodata() else {
         return Ok(Vec::new());
     };
-    let data = rodata.initial_value();
+    let data = &rodata.initial[..];
     let mut out: Vec<Decoder> = Vec::new();
     let mut off = 0;
 
@@ -174,7 +174,7 @@ fn collect(
                 format!("decoder upatch '{u}' does not match package name '{name}'"),
                 -EINVAL,
             ))
-        } else if !obj.has_map(&m.map) {
+        } else if obj.map(&m.map).is_none() {
             Some((format!("decoder manifest for missing map '{map}'"), -EINVAL))
         } else if out
             .iter()

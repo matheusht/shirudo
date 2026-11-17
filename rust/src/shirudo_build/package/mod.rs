@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The packager: a BPF object into a signed `.upatch`. libbpf's
-//! gen_loader turns the object into a loader program and its data; the
+//! The packager: a BPF object into a signed `.upatch`. The object is
+//! read as libbpf reads it and its loader program and data generated as
+//! libbpf's gen_loader generates them (crate::bpf); the
 //! attach metadata, the decoders, the policy labels and the name are
 //! signed with the data, past the end the loader addresses; CMS signs
 //! the loader and the data; and the container puts a header in front.
@@ -11,22 +12,17 @@
 //! package whose data differs from a signed one only in named .rodata
 //! symbols, and signs it anew.
 
-mod bpf;
 mod decoders;
 mod meta;
 
 use core::ffi::{CStr, c_int, c_void};
-use core::ptr;
 use std::ffi::CString;
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
-use self::bpf::Object;
 use super::{KeyFiles, error, info, strerr};
+use crate::bpf::object::{self, GenOpts, Object};
 use crate::errno::{E2BIG, EBADMSG, EINVAL, EIO, ENAMETOOLONG, ENOENT, EOVERFLOW, EPERM};
-use crate::sys::libbpf::{
-    GenLoaderOpts, libbpf_register_prog_handler, libbpf_unregister_prog_handler,
-};
 use crate::sys::loader::unload_blob;
 use crate::text::{digits, parse_u64};
 use crate::util::bpm_package::verify_cms;
@@ -52,9 +48,6 @@ const LOG_BUF_SZ: u32 = 1024 * 1024;
 /// The symbols `upatch rewrite-rodata` may change.
 const RESIGN_SYMBOLS: [&CStr; 2] = [c"obs_watch_v4", c"obs_watch_v6"];
 const RANGES_MAX: usize = 16;
-const BPF_PROG_TYPE_CGROUP_SKB: u32 = 8;
-const BPF_CGROUP_INET_INGRESS: u32 = 0;
-const BPF_CGROUP_INET_EGRESS: u32 = 1;
 const BPF_MAP_TYPE_SK_STORAGE: u32 = 24;
 const BPF_MAP_TYPE_TASK_STORAGE: u32 = 29;
 const BPF_F_NO_PREALLOC: u32 = 1;
@@ -635,44 +628,20 @@ struct Contents<'a> {
     policy_labels: &'a [u8],
 }
 
-/// The generated loader program sets the attach type for cgroup_skb
-/// programs from the build host's view; set it explicitly so a host
-/// without expected_attach_type support cannot produce a loader the
-/// target rejects.
-fn set_target_attach_types(obj: &Object) -> c_int {
-    for p in obj.programs() {
-        let ty = match p.section() {
-            Some(b"cgroup_skb/ingress") => BPF_CGROUP_INET_INGRESS,
-            Some(b"cgroup_skb/egress") => BPF_CGROUP_INET_EGRESS,
-            _ => continue,
-        };
-        if p.set_expected_attach_type(ty) != 0 {
-            let name = String::from_utf8_lossy(p.name().unwrap_or_default());
-            error(format!("set expected attach type for program '{name}'").as_bytes());
-            return -EINVAL;
-        }
-    }
-    0
-}
-
 /// The object as a signed package at `out`.
-fn finalize(obj: Object, out: &CStr, c: &Contents, keys: (&CStr, &CStr)) -> c_int {
+fn finalize(mut obj: Object, out: &CStr, c: &Contents, keys: (&CStr, &CStr)) -> c_int {
     // The loader writes map_fd/prog_fd back into descriptor arrays past
     // its ctx, in the order libbpf iterates the object; the target finds
     // prog_fd[] after BPF_PROG_TEST_RUN by these counts. The attach
     // metadata comes before the loader so that an unsupported section
-    // fails with shirudo's diagnostic, not the host kernel's.
-    let nr_maps = obj.maps().count() as u32;
+    // fails with shirudo's diagnostic, not the generator's.
+    let nr_maps = obj.maps.len() as u32;
     let nr_progs = obj.programs().count() as u32;
     let unloading = c.flags & DIRECTIVE_UNLOAD != 0;
     let name = c.name.to_bytes();
     let (mut attach_meta, mut decoder_blob, mut nr_decoders) = (Vec::new(), Vec::new(), 0);
 
     if !unloading {
-        let err = set_target_attach_types(&obj);
-        if err != 0 {
-            return err;
-        }
         attach_meta = match meta::prog_metadata(&obj, nr_maps, nr_progs) {
             Ok(m) => m,
             Err(err) => return err,
@@ -683,10 +652,10 @@ fn finalize(obj: Object, out: &CStr, c: &Contents, keys: (&CStr, &CStr)) -> c_in
                 Err(err) => return err,
             };
     }
-    // SAFETY: all-zero options with their size, as LIBBPF_OPTS makes them.
-    let mut opts: GenLoaderOpts = unsafe { core::mem::zeroed() };
-    opts.sz = size_of::<GenLoaderOpts>();
-    opts.gen_hash = true;
+    let mut opts = GenOpts {
+        gen_hash: true,
+        reuse_map_mask: 0,
+    };
     if !c.policy_labels.is_empty() {
         let le = |off: usize| {
             u32::from_le_bytes(c.policy_labels[off..off + 4].try_into().unwrap_or_default())
@@ -702,16 +671,13 @@ fn finalize(obj: Object, out: &CStr, c: &Contents, keys: (&CStr, &CStr)) -> c_in
         }
         opts.reuse_map_mask = (1u64 << map_idx) | (1u64 << socket_idx);
     }
-    let err = obj.gen_loader(&mut opts);
-    if err != 0 {
-        error(format!("bpf_object__gen_loader: {err}").as_bytes());
-        return err;
-    }
-    let err = obj.load();
-    if err != 0 {
-        error(format!("bpf_object__load: {err}").as_bytes());
-        return err;
-    }
+    let (insns, data) = match obj.gen_loader(&opts) {
+        Ok(l) => l,
+        Err(err) => {
+            error(format!("generate loader: {err}").as_bytes());
+            return err;
+        }
+    };
     // The name the pin, the archive and the register event carry, the
     // attach sites, the unload target: signed with the data, since the
     // header is not.
@@ -732,8 +698,8 @@ fn finalize(obj: Object, out: &CStr, c: &Contents, keys: (&CStr, &CStr)) -> c_in
             sections.push(Section(SECTION_POLICY_LABELS, c.policy_labels));
         }
     }
-    let insns = part(opts.insns.cast(), opts.insns_sz);
-    let signed = match compose_signed_data(part(opts.data.cast(), opts.data_sz), &sections) {
+    let insns = &insns[..];
+    let signed = match compose_signed_data(&data, &sections) {
         Ok(s) => s,
         Err(err) => return err,
     };
@@ -812,81 +778,38 @@ fn finalize(obj: Object, out: &CStr, c: &Contents, keys: (&CStr, &CStr)) -> c_in
         String::from_utf8_lossy(name),
     );
     info(msg.as_bytes());
-    drop(obj);
     0
-}
-
-/// The cgroup_skb section handlers, registered while a package is made
-/// and unregistered when it goes.
-struct Handlers([c_int; 2]);
-
-impl Handlers {
-    fn register() -> Result<Self, c_int> {
-        let mut h = Handlers([-1, -1]);
-        for (i, (sec, ty)) in [
-            (c"cgroup_skb/ingress", BPF_CGROUP_INET_INGRESS),
-            (c"cgroup_skb/egress", BPF_CGROUP_INET_EGRESS),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            // SAFETY: a C string, the types and the default options.
-            let id = unsafe {
-                libbpf_register_prog_handler(
-                    sec.as_ptr(),
-                    BPF_PROG_TYPE_CGROUP_SKB,
-                    ty,
-                    ptr::null(),
-                )
-            };
-            if id < 0 {
-                return Err(id);
-            }
-            h.0[i] = id;
-        }
-        Ok(h)
-    }
-}
-
-impl Drop for Handlers {
-    fn drop(&mut self) {
-        for &id in self.0.iter().rev().filter(|&&id| id >= 0) {
-            // SAFETY: a handler registered above.
-            unsafe { libbpf_unregister_prog_handler(id) };
-        }
-    }
 }
 
 /// The policy labels a package signs: their header and the entries,
 /// with the maps that hold the policy found in the object.
 fn policy_labels(obj: &Object, policies: &[u8], nr: u32) -> Result<Vec<u8>, c_int> {
-    let task = obj.maps().find(|m| m.name() == b"shirudo_task_policy");
-    let sock = obj.maps().find(|m| m.name() == b"shirudo_sock_policy");
-    let task_ok = task.is_some_and(|m| {
-        m.ty() == BPF_MAP_TYPE_TASK_STORAGE
+    let index = |name: &[u8]| obj.maps.iter().position(|m| m.name == name);
+    let (task, sock) = (index(b"shirudo_task_policy"), index(b"shirudo_sock_policy"));
+    let task_ok = task.is_some_and(|i| {
+        let m = &obj.maps[i];
+        m.map_type() == BPF_MAP_TYPE_TASK_STORAGE
             && m.key_size() == 4
             && m.value_size() == 16
-            && m.flags() == BPF_F_NO_PREALLOC
+            && m.map_flags() == BPF_F_NO_PREALLOC
     });
     if !task_ok {
         error(b"policy labels require a compatible shirudo_task_policy map");
         return Err(-EINVAL);
     }
-    let sock_ok = sock.is_some_and(|m| {
-        m.ty() == BPF_MAP_TYPE_SK_STORAGE
+    let sock_ok = sock.is_some_and(|i| {
+        let m = &obj.maps[i];
+        m.map_type() == BPF_MAP_TYPE_SK_STORAGE
             && m.key_size() == 4
             && m.value_size() == 8
-            && m.flags() == (BPF_F_NO_PREALLOC | BPF_F_CLONE)
+            && m.map_flags() == (BPF_F_NO_PREALLOC | BPF_F_CLONE)
     });
     if !sock_ok {
         error(b"policy labels require a compatible shirudo_sock_policy map");
         return Err(-EINVAL);
     }
-    let index = |want| obj.maps().position(|m| Some(m) == want);
-    let policy_idx = index(task)
-        .filter(|&i| i < MAPS_MAX as usize)
-        .ok_or(-E2BIG)?;
-    let socket_idx = index(sock)
+    let policy_idx = task.filter(|&i| i < MAPS_MAX as usize).ok_or(-E2BIG)?;
+    let socket_idx = sock
         .filter(|&i| i < MAPS_MAX as usize && i != policy_idx)
         .ok_or(-E2BIG)?;
     let total = (nr as usize)
@@ -920,14 +843,11 @@ pub(super) fn load(
     if err != 0 {
         return err;
     }
-    let handlers = match Handlers::register() {
-        Ok(h) => h,
-        Err(err) => {
-            error(format!("register cgroup_skb section handlers: {err}").as_bytes());
-            return err;
-        }
-    };
-    let obj = match Object::open_file(bpf_o) {
+    let path = bpf_o.to_bytes();
+    let obj = std::fs::read(super::path(path))
+        .map_err(|e| errno_of(&e))
+        .and_then(|data| Object::open(&data, object::object_name(path)));
+    let obj = match obj {
         Ok(o) => o,
         Err(err) => {
             error(format!("open {}: {err}", String::from_utf8_lossy(bpf_o.to_bytes())).as_bytes());
@@ -949,9 +869,7 @@ pub(super) fn load(
         src_path,
         policy_labels: &labels,
     };
-    let ret = finalize(obj, out, &contents, keys);
-    drop(handlers);
-    ret
+    finalize(obj, out, &contents, keys)
 }
 
 /// `struct unload_params` of the unload template: the name and the
@@ -972,14 +890,18 @@ pub(super) fn unload(name: &CStr, payload: &[u8; 32], out: &CStr, keys: (&CStr, 
         error(b"embedded unload template missing");
         return -ENOENT;
     };
-    let obj = match Object::open_mem(b.data, b.size) {
+    // SAFETY: the static blob's `size` bytes.
+    let data = unsafe { crate::ffi::slice(b.data.cast::<u8>(), b.size) };
+    // Named as libbpf names it opened from unload.bpf.o: from memory,
+    // libbpf would name it from its address, and its .rodata map so.
+    let mut obj = match Object::open(data, b"unload") {
         Ok(o) => o,
         Err(err) => {
             error(format!("open embedded unload template: {err}").as_bytes());
             return err;
         }
     };
-    let Some(rodata) = obj.rodata() else {
+    let Some(rodata) = obj.rodata_mut() else {
         error(b"unload template has no .rodata map");
         return -EINVAL;
     };
@@ -990,8 +912,7 @@ pub(super) fn unload(name: &CStr, payload: &[u8; 32], out: &CStr, keys: (&CStr, 
     let mut params = [0u8; UNLOAD_PARAMS];
     params[..n.len()].copy_from_slice(n);
     params[NAME_MAX..].copy_from_slice(payload);
-    let err = rodata.set_initial_value(&params);
-    if err != 0 {
+    if let Err(err) = rodata.set_initial_value(&params) {
         error(format!("set_initial_value(.rodata): {err}").as_bytes());
         return err;
     }

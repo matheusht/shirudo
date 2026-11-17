@@ -17,6 +17,29 @@ pub(crate) const SHT_REL: u32 = 9;
 pub(crate) const SHT_LLVM_ADDRSIG: u32 = 0x6fff_4c03;
 pub(crate) const SHF_EXECINSTR: u64 = 4;
 
+/// The size of the records libelf reads a section of type `ty` as, of
+/// which its size must be a multiple: elfutils' type sizes for the
+/// types it converts, a byte for any other.
+fn record_size(ty: u32) -> u64 {
+    match ty {
+        // SYMTAB, RELA, DYNSYM
+        2 | 4 | 11 => 24,
+        // DYNAMIC, REL, GNU_verneed
+        6 | SHT_REL | 0x6fff_fffe => 16,
+        // INIT_ARRAY, FINI_ARRAY, PREINIT_ARRAY
+        14..=16 => 8,
+        // HASH, GROUP, SYMTAB_SHNDX, SUNW_syminfo
+        5 | 17 | 18 | 0x6fff_fffc => 4,
+        // GNU_LIBLIST
+        0x6fff_fff7 => 20,
+        // SUNW_move
+        0x6fff_fffa => 28,
+        // GNU_versym
+        0x6fff_ffff => 2,
+        _ => 1,
+    }
+}
+
 pub(crate) const STT_OBJECT: u8 = 1;
 pub(crate) const STT_FUNC: u8 = 2;
 pub(crate) const STT_SECTION: u8 = 3;
@@ -160,19 +183,28 @@ impl<'a> Elf<'a> {
         Ok(elf)
     }
 
-    /// The contents of section `idx`, empty for NOBITS.
+    /// The contents of section `idx`, empty for NOBITS; none for a
+    /// section past the file's end or not whole records, as
+    /// elf_getdata() fails them.
     pub(crate) fn section_data(&self, idx: usize) -> Option<&'a [u8]> {
         let s = self.sections.get(idx)?;
         if s.ty == SHT_NOBITS {
             return Some(&[]);
+        }
+        if s.size % record_size(s.ty) != 0 {
+            return None;
         }
         let start = usize::try_from(s.offset).ok()?;
         let end = start.checked_add(usize::try_from(s.size).ok()?)?;
         self.data.get(start..end)
     }
 
-    /// The NUL-terminated string at `off` of the string section `idx`.
+    /// The NUL-terminated string at `off` of the string section `idx`,
+    /// which must be one, as elf_strptr() requires.
     pub(crate) fn str_at(&self, idx: usize, off: u32) -> Option<&'a [u8]> {
+        if self.sections.get(idx)?.ty != SHT_STRTAB {
+            return None;
+        }
         let strs = self.section_data(idx)?;
         let s = strs.get(off as usize..)?;
         Some(&s[..s.iter().position(|&c| c == 0)?])

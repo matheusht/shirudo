@@ -45,8 +45,8 @@ What the operator signs
 -----------------------
 
 The operator does not ship the upatch program itself. ``shirudo build``
-compiles the source, and libbpf's gen_loader turns the object into a
-loader: a ``BPF_PROG_TYPE_SYSCALL`` program whose instructions make the
+compiles the source, and ``shirudo-build`` turns the object into a
+loader as libbpf's gen_loader would: a ``BPF_PROG_TYPE_SYSCALL`` program whose instructions make the
 ``bpf()`` calls that create the upatch's maps and load its programs. The
 loader's data blob carries everything those calls need, the payload
 programs' instructions included. The builder appends signed sections to

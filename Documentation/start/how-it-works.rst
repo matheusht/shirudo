@@ -58,8 +58,8 @@ Build and sign
    symbols, so the bytes the kernel would check are not the bytes the
    operator built. shirudo therefore signs a loader instead. ``shirudo
    build`` hands the work to the operator-only helper ``shirudo-build``,
-   which compiles the source with clang and lets libbpf generate a loader: a
-   small program of type ``BPF_PROG_TYPE_SYSCALL`` that performs the load
+   which compiles the source with clang and generates a loader from the
+   object, as libbpf's gen_loader would: a small program of type ``BPF_PROG_TYPE_SYSCALL`` that performs the load
    steps inside the kernel, with the payload programs in its data. The
    helper appends the upatch's name, its attach metadata and any decoders
    to that data, signs the loader instructions followed by the data with
