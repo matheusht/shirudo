@@ -82,7 +82,13 @@ Figure 1 shows the components and the paths between them.
 The binary embeds three BPF objects, compiled from :src:`bpf/` and included
 with ``.incbin`` in :src:`util/loader.c`, ``bpf2`` and ``seal`` as light
 skeletons: their loaders, which :src:`tools/bpf-lskel` generates when the
-binary is built, and the names of the maps and programs those make:
+binary is built, and the names of the maps and programs those make. The
+tool also writes the Rust :src:`rust/src/skel.rs` includes: the types of
+the maps' keys and values, read from each object's BTF and checked by
+size and field offset where the binary compiles, and handles to the
+maps of those types. A layout the BPF changes fails the build instead
+of a boot. The ``seal`` takes the maps it shares with ``bpf2`` from
+``bpf2``, which init passes it as maps of ``bpf2``'s types:
 
 ``bpf2``
     BPF admission (``lsm/bpf``, ``lsm/bpf_map``, ``lsm/bpf_prog``,

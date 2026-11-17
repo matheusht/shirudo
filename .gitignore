@@ -21,6 +21,7 @@
 /tools/quote-check/shirudo-quote-check
 *.o
 /bpf/*.lskel
+/bpf/*.skel.rs
 *.d
 *.a
 *.so

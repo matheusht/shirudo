@@ -10,16 +10,24 @@
 //! Run once, it creates the object's maps and programs from kernel
 //! context and leaves their descriptors in its context; it can neither
 //! attach nor pin them, which its caller does.
+//!
+//! A skeleton built into the binary comes with the Rust tools/bpf-lskel
+//! writes of it (rust/src/skel.rs): typed handles to its maps and
+//! programs, made from the Skeleton loaded here.
 
-use core::ffi::c_int;
+use core::ffi::{CStr, c_int};
+use core::marker::PhantomData;
 use std::io::Write;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 
-use crate::bpf::lskel::Lskel;
-use crate::errno::{E2BIG, ENOENT};
+use crate::bpf::lskel::{Lskel, Program};
+use crate::errno::{E2BIG, EINVAL, ENOENT};
 use crate::sys::libc::{close, errno, fcntl};
+use crate::sys::loader::EmbeddedBpf;
 use crate::util::bpf_sys::{
-    Attr, BPF_MAP_CREATE, BPF_MAP_FREEZE, BPF_MAP_UPDATE_ELEM, BPF_PROG_LOAD, prog_test_run,
+    Attr, BPF_ANY, BPF_MAP_CREATE, BPF_MAP_FREEZE, BPF_MAP_UPDATE_ELEM, BPF_PROG_LOAD,
+    bpf_map_freeze, bpf_map_lookup_elem, bpf_map_update_elem, bpf_obj_pin, link_create,
+    prog_test_run,
 };
 
 /// VERIFIER_LOG_MAX of util/report.h: the room for the verifier's log.
@@ -224,4 +232,194 @@ pub(crate) fn run(
         return Err(f);
     }
     Ok(cx)
+}
+
+/// Plain data, which a map's keys and values are.
+///
+/// # Safety
+///
+/// Every bit pattern of the type's size is a value of it.
+pub(crate) unsafe trait Pod: Copy {}
+
+// SAFETY: an integer, which any bits are a value of.
+unsafe impl Pod for u8 {}
+// SAFETY: as above.
+unsafe impl Pod for i8 {}
+// SAFETY: as above.
+unsafe impl Pod for u16 {}
+// SAFETY: as above.
+unsafe impl Pod for i16 {}
+// SAFETY: as above.
+unsafe impl Pod for u32 {}
+// SAFETY: as above.
+unsafe impl Pod for i32 {}
+// SAFETY: as above.
+unsafe impl Pod for u64 {}
+// SAFETY: as above.
+unsafe impl Pod for i64 {}
+// SAFETY: an array of Pod values, each any bits.
+unsafe impl<T: Pod, const N: usize> Pod for [T; N] {}
+
+/// A map of `.maps` as its object defines it, which a pinned instance is
+/// checked against: its name, its index among the object's maps, and its
+/// shape.
+#[derive(Clone, Copy)]
+pub(crate) struct MapDef {
+    pub(crate) name: &'static CStr,
+    pub(crate) index: usize,
+    pub(crate) map_type: u32,
+    pub(crate) key_size: u32,
+    pub(crate) value_size: u32,
+    pub(crate) max_entries: u32,
+    pub(crate) flags: u32,
+}
+
+/// A map a skeleton's loader made, of keys `K` and values `V`, the types
+/// tools/bpf-lskel wrote from its BTF. The descriptor is the skeleton's.
+pub(crate) struct Map<'s, K, V> {
+    fd: c_int,
+    _of: PhantomData<&'s (K, V)>,
+}
+
+impl<K: Pod, V: Pod> Map<'_, K, V> {
+    pub(crate) fn fd(&self) -> c_int {
+        self.fd
+    }
+
+    /// The value of `key`, or -errno.
+    pub(crate) fn lookup(&self, key: &K) -> Result<V, c_int> {
+        // SAFETY: V is Pod, which all bits zero is a value of.
+        let mut value: V = unsafe { core::mem::zeroed() };
+        let (k, v) = ((&raw const *key).cast(), (&raw mut value).cast());
+        // SAFETY: the map's descriptor, a key and room for a value of
+        // the sizes the map was made with, those of K and V.
+        match unsafe { bpf_map_lookup_elem(self.fd, k, v) } {
+            0 => Ok(value),
+            err => Err(err),
+        }
+    }
+
+    /// Sets `key` to `value`, or -errno.
+    pub(crate) fn update(&self, key: &K, value: &V) -> Result<(), c_int> {
+        let (k, v) = ((&raw const *key).cast(), (&raw const *value).cast());
+        // SAFETY: the map's descriptor, a key and a value of the sizes
+        // the map was made with, those of K and V.
+        match unsafe { bpf_map_update_elem(self.fd, k, v, BPF_ANY) } {
+            0 => Ok(()),
+            err => Err(err),
+        }
+    }
+
+    /// Freezes the map against writes from userspace, or -errno.
+    pub(crate) fn freeze(&self) -> Result<(), c_int> {
+        match bpf_map_freeze(self.fd) {
+            0 => Ok(()),
+            err => Err(err),
+        }
+    }
+
+    /// Pins the map at `path`, or -errno.
+    pub(crate) fn pin(&self, path: &CStr) -> Result<(), c_int> {
+        pin(self.fd, path)
+    }
+}
+
+/// Pins the map, program or link `fd` at `path`, or -errno.
+pub(crate) fn pin(fd: c_int, path: &CStr) -> Result<(), c_int> {
+    // SAFETY: a descriptor and a C string.
+    match unsafe { bpf_obj_pin(fd, path.as_ptr()) } {
+        0 => Ok(()),
+        err => Err(err),
+    }
+}
+
+/// BPF_PROG_TYPE_LSM and BPF_LSM_MAC.
+const PROG_TYPE_LSM: u32 = 29;
+const LSM_MAC: u32 = 27;
+
+/// A program a skeleton's loader made. The descriptor is the skeleton's.
+pub(crate) struct Prog<'s> {
+    fd: c_int,
+    prog: Program<'s>,
+}
+
+impl Prog<'_> {
+    /// Attaches the LSM program at its hook: the link, or -errno; -EINVAL
+    /// for a program of another kind.
+    pub(crate) fn attach_lsm(&self) -> Result<OwnedFd, c_int> {
+        if self.prog.prog_type != PROG_TYPE_LSM || self.prog.attach_type != LSM_MAC {
+            return Err(-EINVAL);
+        }
+        link_create(self.fd, 0, LSM_MAC, |a| a).map_err(|e| -e)
+    }
+}
+
+/// An object built into the binary, loaded: its skeleton, and the
+/// context holding the descriptors of the maps and programs its loader
+/// made, which go with it.
+pub(crate) struct Skeleton {
+    name: &'static [u8],
+    skel: Lskel<'static>,
+    cx: Ctx,
+}
+
+impl Skeleton {
+    /// Runs the loader of the skeleton embedded as `blob`, which must
+    /// hold the maps and programs `maps` and `progs` name, those
+    /// tools/bpf-lskel wrote the Rust of, the maps it reuses taken from
+    /// `shared`.
+    pub(crate) fn load(
+        name: &'static [u8],
+        blob: *const EmbeddedBpf,
+        maps: &[&[u8]],
+        progs: &[&[u8]],
+        shared: impl Fn(usize) -> Option<c_int>,
+    ) -> Result<Self, Failed> {
+        // SAFETY: NULL or the static blob.
+        let Some(b) = (unsafe { blob.as_ref() }).filter(|b| !b.data.is_null() && b.size != 0)
+        else {
+            return Err(("embedded skeleton", -ENOENT));
+        };
+        // SAFETY: the blob's `size` static bytes.
+        let data = unsafe { crate::ffi::slice(b.data.cast::<u8>(), b.size) };
+        let skel = Lskel::parse(data).ok_or(("embedded skeleton", -EINVAL))?;
+        if skel.maps != maps || !skel.progs.iter().map(|p| p.name).eq(progs.iter().copied()) {
+            return Err((
+                "embedded skeleton not the one the binary was built with",
+                -EINVAL,
+            ));
+        }
+        let cx = run(&skel, shared)?;
+        Ok(Skeleton { name, skel, cx })
+    }
+
+    pub(crate) fn name(&self) -> &'static [u8] {
+        self.name
+    }
+
+    /// The descriptor of map `i`, which a table of maps names by index.
+    pub(crate) fn map_fd(&self, i: usize) -> c_int {
+        self.cx.map_fd(i as u32)
+    }
+
+    /// Map `i` as one of keys `K` and values `V`.
+    ///
+    /// # Safety
+    ///
+    /// `K` and `V` are of the sizes of the map's keys and values.
+    pub(crate) unsafe fn map<K, V>(&self, i: usize) -> Map<'_, K, V> {
+        Map {
+            fd: self.map_fd(i),
+            _of: PhantomData,
+        }
+    }
+
+    /// The program named `name`, which a table of guards names.
+    pub(crate) fn prog(&self, name: &[u8]) -> Option<Prog<'_>> {
+        let (i, &prog) = self.skel.prog(name)?;
+        Some(Prog {
+            fd: self.cx.prog_fd(i as u32),
+            prog,
+        })
+    }
 }

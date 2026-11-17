@@ -287,6 +287,18 @@ impl Map {
         self.key_size
     }
 
+    /// The BTF types of a map of .maps' key and value, which
+    /// tools/bpf-lskel writes Rust of.
+    #[allow(dead_code)]
+    pub(crate) fn key_type_id(&self) -> u32 {
+        self.btf_key_type_id
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn value_type_id(&self) -> u32 {
+        self.btf_value_type_id
+    }
+
     pub(crate) fn value_size(&self) -> u32 {
         self.value_size
     }

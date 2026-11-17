@@ -9,36 +9,34 @@
 //!
 //! bpf2 and the seal are light skeletons built into the binary: their
 //! loaders, generated when shirudo was built, make their maps and
-//! programs; the seal's takes the maps it shares with bpf2 from bpf2.
+//! programs, which rust/src/skel.rs gives types; the seal's takes the
+//! maps it shares with bpf2 from bpf2.
 
 use core::ffi::{CStr, c_char, c_int};
 use core::ptr;
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::{NV_INDEX, SIG_KEYRING_BPF, cat, error, info, last_err, strerr};
-use crate::bpf::lskel::{Lskel, Program};
-use crate::errno::{E2BIG, EACCES, EINVAL, EKEYREJECTED, ENOENT, ENOKEY};
+use crate::errno::{E2BIG, EACCES, EKEYREJECTED, ENOENT, ENOKEY};
 use crate::ffi;
+use crate::skel::bpf2::{self, MountRecord, TaskAuthority};
+use crate::skel::seal;
 use crate::sys::identity::Identity;
 use crate::sys::libc::{
     O_CLOEXEC, O_DIRECTORY, O_RDONLY, SYS_PIDFD_OPEN, access, close, open, syscall, unlink,
 };
-use crate::sys::loader::{EmbeddedBpf, bpf2_blob, seal_blob};
-use crate::util::bpf_sys::{
-    Attr, BPF_ANY, BPF_OBJ_PIN, bpf_map_freeze, bpf_map_lookup_elem, bpf_map_update_elem,
-    bpf_obj_pin, link_create,
-};
+use crate::util::bpf_sys::bpf_map_freeze;
 use crate::util::identity;
 use crate::util::image_guards::{
-    GATE_GUARDS, GATE_HOOK_COUNT, GUARD_BPF, GUARD_BPF_MAP, GUARD_KEY_PERMISSION, GUARD_MAP_COUNT,
-    GUARD_MAPS, GUARD_PROG_LOAD, GUARD_REMOVEXATTR, GUARD_ROOTS, GUARD_SETXATTR, GUARD_TASKS,
+    GATE_GUARDS, GATE_HOOK_COUNT, GUARD_BPF, GUARD_BPF_MAP, GUARD_KEY_PERMISSION, GUARD_MAPS,
+    GUARD_PROG_LOAD, GUARD_REMOVEXATTR, GUARD_ROOTS, GUARD_SETXATTR, GUARD_TASKS,
     GUARD_TPM_COMMAND, GUARD_UNLINK, IMAGE_OBSERVER_GUARDS, IMAGE_SEAL_GUARDS, ImageGuard,
     MOUNT_GUARDS, OBSERVER_GUARDS, SEAL_GUARDS,
 };
 use crate::util::image_runtime;
 use crate::util::io::kernel_dev;
 use crate::util::keyring::{self, keyring_bpf_serial, keyring_dm_verity_serial};
-use crate::util::lskel::{self as runner, Ctx};
+use crate::util::lskel::{Failed, Prog, Skeleton, pin};
 use crate::util::nv_writer::nv_writer_create;
 use crate::util::tpm::{Tpm, tpm_close, tpm_ek_name, tpm_open};
 
@@ -61,19 +59,6 @@ const MAP_PINS: [&CStr; 7] = [
 const IDENTITY_KEYS_MAX: usize = 16;
 /// `TASK_BOOTSTRAP`: the authority of the task bringing enforcement up.
 const TASK_BOOTSTRAP: u8 = 2;
-/// BPF_PROG_TYPE_LSM and BPF_LSM_MAC: every program of bpf2 and the seal.
-const PROG_TYPE_LSM: u32 = 29;
-const LSM_MAC: u32 = 27;
-
-/// `struct task_authority` of `bpf/lib/lsm.h`.
-#[repr(C)]
-struct TaskAuthority {
-    trusted: u8,
-    candidate_valid: u8,
-    candidate_trusted: u8,
-    pad: u8,
-    pad2: u32,
-}
 
 fn exists(path: *const c_char) -> bool {
     // SAFETY: a C string.
@@ -89,59 +74,10 @@ fn gate(guard: usize) -> &'static ImageGuard {
     &GATE_GUARDS[guard]
 }
 
-/// The name of an embedded skeleton.
-fn blob_name(blob: *const EmbeddedBpf) -> &'static [u8] {
-    // SAFETY: the blob, static, its name a static C string.
-    text(unsafe { (*blob).name })
-}
-
-/// The embedded skeleton, whole.
-fn skeleton(blob: *const EmbeddedBpf) -> Result<Lskel<'static>, c_int> {
-    // SAFETY: NULL or the static blob.
-    let Some(b) = (unsafe { blob.as_ref() }).filter(|b| !b.data.is_null() && b.size != 0) else {
-        return Err(-ENOENT);
-    };
-    // SAFETY: the blob's `size` static bytes.
-    let data = unsafe { ffi::slice(b.data.cast::<u8>(), b.size) };
-    Lskel::parse(data).ok_or(-EINVAL)
-}
-
-/// An embedded object, loaded: its skeleton, and the context holding
-/// the descriptors of the maps and programs its loader made.
-struct Loaded {
-    skel: Lskel<'static>,
-    cx: Ctx,
-}
-
-impl Loaded {
-    /// Runs the loader of `skel`, the maps it reuses taken from `shared`.
-    fn load(
-        name: &[u8],
-        skel: Lskel<'static>,
-        shared: impl Fn(usize) -> Option<c_int>,
-    ) -> Result<Self, c_int> {
-        match runner::run(&skel, shared) {
-            Ok(cx) => Ok(Loaded { skel, cx }),
-            Err((step, err)) => {
-                error(&cat!(name, ": ", step, ": ", strerr(-err)));
-                Err(err)
-            }
-        }
-    }
-
-    fn map(&self, name: *const c_char) -> Option<c_int> {
-        self.map_named(text(name))
-    }
-
-    fn map_named(&self, name: &[u8]) -> Option<c_int> {
-        let i = self.skel.map(name)?;
-        Some(self.cx.map_fd(i as u32))
-    }
-
-    fn program(&self, name: *const c_char) -> Option<(c_int, Program<'static>)> {
-        let (i, p) = self.skel.prog(text(name))?;
-        Some((self.cx.prog_fd(i as u32), *p))
-    }
+/// Reports a skeleton whose loader failed: its -errno.
+fn load_failed(name: &[u8], (step, err): Failed) -> c_int {
+    error(&cat!(name, ": ", step, ": ", strerr(-err)));
+    err
 }
 
 /// A pinned link: dropped, its descriptor lets go of the link, which
@@ -159,29 +95,25 @@ impl Link {
     }
 }
 
-/// Attaches the LSM program `prog` and pins its link at `pin`.
-fn attach_pin(prog: (c_int, Program<'_>), pin: *const c_char) -> Result<Link, c_int> {
-    let (fd, p) = prog;
-    if p.prog_type != PROG_TYPE_LSM || p.attach_type != LSM_MAC {
-        return Err(-EINVAL);
-    }
-    let link = link_create(fd, 0, LSM_MAC, |a| a).map_err(|e| -e)?;
-    Attr::new()
-        .ptr(0, pin)
-        .u32(8, link.as_raw_fd() as u32)
-        .run(BPF_OBJ_PIN)
-        .map_err(|e| -e)?;
-    Ok(Link { _fd: link, pin })
+/// Attaches the LSM program `prog` and pins its link at `path`.
+fn attach_pin(prog: &Prog<'_>, path: *const c_char) -> Result<Link, c_int> {
+    let link = prog.attach_lsm()?;
+    // SAFETY: a static C string of the guard tables.
+    pin(link.as_raw_fd(), unsafe { CStr::from_ptr(path) })?;
+    Ok(Link {
+        _fd: link,
+        pin: path,
+    })
 }
 
 /// Attaches the `guards` of `obj` in order, their links into `links`.
-fn attach_group(obj: &Loaded, guards: &[ImageGuard], links: &mut Vec<Link>) -> c_int {
+fn attach_group(obj: &Skeleton, guards: &[ImageGuard], links: &mut Vec<Link>) -> c_int {
     for g in guards {
-        let Some(p) = obj.program(g.prog) else {
+        let Some(p) = obj.prog(text(g.prog)) else {
             error(&cat!("program ", text(g.prog), " missing"));
             return -ENOENT;
         };
-        match attach_pin(p, g.pin) {
+        match attach_pin(&p, g.pin) {
             Ok(l) => links.push(l),
             Err(ret) => {
                 error(&cat!("attach ", text(g.prog), ": ", strerr(-ret)));
@@ -190,27 +122,6 @@ fn attach_group(obj: &Loaded, guards: &[ImageGuard], links: &mut Vec<Link>) -> c
         }
     }
     0
-}
-
-/// The descriptors of bpf2's maps the seal's loader takes, the policy
-/// maps the two share: the seal must reuse exactly those.
-fn shared_policy_maps(bpf2: &Loaded, seal: &Lskel<'_>) -> Result<Vec<(usize, c_int)>, c_int> {
-    let mut shared = Vec::new();
-    for m in &GUARD_MAPS {
-        let name = text(m.name);
-        let (Some(i), Some(fd)) = (seal.map(name), bpf2.map_named(name)) else {
-            return Err(-ENOENT);
-        };
-        if !seal.reuses(i) {
-            return Err(-EINVAL);
-        }
-        shared.push((i, fd));
-    }
-    let reused = (0..seal.maps.len()).filter(|&i| seal.reuses(i)).count();
-    if reused != shared.len() {
-        return Err(-EINVAL);
-    }
-    Ok(shared)
 }
 
 /// The asymmetric keys of `ring`, at most IDENTITY_KEYS_MAX, and
@@ -297,14 +208,10 @@ fn record_ek_name(id: &mut Identity) -> c_int {
 /// Seeds the bootstrap task's authority, freezes the shared state but
 /// the expected config roots, which change with each mapping, and pins
 /// it.
-fn freeze_task_maps(obj: &Loaded) -> c_int {
-    let maps = &GUARD_MAPS;
+fn freeze_task_maps(obj: &Skeleton) -> c_int {
     let authority = TaskAuthority {
         trusted: TASK_BOOTSTRAP,
-        candidate_valid: 0,
-        candidate_trusted: 0,
-        pad: 0,
-        pad2: 0,
+        ..TaskAuthority::zeroed()
     };
     // SAFETY: pidfd_open() of this process.
     let pidfd =
@@ -312,43 +219,33 @@ fn freeze_task_maps(obj: &Loaded) -> c_int {
     if pidfd < 0 {
         return last_err();
     }
-    let mut ret = 0;
-    for (i, m) in maps
-        .iter()
-        .enumerate()
-        .take(GUARD_MAP_COUNT)
-        .skip(GUARD_TASKS)
-    {
-        let Some(fd) = obj.map(m.name) else {
-            ret = -ENOENT;
-            break;
-        };
-        if i == GUARD_TASKS {
-            let (key, value) = ((&raw const pidfd).cast(), (&raw const authority).cast());
-            // SAFETY: the map's fd, the pidfd key and the authority value.
-            if unsafe { bpf_map_update_elem(fd, key, value, BPF_ANY) } != 0 {
-                ret = last_err();
-                break;
+    let tasks = bpf2::maps(obj).shirudo_tasks;
+    let ret = tasks.update(&pidfd, &authority).and_then(|()| {
+        let mut maps = GUARD_MAPS.iter().enumerate().skip(GUARD_TASKS);
+        maps.try_for_each(|(i, m)| {
+            let fd = obj.map_fd(m.def.index);
+            // Expected roots change for each mapping.
+            let err = if i == GUARD_ROOTS {
+                0
+            } else {
+                bpf_map_freeze(fd)
+            };
+            if err != 0 {
+                return Err(err);
             }
-        }
-        // Expected roots change for each mapping.
-        let frozen = i == GUARD_ROOTS || bpf_map_freeze(fd) == 0;
-        // SAFETY: the map's fd and a C string.
-        if !frozen || unsafe { bpf_obj_pin(fd, m.pin) } != 0 {
-            ret = last_err();
-            break;
-        }
-    }
+            // SAFETY: a static C string of the table.
+            pin(fd, unsafe { CStr::from_ptr(m.pin) })
+        })
+    });
     // SAFETY: the pidfd opened above.
     unsafe { close(pidfd) };
-    ret
+    ret.err().unwrap_or(0)
 }
 
 /// The recorder in the mount guards sees the bootstrap task open the
 /// bpffs root; the record is read back, since a guard with none to keep
 /// would let an unmount above the bpffs through.
-fn record_bpffs_mount(obj: &Loaded) -> c_int {
-    let (zero, mut mount) = (0u32, 0u64);
+fn record_bpffs_mount(obj: &Skeleton) -> c_int {
     // SAFETY: a C string.
     let fd = unsafe { open(BPFFS_DIR.as_ptr(), O_RDONLY | O_DIRECTORY | O_CLOEXEC) };
 
@@ -357,27 +254,18 @@ fn record_bpffs_mount(obj: &Loaded) -> c_int {
     }
     // SAFETY: the descriptor opened above.
     unsafe { close(fd) };
-    let Some(m) = obj.map(c"shirudo_mnt_rec".as_ptr()) else {
-        return -ENOENT;
-    };
-    // SAFETY: the map's fd, its key and room for its value.
-    if unsafe { bpf_map_lookup_elem(m, (&raw const zero).cast(), (&raw mut mount).cast()) } != 0 {
-        return last_err();
-    }
-    if mount == 0 {
-        return -ENOENT;
-    }
-    if bpf_map_freeze(m) != 0 {
-        last_err()
-    } else {
-        0
+    let m = bpf2::maps(obj).shirudo_mnt_rec;
+    match m.lookup(&0) {
+        Ok(MountRecord { mount: 0 }) => -ENOENT,
+        Ok(_) => m.freeze().err().unwrap_or(0),
+        Err(err) => err,
     }
 }
 
 /// The objects and links of one run, in the order a failed run undoes
 /// them.
 struct Attached {
-    seal_obj: Option<Loaded>,
+    seal_obj: Option<Skeleton>,
     image_seal: Vec<Link>,
     image_observer: Vec<Link>,
     observer: Vec<Link>,
@@ -399,7 +287,7 @@ const GATE_RELEASE: [usize; GATE_HOOK_COUNT] = [
 ];
 
 impl Attached {
-    fn gate(&mut self, guard: usize, p: Option<(c_int, Program<'_>)>, hook: &str) -> c_int {
+    fn gate(&mut self, guard: usize, p: Option<&Prog<'_>>, hook: &str) -> c_int {
         match p
             .ok_or(-ENOENT)
             .and_then(|p| attach_pin(p, gate(guard).pin))
@@ -415,35 +303,24 @@ impl Attached {
         }
     }
 
-    /// Writable state and runtime processes always get the full seal.
-    fn attach_seal(&mut self, bpf2: &Loaded) -> c_int {
-        // SAFETY: the embedded seal skeleton, static.
-        let blob = unsafe { seal_blob() };
-        let skel = match skeleton(blob) {
-            Ok(s) => s,
-            Err(err) => {
-                error(&cat!("embedded seal skeleton: ", strerr(-err)));
-                return err;
-            }
+    /// Writable state and runtime processes always get the full seal,
+    /// which shares bpf2's policy maps.
+    fn attach_seal(&mut self, bpf2: &Skeleton) -> c_int {
+        let m = bpf2::maps(bpf2);
+        let shared = seal::Shared {
+            shirudo_bpffs_sb: &m.shirudo_bpffs_sb,
+            shirudo_tasks: &m.shirudo_tasks,
+            shirudo_devices: &m.shirudo_devices,
+            shirudo_roots: &m.shirudo_roots,
+            shirudo_tamper: &m.shirudo_tamper,
+            shirudo_task_policy: &m.shirudo_task_policy,
+            shirudo_sock_policy: &m.shirudo_sock_policy,
         };
-        let shared = match shared_policy_maps(bpf2, &skel) {
-            Ok(s) => s,
-            Err(err) => {
-                error(&cat!("seal: shared policy maps: ", strerr(-err)));
-                return err;
-            }
-        };
-        let fd = |i| shared.iter().find(|&&(j, _)| j == i).map(|&(_, fd)| fd);
-        let obj = match Loaded::load(b"seal", skel, fd) {
+        let obj = match seal::load(&shared) {
             Ok(obj) => obj,
-            Err(err) => return err,
+            Err(f) => return load_failed(b"seal", f),
         };
-        let err = match obj.map(c"seal_scratch_map".as_ptr()) {
-            None => -ENOENT,
-            Some(scratch) if bpf_map_freeze(scratch) != 0 => last_err(),
-            Some(_) => 0,
-        };
-        if err != 0 {
+        if let Err(err) = seal::maps(&obj).seal_scratch_map.freeze() {
             error(&cat!("seal: freeze seal_scratch_map: ", strerr(-err)));
             return err;
         }
@@ -458,7 +335,7 @@ impl Attached {
         err
     }
 
-    fn run(&mut self, obj: &Loaded, name: &[u8]) -> c_int {
+    fn run(&mut self, obj: &Skeleton) -> c_int {
         let mut id = Identity::zeroed();
 
         match std::fs::metadata(super::path(BPFFS_DIR.to_bytes())) {
@@ -546,27 +423,12 @@ impl Attached {
             return err;
         }
 
-        let Some(fd) = obj.map(c"shirudo_bpffs_sb".as_ptr()) else {
-            error(b"shirudo_bpffs_sb map not in embedded bpf2");
-            return -ENOENT;
-        };
-        let zero = 0u32;
-        // SAFETY: the map's fd, its key and the identity.
-        if unsafe {
-            bpf_map_update_elem(
-                fd,
-                (&raw const zero).cast(),
-                (&raw const id).cast(),
-                BPF_ANY,
-            )
-        } != 0
-        {
-            let err = last_err();
+        let sb = bpf2::maps(obj).shirudo_bpffs_sb;
+        if let Err(err) = sb.update(&0, &id) {
             error(&cat!("populate sb-identity map: ", strerr(-err)));
             return err;
         }
-        if bpf_map_freeze(fd) != 0 {
-            let err = last_err();
+        if let Err(err) = sb.freeze() {
             error(&cat!("freeze sb-identity map: ", strerr(-err)));
             return err;
         }
@@ -577,9 +439,7 @@ impl Attached {
         // Pinned so that every later command reads the anchor init froze
         // from the kernel rather than from a file: the serial a load
         // names and status reports is the one lsm/bpf_prog_load enforces.
-        // SAFETY: the map's fd and a C string.
-        if unsafe { bpf_obj_pin(fd, IDENTITY_PIN.as_ptr()) } != 0 {
-            let err = last_err();
+        if let Err(err) = sb.pin(IDENTITY_PIN) {
             error(&cat!(
                 "pin identity map at ",
                 IDENTITY_PIN,
@@ -610,13 +470,13 @@ impl Attached {
             GUARD_TPM_COMMAND,
             GUARD_BPF,
         ] {
-            let Some(p) = obj.program(gate(g).prog) else {
+            let Some(p) = obj.prog(text(gate(g).prog)) else {
                 error(b"expected programs missing in bpf2 object");
                 return -ENOENT;
             };
             progs.push((g, p));
         }
-        let prog = |guard: usize| progs.iter().find(|(g, _)| *g == guard).map(|&(_, p)| p);
+        let prog = |guard: usize| progs.iter().find(|(g, _)| *g == guard).map(|(_, p)| p);
 
         // The prctl identity guard is already active. The remaining hooks
         // go on as the bpffs guards, the seal's filesystem and
@@ -662,7 +522,7 @@ impl Attached {
             }
         }
         info(&cat!(
-            name,
+            obj.name(),
             " and seal attached: lsm/bpf gate live, writable state sealed"
         ));
         0
@@ -732,19 +592,9 @@ pub(super) fn attach() -> c_int {
             }
         }
     }
-    // SAFETY: the embedded bpf2 skeleton, static.
-    let blob = unsafe { bpf2_blob() };
-    let skel = match skeleton(blob) {
-        Ok(s) => s,
-        Err(err) => {
-            error(&cat!("embedded bpf2 skeleton: ", strerr(-err)));
-            return err;
-        }
-    };
-    let name = blob_name(blob);
-    let obj = match Loaded::load(name, skel, |_| None) {
+    let obj = match bpf2::load() {
         Ok(obj) => obj,
-        Err(err) => return err,
+        Err(f) => return load_failed(b"bpf2", f),
     };
     let mut a = Attached {
         seal_obj: None,
@@ -755,10 +605,8 @@ pub(super) fn attach() -> c_int {
         mount: Vec::new(),
         gates: [const { None }; GATE_HOOK_COUNT],
     };
-    let err = a.run(&obj, name);
+    let err = a.run(&obj);
     a.release(err);
     drop(obj);
     err
 }
-
-const _: () = assert!(size_of::<TaskAuthority>() == 8);

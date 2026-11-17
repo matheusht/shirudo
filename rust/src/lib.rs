@@ -14,6 +14,7 @@ mod heap;
 mod log;
 mod panic;
 mod shirudo_build;
+mod skel;
 mod sys;
 mod text;
 mod util;

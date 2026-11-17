@@ -51,11 +51,6 @@ fn name(b: &[u8]) -> Option<(&[u8], &[u8])> {
 }
 
 impl<'a> Lskel<'a> {
-    /// The index of the map named `name`.
-    pub(crate) fn map(&self, name: &[u8]) -> Option<usize> {
-        self.maps.iter().position(|&m| m == name)
-    }
-
     /// The index and the program named `name`.
     pub(crate) fn prog(&self, name: &[u8]) -> Option<(usize, &Program<'a>)> {
         self.progs.iter().enumerate().find(|(_, p)| p.name == name)

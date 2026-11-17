@@ -12,6 +12,7 @@ use core::ffi::{CStr, c_char, c_int};
 
 use crate::bpf::btf::{Btf, KIND_FUNC};
 use crate::errno::{EBUSY, ENAMETOOLONG, ENOENT, EPROTO};
+use crate::skel::bpf2::{ExpectedRoot, def};
 use crate::sys::libc::{SYS_PIDFD_OPEN, close, errno, strerror, syscall};
 use crate::text::cstr;
 use crate::util::bpf_info::{Info, LINK_INFO_SIZE, MAP_INFO_SIZE, PROG_INFO_SIZE};
@@ -21,6 +22,7 @@ use crate::util::bpf_sys::{
 };
 use crate::util::identity;
 use crate::util::kernel_btf;
+use crate::util::lskel::MapDef;
 
 /// `struct image_guard`: a program and where its link is pinned.
 #[repr(C)]
@@ -29,23 +31,15 @@ pub(crate) struct ImageGuard {
     pub(crate) pin: *const c_char,
 }
 
-/// `struct guard_map`: a map the guards share, and where it is pinned.
-#[repr(C)]
+/// A map the guards share, as bpf2 defines it, and where it is pinned.
 pub(crate) struct GuardMap {
-    pub(crate) name: *const c_char,
+    pub(crate) def: MapDef,
     pub(crate) pin: *const c_char,
-    pub(crate) ty: u32,
-    pub(crate) key_size: u32,
-    pub(crate) value_size: u32,
-    pub(crate) max_entries: u32,
-    pub(crate) flags: u32,
 }
-
-const _: () = assert!(size_of::<GuardMap>() == 40);
 
 // SAFETY: both point at static C strings, which nothing writes.
 unsafe impl Sync for ImageGuard {}
-// SAFETY: as above.
+// SAFETY: the pin points at a static C string, which nothing writes.
 unsafe impl Sync for GuardMap {}
 
 pub(crate) const SEAL_HOOK_COUNT: usize = 27;
@@ -68,12 +62,12 @@ pub(crate) const GUARD_TASKS: usize = 1;
 pub(crate) const GUARD_ROOTS: usize = 3;
 pub(crate) const GUARD_MAP_COUNT: usize = 7;
 
-const BPF_MAP_TYPE_HASH: u32 = 1;
-const BPF_MAP_TYPE_ARRAY: u32 = 2;
-const BPF_MAP_TYPE_SK_STORAGE: u32 = 24;
-const BPF_MAP_TYPE_TASK_STORAGE: u32 = 29;
-const BPF_F_NO_PREALLOC: u32 = 1;
-const BPF_F_CLONE: u32 = 1 << 9;
+const fn guard_map(def: MapDef, pin: &'static CStr) -> GuardMap {
+    GuardMap {
+        def,
+        pin: pin.as_ptr(),
+    }
+}
 
 const fn guard(prog: &'static CStr, pin: &'static CStr) -> ImageGuard {
     ImageGuard {
@@ -318,69 +312,16 @@ pub(crate) static IMAGE_OBSERVER_GUARDS: [ImageGuard; IMAGE_OBSERVER_HOOK_COUNT]
 ];
 
 pub(crate) static GUARD_MAPS: [GuardMap; GUARD_MAP_COUNT] = [
-    GuardMap {
-        name: c"shirudo_bpffs_sb".as_ptr(),
-        pin: c"/run/shirudo/bpffs/identity".as_ptr(),
-        ty: BPF_MAP_TYPE_ARRAY,
-        key_size: 4,
-        value_size: 580,
-        max_entries: 1,
-        flags: 0,
-    },
-    GuardMap {
-        name: c"shirudo_tasks".as_ptr(),
-        pin: c"/run/shirudo/bpffs/task_authority".as_ptr(),
-        ty: BPF_MAP_TYPE_TASK_STORAGE,
-        key_size: 4,
-        value_size: 8,
-        max_entries: 0,
-        flags: BPF_F_NO_PREALLOC,
-    },
-    GuardMap {
-        name: c"shirudo_devices".as_ptr(),
-        pin: c"/run/shirudo/bpffs/devices".as_ptr(),
-        ty: BPF_MAP_TYPE_HASH,
-        key_size: 8,
-        value_size: 48,
-        max_entries: 128,
-        flags: 0,
-    },
-    GuardMap {
-        name: c"shirudo_roots".as_ptr(),
-        pin: c"/run/shirudo/bpffs/config_roots".as_ptr(),
-        ty: BPF_MAP_TYPE_TASK_STORAGE,
-        key_size: 4,
-        value_size: 36,
-        max_entries: 0,
-        flags: BPF_F_NO_PREALLOC,
-    },
-    GuardMap {
-        name: c"shirudo_tamper".as_ptr(),
-        pin: c"/run/shirudo/bpffs/tamper".as_ptr(),
-        ty: BPF_MAP_TYPE_ARRAY,
-        key_size: 4,
-        value_size: 8,
-        max_entries: 37,
-        flags: 0,
-    },
-    GuardMap {
-        name: c"shirudo_task_policy".as_ptr(),
-        pin: c"/run/shirudo/bpffs/task_policy".as_ptr(),
-        ty: BPF_MAP_TYPE_TASK_STORAGE,
-        key_size: 4,
-        value_size: 16,
-        max_entries: 0,
-        flags: BPF_F_NO_PREALLOC,
-    },
-    GuardMap {
-        name: c"shirudo_sock_policy".as_ptr(),
-        pin: c"/run/shirudo/bpffs/socket_policy".as_ptr(),
-        ty: BPF_MAP_TYPE_SK_STORAGE,
-        key_size: 4,
-        value_size: 8,
-        max_entries: 0,
-        flags: BPF_F_NO_PREALLOC | BPF_F_CLONE,
-    },
+    guard_map(def::SHIRUDO_BPFFS_SB, c"/run/shirudo/bpffs/identity"),
+    guard_map(def::SHIRUDO_TASKS, c"/run/shirudo/bpffs/task_authority"),
+    guard_map(def::SHIRUDO_DEVICES, c"/run/shirudo/bpffs/devices"),
+    guard_map(def::SHIRUDO_ROOTS, c"/run/shirudo/bpffs/config_roots"),
+    guard_map(def::SHIRUDO_TAMPER, c"/run/shirudo/bpffs/tamper"),
+    guard_map(def::SHIRUDO_TASK_POLICY, c"/run/shirudo/bpffs/task_policy"),
+    guard_map(
+        def::SHIRUDO_SOCK_POLICY,
+        c"/run/shirudo/bpffs/socket_policy",
+    ),
 ];
 
 /// `struct config_root_guard`: what config_root_begin() holds open, -1
@@ -390,15 +331,6 @@ pub(crate) struct ConfigRootGuard {
     pub(crate) map_fd: c_int,
     pub(crate) task_fd: c_int,
 }
-
-/// `struct expected_root` of util/identity.h: the root a task expects.
-#[repr(C)]
-struct ExpectedRoot {
-    root: [u8; 32],
-    valid: u32,
-}
-
-const _: () = assert!(size_of::<ExpectedRoot>() == 36);
 
 const BPF_ANY: u64 = 0;
 
@@ -581,14 +513,15 @@ fn guard_map_ids() -> Result<[u32; GUARD_MAP_COUNT], c_int> {
             Err(e) => e,
             Ok(()) => {
                 let name = obj_name(info.bytes(), MAP_NAME);
+                let def = &expected.def;
                 let ok = info.u32_at(MAP_ID) != 0
-                    && info.u32_at(MAP_TYPE) == expected.ty
-                    && info.u32_at(MAP_KEY_SIZE) == expected.key_size
-                    && info.u32_at(MAP_VALUE_SIZE) == expected.value_size
-                    && info.u32_at(MAP_MAX_ENTRIES) == expected.max_entries
-                    && info.u32_at(MAP_FLAGS) == expected.flags
+                    && info.u32_at(MAP_TYPE) == def.map_type
+                    && info.u32_at(MAP_KEY_SIZE) == def.key_size
+                    && info.u32_at(MAP_VALUE_SIZE) == def.value_size
+                    && info.u32_at(MAP_MAX_ENTRIES) == def.max_entries
+                    && info.u32_at(MAP_FLAGS) == def.flags
                     && name[OBJ_NAME_LEN - 1] == 0
-                    && name_is(name, expected.name);
+                    && name_is(name, def.name.as_ptr());
                 if ok { 0 } else { -EPROTO }
             }
         };
@@ -630,7 +563,7 @@ fn guard_program_maps(map_ids: &[u32], expected: &[u32; GUARD_MAP_COUNT]) -> c_i
         let mismatch = GUARD_MAPS
             .iter()
             .zip(expected)
-            .any(|(m, &want)| name_is(name, m.name) && info.u32_at(MAP_ID) != want);
+            .any(|(m, &want)| name_is(name, m.def.name.as_ptr()) && info.u32_at(MAP_ID) != want);
         if mismatch {
             return -EPROTO;
         }

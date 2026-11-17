@@ -419,7 +419,8 @@ Project layout
      - The ``vmlinux.h`` generator.
    * - :src:`tools/bpf-lskel/`
      - The build tool that writes the light skeletons of ``bpf2`` and
-       ``seal`` the binary embeds, with the BPF object model of
+       ``seal`` the binary embeds, and their Rust, which
+       :src:`rust/src/skel.rs` includes, with the BPF object model of
        :src:`rust/src/bpf/`.
    * - :src:`tools/bpf-deps/`
      - The script that refreshes :src:`vendor/libbpf`.

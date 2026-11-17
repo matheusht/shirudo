@@ -210,9 +210,8 @@ jobs:
           key: fuzz-corpus-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: fuzz-corpus-
 
-      # The targets need no BPF objects, but the toolchain the other jobs
-      # build in comes with the LVH guest. A push or a pull request gets a
-      # minute per target, a run by hand ten.
+      # Generated Rust map types need BPF objects and the LVH guest BTF.
+      # A push or pull request gets a minute per target, a manual run ten.
       - name: Fuzz the parsers of input from outside the host in LVH VM
         id: fuzz
         uses: ./.github/actions/lvh

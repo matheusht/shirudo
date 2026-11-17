@@ -7,7 +7,8 @@
 #   1. vendored libbpf (vendor/libbpf) and the vmlinux.h generator
 #   2. generated headers   (vendor/linux/vmlinux.h)
 #   3. compiled objects    (util/*.o, builtin-*.o, shirudo.o, bpf/*.bpf.o)
-#   4. embedded BPF        (bpf/*.lskel and bpf/unload.bpf.o in util/loader.o)
+#   4. embedded BPF        (bpf/*.lskel in util/loader.o and typed
+#                           bpf/*.skel.rs in Rust)
 #   5. link                (shirudo, shirudo-target, shirudo-build)
 
 include Makefile.version
@@ -314,6 +315,7 @@ QUOTE_CHECK_SRCS := \
 UTIL_OBJS    := $(foreach s,$(UTIL_SRCS),$(call obj,$(s:.c=.o)))
 BPF_OBJS     := $(BPF_SRCS:.c=.bpf.o)
 BPF_LSKELS   := bpf/bpf2.lskel bpf/seal.lskel
+BPF_SKEL_RS  := $(BPF_LSKELS:.lskel=.skel.rs)
 BUILD_OBJS   := $(foreach s,$(BUILD_SRCS),$(call obj,$(s:.c=.o)))
 QUOTE_CHECK_OBJS := $(foreach s,$(QUOTE_CHECK_SRCS),$(call obj,$(s:.c=.o)))
 
@@ -384,7 +386,7 @@ endif
 
 rust: $(RUST_LIB)
 
-$(RUST_LIB): $(RUST_SRCS) $(RUST_LIBEXEC_CHANGED)
+$(RUST_LIB): $(RUST_SRCS) $(BPF_SKEL_RS) $(RUST_LIBEXEC_CHANGED)
 	@printf '  CARGO   $@\n'
 	$(Q)RUSTFLAGS="$(RUSTFLAGS_WERROR)" \
 	    CARGO_PROFILE_RELEASE_DEBUG=$(if $(DEBUG_CFLAGS),true,false) \
@@ -475,26 +477,29 @@ bpf/%.bpf.o: bpf/%.c $(VMLINUX_H) $(BPF_LIBBPF_HEADERS) \
 # bpf2 and the seal are embedded as light skeletons, so that init loads
 # them without reading an object: tools/bpf-lskel, a build tool rustc
 # builds with std alone from the BPF object model of the Rust library,
-# generates their loaders. The seal's takes the maps it shares with bpf2
-# from bpf2: GUARD_MAPS of rust/src/util/image_guards.rs, which init
-# checks it takes.
+# generates their loaders, and the Rust rust/src/skel.rs includes: the
+# types of their maps from the objects' BTF, and handles to the maps.
+# The seal's loader takes the maps SEAL_SHARED_MAPS names from bpf2,
+# defined alike in both, which init passes it as seal::Shared.
 RUSTC            ?= rustc
 BPF_LSKEL_TOOL   := build/bpf-lskel
 SEAL_SHARED_MAPS := shirudo_bpffs_sb,shirudo_tasks,shirudo_devices,shirudo_roots,shirudo_tamper,shirudo_task_policy,shirudo_sock_policy
 
-$(BPF_LSKEL_TOOL): tools/bpf-lskel/bpf-lskel.rs $(wildcard $(RUST_DIR)/src/bpf/*.rs) \
+$(BPF_LSKEL_TOOL): $(wildcard tools/bpf-lskel/*.rs) $(wildcard $(RUST_DIR)/src/bpf/*.rs) \
                    $(RUST_DIR)/src/errno.rs
 	@printf '  RUSTC   $@\n'
 	$(Q)mkdir -p $(dir $@)
-	$(Q)$(RUSTC) --edition 2024 -O $(RUSTFLAGS_WERROR) --crate-name bpf_lskel -o $@ $<
+	$(Q)$(RUSTC) --edition 2024 -O $(RUSTFLAGS_WERROR) --crate-name bpf_lskel \
+	    -o $@ tools/bpf-lskel/bpf-lskel.rs
 
-bpf/bpf2.lskel: bpf/bpf2.bpf.o $(BPF_LSKEL_TOOL)
-	@printf '  LSKEL   $@\n'
-	$(Q)$(BPF_LSKEL_TOOL) $< bpf2 -o $@
+bpf/bpf2.lskel bpf/bpf2.skel.rs &: bpf/bpf2.bpf.o $(BPF_LSKEL_TOOL)
+	@printf '  LSKEL   bpf/bpf2.lskel\n'
+	$(Q)$(BPF_LSKEL_TOOL) $< bpf2 --rust bpf/bpf2.skel.rs -o bpf/bpf2.lskel
 
-bpf/seal.lskel: bpf/seal.bpf.o bpf/bpf2.bpf.o $(BPF_LSKEL_TOOL)
-	@printf '  LSKEL   $@\n'
-	$(Q)$(BPF_LSKEL_TOOL) $< seal --share bpf/bpf2.bpf.o --maps $(SEAL_SHARED_MAPS) -o $@
+bpf/seal.lskel bpf/seal.skel.rs &: bpf/seal.bpf.o bpf/bpf2.bpf.o $(BPF_LSKEL_TOOL)
+	@printf '  LSKEL   bpf/seal.lskel\n'
+	$(Q)$(BPF_LSKEL_TOOL) $< seal --share bpf/bpf2.bpf.o --maps $(SEAL_SHARED_MAPS) \
+	    --rust bpf/seal.skel.rs -o bpf/seal.lskel
 
 # ----- version_id ------------------------------------------------
 
@@ -1195,7 +1200,7 @@ RUST_FUZZ_FLAGS  := -Cpasses=sancov-module \
                     -Cllvm-args=-sanitizer-coverage-pc-table \
                     -Cllvm-args=-sanitizer-coverage-trace-compares
 
-$(RUST_FUZZ_LIB): $(RUST_SRCS)
+$(RUST_FUZZ_LIB): $(RUST_SRCS) $(BPF_SKEL_RS)
 	@printf '  CARGO   $@\n'
 	$(Q)RUSTFLAGS="$(RUSTFLAGS_WERROR) $(RUST_FUZZ_FLAGS)" \
 	    $(CARGO) build --quiet --release --locked --offline \
@@ -1397,7 +1402,8 @@ clean:
 	$(Q)rm -rf build/target build/unit build/quote-check build/fuzz-afl \
 	    build/fuzz-afl-cmplog $(RUST_TARGET) $(RUST_FUZZ_TARGET)
 	$(Q)rm -f $(DEPS) testing/helper/*.d
-	$(Q)rm -f $(BPF_OBJS) $(BPF_LSKELS) $(BPF_LSKEL_TOOL) $(VMLINUX_H) systemd/shirudo.service \
+	$(Q)rm -f $(BPF_OBJS) $(BPF_LSKELS) $(BPF_SKEL_RS) $(BPF_LSKEL_TOOL) $(VMLINUX_H) \
+	    systemd/shirudo.service \
 	    systemd/shirudo-initrd.service \
 	          systemd/shirudo-map-export.service \
 	          systemd/shirudo-keepalive.service \
