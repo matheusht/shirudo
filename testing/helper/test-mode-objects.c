@@ -1,82 +1,72 @@
 // SPDX-License-Identifier: BSD-2-Clause
 /* Copyright (c) 2026 Authors of shirudo */
 
-#include <gelf.h>
-#include <stdbool.h>
-#include <stdio.h>
+/*
+ * Lists what the light skeletons of bpf2 and the seal built into shirudo
+ * load: their maps, their programs and the kernel symbols their loaders
+ * resolve, read from the format of rust/src/bpf/lskel.rs.
+ */
 
-#include <bpf/libbpf.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 
 #include "util/loader.h"
 
-static int symbols(const char *selection,
-		   const struct embedded_bpf *blob)
+#define LSKEL_HEADER 40
+
+static uint32_t le32(const unsigned char *p)
 {
-	Elf_Scn *section = NULL;
-	Elf *elf;
-	int ret = 0;
-
-	if (elf_version(EV_CURRENT) == EV_NONE)
-		return 1;
-	elf = elf_memory((char *)blob->data, blob->size);
-	if (!elf)
-		return 1;
-	while ((section = elf_nextscn(elf, section))) {
-		GElf_Shdr header;
-		Elf_Data *data;
-		size_t i;
-
-		if (!gelf_getshdr(section, &header)) {
-			ret = 1;
-			break;
-		}
-		if (header.sh_type != SHT_SYMTAB)
-			continue;
-		data = elf_getdata(section, NULL);
-		if (!data || !header.sh_entsize) {
-			ret = 1;
-			break;
-		}
-		for (i = 1; i < header.sh_size / header.sh_entsize; i++) {
-			GElf_Sym symbol;
-			const char *name;
-
-			if (!gelf_getsym(data, i, &symbol)) {
-				ret = 1;
-				break;
-			}
-			if (symbol.st_shndx != SHN_UNDEF)
-				continue;
-			name = elf_strptr(elf, header.sh_link, symbol.st_name);
-			if (!name) {
-				ret = 1;
-				break;
-			}
-			printf("extern %s %s\n", selection, name);
-		}
-	}
-	elf_end(elf);
-	return ret;
+	return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24;
 }
 
-static int inspect(const char *selection,
-		   const struct embedded_bpf *blob)
+/* The NUL-terminated name at *p, before end; *p moves past it. */
+static const char *next_name(const unsigned char **p, const unsigned char *end)
 {
-	struct bpf_program *program;
-	struct bpf_object *obj;
-	struct bpf_map *map;
+	const unsigned char *nul = memchr(*p, 0, end - *p);
+	const char *name = (const char *)*p;
 
-	obj = bpf_object__open_mem(blob->data, blob->size, NULL);
-	if (!obj)
+	if (!nul)
+		return NULL;
+	*p = nul + 1;
+	return name;
+}
+
+static int list(const char *kind, const char *selection, uint32_t n,
+		size_t skip, const unsigned char **p, const unsigned char *end)
+{
+	const char *name;
+	uint32_t i;
+
+	for (i = 0; i < n; i++) {
+		if ((size_t)(end - *p) < skip)
+			return 1;
+		*p += skip;
+		name = next_name(p, end);
+		if (!name)
+			return 1;
+		printf("%s %s %s\n", kind, selection, name);
+	}
+	return 0;
+}
+
+static int inspect(const char *selection, const struct embedded_bpf *blob)
+{
+	const unsigned char *b = blob->data, *p, *end;
+	uint32_t names_len;
+
+	if (!b || blob->size < LSKEL_HEADER || memcmp(b, "SHLSKEL1", 8))
 		return 1;
+	names_len = le32(b + 28);
+	if (names_len > blob->size - LSKEL_HEADER)
+		return 1;
+	p = b + LSKEL_HEADER;
+	end = p + names_len;
 	printf("blob %s %s\n", selection, blob->name);
-	bpf_object__for_each_program(program, obj)
-		printf("program %s %s\n", selection,
-		       bpf_program__name(program));
-	bpf_object__for_each_map(map, obj)
-		printf("map %s %s\n", selection, bpf_map__name(map));
-	bpf_object__close(obj);
-	return symbols(selection, blob);
+	/* Each program's type and attach type come before its name. */
+	return list("map", selection, le32(b + 8), 0, &p, end) ||
+	       list("program", selection, le32(b + 12), 8, &p, end) ||
+	       list("extern", selection, le32(b + 16), 0, &p, end);
 }
 
 int main(void)

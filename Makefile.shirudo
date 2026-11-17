@@ -7,7 +7,7 @@
 #   1. vendored libbpf (vendor/libbpf) and the vmlinux.h generator
 #   2. generated headers   (vendor/linux/vmlinux.h)
 #   3. compiled objects    (util/*.o, builtin-*.o, shirudo.o, bpf/*.bpf.o)
-#   4. embedded BPF        (util/loader.o, .incbin of bpf/*.bpf.o)
+#   4. embedded BPF        (bpf/*.lskel and bpf/unload.bpf.o in util/loader.o)
 #   5. link                (shirudo, shirudo-target, shirudo-build)
 
 include Makefile.version
@@ -313,6 +313,7 @@ QUOTE_CHECK_SRCS := \
 
 UTIL_OBJS    := $(foreach s,$(UTIL_SRCS),$(call obj,$(s:.c=.o)))
 BPF_OBJS     := $(BPF_SRCS:.c=.bpf.o)
+BPF_LSKELS   := bpf/bpf2.lskel bpf/seal.lskel
 BUILD_OBJS   := $(foreach s,$(BUILD_SRCS),$(call obj,$(s:.c=.o)))
 QUOTE_CHECK_OBJS := $(foreach s,$(QUOTE_CHECK_SRCS),$(call obj,$(s:.c=.o)))
 
@@ -471,6 +472,30 @@ bpf/%.bpf.o: bpf/%.c $(VMLINUX_H) $(BPF_LIBBPF_HEADERS) \
 	    -I$(BPF_UAPI_INCLUDE) \
 	    -c $< -o $@
 
+# bpf2 and the seal are embedded as light skeletons, so that init loads
+# them without reading an object: tools/bpf-lskel, a build tool rustc
+# builds with std alone from the BPF object model of the Rust library,
+# generates their loaders. The seal's takes the maps it shares with bpf2
+# from bpf2: GUARD_MAPS of rust/src/util/image_guards.rs, which init
+# checks it takes.
+RUSTC            ?= rustc
+BPF_LSKEL_TOOL   := build/bpf-lskel
+SEAL_SHARED_MAPS := shirudo_bpffs_sb,shirudo_tasks,shirudo_devices,shirudo_roots,shirudo_tamper,shirudo_task_policy,shirudo_sock_policy
+
+$(BPF_LSKEL_TOOL): tools/bpf-lskel/bpf-lskel.rs $(wildcard $(RUST_DIR)/src/bpf/*.rs) \
+                   $(RUST_DIR)/src/errno.rs
+	@printf '  RUSTC   $@\n'
+	$(Q)mkdir -p $(dir $@)
+	$(Q)$(RUSTC) --edition 2024 -O $(RUSTFLAGS_WERROR) --crate-name bpf_lskel -o $@ $<
+
+bpf/bpf2.lskel: bpf/bpf2.bpf.o $(BPF_LSKEL_TOOL)
+	@printf '  LSKEL   $@\n'
+	$(Q)$(BPF_LSKEL_TOOL) $< bpf2 -o $@
+
+bpf/seal.lskel: bpf/seal.bpf.o bpf/bpf2.bpf.o $(BPF_LSKEL_TOOL)
+	@printf '  LSKEL   $@\n'
+	$(Q)$(BPF_LSKEL_TOOL) $< seal --share bpf/bpf2.bpf.o --maps $(SEAL_SHARED_MAPS) -o $@
+
 # ----- version_id ------------------------------------------------
 
 # Regenerated every build; cheap (one sha256sum invocation).
@@ -524,8 +549,8 @@ shirudo-target: $(MAIN_OBJ)  $(UTIL_OBJS) $(VERSION_OBJ) $(LIBBPF_A) \
 	    { rm -f $@; exit 1; }
 
 # util/loader.o has a make-level dep on every embedded bpf object.
-util/loader.o: $(BPF_OBJS)
-build/target/util/loader.o: $(BPF_OBJS)
+util/loader.o: $(BPF_OBJS) $(BPF_LSKELS)
+build/target/util/loader.o: $(BPF_OBJS) $(BPF_LSKELS)
 
 # shirudo-build links Rust CMS signer (CMS signer) plus a subset of util,
 # util/loader.o for its .incbin of bpf/unload.bpf.o (used by the
@@ -1062,9 +1087,9 @@ testing/helper/test-image-cleanup: testing/helper/test-image-cleanup.c \
 		$(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
 testing/helper/test-mode-objects: testing/helper/test-mode-objects.c \
-		$(call obj,util/loader.o) $(LIBBPF_A)
+		$(call obj,util/loader.o)
 	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ -lelf -lz
+	$(Q)$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
 
 testing/helper/test-seal-output: testing/helper/test-seal-output.c \
 		util/log.o util/string.o util/malloc.o $(RUST_LIB)
@@ -1372,7 +1397,7 @@ clean:
 	$(Q)rm -rf build/target build/unit build/quote-check build/fuzz-afl \
 	    build/fuzz-afl-cmplog $(RUST_TARGET) $(RUST_FUZZ_TARGET)
 	$(Q)rm -f $(DEPS) testing/helper/*.d
-	$(Q)rm -f $(BPF_OBJS) $(VMLINUX_H) systemd/shirudo.service \
+	$(Q)rm -f $(BPF_OBJS) $(BPF_LSKELS) $(BPF_LSKEL_TOOL) $(VMLINUX_H) systemd/shirudo.service \
 	    systemd/shirudo-initrd.service \
 	          systemd/shirudo-map-export.service \
 	          systemd/shirudo-keepalive.service \

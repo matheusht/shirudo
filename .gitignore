@@ -20,6 +20,7 @@
 /tools/shirudo-build/shirudo-build
 /tools/quote-check/shirudo-quote-check
 *.o
+/bpf/*.lskel
 *.d
 *.a
 *.so

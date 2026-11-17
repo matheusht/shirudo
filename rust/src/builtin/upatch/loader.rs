@@ -40,6 +40,11 @@ use crate::util::crypto_openssl::sha256_calc;
 use crate::util::elf_target::build_id_fd;
 use crate::util::identity;
 use crate::util::keyring;
+use crate::util::lskel::{
+    Attr, BPF_MAP_CREATE, BPF_MAP_FREEZE, BPF_MAP_UPDATE_ELEM, BPF_OBJ_PIN, BPF_PROG_LOAD,
+    BPF_RAW_TRACEPOINT_OPEN, Ctx, F_SLEEPABLE, MAP_TYPE_ARRAY, PROG_TYPE_SYSCALL, VERIFIER_LOG_MAX,
+    link_create,
+};
 use crate::util::map_read::prog_test_run;
 use crate::util::report::{OpReport, report_set_log};
 use crate::util::upatch::{
@@ -50,8 +55,6 @@ use crate::util::upatch::{
 };
 use crate::util::upatch_resolve::{BPFFS_UPATCHES_DIR, XATTR_PAYLOAD, pin_path};
 
-/// VERIFIER_LOG_MAX of util/report.h: the room for the verifier's log.
-const VERIFIER_LOG_MAX: usize = 16 * 1024 * 1024;
 /// POLICY_PIN, SOCKET_POLICY_PIN and XATTR_POLICY of util/paths.h.
 const POLICY_PIN: &CStr = c"/run/shirudo/bpffs/task_policy";
 const SOCKET_POLICY_PIN: &CStr = c"/run/shirudo/bpffs/socket_policy";
@@ -61,32 +64,16 @@ const SIG_KEYRING_BPF: u32 = 5;
 const POLICY_NAME_MAX: usize = 64;
 
 #[cfg(target_arch = "x86_64")]
-const SYS_BPF: c_long = 321;
-#[cfg(target_arch = "x86_64")]
 const SYS_PERF_EVENT_OPEN: c_long = 298;
-#[cfg(target_arch = "aarch64")]
-const SYS_BPF: c_long = 280;
 #[cfg(target_arch = "aarch64")]
 const SYS_PERF_EVENT_OPEN: c_long = 241;
 
-/// The bpf() commands the loader issues.
-const BPF_MAP_CREATE: c_long = 0;
-const BPF_MAP_UPDATE_ELEM: c_long = 2;
-const BPF_PROG_LOAD: c_long = 5;
-const BPF_OBJ_PIN: c_long = 6;
-const BPF_RAW_TRACEPOINT_OPEN: c_long = 17;
-const BPF_MAP_FREEZE: c_long = 22;
-const BPF_LINK_CREATE: c_long = 28;
-
-const MAP_TYPE_ARRAY: u32 = 2;
 const MAP_TYPE_SK_STORAGE: u32 = 24;
 const MAP_TYPE_TASK_STORAGE: u32 = 29;
 const F_NO_PREALLOC: u32 = 1;
 const F_CLONE: u32 = 512;
 const PROG_TYPE_CGROUP_SKB: u32 = 8;
 const PROG_TYPE_LSM: u32 = 29;
-const PROG_TYPE_SYSCALL: u32 = 31;
-const F_SLEEPABLE: u32 = 16;
 
 /// BPF_* attach types.
 const CGROUP_INET_INGRESS: u32 = 0;
@@ -137,73 +124,6 @@ const MAP_FLAGS: usize = 20;
 const MAP_NAME: usize = 24;
 const LINK_TYPE: usize = 0;
 const LINK_U: usize = 16;
-
-/// `union bpf_attr`, filled by hand: libbpf's wrappers take no signature,
-/// keyring or exclusive map.
-#[repr(C, align(8))]
-struct Attr([u8; Attr::SIZE]);
-
-impl Attr {
-    const SIZE: usize = 168;
-
-    fn new() -> Self {
-        Attr([0; Self::SIZE])
-    }
-
-    fn put(mut self, off: usize, v: &[u8]) -> Self {
-        self.0[off..off + v.len()].copy_from_slice(v);
-        self
-    }
-
-    fn u32(self, off: usize, v: u32) -> Self {
-        self.put(off, &v.to_ne_bytes())
-    }
-
-    fn u64(self, off: usize, v: u64) -> Self {
-        self.put(off, &v.to_ne_bytes())
-    }
-
-    fn ptr<T>(self, off: usize, p: *const T) -> Self {
-        self.u64(off, p as u64)
-    }
-
-    /// bpf() command `cmd` on the attribute, whose pointers the caller
-    /// keeps live: what it returns, or the errno.
-    fn run(mut self, cmd: c_long) -> Result<c_int, c_int> {
-        // SAFETY: an attribute of the size the kernel takes, its
-        // pointers to what the caller keeps live across the call.
-        let ret = unsafe { syscall(SYS_BPF, cmd, self.0.as_mut_ptr(), Self::SIZE as c_long) };
-        if ret < 0 {
-            Err(errno())
-        } else {
-            Ok(ret as c_int)
-        }
-    }
-
-    /// As run(), for a command that makes a descriptor.
-    fn fd(self, cmd: c_long) -> Result<OwnedFd, c_int> {
-        let fd = self.run(cmd)?;
-        // SAFETY: a descriptor the kernel just made, owned here alone.
-        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-    }
-}
-
-/// The link program `prog` makes with BPF_LINK_CREATE at `target` as
-/// attach type `ty`, what `with` puts in the union besides.
-fn link_create(
-    prog: c_int,
-    target: c_int,
-    ty: u32,
-    with: impl FnOnce(Attr) -> Attr,
-) -> Result<OwnedFd, c_int> {
-    with(
-        Attr::new()
-            .u32(0, prog as u32)
-            .u32(4, target as u32)
-            .u32(8, ty),
-    )
-    .fd(BPF_LINK_CREATE)
-}
 
 /// The report the caller asked for, if any.
 struct Rep<'a>(Option<&'a mut OpReport>);
@@ -339,95 +259,6 @@ impl Drop for Specs {
     fn drop(&mut self) {
         // SAFETY: the specs parsed, freed once.
         unsafe { upatch::specs_free(self.ptr, self.n) };
-    }
-}
-
-/// `struct loader_ctx` of tools/lib/bpf/skel_internal.h, which the
-/// loader reads, and the map and program descriptors after it, which it
-/// fills and BPF_PROG_TEST_RUN copies back. Dropped, it closes what they
-/// name: the caller's pins keep what was attached.
-struct Ctx {
-    buf: Vec<u8>,
-    nr_maps: u32,
-    nr_progs: u32,
-}
-
-impl Ctx {
-    const HEADER: usize = 24;
-    const MAP_DESC: usize = 16;
-    const PROG_DESC: usize = 4;
-
-    fn prog_desc_off(nr_maps: u32) -> usize {
-        Self::HEADER.saturating_add((nr_maps as usize).saturating_mul(Self::MAP_DESC))
-    }
-
-    /// The context of `nr_maps` and `nr_progs`, with room for the
-    /// loader's max_ctx_offset beyond the descriptors, which
-    /// BPF_PROG_TEST_RUN takes no smaller: None when a syscall program
-    /// takes no context that large.
-    fn new(nr_maps: u32, nr_progs: u32, vlog: &mut [u8]) -> Option<Self> {
-        let size = Self::prog_desc_off(nr_maps)
-            .saturating_add((nr_progs as usize).saturating_mul(Self::PROG_DESC))
-            .saturating_add(1024);
-        if size > usize::from(u16::MAX) {
-            return None;
-        }
-        let mut cx = Ctx {
-            buf: vec![0; size],
-            nr_maps,
-            nr_progs,
-        };
-        cx.put(0, &(size as u32).to_ne_bytes());
-        // Inner verifier diagnostics stay on without the full trace of
-        // accepted programs, whose verbose mode can fail a valid payload
-        // with -ENOSPC when the log fills.
-        cx.put(8, &1u32.to_ne_bytes());
-        cx.put(12, &(VERIFIER_LOG_MAX as u32).to_ne_bytes());
-        cx.put(16, &(vlog.as_mut_ptr() as u64).to_ne_bytes());
-        Some(cx)
-    }
-
-    fn put(&mut self, off: usize, v: &[u8]) {
-        self.buf[off..off + v.len()].copy_from_slice(v);
-    }
-
-    fn i32_at(&self, off: usize) -> i32 {
-        let mut v = [0; 4];
-        v.copy_from_slice(&self.buf[off..off + 4]);
-        i32::from_ne_bytes(v)
-    }
-
-    fn map_fd(&self, i: u32) -> c_int {
-        self.i32_at(Self::HEADER + i as usize * Self::MAP_DESC)
-    }
-
-    fn set_map_fd(&mut self, i: u32, fd: c_int) {
-        self.put(
-            Self::HEADER + i as usize * Self::MAP_DESC,
-            &fd.to_ne_bytes(),
-        );
-    }
-
-    fn prog_fd(&self, i: u32) -> c_int {
-        self.i32_at(Self::prog_desc_off(self.nr_maps) + i as usize * Self::PROG_DESC)
-    }
-
-    /// Forgets the descriptors, which a failed loader closed itself: the
-    /// numbers left name nothing of ours.
-    fn forget(&mut self) {
-        self.buf[Self::HEADER..].fill(0);
-    }
-}
-
-impl Drop for Ctx {
-    fn drop(&mut self) {
-        let fds = (0..self.nr_maps)
-            .map(|i| self.map_fd(i))
-            .chain((0..self.nr_progs).map(|i| self.prog_fd(i)));
-        for fd in fds.filter(|&fd| fd > 0) {
-            // SAFETY: a descriptor the loader made for this process.
-            unsafe { close(fd) };
-        }
     }
 }
 

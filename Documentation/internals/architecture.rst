@@ -80,7 +80,9 @@ Figure 1 shows the components and the paths between them.
    connects into the target; it pulls packages and pushes telemetry.
 
 The binary embeds three BPF objects, compiled from :src:`bpf/` and included
-with ``.incbin`` in :src:`util/loader.c`:
+with ``.incbin`` in :src:`util/loader.c`, ``bpf2`` and ``seal`` as light
+skeletons: their loaders, which :src:`tools/bpf-lskel` generates when the
+binary is built, and the names of the maps and programs those make:
 
 ``bpf2``
     BPF admission (``lsm/bpf``, ``lsm/bpf_map``, ``lsm/bpf_prog``,
@@ -103,7 +105,8 @@ with ``.incbin`` in :src:`util/loader.c`:
     The template that ``shirudo-build`` turns into the loader of an unload
     directive. The target never runs it.
 
-``shirudo init`` loads ``bpf2`` and ``seal`` without a signature. They
+``shirudo init`` runs the loaders of ``bpf2`` and ``seal`` without a
+signature. They
 are part of the binary that the authenticated initrd carries; the BPF
 keyring does not cover them. All other BPF enters through the signed
 loader path.

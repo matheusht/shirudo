@@ -42,6 +42,7 @@ mod kernel_build_id;
 mod kernel_release;
 pub(crate) mod keyring;
 pub(crate) mod keys;
+pub(crate) mod lskel;
 pub(crate) mod map_format;
 pub(crate) mod map_read;
 pub(crate) mod map_render;

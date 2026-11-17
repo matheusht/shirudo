@@ -11,6 +11,7 @@ pub(crate) mod btf_dump;
 pub(crate) mod btf_ext;
 pub(crate) mod elf;
 pub(crate) mod loader;
+pub(crate) mod lskel;
 pub(crate) mod object;
 pub(crate) mod skel;
 

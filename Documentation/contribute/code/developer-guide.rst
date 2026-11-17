@@ -417,6 +417,10 @@ Project layout
      - The dracut module, the initrd generator and the installer.
    * - :src:`tools/gen-vmlinux-h/`
      - The ``vmlinux.h`` generator.
+   * - :src:`tools/bpf-lskel/`
+     - The build tool that writes the light skeletons of ``bpf2`` and
+       ``seal`` the binary embeds, with the BPF object model of
+       :src:`rust/src/bpf/`.
    * - :src:`tools/bpf-deps/`
      - The script that refreshes :src:`vendor/libbpf`.
    * - :src:`tools/put-shields`

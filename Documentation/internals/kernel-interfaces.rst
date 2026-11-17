@@ -285,9 +285,15 @@ checked descriptor and ``config2`` the recorded file offset.
 
 An unload directive makes the first four calls and no others.
 
-``init`` loads ``bpf2`` and ``seal`` with libbpf (``BPF_BTF_LOAD``,
-``BPF_MAP_CREATE``, ``BPF_PROG_LOAD`` of ``BPF_PROG_TYPE_LSM``), attaches
-each program with ``BPF_LINK_CREATE`` and ``BPF_LSM_MAC``, and pins it.
+``init`` loads ``bpf2`` and then ``seal`` as it loads a signed loader,
+unsigned: the loader's data in a frozen map (``BPF_MAP_CREATE``,
+``BPF_MAP_UPDATE_ELEM``, ``BPF_MAP_FREEZE``), the loader itself
+(``BPF_PROG_LOAD`` of ``BPF_PROG_TYPE_SYSCALL``) and one
+``BPF_PROG_TEST_RUN``, in which it makes the BTF, the maps and the
+``BPF_PROG_TYPE_LSM`` programs. The seal's loader takes the maps it shares
+with ``bpf2`` from the context, as ``bpf2``'s descriptors. ``init``
+attaches each program with ``BPF_LINK_CREATE`` and ``BPF_LSM_MAC``, and
+pins it.
 It populates the identity map with ``BPF_MAP_UPDATE_ELEM``, seeds
 ``shirudo_tasks`` with a pidfd as key, and freezes maps with
 ``BPF_MAP_FREEZE``.

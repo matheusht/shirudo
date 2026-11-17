@@ -8,13 +8,14 @@
 use core::ffi::{CStr, c_char, c_int, c_long};
 use core::mem::MaybeUninit;
 
+use crate::bpf::lskel::Lskel;
 use crate::errno::{ENOENT, ENOPKG};
 use crate::sys::libc::{
     AT_FDCWD, O_CLOEXEC, O_RDONLY, R_OK, S_IFMT, S_IFREG, STATX_SIZE, STATX_TYPE, SYS_ADD_KEY,
     SYS_KEYCTL, Statx, W_OK, access, close, errno, fclose, fgets, fopen, geteuid, open, read,
     statx, strerror, syscall,
 };
-use crate::sys::loader::{bpf2_blob, seal_blob};
+use crate::sys::loader::{EmbeddedBpf, bpf2_blob, seal_blob};
 use crate::text::{cstr, decimal, strscpy, strsprintf};
 use crate::util::config::{self, Scrubbed};
 use crate::util::crypto_openssl::{Cert, cert_free, cert_key_algorithm};
@@ -437,10 +438,17 @@ fn check_keyring(r: &mut PreflightResult) {
 
 fn check_embedded_loader(r: &mut PreflightResult) {
     let i = r.next_slot(PRE_EMBEDDED_LOADER, c"embedded_loader");
-    // SAFETY: the loader's embedded objects, NULL or static.
+    let whole = |b: Option<&EmbeddedBpf>| {
+        b.filter(|b| !b.data.is_null() && b.size != 0)
+            .is_some_and(|b| {
+                // SAFETY: the blob's `size` static bytes.
+                Lskel::parse(unsafe { crate::ffi::slice(b.data.cast::<u8>(), b.size) }).is_some()
+            })
+    };
+    // SAFETY: the embedded skeletons, NULL or static.
     let (bpf2, seal) = unsafe { (bpf2_blob().as_ref(), seal_blob().as_ref()) };
 
-    if bpf2.is_some_and(|b| b.size != 0) && seal.is_some_and(|s| s.size != 0) {
+    if whole(bpf2) && whole(seal) {
         r.pass(i);
     } else {
         r.fail(i, &[b"embedded BPF objects missing"]);

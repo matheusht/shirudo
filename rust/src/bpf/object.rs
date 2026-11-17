@@ -1251,6 +1251,20 @@ impl Object {
         self.progs.iter().filter(|p| !self.is_subprog(p))
     }
 
+    /// The programs a loader loads, in the order of its program
+    /// descriptors: the object's, but those it leaves out. For
+    /// tools/bpf-lskel, as is extern_names().
+    #[allow(dead_code)]
+    pub(crate) fn loaded_programs(&self) -> impl Iterator<Item = &Prog> {
+        self.programs().filter(|p| p.strategy == Strategy::Auto)
+    }
+
+    /// The names of the kernel symbols of .ksyms the object uses.
+    #[allow(dead_code)]
+    pub(crate) fn extern_names(&self) -> impl Iterator<Item = &[u8]> {
+        self.externs.iter().map(|e| &e.name[..])
+    }
+
     pub(crate) fn btf(&self) -> &Btf {
         &self.btf
     }

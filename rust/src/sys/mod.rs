@@ -10,7 +10,6 @@ pub mod btf;
 pub mod curl;
 pub mod elf;
 pub mod identity;
-pub mod libbpf;
 pub mod libc;
 pub mod loader;
 pub mod luajit;
