@@ -6,7 +6,7 @@
 //! gives it, and every map it pins with their contents. It reads only
 //! what the LSM allows: bpf() info and lookups, xattrs and stat.
 
-use core::ffi::{CStr, c_char, c_int, c_long};
+use core::ffi::{CStr, c_int, c_long};
 use std::ffi::CString;
 
 use super::{JSON_MAX, Summaries, err, help, item, log_err, out, print_json, strerr, type_name};
@@ -16,10 +16,7 @@ use crate::sys::btf::{
     Btf, btf__free, btf__load_from_kernel_by_id, btf__load_vmlinux_btf, btf__name_by_offset,
 };
 use crate::sys::libc::{close, errno};
-use crate::sys::upatch::{
-    MapSummary, upatch_loaded_at, upatch_open_first_link, upatch_payload_sha256,
-    upatch_resolve_location,
-};
+use crate::sys::upatch::MapSummary;
 use crate::sys::upatch_maps::{
     MAP_ENTRIES_DEFAULT, MAP_READ_PEEK, MapView, map_view_free, upatch_maps_emit_json_object,
     upatch_maps_print_detail, upatch_maps_read,
@@ -29,6 +26,7 @@ use crate::util::help::{HelpItem, is_help};
 use crate::util::json::JsonEmit;
 use crate::util::timefmt::format_duration;
 use crate::util::upatch::name_valid;
+use crate::util::upatch_resolve::{loaded_at, open_first_link, payload_sha256, resolve_location};
 use crate::util::upatch_table::age_sec;
 
 const EINVAL: c_int = 22;
@@ -166,17 +164,16 @@ fn source(prog: c_int) -> Result<Vec<Line>, c_int> {
 }
 
 /// A C string the call writes into `N` bytes.
-fn filled<const N: usize>(f: impl FnOnce(*mut c_char, usize)) -> Vec<u8> {
+fn filled<const N: usize>(f: impl FnOnce(&mut [u8])) -> Vec<u8> {
     let mut buf = [0u8; N];
-    f(buf.as_mut_ptr().cast(), N);
+    f(&mut buf);
     cstr(&buf).to_vec()
 }
 
 /// Upatch `name` as loaded, or -errno. Missing line_info is no failure:
 /// the rest still describes it.
 fn collect(name: &CStr) -> Result<Loaded, c_int> {
-    // SAFETY: a C string.
-    let link = unsafe { upatch_open_first_link(name.as_ptr()) };
+    let link = open_first_link(name.to_bytes());
     if link < 0 {
         return Err(link);
     }
@@ -189,16 +186,13 @@ fn collect(name: &CStr) -> Result<Loaded, c_int> {
     if prog_id == 0 {
         return Err(-EINVAL);
     }
-    let n = name.as_ptr();
-    // SAFETY: a C string and each call's room.
-    let loaded_at = filled::<32>(|o, c| unsafe { upatch_loaded_at(n, o, c) });
-    // SAFETY: as above.
-    let payload = filled::<65>(|o, c| unsafe { upatch_payload_sha256(n, o, c) });
+    let n = name.to_bytes();
+    let loaded_at = filled::<32>(|o| loaded_at(n, o));
+    let payload = filled::<65>(|o| payload_sha256(n, o));
     // SAFETY: libbpf's loader, NULL when there is none.
     let vbtf = unsafe { btf__load_vmlinux_btf() };
-    // SAFETY: the BTF or NULL, a C string and the room.
-    let location = filled::<160>(|o, c| unsafe {
-        upatch_resolve_location(vbtf, n, o, c);
+    let location = filled::<160>(|o| {
+        resolve_location(vbtf, n, o);
     });
     // SAFETY: the BTF loaded above, or NULL, freed once.
     unsafe { btf__free(vbtf) };

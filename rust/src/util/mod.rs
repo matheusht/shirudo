@@ -52,5 +52,6 @@ mod tls_openssl;
 pub(crate) mod tpm;
 pub(crate) mod tpm_wire;
 pub(crate) mod upatch;
+pub(crate) mod upatch_resolve;
 pub(crate) mod upatch_rodata;
 pub(crate) mod upatch_table;

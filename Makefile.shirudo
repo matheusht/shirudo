@@ -268,7 +268,7 @@ UTIL_SRCS := \
      \
     util/upatch_pins.c \
     util/upatch_verify.c \
-    util/upatch_resolve.c
+
 
 BUILTIN_SRCS := \
     builtin-upatch.c
@@ -954,7 +954,6 @@ testing/helper/test-signed-load: testing/helper/test-signed-load.c
 
 testing/helper/test-otel-map: testing/helper/test-otel-map.c util/upatch_maps.o \
                         util/curl.o util/upatch_pins.o \
-                        util/upatch_resolve.o \
                          util/string.o util/log.o \
                         util/paths.o \
                          util/malloc.o $(LIBBPF_A) util/hex.o \
@@ -974,7 +973,7 @@ testing/helper/test-upatch-prog-metadata: testing/helper/test-upatch-prog-metada
 		$(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
 testing/helper/test-upatch-serializer-pages: testing/helper/test-upatch-serializer-pages.c \
-                                       util/upatch_maps.o util/upatch_pins.o util/upatch_resolve.o \
+                                       util/upatch_maps.o util/upatch_pins.o  \
                                         \
                                        util/string.o \
                                        util/malloc.o  util/paths.o \
@@ -1245,7 +1244,7 @@ $(FUZZ_OUT)/fuzz-elf: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-elf: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS)
 $(FUZZ_OUT)/fuzz-serializer: testing/fuzz/fuzz-serializer.c $(FUZZ_BASE) \
                               util/upatch_maps.c util/upatch_pins.c \
-                              util/upatch_resolve.c $(FUZZ_SEAL)  util/paths.c \
+                               $(FUZZ_SEAL)  util/paths.c \
                               $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-serializer: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-serializer: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS)
@@ -1296,7 +1295,7 @@ $(FUZZ_OUT)/fuzz-upatch-info: testing/fuzz/fuzz-upatch-info.c $(FUZZ_BASE) \
                                \
                                util/upatch_maps.c \
                                util/upatch_pins.c \
-                              util/upatch_resolve.c \
+                               \
                               util/upatch_verify.c util/version_id.c \
                               util/xdp.c $(FUZZ_SEAL) $(LIBBPF_A)
 # Rust defines upatch_decode_map_signal(), which

@@ -13,13 +13,13 @@ use std::os::unix::ffi::OsStrExt;
 
 use super::{JSON_MAX, err, help, hex, out, pad, print_json};
 use crate::sys::libc::close;
-use crate::sys::upatch::upatch_open_first_link;
 use crate::util::help::is_help;
 use crate::util::json::JsonEmit;
 use crate::util::upatch::{self, NAME_MAX, Opened, name_from_pin, pin_name};
+use crate::util::upatch_resolve::open_first_link;
 
 pub(super) const UPATCHES_DIR: &str = "/var/lib/shirudo/upatches";
-pub(super) const BPFFS_UPATCHES_DIR: &str = "/run/shirudo/bpffs/upatches";
+pub(super) use crate::util::upatch_resolve::BPFFS_UPATCHES_DIR;
 
 fn usage() {
     help(
@@ -47,11 +47,7 @@ fn names(dir: &str, keep: impl Fn(&[u8]) -> bool) -> Vec<Vec<u8>> {
 
 /// Whether upatch `name` is loaded: a link pinned, or its test program.
 fn loaded(name: &[u8]) -> bool {
-    let Ok(c_name) = CString::new(name) else {
-        return false;
-    };
-    // SAFETY: a C string.
-    let fd = unsafe { upatch_open_first_link(c_name.as_ptr()) };
+    let fd = open_first_link(name);
     if fd >= 0 {
         // SAFETY: the descriptor opened above.
         unsafe { close(fd) };

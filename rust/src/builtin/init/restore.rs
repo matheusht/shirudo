@@ -14,7 +14,7 @@ use crate::errno::{EACCES, EEXIST, EINVAL, ENAMETOOLONG, ENODEV, ENOENT, ENOSPC,
 use crate::sys::hex::hex_decode;
 use crate::sys::libc::{close, explicit_bzero};
 use crate::sys::string::name_has_suffix;
-use crate::sys::upatch::{upatch_apply, upatch_open_first_link, upatch_payload_sha256};
+use crate::sys::upatch::upatch_apply;
 use crate::text::cstr;
 use crate::util::bpm_tree::TreeState;
 use crate::util::bpm_tree_state::tree_state_read;
@@ -31,6 +31,7 @@ use crate::util::measured::{
 };
 use crate::util::seal::seal_owns;
 use crate::util::upatch::{Upatch, upatch_close, upatch_open};
+use crate::util::upatch_resolve;
 
 const UPATCHES_DIR: &str = "/var/lib/shirudo/upatches";
 const BPM_TREE_STATE_PATH: &str = "/var/lib/shirudo/bpm/upatch-tree/state.json";
@@ -137,19 +138,12 @@ fn restore_one(
         ));
         return Ok(None);
     }
-    // SAFETY: a C string.
-    let fd = unsafe { upatch_open_first_link(e.name.as_ptr().cast()) };
+    let fd = upatch_resolve::open_first_link(cstr(&e.name));
     if fd >= 0 {
         let mut pinned = [0u8; 65];
-        // SAFETY: the descriptor opened above, a C string and the room.
-        unsafe {
-            close(fd);
-            upatch_payload_sha256(
-                e.name.as_ptr().cast(),
-                pinned.as_mut_ptr().cast(),
-                pinned.len(),
-            );
-        }
+        // SAFETY: the descriptor opened above.
+        unsafe { close(fd) };
+        upatch_resolve::payload_sha256(cstr(&e.name), &mut pinned);
         if cstr(&pinned) != cstr(&e.payload_hex) {
             error(&cat!(
                 "boot-restore: ",

@@ -6,8 +6,6 @@
 
 use core::ffi::{c_char, c_int};
 
-use crate::sys::btf::Btf;
-
 /// What an install gives for a valid upatch whose target module is not
 /// loaded.
 pub const UPATCH_INSTALL_TARGET_MISSING: c_int = 2;
@@ -27,18 +25,6 @@ const _: () = assert!(size_of::<MapSummary>() == 296);
 const _: () = assert!(core::mem::offset_of!(MapSummary, type_name) == 280);
 
 unsafe extern "C" {
-    /// Where upatch `name` attaches, as a C string into the `cap` bytes at
-    /// `out`, looked up in `vbtf`, the vmlinux BTF or NULL: 0 or -errno.
-    pub fn upatch_resolve_location(
-        vbtf: *mut Btf,
-        name: *const c_char,
-        out: *mut c_char,
-        cap: usize,
-    ) -> c_int;
-    /// When upatch `name` was loaded, or "" when unknown.
-    pub fn upatch_loaded_at(name: *const c_char, out: *mut c_char, cap: usize);
-    /// The hex payload digest of loaded upatch `name`, or "".
-    pub fn upatch_payload_sha256(name: *const c_char, out: *mut c_char, cap: usize);
     /// The maps of upatch `name` into `*out`, their count into `*n`, which
     /// map_summary_free() frees: 0 or -errno.
     pub fn upatch_maps_list_one(
@@ -53,9 +39,6 @@ unsafe extern "C" {
     pub fn upatch_maps_print_summary(list: *const MapSummary, n: usize);
     /// Frees the `n` summaries at `list`, NULL for none.
     pub fn map_summary_free(list: *mut MapSummary, n: usize);
-    /// The first link of loaded upatch `name`, opened: a descriptor, or
-    /// -errno when none is pinned.
-    pub fn upatch_open_first_link(name: *const c_char) -> c_int;
     /// Loads the archived upatch at `path`: 0 or -errno.
     pub fn upatch_apply(path: *const c_char) -> c_int;
 }

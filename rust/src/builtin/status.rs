@@ -26,10 +26,7 @@ use crate::sys::log::{pr_err, pr_warn};
 use crate::sys::malloc::xfree;
 use crate::sys::string::name_has_suffix;
 use crate::sys::tamper::{TamperCounts, tamper_meaning, tamper_name, tamper_read};
-use crate::sys::upatch::{
-    MapSummary, map_summary_free, upatch_loaded_at, upatch_maps_list_one, upatch_payload_sha256,
-    upatch_resolve_location,
-};
+use crate::sys::upatch::{MapSummary, map_summary_free, upatch_maps_list_one};
 use crate::sys::version::shirudo_version_id;
 use crate::text::cstr;
 use crate::util::bpm_tree_state::tree_emit_status;
@@ -59,6 +56,7 @@ use crate::util::otel::{OtelOpts, otel_send_log_json, status_otel_severity};
 use crate::util::sysinfo::{Sysinfo, sysinfo_emit_json, sysinfo_gather};
 use crate::util::tpm::tpm_tcti;
 use crate::util::upatch::name_from_pin;
+use crate::util::upatch_resolve;
 use crate::util::upatch_table::{self, UpatchTableRow};
 
 const VAR_LIB: &[u8] = b"/var/lib/shirudo";
@@ -475,17 +473,19 @@ fn upatch_rows(pins: &[Vec<u8>]) -> Vec<UpatchTableRow> {
             }
             // SAFETY: the BTF or NULL, a C string and each field's room.
             unsafe {
-                upatch_resolve_location(
+                let upatch = name.to_bytes();
+                upatch_resolve::resolve_location(
                     vbtf,
-                    name.as_ptr(),
-                    r.location.as_mut_ptr(),
-                    r.location.len(),
+                    upatch,
+                    ffi::bytes_mut(r.location.as_mut_ptr().cast(), r.location.len()),
                 );
-                upatch_loaded_at(name.as_ptr(), r.loaded_at.as_mut_ptr(), r.loaded_at.len());
-                upatch_payload_sha256(
-                    name.as_ptr(),
-                    r.payload_sha256.as_mut_ptr(),
-                    r.payload_sha256.len(),
+                upatch_resolve::loaded_at(
+                    upatch,
+                    ffi::bytes_mut(r.loaded_at.as_mut_ptr().cast(), r.loaded_at.len()),
+                );
+                upatch_resolve::payload_sha256(
+                    upatch,
+                    ffi::bytes_mut(r.payload_sha256.as_mut_ptr().cast(), r.payload_sha256.len()),
                 );
                 upatch_maps_list_one(name.as_ptr(), &mut list, &mut n);
                 map_summary_free(list, n);

@@ -52,13 +52,13 @@ use crate::util::measured::{
 use crate::util::report::{OpReport, report_emit, report_free};
 use crate::util::seal::{seal_mkdir_p, seal_open_read, seal_write_file};
 use crate::util::upatch::{self, NAME_MAX, Opened, Upatch, name_valid, pin_name, upatch_signature};
+use crate::util::upatch_resolve::XATTR_PAYLOAD;
 
 /// INCOMING_DIR, LSM_LINK_PIN and XATTR_PAYLOAD of util/paths.h, and
 /// UPATCH_FILE_MAX of util/upatch.h.
 const INCOMING_DIR: &CStr = c"/var/lib/shirudo/incoming";
 const UPATCHES_DIR_C: &CStr = c"/var/lib/shirudo/upatches";
 const LSM_LINK_PIN: &CStr = c"/run/shirudo/bpffs/lsm_link";
-const XATTR_PAYLOAD: &CStr = c"security.bpf.shirudo.payload";
 const UPATCH_FILE_MAX: usize = 16 * 1024 * 1024;
 const DIGEST_LEN: usize = 32;
 const KERNEL_ABI_DETAIL_MAX: usize = 256;
