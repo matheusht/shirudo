@@ -10,7 +10,7 @@
 //! against the caller's expectations and the anchor init froze, and
 //! takes the register lock. Under the lock it undoes whatever an
 //! earlier, stopped operation left that this boot's records do not
-//! cover. The signed loader in builtin-upatch.c then loads or verifies.
+//! cover. The signed loader then loads or verifies.
 //! A load archives before it extends the register, and is undone when
 //! either fails, so that nothing runs unmeasured. An unload extends
 //! before it detaches, so that the register never misses a detach.
@@ -62,16 +62,6 @@ const LSM_LINK_PIN: &CStr = c"/run/shirudo/bpffs/lsm_link";
 const UPATCH_FILE_MAX: usize = 16 * 1024 * 1024;
 const DIGEST_LEN: usize = 32;
 const KERNEL_ABI_DETAIL_MAX: usize = 256;
-
-unsafe extern "C" {
-    /// The signed loader of builtin-upatch.c: loads the upatch at
-    /// `path`, or with `verify_only` checks its signature alone, and
-    /// says what failed in `rep`: 0 or nonzero.
-    fn upatch_apply_signed(path: *const c_char, verify_only: bool, rep: *mut OpReport) -> c_int;
-    /// The kernel's BPF keyring, checked against the anchor init froze,
-    /// and says what failed in `rep`: 0 or nonzero.
-    fn upatch_trust_anchor(keyring: *mut i32, serial: *mut i32, rep: *mut OpReport) -> c_int;
-}
 
 fn load_usage() {
     help(
@@ -158,8 +148,8 @@ fn decode_chain(hex: &CStr) -> Option<[u8; DIGEST_LEN]> {
     (unsafe { hex_decode(hex.as_ptr(), want.as_mut_ptr(), DIGEST_LEN) } == 0).then_some(want)
 }
 
-/// Records a failure in the report, as the loader's rep_fail() does.
-fn fail(
+/// Records a failure in the report.
+pub(super) fn fail(
     rep: &mut OpReport,
     phase: &'static CStr,
     category: &'static CStr,
@@ -334,7 +324,7 @@ fn wipe(dir: &[u8]) -> c_int {
 
 /// Removes the pins of upatch `name`. Unlinking the link pin drops its
 /// last reference, which detaches.
-fn remove_pins(name: &[u8]) -> c_int {
+pub(super) fn remove_pins(name: &[u8]) -> c_int {
     let dir = pin_dir(name);
     if let Err(e) = fs::metadata(os(&dir)) {
         return io_err(&e);
@@ -575,9 +565,7 @@ fn preflight(expect_chain: Option<&CStr>, rep: &mut OpReport) -> Result<(), ()> 
         );
         return Err(());
     }
-    let (mut keyring, mut serial) = (0, 0);
-    // SAFETY: room for the keyring and its serial, and the report.
-    if unsafe { upatch_trust_anchor(&mut keyring, &mut serial, rep) } != 0 {
+    if super::loader::trust_anchor(Some(&mut *rep)).is_err() {
         return Err(());
     }
     // SAFETY: a C string.
@@ -1025,8 +1013,7 @@ fn load_steps(a: &OpArgs, file: &CStr, rep: &mut OpReport, name_out: &mut CStrin
         );
         return 1;
     }
-    // SAFETY: the staged copy's C string and the report.
-    if unsafe { upatch_apply_signed(staged.path.as_ptr(), false, rep) } != 0 {
+    if super::loader::apply_signed(&staged.path, false, Some(&mut *rep)).is_err() {
         return 1;
     }
 
@@ -1228,8 +1215,7 @@ fn unload_steps(a: &OpArgs, file: &CStr, rep: &mut OpReport, name_out: &mut CStr
         return 1;
     }
     // A bad signature fails here, before anything is removed.
-    // SAFETY: the staged copy's C string and the report.
-    if unsafe { upatch_apply_signed(staged.path.as_ptr(), true, rep) } != 0 {
+    if super::loader::apply_signed(&staged.path, true, Some(&mut *rep)).is_err() {
         log_err(b"upatch unload: signature verification failed; refusing");
         return 1;
     }
@@ -1499,20 +1485,4 @@ fn purge_locked(name: &[u8], signer: *const Cert, reason: &[u8]) -> c_int {
     let how: &[u8] = if loaded { b"detached" } else { b"archive_only" };
     log_audit(&[b"upatch purge: name=", name, b" reason=", reason, b" ", how].concat());
     c_int::from(loaded)
-}
-
-mod capi {
-    use core::ffi::{c_char, c_int};
-
-    /// The pins of upatch `name` removed, for the signed loader's undo
-    /// of a load whose payload it could not record: 0 or -errno.
-    ///
-    /// # Safety
-    ///
-    /// `name` is a C string.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_remove_pins(name: *const c_char) -> c_int {
-        // SAFETY: the caller's C string.
-        super::remove_pins(unsafe { crate::ffi::c_str(name) })
-    }
 }

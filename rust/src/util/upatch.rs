@@ -163,19 +163,19 @@ const STAT_SIZE: usize = 128;
 /// for a uprobe the binary's path, build ID and offsets.
 #[repr(C)]
 pub struct ProgSpec {
-    role: u32,
-    kind: u32,
-    offset: u64,
-    target: [u8; ATTACH_TARGET_MAX],
-    map: [u8; PROG_MAP_MAX],
-    uprobe_path: *mut c_char,
-    uprobe_path_len: u32,
-    build_id: [u8; BUILD_ID_MAX],
-    build_id_len: u32,
-    uprobe_offsets: *mut u64,
-    nr_uprobe_offsets: u32,
-    target_fd: c_int,
-    target_stat: [u64; STAT_SIZE / 8],
+    pub(crate) role: u32,
+    pub(crate) kind: u32,
+    pub(crate) offset: u64,
+    pub(crate) target: [u8; ATTACH_TARGET_MAX],
+    pub(crate) map: [u8; PROG_MAP_MAX],
+    pub(crate) uprobe_path: *mut c_char,
+    pub(crate) uprobe_path_len: u32,
+    pub(crate) build_id: [u8; BUILD_ID_MAX],
+    pub(crate) build_id_len: u32,
+    pub(crate) uprobe_offsets: *mut u64,
+    pub(crate) nr_uprobe_offsets: u32,
+    pub(crate) target_fd: c_int,
+    pub(crate) target_stat: [u64; STAT_SIZE / 8],
 }
 
 const _: () = assert!(core::mem::offset_of!(ProgSpec, target_stat) == 256);
@@ -625,7 +625,7 @@ fn prog_name_char(c: u8) -> bool {
 
 /// The header's name as a program name: up to `out`'s room less one,
 /// any other byte than `[A-Za-z0-9_.]` as '_', and zeros after.
-fn prog_name(u: &Upatch, out: &mut [u8]) {
+pub(crate) fn prog_name(u: &Upatch, out: &mut [u8]) {
     let n = u.hdr.name.iter().position(|&c| c == 0).unwrap_or(NAME_MAX);
 
     if out.is_empty() {
@@ -809,7 +809,7 @@ pub(crate) unsafe fn member_valid(name: *const c_char, payload_hex: *const c_cha
 /// # Safety
 ///
 /// `specs` is NULL or the `nr_progs` specs prog_specs_parse() gave.
-unsafe fn specs_free(specs: *mut ProgSpec, nr_progs: u32) {
+pub(crate) unsafe fn specs_free(specs: *mut ProgSpec, nr_progs: u32) {
     if specs.is_null() {
         return;
     }
@@ -1016,7 +1016,7 @@ unsafe fn specs_fill(specs: *mut ProgSpec, m: &[u8], nr_progs: u32, base_len: us
 ///
 /// `metadata` is NULL or points to `metadata_len` bytes, and `out` to
 /// room for a pointer.
-unsafe fn specs_parse(
+pub(crate) unsafe fn specs_parse(
     metadata: *const c_void,
     metadata_len: u32,
     nr_maps: u32,

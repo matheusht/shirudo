@@ -41,7 +41,7 @@ while IFS= read -r page; do
 		sed "s|^|$page |"
 done <"$work/pages" >"$work/options"
 
-cat shirudo.c builtin-*.c rust/src/builtin/*.rs rust/src/builtin/*/*.rs \
+cat shirudo.c rust/src/builtin/*.rs rust/src/builtin/*/*.rs \
 	tools/shirudo-build/*.c rust/src/shirudo_build/*.rs \
 	rust/src/shirudo_build/*/*.rs tools/gen-image/* \
 	tools/gen-initrd/* >"$work/parsers"
@@ -55,12 +55,18 @@ done <"$work/options"
 # Every failure category the code emits has an entry.
 categories=Documentation/reference/failure-categories.rst
 {
-	grep -ohE 'rep_fail\([^,]+, "[a-z_]+", "[a-z_]+"' builtin-*.c util/*.c |
+	# A report's failure: fail(rep, c"<phase>", c"<category>", ...) or
+	# rep.fail(c"<phase>", c"<category>", ...), across lines.
+	for f in rust/src/builtin/*.rs rust/src/builtin/*/*.rs; do
+		tr '\n' ' ' <"$f" |
+			grep -oE 'fail\(([[:space:]]*rep,)?[[:space:]]*c"[a-z_]+",[[:space:]]*c"[a-z_]+"' |
+			sed -E 's/.*c"([a-z_]+)"$/\1/'
+	done
+	grep -ohE 'category = c"[a-z_]+"' rust/src/builtin/*.rs rust/src/builtin/*/*.rs |
 		sed -E 's/.*"([a-z_]+)"$/\1/'
-	grep -ohE '(cat|category) = "[a-z_]+"' builtin-*.c util/*.c |
-		sed -E 's/.*"([a-z_]+)"$/\1/'
-	sed -n '/^static const char \*cat_from_load_errno/,/^}/p' builtin-upatch.c |
-		grep -oE 'return "[a-z_]+"' | sed -E 's/.*"([a-z_]+)"$/\1/'
+	# The categories an errno maps to.
+	sed -n '/^fn [a-z_]*category(/,/^}/p' rust/src/builtin/*.rs rust/src/builtin/*/*.rs |
+		grep -oE 'c"[a-z_]+"' | sed -E 's/c"([a-z_]+)"/\1/'
 } | sort -u >"$work/categories"
 while IFS= read -r category; do
 	grep -qF "\`\`$category\`\`" "$categories" ||

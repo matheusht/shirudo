@@ -210,7 +210,7 @@ fn open_serializer_pin(upatch: &[u8], map: &[u8]) -> c_int {
 
 /// One BPF_PROG_TEST_RUN of `prog_fd` over `ctx`: its return value, or
 /// -errno.
-fn prog_test_run(prog_fd: c_int, ctx: *mut c_void, ctx_size: u32) -> Result<u32, c_int> {
+pub(crate) fn prog_test_run(prog_fd: c_int, ctx: *mut c_void, ctx_size: u32) -> Result<u32, c_int> {
     #[repr(C, align(8))]
     struct Attr([u8; ATTR_SIZE]);
     let mut attr = Attr([0; ATTR_SIZE]);
@@ -868,7 +868,7 @@ pub(crate) fn list(upatch: Option<&[u8]>) -> Vec<MapSummary> {
 }
 
 mod capi {
-    use core::ffi::{CStr, c_char, c_int, c_void};
+    use core::ffi::{CStr, c_char, c_int};
 
     /// The name BPF_MAP_TYPE_* `ty` goes by, "unknown" for one not
     /// told apart.
@@ -905,29 +905,6 @@ mod capi {
             Ok(p) => {
                 // SAFETY: the caller's room.
                 unsafe { out.write(p) };
-                0
-            }
-            Err(e) => e,
-        }
-    }
-
-    /// One BPF_PROG_TEST_RUN of `prog_fd` over the `ctx_size` bytes at
-    /// `ctx`, for the signed loader: 0 with its return value, or -errno.
-    ///
-    /// # Safety
-    ///
-    /// `ctx` holds `ctx_size` bytes, and `retval` is room for the value.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn prog_test_run(
-        prog_fd: c_int,
-        ctx: *mut c_void,
-        ctx_size: u32,
-        retval: *mut u32,
-    ) -> c_int {
-        match super::prog_test_run(prog_fd, ctx, ctx_size) {
-            Ok(r) => {
-                // SAFETY: the caller's room.
-                unsafe { *retval = r };
                 0
             }
             Err(e) => e,

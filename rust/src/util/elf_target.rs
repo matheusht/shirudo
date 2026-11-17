@@ -182,7 +182,7 @@ unsafe fn elf_build_id(elf: *mut Elf, build_id: *mut u8, build_id_len: *mut u32)
 ///
 /// `build_id` is NULL or room for an ID, and `build_id_len` NULL or room
 /// for its length.
-unsafe fn build_id_fd(fd: c_int, build_id: *mut u8, build_id_len: *mut u32) -> c_int {
+pub(crate) unsafe fn build_id_fd(fd: c_int, build_id: *mut u8, build_id_len: *mut u32) -> c_int {
     if fd < 0 || build_id.is_null() || build_id_len.is_null() {
         return -EINVAL;
     }

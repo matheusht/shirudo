@@ -22,7 +22,7 @@ const KEYCTL_UNLINK: c_long = 9;
 const KEYCTL_READ: c_long = 11;
 const KEYCTL_RESTRICT_KEYRING: c_long = 29;
 const KEY_SPEC_THREAD_KEYRING: i32 = -1;
-const KEY_SPEC_BPF_KEYRING: i32 = -9;
+pub(crate) const KEY_SPEC_BPF_KEYRING: i32 = -9;
 const KEY_SPEC_DM_VERITY_KEYRING: i32 = -10;
 
 /// `shirudo_keyring_cb`.
@@ -433,6 +433,11 @@ fn keyctl_spec(cmd: c_long, spec: i32) -> c_long {
     if ret < 0 { -c_long::from(errno()) } else { ret }
 }
 
+/// The serial of the kernel's BPF keyring, or -errno.
+pub(crate) fn bpf_serial() -> i32 {
+    keyctl_spec(KEYCTL_GET_KEYRING_ID, KEY_SPEC_BPF_KEYRING) as i32
+}
+
 /// A DER certificate added to the special keyring `spec`: its serial, or
 /// -errno.
 ///
@@ -747,7 +752,7 @@ mod capi {
 
     #[unsafe(no_mangle)]
     pub extern "C" fn keyring_bpf_serial() -> i32 {
-        super::keyctl_spec(KEYCTL_GET_KEYRING_ID, KEY_SPEC_BPF_KEYRING) as i32
+        super::bpf_serial()
     }
 
     /// # Safety

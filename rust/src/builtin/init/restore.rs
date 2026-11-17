@@ -10,11 +10,11 @@ use core::{mem, ptr};
 use std::ffi::CString;
 
 use super::{Init, cat, error, hex, info, strerr, warn};
+use crate::builtin::upatch::loader;
 use crate::errno::{EACCES, EEXIST, EINVAL, ENAMETOOLONG, ENODEV, ENOENT, ENOSPC, EPERM};
 use crate::sys::hex::hex_decode;
 use crate::sys::libc::{close, explicit_bzero};
 use crate::sys::string::name_has_suffix;
-use crate::sys::upatch::upatch_apply;
 use crate::text::cstr;
 use crate::util::bpm_tree::TreeState;
 use crate::util::bpm_tree_state::tree_state_read;
@@ -163,8 +163,7 @@ fn restore_one(
         ));
         return Err(-EPERM);
     }
-    // SAFETY: a C string.
-    if unsafe { upatch_apply(file.as_ptr()) } != 0 {
+    if loader::apply_signed(&file, false, None).is_err() {
         error(&cat!("boot-restore: failed to apply ", name));
         return Err(-EINVAL);
     }

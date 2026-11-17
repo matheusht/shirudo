@@ -4,7 +4,7 @@
 import Shirudo.Chain
 
 /-!
-The upatch load and unload protocol of builtin-upatch.c and the boot
+The upatch load and unload protocol of rust/src/builtin/upatch/ and the boot
 restore of rust/src/builtin/init/restore.rs, against crashes, concurrent
 commands and root.
 
@@ -412,7 +412,7 @@ structure Variant where
   `init` wrote its record. -/
   gate : Bool := true
 
-/-- The protocol as builtin-upatch.c and rust/src/builtin/init have it. -/
+/-- The protocol as rust/src/builtin/upatch and rust/src/builtin/init have it. -/
 def C : Variant := {}
 
 /-- `eventlog_lock()` returns: no other descriptor holds the lock. -/

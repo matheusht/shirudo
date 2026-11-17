@@ -406,6 +406,20 @@ unsafe extern "C" {
         size: usize,
     ) -> isize;
     pub fn mkdirat(dirfd: c_int, path: *const c_char, mode: u32) -> c_int;
+    pub fn setxattr(
+        path: *const c_char,
+        name: *const c_char,
+        value: *const c_void,
+        size: usize,
+        flags: c_int,
+    ) -> c_int;
+    pub fn getsockopt(
+        fd: c_int,
+        level: c_int,
+        name: c_int,
+        value: *mut c_void,
+        len: *mut u32,
+    ) -> c_int;
     pub fn fsetxattr(
         fd: c_int,
         name: *const c_char,

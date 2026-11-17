@@ -270,9 +270,6 @@ UTIL_SRCS := \
     util/upatch_verify.c \
 
 
-BUILTIN_SRCS := \
-    builtin-upatch.c
-
 
 # BPF-side libbpf headers, used straight from vendor/libbpf (the BPF
 # compile rule adds it to the include path so <bpf/...> resolves) and
@@ -315,7 +312,6 @@ QUOTE_CHECK_SRCS := \
 # ----- derived names ----------------------------------------------
 
 UTIL_OBJS    := $(foreach s,$(UTIL_SRCS),$(call obj,$(s:.c=.o)))
-BUILTIN_OBJS := $(foreach s,$(BUILTIN_SRCS),$(call obj,$(s:.c=.o)))
 BPF_OBJS     := $(BPF_SRCS:.c=.bpf.o)
 BUILD_OBJS   := $(foreach s,$(BUILD_SRCS),$(call obj,$(s:.c=.o)))
 QUOTE_CHECK_OBJS := $(foreach s,$(QUOTE_CHECK_SRCS),$(call obj,$(s:.c=.o)))
@@ -327,7 +323,7 @@ VERSION_OBJ  := $(call obj,util/version_id.o)
 # changing a header would leave dependent .o files stale -- e.g. a struct
 # whose size grew in a header but whose .c was not re-touched, producing
 # an ABI mismatch and memory corruption at runtime.
-DEP_OBJS := $(MAIN_OBJ) $(BUILTIN_OBJS) $(UTIL_OBJS) $(VERSION_OBJ) \
+DEP_OBJS := $(MAIN_OBJ)  $(UTIL_OBJS) $(VERSION_OBJ) \
             $(BUILD_OBJS)  $(QUOTE_CHECK_OBJS)
 DEPS     := $(DEP_OBJS:.o=.d)
 
@@ -507,21 +503,21 @@ util/version_id.c:
 
 # ----- phase 5: link ---------------------------------------------
 
-shirudo: $(MAIN_OBJ) $(BUILTIN_OBJS) $(UTIL_OBJS) $(VERSION_OBJ) $(LIBBPF_A) \
+shirudo: $(MAIN_OBJ)  $(UTIL_OBJS) $(VERSION_OBJ) $(LIBBPF_A) \
          $(RUST_LIB)
 	@printf '  LD      $@\n'
 	$(Q)$(LD) $(CFLAGS) $(HARDEN_LDFLAGS) $(LDFLAGS) $(RPATH_LDFLAGS) -o $@ \
-	    $(MAIN_OBJ) $(BUILTIN_OBJS) $(UTIL_OBJS) $(VERSION_OBJ) \
+	    $(MAIN_OBJ)  $(UTIL_OBJS) $(VERSION_OBJ) \
 	    $(RUST_LIB) $(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_LDLIBS)
 
-shirudo-target: $(MAIN_OBJ) $(BUILTIN_OBJS) $(UTIL_OBJS) $(VERSION_OBJ) $(LIBBPF_A) \
+shirudo-target: $(MAIN_OBJ)  $(UTIL_OBJS) $(VERSION_OBJ) $(LIBBPF_A) \
                 $(RUST_LIB) \
                 Makefile.shirudo $(CONFIG_MK_DEP) .github/scripts/check-static-target.sh
 	@printf '  LD      $@ (static PIE)\n'
 	$(Q)$(LD) $(CFLAGS) $(TARGET_TLS_CFLAGS) \
 	    $(HARDEN_STATIC_PIE_LDFLAGS) $(LDFLAGS) \
 	    -static-pie -static-libgcc -o $@ \
-	    $(MAIN_OBJ) $(BUILTIN_OBJS) $(UTIL_OBJS) $(VERSION_OBJ) \
+	    $(MAIN_OBJ)  $(UTIL_OBJS) $(VERSION_OBJ) \
 	    $(RUST_LIB) $(STATIC_LIBS) $(TARGET_TLS_STATIC_LINK_LIBS) \
 	    $(TARGET_STATIC_RUNTIME_LINK_LIBS) $(RUST_LDLIBS)
 	$(Q)sh .github/scripts/check-static-target.sh $@ || \
@@ -747,7 +743,7 @@ endif
 
 build/verity-tests/shirudo-image-fault: testing/helper/image-fault.c \
 		testing/helper/image-fault.h \
-		$(MAIN_OBJ) $(BUILTIN_OBJS) $(UTIL_OBJS) $(VERSION_OBJ) $(LIBBPF_A) \
+		$(MAIN_OBJ)  $(UTIL_OBJS) $(VERSION_OBJ) $(LIBBPF_A) \
 		$(RUST_LIB)
 	@printf '  CC      $@\n'
 	$(Q)mkdir -p $(dir $@)
@@ -838,7 +834,7 @@ testing/helper/test-nv-writer: testing/helper/test-nv-writer.c $(REGISTER_OBJS)
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(REGISTER_LIBS)
 
 testing/helper/test-keyring-seal: testing/helper/test-keyring-seal.c \
-		$(BUILTIN_OBJS) $(UTIL_OBJS) $(VERSION_OBJ) $(LIBBPF_A) $(RUST_LIB)
+		 $(UTIL_OBJS) $(VERSION_OBJ) $(LIBBPF_A) $(RUST_LIB)
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< \
 		$(filter %.o %.a,$^) \
@@ -878,7 +874,7 @@ testing/helper/test-register: testing/helper/test-register.c  \
 		-Wl,--wrap=enforcement_active
 
 testing/helper/test-register-cli: testing/helper/test-register-cli.c \
-		$(BUILTIN_OBJS) $(UTIL_OBJS) $(VERSION_OBJ) $(LIBBPF_A) $(RUST_LIB)
+		 $(UTIL_OBJS) $(VERSION_OBJ) $(LIBBPF_A) $(RUST_LIB)
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
@@ -1045,7 +1041,7 @@ testing/helper/test-image-config: testing/helper/test-image-config.c \
 		$(RUST_TEST_LDLIBS)
 
 testing/helper/test-image-cli: testing/helper/test-image-cli.c \
-		$(BUILTIN_OBJS) \
+		 \
 		$(UTIL_OBJS) $(VERSION_OBJ) $(LIBBPF_A) $(RUST_LIB)
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) $(LDFLAGS) $(RPATH_LDFLAGS) -o $@ \
@@ -1054,7 +1050,7 @@ testing/helper/test-image-cli: testing/helper/test-image-cli.c \
 		$(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
 testing/helper/test-image-cleanup: testing/helper/test-image-cleanup.c \
-		testing/helper/image-cleanup.h  $(BUILTIN_OBJS) \
+		testing/helper/image-cleanup.h   \
 		$(filter-out $(call obj,),$(UTIL_OBJS)) \
 		$(VERSION_OBJ) $(LIBBPF_A) $(RUST_LIB)
 	@printf '  CC      $@\n'
@@ -1130,7 +1126,7 @@ unit-tests: $(UNIT_TESTS)
 # compiler would. sparse predefines no __FLT_EVAL_METHOD__, which
 # glibc's <math.h> tests, so -Wundef is the compiler's to check.
 SPARSE_TYPES_H ?= /usr/include/linux/types.h
-SPARSE_SRCS    := shirudo.c $(BUILTIN_SRCS) $(UTIL_SRCS) $(BUILD_SRCS) \
+SPARSE_SRCS    := shirudo.c  $(UTIL_SRCS) $(BUILD_SRCS) \
                   $(QUOTE_CHECK_SRCS)
 
 .PHONY: sparse
@@ -1286,7 +1282,7 @@ $(FUZZ_OUT)/fuzz-quote-check: testing/fuzz/fuzz-quote-check.c $(FUZZ_BASE) \
                                tools/quote-check/row.c \
 
 $(FUZZ_OUT)/fuzz-upatch-info: testing/fuzz/fuzz-upatch-info.c $(FUZZ_BASE) \
-                              testing/fuzz/output.c builtin-upatch.c \
+                              testing/fuzz/output.c  \
                               builtin.h \
                               util/curl.c \
                                \
@@ -1301,7 +1297,7 @@ $(FUZZ_OUT)/fuzz-upatch-info: testing/fuzz/fuzz-upatch-info.c $(FUZZ_BASE) \
                               util/upatch_verify.c util/version_id.c \
                               util/xdp.c $(FUZZ_SEAL) $(LIBBPF_A)
 # Rust defines upatch_decode_map_signal(), which
-# builtin-upatch.c calls, with LuaJIT alone; upatch info runs no Lua.
+#  calls, with LuaJIT alone; upatch info runs no Lua.
 $(FUZZ_OUT)/fuzz-upatch-info: FUZZ_CFLAGS += $(TSS2_CFLAGS) $(LIBELF_CFLAGS) \
                                              $(LUAJIT_CFLAGS) -DHAVE_LUAJIT
 $(FUZZ_OUT)/fuzz-upatch-info: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) \
@@ -1333,7 +1329,7 @@ $(FUZZ_OUT)/fuzz-attest-report: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) \
 # A target that reaches static parsers or printers includes their source,
 # which it then depends on without linking it a second time.
 $(FUZZ_OUT)/fuzz-serializer: FUZZ_INCLUDED :=
-$(FUZZ_OUT)/fuzz-upatch-info: FUZZ_INCLUDED := builtin-upatch.c
+$(FUZZ_OUT)/fuzz-upatch-info: FUZZ_INCLUDED :=
 $(FUZZ_OUT)/fuzz-bpm-info: FUZZ_INCLUDED :=
 $(FUZZ_OUT)/fuzz-attest-report: FUZZ_INCLUDED :=
 
@@ -1368,7 +1364,7 @@ fuzz-targets: $(FUZZ_TARGETS)
 clean:
 	$(Q)rm -f shirudo shirudo-target tools/shirudo-build/shirudo-build $(TEST_HELPERS)
 	$(Q)rm -f tools/quote-check/shirudo-quote-check
-	$(Q)rm -f $(MAIN_OBJ) $(BUILTIN_OBJS) $(UTIL_OBJS) \
+	$(Q)rm -f $(MAIN_OBJ)  $(UTIL_OBJS) \
 	          $(BUILD_OBJS)  $(QUOTE_CHECK_OBJS) $(VERSION_OBJ) \
 	          util/version_id.c
 	$(Q)rm -rf build/target build/unit build/quote-check build/fuzz-afl \

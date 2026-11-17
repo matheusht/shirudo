@@ -378,12 +378,13 @@ Project layout
    * - :src:`shirudo.c`
      - ``main()``, which hands the command line to the dispatch table
        in :src:`rust/src/builtin/commands.rs`.
-   * - :src:`builtin-upatch.c`, :src:`builtin.h`
-     - One module per top-level command, in :src:`rust/src/builtin/`:
-       ``attest``, ``bpm``, ``build``, ``config``, ``genkey``,
-       ``image``, ``init``, ``keys``, ``status``, ``upatch`` and
-       ``version``. The signed loader under ``upatch load`` and
-       ``unload`` is still C, in :src:`builtin-upatch.c`.
+   * - :src:`builtin.h`
+     - The C declarations of the commands, one module per top-level
+       command in :src:`rust/src/builtin/`: ``attest``, ``bpm``,
+       ``build``, ``config``, ``genkey``, ``image``, ``init``, ``keys``,
+       ``status``, ``upatch`` and ``version``. The signed loader under
+       ``upatch load``, ``unload`` and boot restore is
+       :src:`rust/src/builtin/upatch/loader.rs`.
    * - :src:`util/`
      - The userspace library both binaries link.
    * - :src:`bpf/`

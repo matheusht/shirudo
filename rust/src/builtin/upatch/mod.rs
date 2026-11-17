@@ -3,12 +3,12 @@
 
 //! `shirudo upatch`: describe an upatch file, list the archived and the
 //! loaded upatches, describe a loaded one and read its maps from the
-//! kernel, and load and unload upatches through the signed loader of
-//! builtin-upatch.c.
+//! kernel, and load and unload upatches through the signed loader.
 
 mod get;
 mod info;
 mod list;
+pub(crate) mod loader;
 mod map;
 mod ops;
 

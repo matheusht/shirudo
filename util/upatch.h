@@ -170,22 +170,4 @@ int prog_specs_parse(const void *metadata, __u32 metadata_len,
 		     __u32 nr_maps, __u32 nr_progs, struct prog_spec **out);
 void prog_specs_free(struct prog_spec *specs, __u32 nr_progs);
 
-/*
- * The signed loader of builtin-upatch.c: upatch_apply() for init's boot
- * restore, and for the operations of rust/src/builtin/upatch/ops.rs
- * upatch_apply_signed(), which with verify_only checks the signature
- * alone, and upatch_trust_anchor(), the kernel's BPF keyring checked
- * against the anchor init froze. Each says what failed in rep.
- */
-struct op_report;
-
-int upatch_apply(const char *path);
-int upatch_apply_signed(const char *path, bool verify_only,
-			struct op_report *rep);
-int upatch_trust_anchor(__s32 *keyring, __s32 *serial,
-			struct op_report *rep);
-
-/* The pins of upatch name removed, which detaches it: 0 or -errno. */
-int upatch_remove_pins(const char *name);
-
 #endif /* SHIRUDO_UTIL_UPATCH_H */

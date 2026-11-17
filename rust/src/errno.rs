@@ -41,6 +41,7 @@ pub const EUCLEAN: c_int = 117;
 pub const EREMOTEIO: c_int = 121;
 pub const ENOKEY: c_int = 126;
 pub const EKEYREJECTED: c_int = 129;
+pub const EXDEV: c_int = 18;
 pub const ENODEV: c_int = 19;
 pub const ENODATA: c_int = 61;
 pub const EPROTO: c_int = 71;

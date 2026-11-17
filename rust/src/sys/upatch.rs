@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! Loading and unloading upatches, of `util/upatch.h`, which
-//! builtin-upatch.c implements.
+//! What `util/upatch.h` and `util/upatch_maps.h` share with the C: an
+//! install's result and a map's summary.
 
 use core::ffi::{c_char, c_int};
 
@@ -23,8 +23,3 @@ pub struct MapSummary {
 
 const _: () = assert!(size_of::<MapSummary>() == 296);
 const _: () = assert!(core::mem::offset_of!(MapSummary, type_name) == 280);
-
-unsafe extern "C" {
-    /// Loads the archived upatch at `path`: 0 or -errno.
-    pub fn upatch_apply(path: *const c_char) -> c_int;
-}

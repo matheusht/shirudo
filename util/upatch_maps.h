@@ -134,7 +134,4 @@ int upatch_maps_read_serial_page(int fd, __u32 max_entries, __u32 page_index,
 				 __u64 cursor, __u64 invocation_id,
 				 struct serial_page *out);
 
-int prog_test_run(int prog_fd, void *ctx, __u32 ctx_sz,
-		  __u32 *retval);
-
 #endif /* SHIRUDO_UTIL_UPATCH_MAPS_H */

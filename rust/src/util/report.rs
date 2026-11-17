@@ -226,7 +226,7 @@ pub(crate) unsafe fn report_emit(path: *const c_char, r: &OpReport) -> c_int {
 ///
 /// `log` is NULL or a C string, and the report's log NULL or one
 /// xstrndup() gave.
-unsafe fn report_set_log(r: &mut OpReport, log: *const c_char) {
+pub(crate) unsafe fn report_set_log(r: &mut OpReport, log: *const c_char) {
     // SAFETY: the caller passes a log from xstrndup() or NULL.
     unsafe { xstrfree(r.verifier_log) };
     r.verifier_log = core::ptr::null_mut();
