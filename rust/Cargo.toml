@@ -25,6 +25,10 @@ undocumented_unsafe_blocks = "deny"
 # prebuilt objects would bring all of themselves. The crate unwinds, for
 # a Lua error that crosses a Rust callback; src/panic.rs aborts a panic.
 [profile.release]
+# Size before speed: the static target must fit the runtime image that
+# every boot reads whole through dm-verity, and the crate is not where
+# shirudo spends its time.
+opt-level = "s"
 overflow-checks = true
 codegen-units = 1
 lto = true
