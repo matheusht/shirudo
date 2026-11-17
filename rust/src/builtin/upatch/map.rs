@@ -20,10 +20,8 @@ use crate::sys::libc::{
     LOCK_UN, O_APPEND, O_CREAT, O_RDWR, STDOUT_FILENO, close, errno, ferror, flock, stdout,
 };
 use crate::sys::malloc::xfree;
-use crate::sys::upatch::upatch_maps_print_summary;
 use crate::sys::upatch_maps::{
-    MAP_ENTRIES_DEFAULT, MAP_READ_PEEK, MapView, map_view_free, upatch_maps_print_detail,
-    upatch_maps_read,
+    MAP_ENTRIES_DEFAULT, MAP_READ_PEEK, MapView, map_view_free, upatch_maps_read,
 };
 use crate::text::{cstr, parse_u64};
 use crate::util::config::{self, Scrubbed};
@@ -31,6 +29,7 @@ use crate::util::decode;
 use crate::util::help::{HelpItem, is_help};
 use crate::util::io::{lock_exclusive, write_complete};
 use crate::util::json::JsonEmit;
+use crate::util::map_render;
 use crate::util::otel::{self, OtelOpts};
 use crate::util::seal::seal_output_open;
 use crate::util::upatch::name_valid;
@@ -380,13 +379,11 @@ fn export(
             }
         }
         if detail {
-            // SAFETY: the view read, printed to the C library's stdout,
-            // whose error flag the print leaves.
-            unsafe {
-                upatch_maps_print_detail(&*v);
-                if ferror(stdout) != 0 {
-                    ret = 1;
-                }
+            map_render::print_detail(&v);
+            // SAFETY: the C library's stdout, whose error flag the print
+            // leaves.
+            if unsafe { ferror(stdout) } != 0 {
+                ret = 1;
             }
         }
     }
@@ -398,8 +395,7 @@ fn export(
 /// The maps listed, as a table or a JSON record: 0 or 1.
 fn summary(a: &Args, maps: &Summaries) -> c_int {
     if !a.json {
-        // SAFETY: the listed summaries.
-        unsafe { upatch_maps_print_summary(maps.list, maps.n) };
+        map_render::print_summary(maps.as_slice());
         return 0;
     }
     let mut e = JsonEmit::growing(JSON_MAX);

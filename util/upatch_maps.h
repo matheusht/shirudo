@@ -119,6 +119,7 @@ int  upatch_maps_read(const char *upatch, const char *map,
 		      __u32 max_entries_cap, __u32 flags,
 		      struct map_view *out);
 
+/* In rust/src/util/map_render.rs. */
 void upatch_maps_print_summary(const struct map_summary *list,
 			       size_t n);
 void upatch_maps_print_detail(const struct map_view *v);

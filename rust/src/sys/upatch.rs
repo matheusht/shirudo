@@ -35,8 +35,6 @@ unsafe extern "C" {
     /// The maps of every loaded upatch into `*out`, their count into
     /// `*n`, which map_summary_free() frees: 0 or -errno.
     pub fn upatch_maps_list_all(out: *mut *mut MapSummary, n: *mut usize) -> c_int;
-    /// Prints the `n` summaries at `list` as a table to stdout.
-    pub fn upatch_maps_print_summary(list: *const MapSummary, n: usize);
     /// Frees the `n` summaries at `list`, NULL for none.
     pub fn map_summary_free(list: *mut MapSummary, n: usize);
     /// Loads the archived upatch at `path`: 0 or -errno.

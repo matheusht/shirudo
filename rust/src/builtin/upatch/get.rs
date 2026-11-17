@@ -18,13 +18,13 @@ use crate::sys::btf::{
 use crate::sys::libc::{close, errno};
 use crate::sys::upatch::MapSummary;
 use crate::sys::upatch_maps::{
-    MAP_ENTRIES_DEFAULT, MAP_READ_PEEK, MapView, map_view_free, upatch_maps_emit_json_object,
-    upatch_maps_print_detail, upatch_maps_read,
+    MAP_ENTRIES_DEFAULT, MAP_READ_PEEK, MapView, map_view_free, upatch_maps_read,
 };
 use crate::text::cstr;
 use crate::util::bpf_info::{Info, LINK_INFO_SIZE, PROG_INFO_SIZE};
 use crate::util::help::{HelpItem, is_help};
 use crate::util::json::JsonEmit;
+use crate::util::map_render;
 use crate::util::timefmt::format_duration;
 use crate::util::upatch::name_valid;
 use crate::util::upatch_resolve::{loaded_at, open_first_link, payload_sha256, resolve_location};
@@ -276,8 +276,7 @@ fn text(name: &CStr, l: &Loaded, maps: &[MapSummary], cap: u32) {
         read_map(name, m, cap, |v| {
             out(&[b"\n== Map: ", cstr(&m.name), b" ==\n"].concat());
             match v {
-                // SAFETY: the view read, which the C prints to stdout.
-                Ok(v) => unsafe { upatch_maps_print_detail(v) },
+                Ok(v) => map_render::print_detail(v),
                 Err(e) => out(&[b"  (read failed: ", strerr(-e), b")\n"].concat()),
             }
         });
@@ -320,8 +319,7 @@ fn json(name: &CStr, l: &Loaded, maps: &[MapSummary], cap: u32) -> c_int {
     e.arr_open(b"maps");
     for m in maps {
         read_map(name, m, cap, |v| match v {
-            // SAFETY: the emitter, which the C writes through, and the view.
-            Ok(v) => unsafe { upatch_maps_emit_json_object(&mut e, v) },
+            Ok(v) => map_render::emit_json_object(&mut e, v),
             Err(err) => {
                 e.obj_open();
                 e.kv_string(b"name", cstr(&m.name));
