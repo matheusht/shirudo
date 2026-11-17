@@ -2441,11 +2441,20 @@ mod capi {
 
     /// # Safety
     ///
-    /// `t` is a connection, and `key` a key.
+    /// `key` is a key, and `t` a connection when the key holds a handle:
+    /// as the C did, an empty key is flushed without one, so a caller's
+    /// cleanup may pass a connection it already closed.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn tpm_key_flush(t: *mut Tpm, key: *mut TpmKey) {
-        // SAFETY: the caller passes a connection and a key.
-        unsafe { super::key_flush((*t).esys, &mut *key) }
+        // SAFETY: the caller passes a key.
+        let key = unsafe { &mut *key };
+        let esys = if key.handle != ESYS_TR_NONE && key.handle != 0 {
+            // SAFETY: a key with a handle comes with its connection.
+            unsafe { (*t).esys }
+        } else {
+            core::ptr::null_mut()
+        };
+        super::key_flush(esys, key);
     }
 
     /// # Safety
