@@ -7,7 +7,9 @@
 
 extern int enforcing;
 
-int __wrap_enforcement_active(void);
-int __wrap_identity_read(struct identity *out);
+int __wrap_prctl(int option, ...);
+int __wrap_bpf_obj_get(const char *path);
+int __wrap_bpf_obj_get_info_by_fd(int fd, void *info, __u32 *len);
+int __wrap_bpf_map_lookup_elem(int fd, const void *key, void *value);
 
 #endif

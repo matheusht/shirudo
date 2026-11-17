@@ -17,7 +17,7 @@ use crate::sys::bpf::{
     BPF_ANY, bpf_map_freeze, bpf_map_lookup_elem, bpf_map_update_elem, bpf_obj_pin,
 };
 use crate::sys::btf::libbpf_get_error;
-use crate::sys::identity::{Identity, identity_read};
+use crate::sys::identity::Identity;
 use crate::sys::image_guards::{
     GATE_HOOK_COUNT, GUARD_BPF, GUARD_BPF_MAP, GUARD_KEY_PERMISSION, GUARD_MAP_COUNT,
     GUARD_PROG_LOAD, GUARD_REMOVEXATTR, GUARD_ROOTS, GUARD_SETXATTR, GUARD_TASKS,
@@ -34,6 +34,7 @@ use crate::sys::libc::{
     O_CLOEXEC, O_DIRECTORY, O_RDONLY, SYS_PIDFD_OPEN, access, close, open, syscall, unlink,
 };
 use crate::sys::loader::{EmbeddedBpf, bpf2_blob, seal_blob};
+use crate::util::identity;
 use crate::util::image_runtime;
 use crate::util::io::kernel_dev;
 use crate::util::keyring::{self, keyring_bpf_serial, keyring_dm_verity_serial};
@@ -714,8 +715,7 @@ pub(super) fn attach() -> c_int {
 
     if exists(bpf_gate) {
         let mut id = Identity::zeroed();
-        // SAFETY: the identity to fill.
-        let err = unsafe { identity_read(&mut id) };
+        let err = identity::read(&mut id);
         if err != 0
             || id.nv_writer_public[0] & 0x80 == 0
             || id.nv_index != NV_INDEX

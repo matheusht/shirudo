@@ -20,7 +20,7 @@ use std::os::unix::fs::MetadataExt;
 use super::words;
 use crate::errno::{EEXIST, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT, ENOKEY, ENOTBLK, EROFS};
 use crate::ffi;
-use crate::sys::identity::{Identity, enforcement_active, identity_read};
+use crate::sys::identity::Identity;
 use crate::sys::libc::{
     Statfs, Statvfs, fwrite, mount, statfs, statvfs, stderr, stdout, strerror, umount2,
 };
@@ -31,6 +31,7 @@ use crate::util::eventlog::{
     EventlogInit, eventlog_adopt_pending, eventlog_boot_init, eventlog_path,
 };
 use crate::util::help::{Help, HelpItem, HelpSection, is_help, print_help};
+use crate::util::identity;
 use crate::util::image_runtime;
 use crate::util::initrd;
 use crate::util::io::bpffs_mounted_at;
@@ -237,8 +238,7 @@ fn init_keyring(init: &mut Init) -> c_int {
         error(&cat!("bpf keyring lookup: ", strerr(-ret)));
         return ret;
     }
-    // SAFETY: the identity to fill.
-    if unsafe { identity_read(&mut id) } == 0 {
+    if identity::read(&mut id) == 0 {
         let same = id.keyring_type == SIG_KEYRING_BPF
             && id.keyring_serial == ring
             && image_runtime::runtime_root() == Some(id.runtime_root);
@@ -485,8 +485,7 @@ fn phase(ret: c_int, what: &str) -> c_int {
 fn run(init: &mut Init) -> c_int {
     // Only the run that brings enforcement up may label an unlabelled
     // tree.
-    // SAFETY: reads the enforcement map.
-    let active = unsafe { enforcement_active() };
+    let active = identity::enforcement_active();
     if active < 0 {
         return phase(active, "reading the enforcement state");
     }

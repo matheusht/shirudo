@@ -14,7 +14,7 @@ use std::ffi::CString;
 use super::{word, words};
 use crate::errno::{EACCES, EINVAL, EKEYREJECTED, ENODEV, ENOENT, ENOKEY, ESTALE};
 use crate::ffi;
-use crate::sys::identity::{Identity, identity_read};
+use crate::sys::identity::Identity;
 use crate::sys::libc::{
     Dirent, O_CLOEXEC, O_RDONLY, PATH_MAX, Tm, alphasort, close, errno, fwrite, open, scandir,
     stdout, strerror, strftime,
@@ -42,6 +42,7 @@ use crate::util::help::{
     Help, HelpItem, HelpSection, is_help, is_list_cmds, print_help, print_subcmd_list,
     resolve_subcommand,
 };
+use crate::util::identity;
 use crate::util::image_config;
 use crate::util::io::check_trusted;
 use crate::util::json::JsonEmit;
@@ -879,8 +880,7 @@ fn check_cert_algorithm(der: &[u8], what: &[u8]) -> c_int {
 fn check_voucher_live(set: &TrustedSet, voucher: &[u8; 32]) -> c_int {
     let mut id = Identity::zeroed();
 
-    // SAFETY: room for the identity.
-    if unsafe { identity_read(&mut id) } != 0 || id.keyring_type != SIG_KEYRING_BPF {
+    if identity::read(&mut id) != 0 || id.keyring_type != SIG_KEYRING_BPF {
         return 0;
     }
     let ring = keyring_bpf_serial();
@@ -1481,8 +1481,7 @@ fn keys_show(args: &[&[u8]]) -> c_int {
         e.arr_close();
     }
     let mut id = Identity::zeroed();
-    // SAFETY: room for the identity.
-    let id_rc = unsafe { identity_read(&mut id) };
+    let id_rc = identity::read(&mut id);
     let n_keys = id.n_keys.min(IDENTITY_KEYS_MAX) as usize;
     let dm_key = [id.dm_verity_key];
     let anchors = [

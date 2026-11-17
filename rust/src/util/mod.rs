@@ -4,6 +4,7 @@
 //! The ports of `util/`, one module for each C file they replace.
 
 pub(crate) mod attest;
+pub(crate) mod bpf_info;
 pub(crate) mod bpm_oci;
 pub(crate) mod bpm_package;
 pub(crate) mod bpm_source_config;
@@ -25,6 +26,7 @@ pub(crate) mod eventlog;
 pub(crate) mod format;
 pub(crate) mod harden;
 pub(crate) mod help;
+pub(crate) mod identity;
 pub(crate) mod image_bootstrap;
 mod image_cache;
 pub(crate) mod image_config;

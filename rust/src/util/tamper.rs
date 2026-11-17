@@ -8,8 +8,9 @@
 use core::ffi::{CStr, c_int};
 
 use crate::errno::EPROTO;
-use crate::sys::bpf::{bpf_map_lookup_elem, bpf_obj_get, bpf_obj_get_info_by_fd};
+use crate::sys::bpf::{bpf_map_lookup_elem, bpf_obj_get};
 use crate::sys::libc::{close, errno};
+use crate::util::bpf_info::{Info, MAP_INFO_SIZE, MAP_MAX_ENTRIES, MAP_VALUE_SIZE};
 
 /// `TAMPER_MAX` of `bpf/lib/tamper.h`: the tamper points there are.
 pub(crate) const TAMPER_MAX: usize = 37;
@@ -229,12 +230,6 @@ pub(crate) fn meaning(point: usize) -> &'static [u8] {
     POINTS.get(point).map_or(b"?", |p| p.meaning.as_bytes())
 }
 
-/// `struct bpf_map_info` of the uapi: its size, and where the value size
-/// and the entry count sit.
-const MAP_INFO_SIZE: usize = 104;
-const MAP_INFO_VALUE_SIZE: usize = 12;
-const MAP_INFO_MAX_ENTRIES: usize = 16;
-
 /// The counters into `out`: 0, -ENOENT before init, -EPROTO for a map
 /// of another shape, or another -errno.
 pub(crate) fn read(out: &mut TamperCounts) -> c_int {
@@ -252,19 +247,12 @@ pub(crate) fn read(out: &mut TamperCounts) -> c_int {
 }
 
 fn read_map(fd: c_int, out: &mut TamperCounts) -> c_int {
-    #[repr(C, align(8))]
-    struct MapInfo([u8; MAP_INFO_SIZE]);
-
-    let mut info = MapInfo([0; MAP_INFO_SIZE]);
-    let mut len = MAP_INFO_SIZE as u32;
-    // SAFETY: the map and room for its info.
-    if unsafe { bpf_obj_get_info_by_fd(fd, info.0.as_mut_ptr().cast(), &mut len) } != 0 {
-        return -errno();
+    let mut info = Info::<MAP_INFO_SIZE>::new();
+    if let Err(err) = info.read(fd) {
+        return err;
     }
-    let field =
-        |off: usize| u32::from_ne_bytes(info.0[off..off + 4].try_into().unwrap_or_default());
-    if field(MAP_INFO_MAX_ENTRIES) as usize != TAMPER_MAX
-        || field(MAP_INFO_VALUE_SIZE) as usize != size_of::<u64>()
+    if info.u32_at(MAP_MAX_ENTRIES) as usize != TAMPER_MAX
+        || info.u32_at(MAP_VALUE_SIZE) as usize != size_of::<u64>()
     {
         return -EPROTO;
     }

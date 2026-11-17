@@ -128,7 +128,8 @@ int guard_map_check(int fd, const struct guard_map *expected, __u32 *id);
 int enforcement_active(void);
 
 /*
- * The identity map init populated, froze and pinned this boot. -ENOENT
+ * In rust/src/util/identity.rs. The identity map init populated,
+ * froze and pinned this boot. -ENOENT
  * when init has not run, another -errno when the pin cannot be read.
  * identity_read_at() takes the pin's name relative to dirfd, as openat()
  * does.

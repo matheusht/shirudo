@@ -8,9 +8,10 @@
 use core::ffi::c_int;
 
 use crate::errno::{EINTR, EIO, EKEYREJECTED};
-use crate::sys::identity::{Identity, identity_read};
+use crate::sys::identity::Identity;
 use crate::sys::libc::{errno, getrandom, scrub, strerror};
 use crate::sys::log::pr_err;
+use crate::util::identity;
 use crate::util::tpm::{tpm_close, tpm_open, tpm_writer_create};
 use crate::util::tpm_wire::{DIGEST_LEN, NV_RSA_BYTES};
 
@@ -65,8 +66,7 @@ fn failed(err: c_int, seed: &mut [u8; DIGEST_LEN], public: &mut [u8; NV_RSA_BYTE
 /// -EKEYREJECTED when the modulus there is not one, its top bit clear.
 pub(crate) fn read(seed: &mut [u8; DIGEST_LEN], public: &mut [u8; NV_RSA_BYTES]) -> c_int {
     let mut id = Identity::zeroed();
-    // SAFETY: an identity to fill.
-    let mut err = unsafe { identity_read(&mut id) };
+    let mut err = identity::read(&mut id);
 
     if err == 0 && id.nv_writer_public[0] & 0x80 == 0 {
         err = -EKEYREJECTED;

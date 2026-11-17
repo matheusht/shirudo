@@ -25,6 +25,7 @@ pub const ENOSPC: c_int = 28;
 pub const EROFS: c_int = 30;
 pub const ERANGE: c_int = 34;
 pub const ENAMETOOLONG: c_int = 36;
+pub const ENOSYS: c_int = 38;
 pub const ELOOP: c_int = 40;
 pub const ENOPKG: c_int = 65;
 pub const EBADMSG: c_int = 74;

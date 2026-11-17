@@ -28,9 +28,7 @@ use crate::errno::{
     ENODEV, ENOENT, ENOKEY, ENXIO, EPERM, EPROTO, ESTALE, EUCLEAN,
 };
 use crate::sys::bpf::{bpf_map_get_next_key, bpf_map_lookup_elem, bpf_obj_get};
-use crate::sys::identity::{
-    DEVICE_CONFIG, DEVICE_RUNTIME, DeviceAuthority, Identity, enforcement_active, identity_read,
-};
+use crate::sys::identity::{DEVICE_CONFIG, DEVICE_RUNTIME, DeviceAuthority, Identity};
 use crate::sys::image_guards::image_guards_ready;
 use crate::sys::libc::{
     O_DIRECTORY, O_NOFOLLOW, O_PATH, Statvfs, Timespec, explicit_bzero, fsetxattr, fstatvfs,
@@ -52,6 +50,7 @@ use crate::util::dm_verity::{
     DmVerity, dm_verity_close, dm_verity_create, dm_verity_inspect, dm_verity_list,
     dm_verity_mount, dm_verity_remove, dm_verity_verify, minor,
 };
+use crate::util::identity;
 use crate::util::image_bootstrap::{
     ImageBootstrap, image_bootstrap_read, image_bootstrap_read_fd, path_valid,
 };
@@ -975,14 +974,12 @@ pub(crate) fn bootstrap_load() -> c_int {
     if with_state(|s| s.loaded) {
         return 1;
     }
-    // SAFETY: reads the enforcement map.
-    let mode = unsafe { enforcement_active() };
+    let mode = identity::enforcement_active();
     if mode < 0 {
         return mode;
     }
     let mut identity = Identity::zeroed();
-    // SAFETY: the identity to fill.
-    let id = unsafe { identity_read(&mut identity) };
+    let id = identity::read(&mut identity);
     if mode != 0 && id != 0 {
         return id;
     }
@@ -1277,14 +1274,12 @@ pub(crate) fn enter(command: &[u8], args: &[&[u8]]) -> c_int {
     ) {
         return 0;
     }
-    // SAFETY: reads the enforcement map.
-    let mode = unsafe { enforcement_active() };
+    let mode = identity::enforcement_active();
     if mode < 0 {
         return mode;
     }
     let mut identity = Identity::zeroed();
-    // SAFETY: the identity to fill.
-    let ret = unsafe { identity_read(&mut identity) };
+    let ret = identity::read(&mut identity);
     if mode != 0 && ret != 0 {
         return ret;
     }

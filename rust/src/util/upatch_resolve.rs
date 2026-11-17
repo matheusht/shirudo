@@ -12,12 +12,11 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 
 use crate::errno::{EINVAL, ENAMETOOLONG, ENOENT};
-use crate::sys::bpf::{
-    bpf_obj_get, bpf_obj_get_info_by_fd, bpf_prog_get_fd_by_id, libbpf_bpf_prog_type_str,
-};
+use crate::sys::bpf::{bpf_obj_get, bpf_prog_get_fd_by_id, libbpf_bpf_prog_type_str};
 use crate::sys::btf::{Btf, btf__name_by_offset, btf__type_by_id, btf__type_cnt};
 use crate::sys::libc::{close, errno, getxattr};
 use crate::text::{strscpy, strsprintf};
+use crate::util::bpf_info::{Info, LINK_INFO_SIZE, PROG_INFO_SIZE};
 use crate::util::timefmt::iso8601;
 use crate::util::upatch::{NAME_MAX, pin_name};
 
@@ -26,9 +25,8 @@ pub(crate) const BPFFS_UPATCHES_DIR: &str = "/run/shirudo/bpffs/upatches";
 pub(crate) const XATTR_PAYLOAD: &CStr = c"security.bpf.shirudo.payload";
 const PATH_MAX: usize = 4096;
 
-/// `struct bpf_link_info`, `struct bpf_prog_info`: their sizes, and where
-/// the fields read here sit.
-const LINK_INFO_SIZE: usize = 64;
+/// Where `struct bpf_link_info` and `struct bpf_prog_info` keep the
+/// fields read here.
 const LINK_TYPE: usize = 0;
 const LINK_PROG_ID: usize = 8;
 const LINK_TRACING_ATTACH_TYPE: usize = 16;
@@ -38,7 +36,6 @@ const LINK_UPROBE_COUNT: usize = 52;
 const LINK_NETFILTER_PF: usize = 16;
 const LINK_NETFILTER_HOOKNUM: usize = 20;
 const LINK_NETFILTER_PRIORITY: usize = 24;
-const PROG_INFO_SIZE: usize = 232;
 const PROG_TYPE: usize = 0;
 const PROG_ATTACH_BTF_ID: usize = 224;
 
@@ -101,31 +98,6 @@ pub(crate) fn open_first_link(name: &[u8]) -> c_int {
     }
 }
 
-/// A `struct bpf_*_info` the kernel fills, as bytes at its alignment.
-#[repr(C, align(8))]
-struct Info<const N: usize>([u8; N]);
-
-impl<const N: usize> Info<N> {
-    fn new() -> Self {
-        Info([0; N])
-    }
-
-    fn u32_at(&self, off: usize) -> u32 {
-        u32::from_ne_bytes(self.0[off..off + 4].try_into().unwrap_or_default())
-    }
-
-    fn set(&mut self, off: usize, v: &[u8]) {
-        self.0[off..off + v.len()].copy_from_slice(v);
-    }
-
-    /// Filled from the BPF object `fd`: 0, or libbpf's -errno.
-    fn read(&mut self, fd: c_int) -> c_int {
-        let mut len = N as u32;
-        // SAFETY: a descriptor and room for the N bytes of info.
-        unsafe { bpf_obj_get_info_by_fd(fd, self.0.as_mut_ptr().cast(), &mut len) }
-    }
-}
-
 /// The SEC() prefix of a program of `prog_type` attached as
 /// `attach_type`, where its type alone does not say it.
 fn sec_prefix(prog_type: u32, attach_type: u32) -> Option<&'static [u8]> {
@@ -152,7 +124,7 @@ fn uprobe_multi(link: c_int, first: &Info<LINK_INFO_SIZE>, out: &mut [u8]) -> c_
     let mut detail = Info::<LINK_INFO_SIZE>::new();
     detail.set(LINK_UPROBE_PATH, &(path.as_mut_ptr() as u64).to_ne_bytes());
     detail.set(LINK_UPROBE_PATH_SIZE, &path_size.to_ne_bytes());
-    let ret = detail.read(link);
+    let ret = detail.read(link).err().unwrap_or(0);
     if ret != 0 {
         return ret;
     }
@@ -184,7 +156,7 @@ pub(crate) fn resolve_location(vbtf: *const Btf, name: &[u8], out: &mut [u8]) ->
         return link;
     }
     let mut linfo = Info::<LINK_INFO_SIZE>::new();
-    let ret = linfo.read(link);
+    let ret = linfo.read(link).err().unwrap_or(0);
     let prog_id = linfo.u32_at(LINK_PROG_ID);
     if ret != 0 || prog_id == 0 {
         // SAFETY: the link opened above.
@@ -220,7 +192,7 @@ pub(crate) fn resolve_location(vbtf: *const Btf, name: &[u8], out: &mut [u8]) ->
         return -errno();
     }
     let mut info = Info::<PROG_INFO_SIZE>::new();
-    let ret = info.read(prog);
+    let ret = info.read(prog).err().unwrap_or(0);
     // SAFETY: the program opened above.
     unsafe { close(prog) };
     if ret != 0 {

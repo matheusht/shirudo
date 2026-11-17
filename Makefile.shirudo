@@ -237,7 +237,8 @@ UTIL_SRCS := \
     util/sysinfo_image.c \
     util/io_trusted.c \
     util/xdp.c \
-    util/identity.c \
+    util/java_agent.c \
+     \
      \
     util/integrity.c \
     util/paths.c \
@@ -826,7 +827,7 @@ REGISTER_OBJS := \
                  util/hex.o util/string.o \
                    \
                  util/log.o util/malloc.o \
-                 util/identity.o \
+                  \
                  $(VERSION_OBJ) $(LIBBPF_A) $(RUST_LIB)
 REGISTER_LIBS := $(LIBCRYPTO_LIBS) $(LIBSSL_LIBS) $(TSS2_LIBS) \
                  $(LIBBPF_A) $(LIBELF_LIBS) $(ZLIB_LIBS) $(RUST_TEST_LDLIBS)
@@ -1227,7 +1228,7 @@ $(FUZZ_OUT)/fuzz-tpm-wire: testing/fuzz/fuzz-tpm-wire.c $(FUZZ_BASE) \
 $(FUZZ_OUT)/fuzz-attest: testing/fuzz/fuzz-attest.c $(FUZZ_BASE) \
                            util/chain_history.c \
                            $(FUZZ_SEAL) \
-                          util/identity.c \
+                           \
                           util/version_id.c  \
                           $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-attest: FUZZ_CFLAGS += $(TSS2_CFLAGS) $(LIBELF_CFLAGS)
@@ -1235,7 +1236,7 @@ $(FUZZ_OUT)/fuzz-attest: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) $(LIBELF_LIBS) $(
 $(FUZZ_OUT)/fuzz-eventlog: testing/fuzz/fuzz-eventlog.c $(FUZZ_BASE) \
                              \
                             $(FUZZ_SEAL)  \
-                            util/identity.c $(LIBBPF_A)
+                             $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-eventlog: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-eventlog: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS) $(ZLIB_LIBS)
 $(FUZZ_OUT)/fuzz-kernel: testing/fuzz/fuzz-kernel.c $(FUZZ_BASE)
@@ -1288,7 +1289,8 @@ $(FUZZ_OUT)/fuzz-upatch-info: testing/fuzz/fuzz-upatch-info.c $(FUZZ_BASE) \
                               testing/fuzz/output.c builtin-upatch.c \
                               builtin.h \
                               util/curl.c \
-                              util/identity.c \
+                               \
+                               util/java_agent.c  \
                               \
                               util/options.c util/paths.c \
                               util/similar.c \
@@ -1307,7 +1309,6 @@ $(FUZZ_OUT)/fuzz-upatch-info: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) \
 $(FUZZ_OUT)/fuzz-bpm-info: testing/fuzz/fuzz-bpm-info.c $(FUZZ_BASE) \
                            testing/fuzz/output.c  builtin.h \
                            $(FUZZ_PACKAGE) \
-                           util/identity.c \
                            util/kconfig.c \
                                                      util/options.c util/paths.c \
                            util/similar.c \
@@ -1320,7 +1321,7 @@ $(FUZZ_OUT)/fuzz-attest-report: testing/fuzz/fuzz-attest-report.c \
                                 builtin.h  \
                                util/chain_history.c \
                                \
-                               util/identity.c \
+                                \
                                \
                                util/options.c util/paths.c util/similar.c \
                                 util/version_id.c $(FUZZ_SEAL) \

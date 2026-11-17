@@ -18,7 +18,7 @@ use crate::errno::{EINPROGRESS, ENODEV, ENOENT, ENOKEY};
 use crate::ffi;
 use crate::sys::bpf::bpf_obj_get;
 use crate::sys::btf::{btf__free, btf__load_vmlinux_btf};
-use crate::sys::identity::{Identity, identity_read};
+use crate::sys::identity::Identity;
 use crate::sys::libc::{
     access, close, explicit_bzero, fwrite, gethostname, stderr, stdout, strerror,
 };
@@ -38,6 +38,7 @@ use crate::util::crypto_openssl::{
 use crate::util::eventlog::{eventlog_lock, eventlog_path, eventlog_replay, eventlog_unlock};
 use crate::util::format::{fputs_sanitized, human_size};
 use crate::util::help::{Help, HelpItem, HelpSection, is_help, print_help};
+use crate::util::identity;
 use crate::util::image_bootstrap::{ImageBootstrap, image_bootstrap_read};
 use crate::util::image_runtime;
 use crate::util::initrd;
@@ -1131,8 +1132,7 @@ impl Report {
         // The anchor init froze is the kernel's record; the live keyring
         // of that kind is what a load would name, and the two must agree.
         let mut ident = Identity::zeroed();
-        // SAFETY: the identity to fill.
-        let mut pinned = unsafe { identity_read(&mut ident) };
+        let mut pinned = identity::read(&mut ident);
         if pinned == 0 {
             pinned = ident.keyring_serial;
         }

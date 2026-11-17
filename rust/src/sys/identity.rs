@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The identity of `util/identity.h`, which init froze into the kernel,
-//! and its reader.
-
-use core::ffi::c_int;
+//! The identity of `util/identity.h`, which init froze into the kernel;
+//! util/identity.rs reads it.
 
 /// `struct identity`, the frozen ABI shared with bpf/lib/identity.h: the
 /// fields read here, and the rest as the header lays them out.
@@ -76,13 +74,4 @@ impl DeviceAuthority {
             diskseq: 0,
         }
     }
-}
-
-unsafe extern "C" {
-    /// The identity map init populated, froze and pinned this boot, into
-    /// `out`: 0, -ENOENT before init, or another -errno.
-    pub fn identity_read(out: *mut Identity) -> c_int;
-    /// Whether this boot enforces: 1, 0, or -errno when the
-    /// enforcement map cannot be read.
-    pub fn enforcement_active() -> c_int;
 }

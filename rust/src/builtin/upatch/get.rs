@@ -11,7 +11,7 @@ use std::ffi::CString;
 
 use super::{JSON_MAX, Summaries, err, help, item, log_err, out, print_json, strerr, type_name};
 use crate::ffi;
-use crate::sys::bpf::{bpf_obj_get_info_by_fd, bpf_prog_get_fd_by_id};
+use crate::sys::bpf::bpf_prog_get_fd_by_id;
 use crate::sys::btf::{
     Btf, btf__free, btf__load_from_kernel_by_id, btf__load_vmlinux_btf, btf__name_by_offset,
 };
@@ -22,6 +22,7 @@ use crate::sys::upatch_maps::{
     upatch_maps_print_detail, upatch_maps_read,
 };
 use crate::text::cstr;
+use crate::util::bpf_info::{Info, LINK_INFO_SIZE, PROG_INFO_SIZE};
 use crate::util::help::{HelpItem, is_help};
 use crate::util::json::JsonEmit;
 use crate::util::timefmt::format_duration;
@@ -32,10 +33,8 @@ use crate::util::upatch_table::age_sec;
 const EINVAL: c_int = 22;
 
 /// Where `struct bpf_link_info` and `struct bpf_prog_info` keep what is
-/// read of them, and their sizes.
-const LINK_INFO_SIZE: usize = 64;
+/// read of them.
 const LINK_PROG_ID: usize = 8;
-const PROG_INFO_SIZE: usize = 232;
 const PROG_BTF_ID: usize = 128;
 const PROG_NR_LINE_INFO: usize = 148;
 const PROG_LINE_INFO: usize = 152;
@@ -55,34 +54,6 @@ fn usage() {
         &[(c"options:", &OPTIONS)],
         Some(c"Examples:\n  shirudo upatch get cve-2026-31431\n  shirudo upatch get cve-2026-31431 --json | jq"),
     );
-}
-
-/// A `struct bpf_*_info` the kernel fills, as bytes at its alignment.
-#[repr(C, align(8))]
-struct Info<const N: usize>([u8; N]);
-
-impl<const N: usize> Info<N> {
-    fn new() -> Self {
-        Info([0; N])
-    }
-
-    fn u32_at(&self, off: usize) -> u32 {
-        u32::from_ne_bytes(self.0[off..off + 4].try_into().unwrap_or_default())
-    }
-
-    fn set(&mut self, off: usize, v: &[u8]) {
-        self.0[off..off + v.len()].copy_from_slice(v);
-    }
-
-    /// Filled from the BPF object `fd`, or -errno.
-    fn read(&mut self, fd: c_int) -> Result<(), c_int> {
-        let mut len = N as u32;
-        // SAFETY: a descriptor and room for the N bytes of info.
-        match unsafe { bpf_obj_get_info_by_fd(fd, self.0.as_mut_ptr().cast(), &mut len) } {
-            0 => Ok(()),
-            r => Err(r),
-        }
-    }
 }
 
 /// A source line of the program.

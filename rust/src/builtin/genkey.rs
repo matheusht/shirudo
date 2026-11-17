@@ -10,7 +10,6 @@ use core::ptr;
 use super::word;
 use crate::errno::{EINVAL, ENAMETOOLONG, ENOENT, EPERM};
 use crate::ffi::{self, c_splice};
-use crate::sys::identity::enforcement_active;
 use crate::sys::libc::{
     O_CLOEXEC, O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_RDONLY, O_WRONLY, PATH_MAX, Statx,
     close, errno, fchmod, fprintf, fsync, geteuid, link, open, openat, rename, stderr, strerror,
@@ -31,6 +30,7 @@ use crate::sys::paths::{key_paths, keys_dir_resolve, path_exists};
 use crate::sys::string::strsprintf;
 use crate::util::crypto_openssl::openssl_complain;
 use crate::util::help::{Help, HelpItem, HelpSection, is_help, print_help};
+use crate::util::identity;
 use crate::util::io::stat_fd;
 use crate::util::seal::seal_mkdir_p;
 
@@ -648,8 +648,7 @@ unsafe fn genkey(args: &[*const c_char]) -> c_int {
     // A target never holds a private key, and its task has the authority
     // the seal denies root, which would write the pair wherever root
     // asks.
-    // SAFETY: a call that takes nothing.
-    if unsafe { enforcement_active() } != 0 {
+    if identity::enforcement_active() != 0 {
         // SAFETY: a message without arguments.
         unsafe {
             pr_err(

@@ -15,12 +15,13 @@ use crate::errno::{
     E2BIG, EACCES, EINVAL, EIO, EKEYREJECTED, ENODATA, ENODEV, ENOENT, ENOMEM, EPROTO,
     EPROTONOSUPPORT,
 };
-use crate::sys::identity::{Identity, enforcement_active, identity_read};
+use crate::sys::identity::Identity;
 use crate::sys::libc::{errno, explicit_bzero, getenv, setenv, strerror, unsetenv};
 use crate::sys::malloc::{xcalloc, xfree};
 use crate::sys::tss2::*;
 use crate::text::strscpy;
 use crate::util::config::{self, Scrubbed};
+use crate::util::identity;
 use crate::util::image_config;
 use crate::util::tpm_wire::{
     TpmPublic, nv_extend_cphash, object_name, policy_nv_written, policy_or, public_marshal,
@@ -197,8 +198,7 @@ fn session_setup(t: &mut Tpm, active: bool) -> c_int {
     let mut id = Identity::zeroed();
 
     if active {
-        // SAFETY: room for the identity.
-        let ret = unsafe { identity_read(&mut id) };
+        let ret = identity::read(&mut id);
 
         if ret != 0 {
             err!(c"tpm: frozen identity unreadable: %s", strerror(-ret));
@@ -283,8 +283,7 @@ unsafe fn tcti(buf: *mut u8, size: usize) -> c_int {
 /// `out` is room for a pointer.
 unsafe fn open_tpm(out: *mut *mut Tpm, quiet: bool) -> c_int {
     let mut tcti_buf = [0u8; TCTI_MAX];
-    // SAFETY: a query of the enforcement map.
-    let active = unsafe { enforcement_active() };
+    let active = identity::enforcement_active();
 
     if active < 0 {
         err!(
