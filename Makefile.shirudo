@@ -257,7 +257,6 @@ UTIL_SRCS := \
     util/kconfig.c \
      \
      \
-    util/image_guards.c \
     util/malloc.c \
     util/options.c \
     util/keepalive.c \

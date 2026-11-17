@@ -30,6 +30,7 @@ pub(crate) mod identity;
 pub(crate) mod image_bootstrap;
 mod image_cache;
 pub(crate) mod image_config;
+pub(crate) mod image_guards;
 pub(crate) mod image_keys;
 pub(crate) mod image_runtime;
 pub(crate) mod initrd;

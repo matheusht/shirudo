@@ -18,13 +18,6 @@ use crate::sys::bpf::{
 };
 use crate::sys::btf::libbpf_get_error;
 use crate::sys::identity::Identity;
-use crate::sys::image_guards::{
-    GATE_HOOK_COUNT, GUARD_BPF, GUARD_BPF_MAP, GUARD_KEY_PERMISSION, GUARD_MAP_COUNT,
-    GUARD_PROG_LOAD, GUARD_REMOVEXATTR, GUARD_ROOTS, GUARD_SETXATTR, GUARD_TASKS,
-    GUARD_TPM_COMMAND, GUARD_UNLINK, ImageGuard, shirudo_gate_guards, shirudo_guard_maps,
-    shirudo_image_observer_guards, shirudo_image_seal_guards, shirudo_mount_guards,
-    shirudo_observer_guards, shirudo_seal_guards,
-};
 use crate::sys::libbpf::{
     BpfLink, BpfMap, BpfObject, BpfProgram, bpf_link__destroy, bpf_link__pin, bpf_link__unpin,
     bpf_map__fd, bpf_map__reuse_fd, bpf_object__close, bpf_object__find_map_by_name,
@@ -35,6 +28,12 @@ use crate::sys::libc::{
 };
 use crate::sys::loader::{EmbeddedBpf, bpf2_blob, seal_blob};
 use crate::util::identity;
+use crate::util::image_guards::{
+    GATE_GUARDS, GATE_HOOK_COUNT, GUARD_BPF, GUARD_BPF_MAP, GUARD_KEY_PERMISSION, GUARD_MAP_COUNT,
+    GUARD_MAPS, GUARD_PROG_LOAD, GUARD_REMOVEXATTR, GUARD_ROOTS, GUARD_SETXATTR, GUARD_TASKS,
+    GUARD_TPM_COMMAND, GUARD_UNLINK, IMAGE_OBSERVER_GUARDS, IMAGE_SEAL_GUARDS, ImageGuard,
+    MOUNT_GUARDS, OBSERVER_GUARDS, SEAL_GUARDS,
+};
 use crate::util::image_runtime;
 use crate::util::io::kernel_dev;
 use crate::util::keyring::{self, keyring_bpf_serial, keyring_dm_verity_serial};
@@ -82,8 +81,7 @@ fn text(p: *const c_char) -> &'static [u8] {
 }
 
 fn gate(guard: usize) -> &'static ImageGuard {
-    // SAFETY: the gate table, constant data; guard is below its count.
-    unsafe { &shirudo_gate_guards[guard] }
+    &GATE_GUARDS[guard]
 }
 
 fn program(obj: *mut BpfObject, name: *const c_char) -> *mut BpfProgram {
@@ -163,8 +161,7 @@ fn attach_group(
 
 /// The admission and seal objects share bootstrap state and task marks.
 fn share_policy_maps(source: *mut BpfObject, destination: *mut BpfObject) -> c_int {
-    // SAFETY: the map table, constant data.
-    let maps = unsafe { &shirudo_guard_maps };
+    let maps = &GUARD_MAPS;
 
     for m in maps {
         let (from, to) = (map(source, m.name), map(destination, m.name));
@@ -265,8 +262,7 @@ fn record_ek_name(id: &mut Identity) -> c_int {
 /// the expected config roots, which change with each mapping, and pins
 /// it.
 fn freeze_task_maps(obj: *mut BpfObject) -> c_int {
-    // SAFETY: the map table, constant data.
-    let maps = unsafe { &shirudo_guard_maps };
+    let maps = &GUARD_MAPS;
     let authority = TaskAuthority {
         trusted: TASK_BOOTSTRAP,
         candidate_valid: 0,
@@ -420,8 +416,7 @@ impl Attached {
             unsafe { bpf_object__close(obj) };
             return err;
         }
-        // SAFETY: the guard tables, constant data.
-        let (seal, image_seal) = unsafe { (&shirudo_seal_guards, &shirudo_image_seal_guards) };
+        let (seal, image_seal) = (&SEAL_GUARDS, &IMAGE_SEAL_GUARDS);
         err = attach_group(obj, seal, &mut self.seal);
         if err == 0 {
             err = attach_group(obj, image_seal, &mut self.image_seal);
@@ -577,14 +572,8 @@ impl Attached {
         }
 
         // The executable-identity guard precedes every BPF admission gate.
-        // SAFETY: the guard tables, constant data.
-        let (observer, image_observer, mount) = unsafe {
-            (
-                &shirudo_observer_guards,
-                &shirudo_image_observer_guards,
-                &shirudo_mount_guards,
-            )
-        };
+        let (observer, image_observer, mount) =
+            (&OBSERVER_GUARDS, &IMAGE_OBSERVER_GUARDS, &MOUNT_GUARDS);
         let mut err = attach_group(obj, observer, &mut self.observer);
         if err == 0 {
             err = attach_group(obj, image_observer, &mut self.image_observer);

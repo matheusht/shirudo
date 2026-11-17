@@ -8,14 +8,12 @@
 
 #include <shirudo/misc.h>
 
-#include "util/image_guards.h"
-
-int __real_config_root_begin(const __u8 root[32],
-			     struct config_root_guard *guard);
-int __wrap_config_root_begin(const __u8 root[32],
-			     struct config_root_guard *guard);
-int __real_config_root_end(struct config_root_guard *guard);
-int __wrap_config_root_end(struct config_root_guard *guard);
+int __real_bpf_obj_get(const char *path);
+int __wrap_bpf_obj_get(const char *path);
+int __real_bpf_map_update_elem(int fd, const void *key, const void *value,
+			       __u64 flags);
+int __wrap_bpf_map_update_elem(int fd, const void *key, const void *value,
+			       __u64 flags);
 
 int __real_main(int argc, const char **argv);
 int __wrap_main(int argc, const char **argv);

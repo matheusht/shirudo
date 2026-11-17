@@ -33,40 +33,52 @@ static enum root_test_mode root_mode;
 static __u32 begin_calls, end_calls;
 static int consumed_valid = -1;
 
-int __wrap_config_root_begin(const __u8 root[32],
-			     struct config_root_guard *guard)
-{
-	__u8 wrong[32];
+static int roots_fd = -1;
 
-	if (root_mode == ROOT_NORMAL)
-		return __real_config_root_begin(root, guard);
-	begin_calls++;
-	if (root_mode == ROOT_MISSING) {
-		guard->map_fd = -1;
-		guard->task_fd = -1;
-		return 0;
-	}
-	memcpy(wrong, root, sizeof(wrong));
-	if (root_mode == ROOT_WRONG)
-		wrong[0] ^= 1;
-	return __real_config_root_begin(wrong, guard);
+/* The map of the roots tasks expect, which the staging writes go to. */
+int __wrap_bpf_obj_get(const char *path)
+{
+	int fd = __real_bpf_obj_get(path);
+
+	if (fd >= 0 && !strcmp(path, BPFFS_DIR "/config_roots"))
+		roots_fd = fd;
+	return fd;
 }
 
-int __wrap_config_root_end(struct config_root_guard *guard)
+/*
+ * The writes of config_root_begin() and config_root_end() to that map:
+ * the staging of the image's root is left out, or staged off by a bit;
+ * its clearing first notes whether the guard consumed it.
+ */
+int __wrap_bpf_map_update_elem(int fd, const void *key, const void *value,
+			       __u64 flags)
 {
-	struct expected_root expected = {};
-	int ret = 0, cleanup;
+	const struct expected_root *want = value;
+	struct expected_root staged, current = {};
+	int lookup, ret;
 
-	if (root_mode != ROOT_NORMAL) {
-		end_calls++;
-		if (guard->map_fd >= 0 &&
-		    bpf_map_lookup_elem(guard->map_fd, &guard->task_fd,
-					&expected))
-			ret = -errno;
-		consumed_valid = expected.valid;
+	if (root_mode == ROOT_NORMAL || fd != roots_fd)
+		return __real_bpf_map_update_elem(fd, key, value, flags);
+	if (want->valid) {
+		begin_calls++;
+		if (root_mode == ROOT_MISSING)
+			return 0;
+		staged = *want;
+		if (root_mode == ROOT_WRONG)
+			staged.root[0] ^= 1;
+		return __real_bpf_map_update_elem(fd, key, &staged, flags);
 	}
-	cleanup = __real_config_root_end(guard);
-	return ret ? ret : cleanup;
+	end_calls++;
+	lookup = bpf_map_lookup_elem(fd, key, &current) ? -errno : 0;
+	if (root_mode == ROOT_MISSING && lookup == -ENOENT)
+		lookup = 0;
+	consumed_valid = current.valid;
+	ret = __real_bpf_map_update_elem(fd, key, value, flags);
+	if (lookup) {
+		errno = -lookup;
+		return lookup;
+	}
+	return ret;
 }
 
 static int check_root_cleared(void)

@@ -27,6 +27,11 @@ impl<const N: usize> Info<N> {
         Info([0; N])
     }
 
+    /// The structure's bytes.
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.0
+    }
+
     /// The field of 32 bits at `off`.
     pub(crate) fn u32_at(&self, off: usize) -> u32 {
         u32::from_ne_bytes(self.0[off..off + 4].try_into().unwrap_or_default())

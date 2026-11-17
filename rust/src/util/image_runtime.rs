@@ -29,7 +29,6 @@ use crate::errno::{
 };
 use crate::sys::bpf::{bpf_map_get_next_key, bpf_map_lookup_elem, bpf_obj_get};
 use crate::sys::identity::{DEVICE_CONFIG, DEVICE_RUNTIME, DeviceAuthority, Identity};
-use crate::sys::image_guards::image_guards_ready;
 use crate::sys::libc::{
     O_DIRECTORY, O_NOFOLLOW, O_PATH, Statvfs, Timespec, explicit_bzero, fsetxattr, fstatvfs,
     fwrite, ioctl, nanosleep, stdout, umount2,
@@ -56,6 +55,7 @@ use crate::util::image_bootstrap::{
 };
 use crate::util::image_cache::{SEAL_LABEL, XATTR_SEAL, image_cache_fetch};
 use crate::util::image_config::{image_config_clear, image_config_set};
+use crate::util::image_guards::image_guards_ready;
 use crate::util::image_keys::{self, RUNTIME_CERT_PATH};
 use crate::util::io::kernel_dev;
 use crate::util::json::JsonEmit;
@@ -349,8 +349,7 @@ fn runtime_device() -> Result<u64, c_int> {
 /// watched the runtime being mapped.
 fn load_runtime_config(s: &mut State, trusted_boot: bool) -> c_int {
     if !trusted_boot {
-        // SAFETY: reads the guards' pins.
-        let ret = unsafe { image_guards_ready() };
+        let ret = image_guards_ready();
         if ret != 0 {
             return ret;
         }

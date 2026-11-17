@@ -15,7 +15,6 @@ use crate::errno::{
     ESTALE,
 };
 use crate::sys::hex::hex_encode;
-use crate::sys::image_guards::{ConfigRootGuard, config_root_begin, config_root_end};
 use crate::sys::libc::{
     AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, O_CLOEXEC, O_DIRECT, O_NOFOLLOW, O_NONBLOCK,
     O_RDONLY, O_RDWR, PATH_MAX, S_IFBLK, S_IFCHR, S_IFMT, S_IFREG, STATX_BASIC_STATS, SYS_ADD_KEY,
@@ -26,6 +25,7 @@ use crate::sys::malloc::{xcalloc, xfree};
 use crate::sys::string::{parse_u64, strsprintf};
 use crate::text::{cstr, strscpy};
 use crate::util::config_image::{BLOCK_SIZE, ConfigImage, ConfigImageOpen, SIG_MAX, check_files};
+use crate::util::image_guards::{ConfigRootGuard, config_root_begin, config_root_end};
 use crate::util::keyring::keyring_unlink_key;
 
 const DM_BUFFER_SIZE: usize = 4096;
@@ -980,8 +980,7 @@ unsafe fn create(image: *const ConfigImageOpen, name: *const c_char, out: *mut D
         let io_hdr = io(&mut buf);
         io_hdr.data_size = io_hdr.data_start + next;
         if image.image.signed_root {
-            // SAFETY: the root hash, and the guard to fill.
-            ret = unsafe { config_root_begin(image.image.root_hash.as_ptr(), &mut guard) };
+            ret = config_root_begin(&image.image.root_hash, &mut guard);
             if ret != 0 {
                 break 'out;
             }
@@ -1006,8 +1005,7 @@ unsafe fn create(image: *const ConfigImageOpen, name: *const c_char, out: *mut D
             ret = device_path(&mut device, io(&mut buf).dev);
         }
     }
-    // SAFETY: the guard, begun or not.
-    let cleanup = unsafe { config_root_end(&mut guard) };
+    let cleanup = config_root_end(&mut guard);
     if ret == 0 {
         ret = cleanup;
     }
