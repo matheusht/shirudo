@@ -37,7 +37,7 @@ use crate::util::bpf_sys::{
 };
 use crate::util::chain::{memneq_explicit, sha256_2};
 use crate::util::crypto_openssl::sha256_calc;
-use crate::util::elf_target::build_id_fd;
+use crate::util::elf_target;
 use crate::util::identity;
 use crate::util::kernel_btf;
 use crate::util::keyring;
@@ -434,15 +434,12 @@ fn prepare_uprobe_targets(specs: &mut [ProgSpec]) -> Result<(), c_int> {
         if offsets.iter().any(|&o| o >= opened.size()) {
             return Err(ERANGE);
         }
-        let mut id = [0u8; 64];
-        let mut len = 0u32;
-        // SAFETY: the file, and room for an ID and its length.
-        match unsafe { build_id_fd(file.as_raw_fd(), id.as_mut_ptr(), &mut len) } {
-            0 => {}
-            r if r == -EACCES || r == -EPERM => return Err(-r),
-            _ => return Err(ESTALE),
-        }
-        if len != spec.build_id_len || id[..len as usize] != spec.build_id[..len as usize] {
+        let id = match elf_target::build_id(&file) {
+            Ok(id) => id,
+            Err(r) if r == -EACCES || r == -EPERM => return Err(-r),
+            Err(_) => return Err(ESTALE),
+        };
+        if id.len() != spec.build_id_len as usize || id[..] != spec.build_id[..id.len()] {
             return Err(ESTALE);
         }
         spec.target_fd = file.into_raw_fd();

@@ -208,6 +208,9 @@ DYNAMIC_LIBS := \
 CFLAGS += $(LUAJIT_CFLAGS) -DHAVE_LUAJIT
 DYNAMIC_LIBS += $(LUAJIT_LIBS)
 
+# What the binaries link: libelf is libbpf's, which reads ELF for the
+# tests, where the binaries read it themselves (util/elf_file.rs).
+
 ifeq ($(PROFILE),target)
 CFLAGS += -fPIE
 endif
@@ -771,7 +774,10 @@ build/verity-tests/shirudo-policy-probe: \
 
 
 ifeq ($(PROFILE),target)
-VERITY_TEST_LIBS := $(TARGET_TLS_STATIC_LINK_LIBS) \
+# The helpers that link libbpf take its libelf, static with the zstd it
+# takes, which the target itself links neither of; the zlib it takes
+# too comes after.
+VERITY_TEST_LIBS := $(TARGET_TLS_STATIC_LINK_LIBS) -lelf -lzstd \
 		    $(TARGET_STATIC_RUNTIME_LINK_LIBS)
 VERITY_TEST_LDFLAGS := $(HARDEN_STATIC_PIE_LDFLAGS) -static-pie -static-libgcc
 else

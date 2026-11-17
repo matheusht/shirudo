@@ -2,8 +2,8 @@
 /*
  * Copyright (c) 2026 Authors of shirudo
  *
- * The GNU build ID of a uprobe.multi target and the offsets of the
- * symbols it names, which rust/src/util/elf_target.rs implements.
+ * The GNU build ID of a uprobe.multi target, which
+ * rust/src/util/elf_target.rs implements, for the fuzz target.
  */
 
 #ifndef SHIRUDO_ELF_TARGET_H
@@ -33,7 +33,5 @@ int elf_target_resolve_func(const char *path, const char *func, __u64 offset,
 int elf_build_id_fd(int fd,
 		    __u8 build_id[UPATCH_BUILD_ID_MAX],
 		    __u32 *build_id_len);
-
-void elf_target_free(struct elf_target *target);
 
 #endif /* SHIRUDO_ELF_TARGET_H */

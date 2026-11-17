@@ -22,6 +22,7 @@ mod config_update;
 pub(crate) mod crypto_openssl;
 pub(crate) mod decode;
 mod dm_verity;
+pub(crate) mod elf_file;
 pub(crate) mod elf_target;
 pub(crate) mod eventlog;
 pub(crate) mod format;

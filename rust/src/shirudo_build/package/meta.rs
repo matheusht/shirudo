@@ -8,14 +8,13 @@
 //! than the target kernel's.
 
 use core::ffi::c_int;
-use std::ffi::CString;
 
 use super::{error, strerr};
 use crate::bpf::MAP_ARRAY;
 use crate::bpf::object::{Object, Prog};
 use crate::errno::{EINVAL, ENAMETOOLONG, ENOENT, EOPNOTSUPP, EOVERFLOW};
 use crate::text::{parse_u64, parse_x64};
-use crate::util::elf_target::{ElfTarget, elf_target_free, elf_target_resolve};
+use crate::util::elf_target::{self, Target};
 use crate::util::upatch::{
     ATTACH_CGROUP_SKB_EGRESS, ATTACH_CGROUP_SKB_INGRESS, ATTACH_FMOD_RET, ATTACH_KPROBE,
     ATTACH_KRETPROBE, ATTACH_NETFILTER_IPV6_PRE_ROUTING, ATTACH_RAW_TRACEPOINT, ATTACH_TARGET_MAX,
@@ -217,24 +216,7 @@ fn put_str(buf: &mut [u8], s: &[u8]) {
 struct UprobeTarget {
     prog_idx: u32,
     path: Vec<u8>,
-    elf: ElfTarget,
-}
-
-impl Drop for UprobeTarget {
-    fn drop(&mut self) {
-        // SAFETY: the target elf_target_resolve() filled.
-        unsafe { elf_target_free(&mut self.elf) };
-    }
-}
-
-impl UprobeTarget {
-    fn offsets(&self) -> &[u64] {
-        if self.elf.offsets.is_null() {
-            return &[];
-        }
-        // SAFETY: the target's offsets.
-        unsafe { crate::ffi::slice(self.elf.offsets, self.elf.nr_offsets as usize) }
-    }
+    elf: Target,
 }
 
 /// The entry of one attaching program: its kind, and its target and
@@ -301,20 +283,15 @@ fn attach_entry(sec: &[u8], i: usize, entry: &mut [u8], uprobes: &mut Vec<Uprobe
             }
         };
         put_str(&mut entry[16..16 + ATTACH_TARGET_MAX], pattern);
-        // SAFETY: an all-zero target is an empty one.
-        let elf = unsafe { core::mem::zeroed() };
-        let mut t = UprobeTarget {
+        let (elf, err) = match elf_target::resolve(path, pattern) {
+            Ok(t) => (t, 0),
+            Err(err) => (Target::default(), err),
+        };
+        uprobes.push(UprobeTarget {
             prog_idx: i as u32,
             path: path.to_vec(),
             elf,
-        };
-        let (p, pat) = (
-            CString::new(path).unwrap_or_default(),
-            CString::new(pattern).unwrap_or_default(),
-        );
-        // SAFETY: two C strings and the target to fill.
-        let err = unsafe { elf_target_resolve(p.as_ptr(), pat.as_ptr(), &mut t.elf) };
-        uprobes.push(t);
+        });
         if err != 0 {
             let (pattern, path) = (
                 String::from_utf8_lossy(pattern),
@@ -360,7 +337,7 @@ fn append_uprobes(md: &mut Vec<u8>, uprobes: &[UprobeTarget]) -> c_int {
     let mut len = md.len() + UPROBE_TARGETS;
 
     for t in uprobes {
-        len += UPROBE_TARGET + t.path.len() + t.elf.build_id_len as usize + 8 * t.offsets().len();
+        len += UPROBE_TARGET + t.path.len() + t.elf.build_id.len() + 8 * t.elf.offsets.len();
     }
     if len > u32::MAX as usize {
         return -EOVERFLOW;
@@ -374,12 +351,12 @@ fn append_uprobes(md: &mut Vec<u8>, uprobes: &[UprobeTarget]) -> c_int {
         let mut rec = [0u8; UPROBE_TARGET];
         put32(&mut rec, 0, t.prog_idx);
         put32(&mut rec, 4, t.path.len() as u32);
-        put32(&mut rec, 8, t.elf.build_id_len);
-        put32(&mut rec, 12, t.offsets().len() as u32);
+        put32(&mut rec, 8, t.elf.build_id.len() as u32);
+        put32(&mut rec, 12, t.elf.offsets.len() as u32);
         md.extend_from_slice(&rec);
         md.extend_from_slice(&t.path);
-        md.extend_from_slice(&t.elf.build_id[..t.elf.build_id_len as usize]);
-        for off in t.offsets() {
+        md.extend_from_slice(&t.elf.build_id);
+        for off in &t.elf.offsets {
             md.extend_from_slice(&off.to_le_bytes());
         }
     }
