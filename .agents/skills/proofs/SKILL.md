@@ -20,7 +20,7 @@ there, and one a harness starts to read leaves that list:
 
 ```sh
 make proofs                                  # CBMC and Lean 4
-make proofs-cbmc PROOFS="paths-bpffs-name log-escape"  # some CBMC proofs
+make proofs-cbmc PROOFS="paths-bpffs-name paths-pin"  # some CBMC proofs
 make proofs-cbmc CHANGED=origin/main..HEAD   # those reading a changed file
 testing/proofs/cbmc/run.sh -v <proof>        # whole output and traces
 make proofs-lean4                            # the Lean 4 proofs

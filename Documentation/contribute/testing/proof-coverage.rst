@@ -501,12 +501,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
        when they are on its PCR from its initial value, one boot event
        then updates in sequence, and end at the selection; a refusal
        returns nothing, with nothing left allocated
-   * - ``log-escape``
-     - ``escape()`` of :src:`util/log.c`
-     - Messages of 0 to 5 bytes, every buffer size
-     - Terminated printable ASCII, every backslash a ``\\`` or three octal
-       digits, decoding to the message or to a prefix cut between
-       characters
    * - ``serializer-chunk``
      - ``serial_chunk_validate()``
      - Every chunk

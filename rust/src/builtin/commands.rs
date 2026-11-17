@@ -18,7 +18,6 @@ use super::{
 };
 use crate::ffi;
 use crate::sys::libc::{fwrite, stderr, stdout, strerror};
-use crate::sys::log::log_init;
 use crate::util::harden::{harden_self, harden_stdio};
 use crate::util::help::{help_suggest, is_help, is_list_cmds};
 use crate::util::image_runtime;
@@ -195,7 +194,7 @@ unsafe extern "C" fn cmd_help(argc: c_int, argv: *const *const c_char) -> c_int 
 fn run(args: &[*const c_char]) -> c_int {
     harden_stdio();
     // SAFETY: opens the log once, before anything logs.
-    unsafe { log_init() };
+    crate::log::init();
     if harden_self() != 0 {
         return 1;
     }

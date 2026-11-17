@@ -22,7 +22,7 @@ use crate::errno::{EIO, ENAMETOOLONG, EPERM};
 use crate::ffi;
 use crate::heap::xfree;
 use crate::sys::libc::{access, close, fwrite, mkstemps, stderr, stdout, strerror, unlink};
-use crate::sys::log::{log_init, pr_err, pr_info};
+use crate::sys::log::{pr_err, pr_info};
 use crate::sys::paths::{format_key_path, key_paths, keys_dir_resolve};
 use crate::text::{cstr, name_has_suffix};
 use crate::util::harden::{harden_self, harden_stdio};
@@ -606,7 +606,7 @@ unsafe fn run(argc: c_int, argv: *mut *mut c_char) -> c_int {
 
     harden_stdio();
     // SAFETY: opens the log once, before anything logs.
-    unsafe { log_init() };
+    crate::log::init();
     if harden_self() != 0 {
         return 1;
     }

@@ -444,6 +444,8 @@ unsafe extern "C" {
     pub fn fclose(f: *mut File) -> c_int;
     pub fn fileno(f: *mut File) -> c_int;
     pub fn fputs(s: *const c_char, f: *mut File) -> c_int;
+    pub fn openlog(ident: *const c_char, option: c_int, facility: c_int);
+    pub fn syslog(priority: c_int, format: *const c_char, ...);
     pub fn fputc(c: c_int, f: *mut File) -> c_int;
     pub fn fwrite(ptr: *const c_void, size: usize, n: usize, f: *mut File) -> usize;
     pub fn fprintf(f: *mut File, fmt: *const c_char, ...) -> c_int;

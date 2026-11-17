@@ -10,10 +10,6 @@
 
 #include "log.h"
 
-void log_init(void)
-{
-}
-
 /*
  * A parser rejecting a mutated input logs, millions of times a minute:
  * not to the journal. Formatting still runs, so a message that reads

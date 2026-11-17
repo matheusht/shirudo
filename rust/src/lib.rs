@@ -10,6 +10,7 @@ mod builtin;
 mod errno;
 mod ffi;
 mod heap;
+mod log;
 mod panic;
 mod shirudo_build;
 mod sys;
