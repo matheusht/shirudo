@@ -15,7 +15,6 @@ bpm-tree-manifest	--max-field-sensitivity-array-size 768 --unwind 80 --unwindset
 paths-bpffs-name-model	--unwind 20
 serializer-chunk	--unwind 1
 paths-join		--unwind 12
-paths-pin		--unwind 32 LEN=0,1,28-35
 similar-distance	--max-field-sensitivity-array-size 65 --unwind 8 --unwindset memcpy.0:18 LEN=0-15
 similar-suggest		--object-bits 10 --max-field-sensitivity-array-size 65 --unwind 8 --unwindset memcpy.0:14 LEN=0-26
 similar-resolve		--object-bits 10 --unwind 8

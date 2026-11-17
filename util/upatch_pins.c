@@ -142,7 +142,8 @@ int upatch_xdp_prog_pin(char *out, size_t cap, const char *name, __u32 index)
 	char entry[32];
 
 	if (strsprintf(entry, sizeof(entry), XDP_PROG_PIN_PREFIX "%u", index) < 0 ||
-	    upatch_pin_path(out, cap, name, entry, NULL))
+	    upatch_pin_path(out, cap, name,
+			    (const char *const[]){ entry, NULL }))
 		return -ENAMETOOLONG;
 	return 0;
 }

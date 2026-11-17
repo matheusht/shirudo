@@ -13,9 +13,11 @@ static void pin_path_is_the_bpffs_name_and_its_parts(void)
 
 	ASSERT_EQ(upatch_pin_path(out, sizeof(out), "kernel.obs", NULL), 0);
 	EXPECT_STREQ(out, BPFFS_UPATCHES_DIR "/kernel~dobs");
-	ASSERT_EQ(upatch_pin_path(out, sizeof(out), "a", "link", NULL), 0);
+	ASSERT_EQ(upatch_pin_path(out, sizeof(out), "a",
+				  (const char *const []){ "link", NULL }), 0);
 	EXPECT_STREQ(out, BPFFS_UPATCHES_DIR "/a/link");
-	ASSERT_EQ(upatch_pin_path(out, sizeof(out), "a.b", "maps", "m.1", NULL),
+	ASSERT_EQ(upatch_pin_path(out, sizeof(out), "a.b",
+				  (const char *const []){ "maps", "m.1", NULL }),
 		  0);
 	EXPECT_STREQ(out, BPFFS_UPATCHES_DIR "/a~db/maps/m.1");
 }
@@ -24,11 +26,14 @@ static void pin_path_too_long_is_empty(void)
 {
 	char out[sizeof(BPFFS_UPATCHES_DIR "/a/link")];
 
-	EXPECT_EQ(upatch_pin_path(out, sizeof(out), "a", "link", NULL), 0);
-	EXPECT_EQ(upatch_pin_path(out, sizeof(out), "ab", "link", NULL),
+	EXPECT_EQ(upatch_pin_path(out, sizeof(out), "a",
+				  (const char *const []){ "link", NULL }), 0);
+	EXPECT_EQ(upatch_pin_path(out, sizeof(out), "ab",
+				  (const char *const []){ "link", NULL }),
 		  -ENAMETOOLONG);
 	EXPECT_STREQ(out, "");
-	EXPECT_EQ(upatch_pin_path(out, sizeof(out), "a", "links", NULL),
+	EXPECT_EQ(upatch_pin_path(out, sizeof(out), "a",
+				  (const char *const []){ "links", NULL }),
 		  -ENAMETOOLONG);
 	EXPECT_STREQ(out, "");
 }

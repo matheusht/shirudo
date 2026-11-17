@@ -3,8 +3,8 @@
 
 //! The paths of the signing keys: the keys directory a command names, the
 //! environment's, or the default, and the key and certificate under it.
-//! Exported under the names `util/paths.h` gives them; upatch_pin_path(),
-//! a C-variadic function, stays in util/paths.c.
+//! Exported under the names `util/paths.h` gives them; upatch_pin_path()
+//! is in upatch_resolve.rs.
 
 use core::ffi::{CStr, c_char, c_int};
 

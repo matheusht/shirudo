@@ -80,13 +80,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
        they fit, else ``-ENAMETOOLONG``, with an empty string from
        ``path_join()``; no second slash after a key directory that ends
        in one, and ``-EINVAL`` without a buffer, a directory or a file
-   * - ``paths-pin``
-     - ``upatch_pin_path()``
-     - A name and up to two parts of a byte each or none, buffers of 0,
-       1 and 28 to 35 bytes
-     - The pin directory, the pin name and each part after one slash,
-       terminated, exactly when they fit, else ``-ENAMETOOLONG`` with an
-       empty string
    * - ``paths-bpffs-name-model``
      - ``upatch_bpffs_name()``, ``upatch_name_from_bpffs()``
      - Up to 8 bytes, buffers up to 18

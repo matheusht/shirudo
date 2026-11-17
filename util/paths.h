@@ -232,11 +232,13 @@ static inline int upatch_name_from_bpffs(char *out, size_t out_sz,
 }
 
 /*
- * The pin directory of the upatch name, BPFFS_UPATCHES_DIR and its bpffs
- * name, and then each path component that follows, up to the NULL that
- * ends them. 0, or -ENAMETOOLONG with out empty.
+ * In rust/src/util/upatch_resolve.rs: the pin directory of the upatch
+ * name, BPFFS_UPATCHES_DIR and its bpffs name, and then each path
+ * component of parts, an array a NULL ends, or NULL for none. 0, or
+ * -ENAMETOOLONG with out empty.
  */
-int upatch_pin_path(char *out, size_t cap, const char *name, ...) __sentinel;
+int upatch_pin_path(char *out, size_t cap, const char *name,
+		    const char *const *parts);
 
 /* dir, a slash and name: 0, or -ENAMETOOLONG with out empty. */
 int path_join(char *out, size_t cap, const char *dir, const char *name);

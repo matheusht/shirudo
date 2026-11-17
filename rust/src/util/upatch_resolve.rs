@@ -55,9 +55,8 @@ const NFPROTO_IPV6: u32 = 10;
 const NF_INET_PRE_ROUTING: u32 = 0;
 const NF_IP6_PRI_RAW_BEFORE_DEFRAG: i32 = -450;
 
-/// The pin directory of upatch `name`, and below it each of `parts`, as
-/// upatch_pin_path() of util/paths.h makes it; -ENAMETOOLONG for a name
-/// or a path too long.
+/// The pin directory of upatch `name`, and below it each of `parts`;
+/// -ENAMETOOLONG for a name or a path too long.
 pub(crate) fn pin_path(name: &[u8], parts: &[&[u8]]) -> Result<CString, c_int> {
     if name.len() > NAME_MAX {
         return Err(-ENAMETOOLONG);
@@ -286,4 +285,55 @@ pub(crate) fn payload_sha256(name: &[u8], out: &mut [u8]) {
         out[2 * i + 1] = HEX[usize::from(b & 0xf)];
     }
     out[64] = 0;
+}
+
+mod capi {
+    use core::ffi::{CStr, c_char, c_int};
+
+    use crate::errno::ENAMETOOLONG;
+
+    /// upatch_pin_path(): the pin directory of upatch `name` and below it
+    /// each component of `parts`, an array a NULL ends or NULL for none,
+    /// into the `cap` bytes at `out`: 0, or -ENAMETOOLONG with `out` left
+    /// empty.
+    ///
+    /// # Safety
+    ///
+    /// `out` is room for `cap` bytes, `name` NULL or a C string, and
+    /// `parts` NULL or an array of C strings a NULL ends.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn upatch_pin_path(
+        out: *mut c_char,
+        cap: usize,
+        name: *const c_char,
+        parts: *const *const c_char,
+    ) -> c_int {
+        let mut comps: Vec<&[u8]> = Vec::new();
+        let mut p = parts;
+        // SAFETY: the caller's array, read up to its NULL.
+        unsafe {
+            while !p.is_null() && !(*p).is_null() {
+                comps.push(CStr::from_ptr(*p).to_bytes());
+                p = p.add(1);
+            }
+        }
+        // SAFETY: the caller's C string.
+        let path = (!name.is_null())
+            .then(|| super::pin_path(unsafe { CStr::from_ptr(name) }.to_bytes(), &comps));
+        // SAFETY: the caller's room.
+        let out = unsafe { core::slice::from_raw_parts_mut(out.cast::<u8>(), cap) };
+        match path {
+            Some(Ok(path)) if path.as_bytes().len() < cap => {
+                let path = path.as_bytes_with_nul();
+                out[..path.len()].copy_from_slice(path);
+                0
+            }
+            _ => {
+                if let Some(first) = out.first_mut() {
+                    *first = 0;
+                }
+                -ENAMETOOLONG
+            }
+        }
+    }
 }

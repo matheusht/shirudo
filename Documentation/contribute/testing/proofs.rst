@@ -74,7 +74,7 @@ Run the proofs
    .. code-block:: console
 
       $ make proofs-lean4
-      $ make proofs-cbmc PROOFS="paths-bpffs-name paths-pin"
+      $ make proofs-cbmc PROOFS="paths-bpffs-name paths-join"
       $ make proofs-cbmc CHANGED=origin/main..HEAD
 
    ``CHANGED`` takes what ``git diff`` takes, a range of commits or one
