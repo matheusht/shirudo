@@ -18,8 +18,9 @@ use crate::sys::btf::{
 };
 use crate::sys::libc::{fwrite, stderr};
 use crate::sys::malloc::{xfree, xmalloc};
-use crate::sys::upatch_maps::{MapView, upatch_map_is_percpu};
+use crate::sys::upatch_maps::MapView;
 use crate::util::json::JsonEmit;
+use crate::util::map_format;
 
 /// `enum otel_signal`, the values of SHIRUDO_UPATCH_DECODER_EXPORT_*.
 pub(crate) const LOG: c_int = 1;
@@ -228,8 +229,7 @@ fn classify(v: &MapView) -> (c_int, String) {
     if v.skipped {
         return (LOG, "map type is not generically readable".into());
     }
-    // SAFETY: the view's map type.
-    if !unsafe { upatch_map_is_percpu(v.ty) } {
+    if !map_format::is_percpu(v.ty) {
         return (LOG, "map is not per-CPU".into());
     }
     match metric_type(v) {

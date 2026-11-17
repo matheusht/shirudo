@@ -4,23 +4,20 @@
 //! OTLP/JSON documents: the log a map or a status becomes, the metrics a
 //! decoder makes of a map, and the reference to a snapshot in S3.
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{Buffer, Decoded, cstr_or_empty, hex_lower, is_c_space};
 use crate::errno::{E2BIG, EBADMSG, EINVAL, ENODATA, ENOMEM};
 use crate::sys::libc::gethostname;
-use crate::sys::malloc::xstrfree;
-use crate::sys::upatch_maps::{
-    MapView, upatch_map_format_cell, upatch_map_format_percpu_sum, upatch_map_is_percpu,
-    upatch_map_value_stride,
-};
+use crate::sys::upatch_maps::MapView;
 use crate::text::cstr;
 use crate::util::decode::{
     upatch_decode_map_file_json, upatch_decode_map_file_otel, upatch_decode_map_json,
     upatch_decode_map_otel,
 };
 use crate::util::json::{self, JsonEmit, Visit};
+use crate::util::map_format;
 
 /// JSON_MAX_BYTES: the largest document the emitter makes.
 pub(super) const JSON_MAX: usize = 8 * 1024 * 1024;
@@ -321,28 +318,14 @@ fn cell(
     size: u32,
     btf_type: &[u8; 64],
 ) -> Vec<u8> {
-    // SAFETY: the view, a value of it of `size` bytes, and a C string.
-    let s = unsafe { upatch_map_format_cell(v, type_id, value, size, btf_type.as_ptr().cast()) };
-    owned_c_string(s)
-}
-
-/// A C string the maps code allocated, copied and freed.
-fn owned_c_string(s: *mut c_char) -> Vec<u8> {
-    if s.is_null() {
-        return Vec::new();
-    }
-    // SAFETY: the allocation, a C string, freed once.
-    unsafe {
-        let out = CStr::from_ptr(s).to_bytes().to_vec();
-        xstrfree(s);
-        out
-    }
+    // SAFETY: a value of the view of `size` bytes.
+    let value = unsafe { crate::ffi::slice(value.cast::<u8>(), size as usize) };
+    map_format::format_cell(v, type_id, value, cstr(btf_type))
 }
 
 /// The map itself as the body of a log, when no decoder speaks for it.
 fn log_map_data(e: &mut JsonEmit, v: &MapView) {
-    // SAFETY: the view's map type.
-    let percpu = unsafe { upatch_map_is_percpu(v.ty) };
+    let percpu = map_format::is_percpu(v.ty);
 
     kv_string(e, b"name", cstr(&v.name));
     kv_string(e, b"type", cstr_or_empty(v.type_name));
@@ -409,12 +392,11 @@ fn log_map_data(e: &mut JsonEmit, v: &MapView) {
         array_kvlist_begin(e);
         kv_string(e, b"key", &key);
         if percpu {
-            // SAFETY: the view and the entry's values, one per CPU.
-            let sum = owned_c_string(unsafe {
-                upatch_map_format_percpu_sum(v, en.value, v.btf_value_type.as_ptr().cast())
-            });
-            // SAFETY: the view.
-            let stride = unsafe { upatch_map_value_stride(v) } as usize;
+            let stride = map_format::value_stride(v) as usize;
+            // SAFETY: the entry's values, one per CPU.
+            let values =
+                unsafe { crate::ffi::slice(en.value.cast::<u8>(), stride * v.n_cpus as usize) };
+            let sum = map_format::percpu_sum(v, values);
             list_begin(e, b"values_per_cpu", b"arrayValue");
             for cpu in 0..v.n_cpus as usize {
                 // SAFETY: the value of one CPU, within the entry's values.

@@ -130,6 +130,15 @@ void upatch_maps_emit_json_object(struct json_emit *e,
 				  const struct map_view *v);
 
 bool upatch_map_is_percpu(__u32 type);
+
+/*
+ * In rust/src/util/map_format.rs: the name and the definition of type id
+ * of btf, each into the cap bytes at out, empty for none.
+ */
+void upatch_map_btf_type_name(const struct btf *btf, __u32 id, char *out,
+			      size_t cap);
+void upatch_map_btf_type_def(const struct btf *btf, __u32 id, char *out,
+			     size_t cap);
 __u32 upatch_map_value_stride(const struct map_view *v);
 char *upatch_map_format_cell(const struct map_view *v,
 			     __u32 type_id, const void *value,

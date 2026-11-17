@@ -41,6 +41,7 @@ mod kernel_build_id;
 mod kernel_release;
 pub(crate) mod keyring;
 pub(crate) mod keys;
+pub(crate) mod map_format;
 pub(crate) mod measured;
 pub(crate) mod nv_writer;
 pub(crate) mod otel;

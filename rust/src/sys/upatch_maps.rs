@@ -93,25 +93,6 @@ const _: () = assert!(core::mem::offset_of!(MapView, btf) == 2712);
 const _: () = assert!(core::mem::offset_of!(MapView, entries_cap) == 2728);
 
 unsafe extern "C" {
-    /// Whether BPF_MAP_TYPE_* `ty` keeps a value per CPU.
-    pub fn upatch_map_is_percpu(ty: u32) -> bool;
-    /// The bytes between two CPUs' values of a per-CPU map.
-    pub fn upatch_map_value_stride(v: *const MapView) -> u32;
-    /// One key or value as text, through the map's BTF: an allocation
-    /// for xstrfree(), or NULL.
-    pub fn upatch_map_format_cell(
-        v: *const MapView,
-        type_id: u32,
-        value: *const c_void,
-        value_size: u32,
-        btf_type: *const c_char,
-    ) -> *mut c_char;
-    /// The sum of a per-CPU value over its CPUs, as text, or NULL.
-    pub fn upatch_map_format_percpu_sum(
-        v: *const MapView,
-        values_per_cpu: *const c_void,
-        btf_type: *const c_char,
-    ) -> *mut c_char;
     /// Map `map` of upatch `upatch` into `out`, at most `cap` entries or
     /// all for 0, MAP_READ_PEEK in `flags` to leave a serializer's
     /// interval for the exporter: 0 or -errno; map_view_free() frees it.
