@@ -265,9 +265,14 @@ fn send_file(
     }
 }
 
+/// Exports the map as a log or metric, as its shape suggests.
+pub(crate) fn send_auto(v: &MapView, opts: Option<&OtelOpts>) -> c_int {
+    send_file(None, v, AUTO, opts)
+}
+
 /// Exports the map as its decoder's signed signal selection says, and a
 /// log too large for OTLP as a snapshot in S3 when there is a bucket.
-fn send_decoded(v: &MapView, signal: c_int, opts: Option<&OtelOpts>) -> c_int {
+pub(crate) fn send_decoded(v: &MapView, signal: c_int, opts: Option<&OtelOpts>) -> c_int {
     let mode = match signal {
         LOG => FORCE_LOG,
         METRIC => FORCE_METRIC,

@@ -9,13 +9,17 @@
 mod get;
 mod info;
 mod list;
+mod map;
 
 use core::ffi::{CStr, c_char, c_int};
 use std::ffi::CString;
 
 use crate::sys::libc::{fwrite, stderr, stdout};
-use crate::sys::log::pr_err;
+use crate::sys::log::{pr_err, pr_warn};
 use crate::sys::malloc::xfree;
+use crate::sys::upatch::{
+    MapSummary, map_summary_free, upatch_maps_list_all, upatch_maps_list_one,
+};
 use crate::util::help::{
     Help, HelpItem, HelpSection, is_help, is_list_cmds, print_help, print_subcmd_list,
     resolve_subcommand,
@@ -29,7 +33,6 @@ unsafe extern "C" {
     /// The subcommands still in builtin-upatch.c.
     fn cmd_upatch_load(argc: c_int, argv: *const *const c_char) -> c_int;
     fn cmd_upatch_unload(argc: c_int, argv: *const *const c_char) -> c_int;
-    fn cmd_upatch_map(argc: c_int, argv: *const *const c_char) -> c_int;
 }
 
 const fn item(name: &'static CStr, summary: &'static CStr) -> HelpItem {
@@ -116,6 +119,65 @@ fn log_err(text: &[u8]) {
     unsafe { pr_err(c"%s".as_ptr(), text.as_ptr()) };
 }
 
+/// A warning through the log, as pr_warn() would make it.
+fn log_warn(text: &[u8]) {
+    let text = CString::new(
+        text.iter()
+            .copied()
+            .filter(|&c| c != 0)
+            .collect::<Vec<u8>>(),
+    )
+    .unwrap_or_default();
+    // SAFETY: a "%s" format with a C string.
+    unsafe { pr_warn(c"%s".as_ptr(), text.as_ptr()) };
+}
+
+/// The maps the loaded upatches pin: upatch `upatch`'s, or every
+/// upatch's for none.
+struct Summaries {
+    list: *mut MapSummary,
+    n: usize,
+}
+
+impl Summaries {
+    fn of(upatch: Option<&CStr>) -> Self {
+        let mut s = Summaries {
+            list: core::ptr::null_mut(),
+            n: 0,
+        };
+        // SAFETY: a C string and the room for the list and its length.
+        unsafe {
+            match upatch {
+                Some(u) => upatch_maps_list_one(u.as_ptr(), &mut s.list, &mut s.n),
+                None => upatch_maps_list_all(&mut s.list, &mut s.n),
+            }
+        };
+        s
+    }
+
+    fn as_slice(&self) -> &[MapSummary] {
+        // SAFETY: the n summaries listed, or none.
+        unsafe { crate::ffi::slice(self.list, self.n) }
+    }
+}
+
+impl Drop for Summaries {
+    fn drop(&mut self) {
+        // SAFETY: the list, freed once.
+        unsafe { map_summary_free(self.list, self.n) };
+    }
+}
+
+/// A map's type name, "" for none.
+fn type_name(m: &MapSummary) -> &'static [u8] {
+    if m.type_name.is_null() {
+        b""
+    } else {
+        // SAFETY: a static C string of the map type table.
+        unsafe { crate::ffi::c_str(m.type_name) }
+    }
+}
+
 fn strerr(err: c_int) -> &'static [u8] {
     // SAFETY: strerror() gives a C string that outlives the message.
     unsafe { crate::ffi::c_str(crate::sys::libc::strerror(err)) }
@@ -198,8 +260,13 @@ fn run(args: &[*const c_char]) -> c_int {
         b"load" => unsafe { cmd_upatch_load(n, rest.as_ptr()) },
         // SAFETY: as above.
         b"unload" => unsafe { cmd_upatch_unload(n, rest.as_ptr()) },
-        // SAFETY: as above.
-        b"map" => unsafe { cmd_upatch_map(n, rest.as_ptr()) },
+        // SAFETY: the caller's C strings.
+        b"map" => map::run(
+            &rest
+                .iter()
+                .map(|&a| unsafe { CStr::from_ptr(a) })
+                .collect::<Vec<_>>(),
+        ),
         _ => 2,
     }
 }

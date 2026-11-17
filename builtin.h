@@ -38,7 +38,6 @@ int cmd_upatch(int argc, const char **argv);
 /* What cmd_upatch() dispatches to in builtin-upatch.c. */
 int cmd_upatch_load(int argc, const char **argv);
 int cmd_upatch_unload(int argc, const char **argv);
-int cmd_upatch_map(int argc, const char **argv);
 int cmd_bpm(int argc, const char **argv);
 /*
  * For the image CLI test, which reached these by including builtin-bpm.c:

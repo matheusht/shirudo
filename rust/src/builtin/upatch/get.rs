@@ -9,7 +9,7 @@
 use core::ffi::{CStr, c_char, c_int, c_long};
 use std::ffi::CString;
 
-use super::{JSON_MAX, err, help, item, log_err, out, print_json, strerr};
+use super::{JSON_MAX, Summaries, err, help, item, log_err, out, print_json, strerr, type_name};
 use crate::ffi;
 use crate::sys::bpf::{bpf_obj_get_info_by_fd, bpf_prog_get_fd_by_id};
 use crate::sys::btf::{
@@ -17,12 +17,12 @@ use crate::sys::btf::{
 };
 use crate::sys::libc::{close, errno};
 use crate::sys::upatch::{
-    MapSummary, map_summary_free, upatch_loaded_at, upatch_maps_list_one, upatch_open_first_link,
-    upatch_payload_sha256, upatch_resolve_location,
+    MapSummary, upatch_loaded_at, upatch_open_first_link, upatch_payload_sha256,
+    upatch_resolve_location,
 };
 use crate::sys::upatch_maps::{
-    MapView, map_view_free, upatch_maps_emit_json_object, upatch_maps_print_detail,
-    upatch_maps_read,
+    MAP_ENTRIES_DEFAULT, MAP_READ_PEEK, MapView, map_view_free, upatch_maps_emit_json_object,
+    upatch_maps_print_detail, upatch_maps_read,
 };
 use crate::text::cstr;
 use crate::util::help::{HelpItem, is_help};
@@ -31,9 +31,6 @@ use crate::util::timefmt::format_duration;
 use crate::util::upatch::name_valid;
 use crate::util::upatch_table::age_sec;
 
-/// MAP_ENTRIES_DEFAULT and MAP_READ_PEEK of util/upatch_maps.h.
-const MAP_ENTRIES_DEFAULT: u32 = 256;
-const MAP_READ_PEEK: u32 = 1;
 const EINVAL: c_int = 22;
 
 /// Where `struct bpf_link_info` and `struct bpf_prog_info` keep what is
@@ -239,16 +236,6 @@ fn age(ts: &[u8]) -> Vec<u8> {
     cstr(&buf).to_vec()
 }
 
-/// A map type name, "" for none.
-fn opt_str(s: *const c_char) -> &'static [u8] {
-    if s.is_null() {
-        b""
-    } else {
-        // SAFETY: a static C string of the map type table.
-        unsafe { ffi::c_str(s) }
-    }
-}
-
 /// Hands `f` what map `m` of upatch `upatch` holds, its first `cap`
 /// entries or all for 0, without draining a serializer: the view, or
 /// -errno.
@@ -373,7 +360,7 @@ fn json(name: &CStr, l: &Loaded, maps: &[MapSummary], cap: u32) -> c_int {
             Err(err) => {
                 e.obj_open();
                 e.kv_string(b"name", cstr(&m.name));
-                e.kv_string(b"type", opt_str(m.type_name));
+                e.kv_string(b"type", type_name(m));
                 e.kv_int(b"max_entries", i64::from(m.max_entries));
                 e.kv_string(b"error", strerr(-err));
                 e.obj_close();
@@ -428,19 +415,12 @@ pub(super) fn run(args: &[&[u8]]) -> c_int {
             return 1;
         }
     };
-    let (mut list, mut n): (*mut MapSummary, usize) = (core::ptr::null_mut(), 0);
-    // SAFETY: a C string and the room for the list and its length.
-    unsafe { upatch_maps_list_one(name.as_ptr(), &mut list, &mut n) };
-    // SAFETY: the n summaries listed, or none.
-    let maps = unsafe { ffi::slice(list, n) };
+    let maps = Summaries::of(Some(&name));
     let cap = if show_full { 0 } else { MAP_ENTRIES_DEFAULT };
-    let ret = if json_out {
-        json(&name, &loaded, maps, cap)
+    if json_out {
+        json(&name, &loaded, maps.as_slice(), cap)
     } else {
-        text(&name, &loaded, maps, cap);
+        text(&name, &loaded, maps.as_slice(), cap);
         0
-    };
-    // SAFETY: the list, freed once.
-    unsafe { map_summary_free(list, n) };
-    ret
+    }
 }

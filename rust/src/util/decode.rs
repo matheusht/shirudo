@@ -1340,8 +1340,13 @@ fn archive_path(v: &MapView) -> Result<CString, c_int> {
     CString::new(path).map_err(|_| -EINVAL)
 }
 
+/// What the decoder in the upatch's archive makes of the map, as JSON.
+pub(crate) fn map_json(v: &MapView) -> Result<Output, c_int> {
+    decode_open(&archive_path(v)?, true, v, false, JSON_MAX)
+}
+
 /// The signal the map's decoder exports, from the upatch's archive.
-fn signal(v: &MapView) -> Result<u32, c_int> {
+pub(crate) fn signal(v: &MapView) -> Result<u32, c_int> {
     if !upatch::name_valid(Some(cstr(&v.upatch))) {
         return Err(-EINVAL);
     }

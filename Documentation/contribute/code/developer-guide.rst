@@ -382,8 +382,8 @@ Project layout
      - One module per top-level command, in :src:`rust/src/builtin/`:
        ``attest``, ``bpm``, ``build``, ``config``, ``genkey``,
        ``image``, ``init``, ``keys``, ``status``, ``upatch`` and
-       ``version``. ``upatch load``, ``unload`` and ``map`` are still C,
-       in :src:`builtin-upatch.c`.
+       ``version``. ``upatch load`` and ``unload`` are still C, in
+       :src:`builtin-upatch.c`.
    * - :src:`util/`
      - The userspace library both binaries link.
    * - :src:`bpf/`

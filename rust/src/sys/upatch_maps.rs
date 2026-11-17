@@ -17,6 +17,11 @@ const UPATCH_LOCATION_MAX: usize = 160;
 const MAP_TYPENAME_MAX: usize = 64;
 const MAP_TYPEDEF_MAX: usize = 1024;
 
+/// The entries a read returns unless asked for all, which 0 asks.
+pub const MAP_ENTRIES_DEFAULT: u32 = 256;
+/// Reads a serializer's interval without taking it from the exporter.
+pub const MAP_READ_PEEK: u32 = 1 << 0;
+
 /// `struct map_entry`: a key and its value, or values per CPU.
 #[repr(C)]
 pub struct MapEntry {
