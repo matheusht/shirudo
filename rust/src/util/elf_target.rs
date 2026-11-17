@@ -2,20 +2,22 @@
 // Copyright (c) 2026 Authors of shirudo
 
 //! The ELF side of uprobe.multi upatches behind `util/elf_target.h`: the
-//! GNU build ID of a binary, and the file offsets libbpf resolves for a
-//! symbol pattern in it, sorted and each once.
+//! GNU build ID of a binary, and the file offsets of the functions a
+//! symbol pattern names in it, resolved as libbpf's
+//! elf_resolve_pattern_offsets() resolves them, sorted and each once.
 
-use core::ffi::{c_char, c_int, c_ulong};
+use core::ffi::{c_char, c_int};
 use core::ptr;
 
 use crate::errno::{E2BIG, EINVAL, ENOENT, ENOMEM};
-use crate::heap::{libc_free, xcalloc, xfree};
+use crate::heap::{xcalloc, xfree};
 use crate::sys::elf::{
     ELF_C_READ_MMAP, ELF_K_ELF, ELF_T_NHDR, EV_CURRENT, EV_NONE, Elf, ElfData, ElfScn, GElfEhdr,
-    GElfNhdr, GElfPhdr, GElfShdr, NT_GNU_BUILD_ID, PT_NOTE, SHT_NOTE, elf_begin, elf_end,
-    elf_getdata, elf_getdata_rawchunk, elf_getphdrnum, elf_kind, elf_nextscn,
-    elf_resolve_pattern_offsets, elf_version, gelf_getehdr, gelf_getnote, gelf_getphdr,
-    gelf_getshdr,
+    GElfNhdr, GElfPhdr, GElfShdr, GElfSym, NT_GNU_BUILD_ID, PT_NOTE, SHT_DYNSYM, SHT_GNU_VERDEF,
+    SHT_GNU_VERSYM, SHT_NOTE, SHT_SYMTAB, STT_FUNC, elf_begin, elf_end, elf_getdata,
+    elf_getdata_rawchunk, elf_getphdrnum, elf_getscn, elf_kind, elf_nextscn, elf_strptr,
+    elf_version, gelf_getehdr, gelf_getnote, gelf_getphdr, gelf_getshdr, gelf_getsym,
+    gelf_getversym,
 };
 use crate::sys::libc::{O_CLOEXEC, O_RDONLY, close, errno, open};
 
@@ -35,6 +37,176 @@ pub struct ElfTarget {
 }
 
 const _: () = assert!(size_of::<ElfTarget>() == 88);
+
+/// glob_match() of libbpf, after perf's: `?` any one byte, `*` any run.
+fn glob_match(s: &[u8], p: &[u8]) -> bool {
+    let (mut s, mut p) = (s, p);
+    while let (Some(&c), Some(&q)) = (s.first(), p.first()) {
+        if q == b'*' {
+            break;
+        }
+        if q != b'?' && c != q {
+            return false;
+        }
+        s = &s[1..];
+        p = &p[1..];
+    }
+    if p.first() == Some(&b'*') {
+        while p.first() == Some(&b'*') {
+            p = &p[1..];
+        }
+        if p.is_empty() {
+            return true;
+        }
+        while !s.is_empty() {
+            if glob_match(s, p) {
+                return true;
+            }
+            s = &s[1..];
+        }
+    }
+    s.is_empty() && p.is_empty()
+}
+
+/// The section of `sh_type` after `scn`, the first for NULL.
+///
+/// # Safety
+///
+/// `elf` is a descriptor and `scn` NULL or a section of it.
+unsafe fn next_scn_by_type(elf: *mut Elf, sh_type: u32, mut scn: *mut ElfScn) -> *mut ElfScn {
+    loop {
+        // SAFETY: the caller's descriptor and section.
+        scn = unsafe { elf_nextscn(elf, scn) };
+        if scn.is_null() {
+            return scn;
+        }
+        let mut sh = GElfShdr::default();
+        // SAFETY: a section of the descriptor, and room for its header.
+        if !unsafe { gelf_getshdr(scn, &mut sh) }.is_null() && sh.sh_type == sh_type {
+            return scn;
+        }
+    }
+}
+
+/// The file offsets of the functions in the symbol table of `sh_type`
+/// whose names match `pattern`, onto `offsets`, as libbpf's symbol
+/// iterator finds them: -ENOENT for no such table, -EINVAL for one, or
+/// its versions, that does not read.
+///
+/// # Safety
+///
+/// `elf` is a descriptor.
+unsafe fn table_offsets(
+    elf: *mut Elf,
+    sh_type: u32,
+    pattern: &[u8],
+    offsets: &mut Vec<u64>,
+) -> c_int {
+    let mut ehdr = GElfEhdr::default();
+    let mut sh = GElfShdr::default();
+
+    // SAFETY: the caller's descriptor and room for its header.
+    if unsafe { gelf_getehdr(elf, &mut ehdr) }.is_null() {
+        return -EINVAL;
+    }
+    // SAFETY: as above.
+    let scn = unsafe { next_scn_by_type(elf, sh_type, ptr::null_mut()) };
+    if scn.is_null() {
+        return -ENOENT;
+    }
+    // SAFETY: a section of the descriptor and room for its header.
+    if unsafe { gelf_getshdr(scn, &mut sh) }.is_null() || sh.sh_entsize == 0 {
+        return -EINVAL;
+    }
+    let strtab = sh.sh_link as usize;
+    // SAFETY: the section.
+    let syms = unsafe { elf_getdata(scn, ptr::null_mut()) };
+    if syms.is_null() {
+        return -EINVAL;
+    }
+    // SAFETY: the data libelf gave.
+    let nr = unsafe { (*syms).d_size } / sh.sh_entsize as usize;
+    // Versions are a dynamic symbol table's alone.
+    let mut versyms = ptr::null_mut();
+    if sh_type == SHT_DYNSYM {
+        // SAFETY: the descriptor.
+        let scn = unsafe { next_scn_by_type(elf, SHT_GNU_VERSYM, ptr::null_mut()) };
+        if !scn.is_null() {
+            // SAFETY: a section of the descriptor.
+            versyms = unsafe { elf_getdata(scn, ptr::null_mut()) };
+            // SAFETY: the descriptor.
+            let scn = unsafe { next_scn_by_type(elf, SHT_GNU_VERDEF, ptr::null_mut()) };
+            if !scn.is_null() {
+                // SAFETY: a section of the descriptor.
+                let verdefs = unsafe { elf_getdata(scn, ptr::null_mut()) };
+                // SAFETY: as above, and room for its header.
+                if verdefs.is_null() || unsafe { gelf_getshdr(scn, &mut sh) }.is_null() {
+                    return -EINVAL;
+                }
+            }
+        }
+    }
+    for idx in 0..nr {
+        let mut sym = GElfSym::default();
+        let mut ssh = GElfShdr::default();
+        let mut versym = 0u16;
+        let Ok(i) = c_int::try_from(idx) else {
+            break;
+        };
+        // SAFETY: the symbols libelf gave, and room for one.
+        if unsafe { gelf_getsym(syms, i, &mut sym) }.is_null() || sym.st_info & 0xf != STT_FUNC {
+            continue;
+        }
+        // SAFETY: the descriptor, the table's strings and an offset.
+        let name = unsafe { elf_strptr(elf, strtab, sym.st_name as usize) };
+        if name.is_null() {
+            continue;
+        }
+        // SAFETY: the descriptor and an index.
+        let sym_scn = unsafe { elf_getscn(elf, usize::from(sym.st_shndx)) };
+        // SAFETY: NULL or a section, and room for its header.
+        if sym_scn.is_null() || unsafe { gelf_getshdr(sym_scn, &mut ssh) }.is_null() {
+            continue;
+        }
+        // SAFETY: the versions libelf gave, and room for one.
+        if !versyms.is_null() && unsafe { gelf_getversym(versyms, i, &mut versym) }.is_null() {
+            continue;
+        }
+        // SAFETY: a name libelf found in the table's strings.
+        if glob_match(unsafe { crate::ffi::c_str(name) }, pattern) {
+            offsets.push(
+                sym.st_value
+                    .wrapping_sub(ssh.sh_addr)
+                    .wrapping_add(ssh.sh_offset),
+            );
+        }
+    }
+    0
+}
+
+/// elf_resolve_pattern_offsets(): the file offsets of the functions of
+/// `elf` whose names match `pattern`, from .symtab, else .dynsym, or
+/// -ENOENT for none.
+///
+/// # Safety
+///
+/// `elf` is a descriptor.
+unsafe fn pattern_offsets(elf: *mut Elf, pattern: &[u8]) -> Result<Vec<u64>, c_int> {
+    let mut offsets = Vec::new();
+    for sh_type in [SHT_SYMTAB, SHT_DYNSYM] {
+        // SAFETY: the caller's descriptor.
+        match unsafe { table_offsets(elf, sh_type, pattern, &mut offsets) } {
+            0 | ENOENT_NEG => {}
+            err => return Err(err),
+        }
+        if !offsets.is_empty() {
+            return Ok(offsets);
+        }
+    }
+    Err(-ENOENT)
+}
+
+const ENOENT_NEG: c_int = -ENOENT;
 
 /// The GNU build ID among the notes of `data` into `build_id`: 0, -E2BIG
 /// for one empty or longer than a upatch holds, or -ENOENT for none.
@@ -269,8 +441,6 @@ unsafe fn target_resolve(
     if fd < 0 {
         return -errno();
     }
-    let mut resolved: *mut c_ulong = ptr::null_mut();
-    let mut nr_resolved = 0usize;
     // SAFETY: the fd opened above, read through a mapping.
     let elf = unsafe { elf_begin(fd, ELF_C_READ_MMAP, ptr::null_mut()) };
     let err = 'out: {
@@ -284,19 +454,12 @@ unsafe fn target_resolve(
         if err != 0 {
             break 'out err;
         }
-        // libbpf owns the symbol matching and the conversion from virtual
-        // addresses to file offsets that uprobe.multi uses.
-        // SAFETY: the caller's C strings, and room for libbpf's array and
-        // its length.
-        let err =
-            unsafe { elf_resolve_pattern_offsets(path, pattern, &mut resolved, &mut nr_resolved) };
-
-        if err != 0 {
-            break 'out err;
-        }
-        if nr_resolved == 0 {
-            break 'out -ENOENT;
-        }
+        // SAFETY: the descriptor, and the caller's C string.
+        let resolved = match unsafe { pattern_offsets(elf, crate::ffi::c_str(pattern)) } {
+            Ok(r) => r,
+            Err(err) => break 'out err,
+        };
+        let nr_resolved = resolved.len();
         if nr_resolved > OFFSETS_MAX || nr_resolved > u32::MAX as usize {
             break 'out -E2BIG;
         }
@@ -306,20 +469,10 @@ unsafe fn target_resolve(
         if out.offsets.is_null() {
             break 'out -ENOMEM;
         }
-        // SAFETY: the room just allocated, and libbpf's array, each of
-        // nr_resolved entries.
-        let offsets = unsafe {
-            let offsets = core::slice::from_raw_parts_mut(out.offsets, nr_resolved);
-
-            for (i, o) in offsets.iter_mut().enumerate() {
-                *o = *resolved.add(i) as u64;
-            }
-            offsets
-        };
+        // SAFETY: the room just allocated, of nr_resolved entries.
+        let offsets = unsafe { core::slice::from_raw_parts_mut(out.offsets, nr_resolved) };
+        offsets.copy_from_slice(&resolved);
         out.nr_offsets = nr_resolved as u32;
-        // SAFETY: the array libbpf allocated, freed once.
-        unsafe { libc_free(resolved.cast()) };
-        resolved = ptr::null_mut();
 
         offsets.sort_unstable();
         let mut unique = 1usize;
@@ -333,14 +486,12 @@ unsafe fn target_resolve(
         out.nr_offsets = unique as u32;
         0
     };
-    // SAFETY: the descriptor, the fd and libbpf's array, each released
-    // once.
+    // SAFETY: the descriptor and the fd, each released once.
     unsafe {
         if !elf.is_null() {
             elf_end(elf);
         }
         close(fd);
-        libc_free(resolved.cast());
     }
     if err != 0 {
         // SAFETY: the target this resolve filled.

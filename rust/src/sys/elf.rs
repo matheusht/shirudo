@@ -5,7 +5,7 @@
 //! with, the values of elf.h and libelf.h, and the resolver libbpf keeps
 //! for its uprobe.multi attach path.
 
-use core::ffi::{c_char, c_int, c_uint, c_ulong, c_void};
+use core::ffi::{c_char, c_int, c_uint, c_void};
 
 /// An `Elf` descriptor.
 pub enum Elf {}
@@ -49,6 +49,20 @@ pub struct GElfShdr {
     pub sh_addralign: u64,
     pub sh_entsize: u64,
 }
+
+/// `GElf_Sym`.
+#[repr(C)]
+#[derive(Default)]
+pub struct GElfSym {
+    pub st_name: u32,
+    pub st_info: u8,
+    pub st_other: u8,
+    pub st_shndx: u16,
+    pub st_value: u64,
+    pub st_size: u64,
+}
+
+const _: () = assert!(size_of::<GElfSym>() == 24);
 
 /// `GElf_Ehdr`.
 #[repr(C)]
@@ -97,7 +111,12 @@ pub const ELF_K_ELF: c_int = 3;
 pub const ELF_T_NHDR: c_int = 19;
 pub const EV_NONE: c_uint = 0;
 pub const EV_CURRENT: c_uint = 1;
+pub const SHT_SYMTAB: u32 = 2;
 pub const SHT_NOTE: u32 = 7;
+pub const SHT_DYNSYM: u32 = 11;
+pub const SHT_GNU_VERDEF: u32 = 0x6fff_fffd;
+pub const SHT_GNU_VERSYM: u32 = 0x6fff_ffff;
+pub const STT_FUNC: u8 = 2;
 pub const PT_NOTE: u32 = 4;
 pub const NT_GNU_BUILD_ID: u32 = 3;
 
@@ -125,12 +144,9 @@ unsafe extern "C" {
         name_offset: *mut usize,
         desc_offset: *mut usize,
     ) -> usize;
-    /// libbpf's: the file offsets of the symbols of `binary_path` that
-    /// match `pattern`, into an array the C library's free() takes.
-    pub fn elf_resolve_pattern_offsets(
-        binary_path: *const c_char,
-        pattern: *const c_char,
-        poffsets: *mut *mut c_ulong,
-        pcnt: *mut usize,
-    ) -> c_int;
+    pub fn elf_getscn(elf: *mut Elf, index: usize) -> *mut ElfScn;
+    /// The string at `offset` of string section `section`, or NULL.
+    pub fn elf_strptr(elf: *mut Elf, section: usize, offset: usize) -> *mut c_char;
+    pub fn gelf_getsym(data: *mut ElfData, ndx: c_int, dst: *mut GElfSym) -> *mut GElfSym;
+    pub fn gelf_getversym(data: *mut ElfData, ndx: c_int, dst: *mut u16) -> *mut u16;
 }
