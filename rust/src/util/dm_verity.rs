@@ -21,7 +21,6 @@ use crate::sys::libc::{
     SYS_KEYCTL, Statx, close, errno, getrandom, ioctl, mknod, mount, open, pread, statx, syscall,
     umount2,
 };
-use crate::sys::string::strsprintf;
 use crate::text::{cstr, strscpy};
 use crate::util::config_image::{BLOCK_SIZE, ConfigImage, ConfigImageOpen, SIG_MAX, check_files};
 use crate::util::hex::hex_encode;
@@ -430,7 +429,7 @@ fn loop_attach(file_fd: c_int, bytes: u64, out: &mut c_int) -> c_int {
     }
     // SAFETY: the path's room, and the C's format with its argument.
     if unsafe {
-        strsprintf(
+        crate::text::csprintf!(
             path.as_mut_ptr().cast(),
             path.len(),
             c"/dev/loop%d".as_ptr(),
@@ -469,7 +468,7 @@ fn device_path(device: &mut DmVerity, dev: u64) -> c_int {
     device.device = dev;
     // SAFETY: the path's room, and the C's format with its argument.
     if unsafe {
-        strsprintf(
+        crate::text::csprintf!(
             path,
             device.path.len(),
             c"/dev/dm-%u".as_ptr(),
@@ -783,7 +782,7 @@ fn signature_key(fd: c_int, description: &mut [u8; 64]) -> i32 {
     // SAFETY: the description's room, and the C's format with its
     // argument.
     if unsafe {
-        strsprintf(
+        crate::text::csprintf!(
             description.as_mut_ptr().cast(),
             description.len(),
             c"shirudo-verity-%s".as_ptr(),
@@ -908,7 +907,7 @@ unsafe fn create(image: *const ConfigImageOpen, name: *const c_char, out: *mut D
         // SAFETY: the parameters' room, and the C's format with its
         // arguments.
         let mut n = unsafe {
-            strsprintf(
+            crate::text::csprintf!(
                 params.as_mut_ptr().cast(),
                 params.len(),
                 c"1 %u:%u %u:%u 4096 4096 %llu 1 sha256 %s %s".as_ptr(),
@@ -936,7 +935,7 @@ unsafe fn create(image: *const ConfigImageOpen, name: *const c_char, out: *mut D
             // SAFETY: the room left in the parameters, and the C's format
             // with its argument.
             let written = unsafe {
-                strsprintf(
+                crate::text::csprintf!(
                     params.as_mut_ptr().add(n as usize).cast(),
                     remaining as usize,
                     c" 2 root_hash_sig_key_desc %s".as_ptr(),
@@ -1040,7 +1039,7 @@ fn loop_open(device: u64) -> c_int {
     }
     // SAFETY: the path's room, and the C's format with its argument.
     if unsafe {
-        strsprintf(
+        crate::text::csprintf!(
             path.as_mut_ptr().cast(),
             path.len(),
             c"/dev/loop%u".as_ptr(),

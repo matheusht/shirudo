@@ -22,7 +22,6 @@ use crate::sys::libc::{
     O_WRONLY, PATH_MAX, S_IFMT, S_IFREG, STATX_BASIC_STATS, Statx, close, errno, fsetxattr, fsync,
     link, mkdtemp, open, read, rmdir, statx, strerror, unlink,
 };
-use crate::sys::string::strsprintf;
 use crate::util::config_image::{
     ConfigImageOpen, MAX_BYTES, SIG_MAX, config_image_close, config_image_open,
 };
@@ -270,7 +269,7 @@ unsafe fn verify_incoming(opened: &ConfigImageOpen, staging: *const c_char) -> c
     };
     // SAFETY: the name's room, and the C's format with its argument.
     if unsafe {
-        strsprintf(
+        crate::text::csprintf!(
             name.as_mut_ptr().cast(),
             name.len(),
             c"shirudo-verify-%s".as_ptr(),
@@ -335,7 +334,7 @@ unsafe fn fetch(source: *const c_char, target: &mut ConfigUpdateTarget) -> c_int
             if ret != 0 {
                 break 'out;
             }
-            if strsprintf(
+            if crate::text::csprintf!(
                 incoming.as_mut_ptr().cast(),
                 incoming.len(),
                 c"%s/image".as_ptr(),
@@ -346,14 +345,14 @@ unsafe fn fetch(source: *const c_char, target: &mut ConfigUpdateTarget) -> c_int
                 break 'out;
             }
             for (suffix, max) in FILES {
-                if strsprintf(
+                if crate::text::csprintf!(
                     from.as_mut_ptr().cast(),
                     from.len(),
                     c"%s%s".as_ptr(),
                     source,
                     suffix.as_ptr(),
                 ) < 0
-                    || strsprintf(
+                    || crate::text::csprintf!(
                         to.as_mut_ptr().cast(),
                         to.len(),
                         c"%s%s".as_ptr(),
@@ -377,7 +376,7 @@ unsafe fn fetch(source: *const c_char, target: &mut ConfigUpdateTarget) -> c_int
             if ret == 0 {
                 target.root_hash = opened.image.root_hash;
                 hex_encode(target.root_hash.as_ptr(), 32, hex.as_mut_ptr().cast());
-                if strsprintf(
+                if crate::text::csprintf!(
                     target.prefix.as_mut_ptr().cast(),
                     target.prefix.len(),
                     c"%s/%s".as_ptr(),
@@ -393,14 +392,14 @@ unsafe fn fetch(source: *const c_char, target: &mut ConfigUpdateTarget) -> c_int
                 break 'out;
             }
             for (suffix, _) in FILES {
-                if strsprintf(
+                if crate::text::csprintf!(
                     from.as_mut_ptr().cast(),
                     from.len(),
                     c"%s%s".as_ptr(),
                     incoming.as_ptr(),
                     suffix.as_ptr(),
                 ) < 0
-                    || strsprintf(
+                    || crate::text::csprintf!(
                         to.as_mut_ptr().cast(),
                         to.len(),
                         c"%s%s".as_ptr(),
@@ -436,7 +435,7 @@ unsafe fn fetch(source: *const c_char, target: &mut ConfigUpdateTarget) -> c_int
             close(dir);
         }
         for (suffix, _) in FILES {
-            if strsprintf(
+            if crate::text::csprintf!(
                 to.as_mut_ptr().cast(),
                 to.len(),
                 c"%s/image%s".as_ptr(),

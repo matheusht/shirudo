@@ -170,6 +170,37 @@ pub fn parse_x64(s: &[u8], max: u64) -> Result<u64, c_int> {
     })
 }
 
+/// What strsprintf() made of a snprintf() of `n` bytes into the `size`
+/// bytes at `buf`: the length, or -E2BIG with `buf` left empty when the
+/// output did not fit.
+///
+/// # Safety
+///
+/// `buf` is room for `size` bytes.
+pub(crate) unsafe fn sprintf_result(buf: *mut core::ffi::c_char, size: usize, n: c_int) -> c_int {
+    if usize::try_from(n).is_ok_and(|n| n < size) {
+        return n;
+    }
+    if size != 0 {
+        // SAFETY: the caller's room, of at least a byte.
+        unsafe { *buf = 0 };
+    }
+    -E2BIG
+}
+
+/// strsprintf() of a C format: the C library's snprintf() into the
+/// `size` bytes at `buf`, and the length written, or -E2BIG with `buf`
+/// left empty when the output does not fit. The caller's unsafe block
+/// holds the room, the format and the arguments it converts.
+macro_rules! csprintf {
+    ($buf:expr, $size:expr, $fmt:expr $(, $arg:expr)* $(,)?) => {{
+        let (buf, size): (*mut ::core::ffi::c_char, usize) = ($buf, $size);
+        let n = $crate::sys::libc::snprintf(buf, size, $fmt $(, $arg)*);
+        $crate::text::sprintf_result(buf, size, n)
+    }};
+}
+pub(crate) use csprintf;
+
 /// A label an IPv4 parser reads as a number: decimal digits, or 0x and
 /// hex digits.
 fn numeric_dns_label(label: &[u8]) -> bool {

@@ -20,7 +20,6 @@ use crate::sys::btf::{
     btf_dump__dump_type_data, btf_dump__free, btf_dump__new, libbpf_get_error,
 };
 use crate::sys::libc::{STDOUT_FILENO, VaList, printf, putchar, stdout, vfprintf};
-use crate::sys::string::strsprintf;
 use crate::util::io::write_complete;
 use crate::util::json::{JsonEmit, MAX_BYTES};
 use crate::util::upatch::{NAME_MAX, Upatch, header_name, is_unload};
@@ -563,7 +562,7 @@ unsafe fn append(
 ) -> c_int {
     // SAFETY: the room left in buf, and the caller's format and argument.
     let n = unsafe {
-        strsprintf(
+        crate::text::csprintf!(
             buf[*off..].as_mut_ptr().cast(),
             buf.len() - *off,
             fmt.as_ptr(),
@@ -626,7 +625,7 @@ unsafe fn append_type_name(
             if append_type_name(btf, a.ty, buf, off, depth + 1) != 0 {
                 return -EINVAL;
             }
-            let n = strsprintf(
+            let n = crate::text::csprintf!(
                 buf[*off..].as_mut_ptr().cast(),
                 buf.len() - *off,
                 c"[%u]".as_ptr(),
@@ -642,7 +641,7 @@ unsafe fn append_type_name(
             if append_type_name(btf, t.size_type, buf, off, depth + 1) != 0 {
                 return -EINVAL;
             }
-            let n = strsprintf(
+            let n = crate::text::csprintf!(
                 buf[*off..].as_mut_ptr().cast(),
                 buf.len() - *off,
                 c" *".as_ptr(),
@@ -660,7 +659,7 @@ unsafe fn append_type_name(
                 KIND_ENUM => c"enum ",
                 _ => c"",
             };
-            strsprintf(
+            crate::text::csprintf!(
                 buf[*off..].as_mut_ptr().cast(),
                 buf.len() - *off,
                 c"%s%s".as_ptr(),
@@ -677,7 +676,7 @@ unsafe fn append_type_name(
                 KIND_FWD => c"forward declaration",
                 _ => c"?",
             };
-            strsprintf(
+            crate::text::csprintf!(
                 buf[*off..].as_mut_ptr().cast(),
                 buf.len() - *off,
                 c"%s".as_ptr(),
@@ -698,14 +697,14 @@ fn json_number(e: &mut JsonEmit, value: u64, signed: bool) -> c_int {
     // SAFETY: the room of number, and the C's formats with an integer.
     let n = unsafe {
         if signed {
-            strsprintf(
+            crate::text::csprintf!(
                 number.as_mut_ptr().cast(),
                 number.len(),
                 c"%lld".as_ptr(),
                 value as i64,
             )
         } else {
-            strsprintf(
+            crate::text::csprintf!(
                 number.as_mut_ptr().cast(),
                 number.len(),
                 c"%llu".as_ptr(),
@@ -911,7 +910,7 @@ unsafe fn json_btf_value(
                     // SAFETY: the room of fallback, the C's format and
                     // an integer.
                     let n = unsafe {
-                        strsprintf(
+                        crate::text::csprintf!(
                             fallback.as_mut_ptr().cast(),
                             fallback.len(),
                             c"member_%u".as_ptr(),
@@ -1000,7 +999,7 @@ unsafe fn json_btf_value(
             value[..size].copy_from_slice(bytes);
             // SAFETY: the room of text, the C's format and an integer.
             let n = unsafe {
-                strsprintf(
+                crate::text::csprintf!(
                     text.as_mut_ptr().cast(),
                     text.len(),
                     c"0x%llx".as_ptr(),

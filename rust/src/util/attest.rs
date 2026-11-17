@@ -18,7 +18,6 @@ use crate::sys::libc::{
     AT_FDCWD, O_CLOEXEC, O_RDONLY, STATX_BASIC_STATS, Statx, close, errno, explicit_bzero,
     getrandom, open, read, scrub, statx,
 };
-use crate::sys::string::strsprintf;
 use crate::sys::tss2::NV_WRITTEN;
 use crate::sys::version::shirudo_version_id;
 use crate::text::capi::{digits, parse_u64, parse_x64, strscpy as c_strscpy};
@@ -697,7 +696,7 @@ unsafe fn evidence(
     }
     // SAFETY: the room, and the C's format with its argument.
     if unsafe {
-        strsprintf(
+        crate::text::csprintf!(
             nv_index.as_mut_ptr().cast(),
             nv_index.len(),
             c"0x%08X".as_ptr(),
@@ -946,7 +945,7 @@ unsafe extern "C" fn on_record(ctx: *mut c_void) -> c_int {
         // verify cannot tie op and id to the digest: leave them out.
         // SAFETY: the label's room, and the C's format with its argument.
         if unsafe {
-            strsprintf(
+            crate::text::csprintf!(
                 r.label.as_mut_ptr().cast(),
                 r.label.len(),
                 c"seq %lld".as_ptr(),
@@ -968,7 +967,7 @@ unsafe extern "C" fn on_record(ctx: *mut c_void) -> c_int {
             // SAFETY: the label's room, and the C's format with its
             // arguments: the digest's hex after its "sha256:".
             if unsafe {
-                strsprintf(
+                crate::text::csprintf!(
                     r.label.as_mut_ptr().cast(),
                     r.label.len(),
                     c"seq %lld operation %.12s".as_ptr(),
@@ -996,7 +995,7 @@ unsafe extern "C" fn on_record(ctx: *mut c_void) -> c_int {
             // SAFETY: the label's room, and the C's format with its
             // argument.
             if unsafe {
-                strsprintf(
+                crate::text::csprintf!(
                     r.label.as_mut_ptr().cast(),
                     r.label.len(),
                     c"certificate %.12s".as_ptr(),
@@ -1095,7 +1094,7 @@ macro_rules! say {
         $rep.say($ok, |buf, room| {
             // SAFETY: the room left in the report, and a format with the
             // arguments it converts.
-            unsafe { strsprintf(buf, room, $fmt.as_ptr() $(, $arg)*) }
+            unsafe { crate::text::csprintf!(buf, room, $fmt.as_ptr() $(, $arg)*) }
         })
     };
 }
@@ -1106,7 +1105,7 @@ macro_rules! note {
         $rep.note(|buf, room| {
             // SAFETY: the room left in the report, and a format with the
             // arguments it converts.
-            unsafe { strsprintf(buf, room, $fmt.as_ptr() $(, $arg)*) }
+            unsafe { crate::text::csprintf!(buf, room, $fmt.as_ptr() $(, $arg)*) }
         })
     };
 }

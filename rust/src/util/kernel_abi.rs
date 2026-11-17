@@ -18,7 +18,6 @@ use crate::sys::btf::{
     members,
 };
 use crate::sys::libc::strerror;
-use crate::sys::string::strsprintf;
 use crate::text::capi::strscpy;
 
 const MAP_SHA_SIZE: u32 = 32;
@@ -38,9 +37,9 @@ unsafe fn fail(detail: *mut c_char, detail_sz: usize, fmt: &CStr, arg: *const c_
         // SAFETY: the caller's room, and the format with what it converts.
         let n = unsafe {
             if arg.is_null() {
-                strsprintf(detail, detail_sz, fmt.as_ptr())
+                crate::text::csprintf!(detail, detail_sz, fmt.as_ptr())
             } else {
-                strsprintf(detail, detail_sz, fmt.as_ptr(), arg)
+                crate::text::csprintf!(detail, detail_sz, fmt.as_ptr(), arg)
             }
         };
         if n < 0 {

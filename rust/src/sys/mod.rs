@@ -16,7 +16,6 @@ pub mod loader;
 pub mod luajit;
 pub mod openssl;
 pub mod ssl;
-pub mod string;
 pub mod tss2;
 pub mod upatch;
 pub mod upatch_maps;

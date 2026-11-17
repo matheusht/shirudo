@@ -25,7 +25,6 @@ use crate::sys::openssl::{
     X509_new, X509_set_issuer_name, X509_set_pubkey, X509_set_subject_name, X509_set_version,
     X509_sign, X509V3_EXT_conf_nid, X509V3_set_ctx, X509v3Ctx, i2d_X509_bio,
 };
-use crate::sys::string::strsprintf;
 use crate::util::crypto_openssl::openssl_complain;
 use crate::util::help::{Help, HelpItem, HelpSection, is_help, print_help};
 use crate::util::identity;
@@ -608,9 +607,9 @@ unsafe fn write_pair(
         );
 
         // The old pair goes only once the new one is on disk.
-        if strsprintf(pn, PATH_MAX, c"%s.new".as_ptr(), pkey_path) < 0
-            || strsprintf(cn, PATH_MAX, c"%s.new".as_ptr(), cert_path) < 0
-            || strsprintf(po, PATH_MAX, c"%s.old".as_ptr(), pkey_path) < 0
+        if crate::text::csprintf!(pn, PATH_MAX, c"%s.new".as_ptr(), pkey_path) < 0
+            || crate::text::csprintf!(cn, PATH_MAX, c"%s.new".as_ptr(), cert_path) < 0
+            || crate::text::csprintf!(po, PATH_MAX, c"%s.old".as_ptr(), pkey_path) < 0
         {
             crate::log::log_c!(
                 crate::log::err,
