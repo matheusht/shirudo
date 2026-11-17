@@ -23,7 +23,6 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use super::{KeyFiles, error, info, strerr};
 use crate::bpf::object::{self, GenOpts, Object};
 use crate::errno::{E2BIG, EBADMSG, EINVAL, EIO, ENAMETOOLONG, ENOENT, EOVERFLOW};
-use crate::sys::loader::unload_blob;
 use crate::util::bpm_package::verify_cms;
 use crate::util::crypto_openssl::sha256_calc;
 use crate::util::upatch::{
@@ -849,6 +848,10 @@ pub(super) fn load(
 /// payload it unloads.
 const UNLOAD_PARAMS: usize = NAME_MAX + PAYLOAD_HASH_LEN;
 
+/// The unload template, bpf/unload.bpf.o, which a directive is packaged
+/// from.
+static UNLOAD_TEMPLATE: &[u8] = include_bytes!("../../../../bpf/unload.bpf.o");
+
 /// Signs the directive that unloads upatch `name`, whose payload has
 /// the digest `payload`, at `out`.
 pub(super) fn unload(name: &CStr, payload: &[u8; 32], out: &CStr, keys: (&CStr, &CStr)) -> c_int {
@@ -856,15 +859,7 @@ pub(super) fn unload(name: &CStr, payload: &[u8; 32], out: &CStr, keys: (&CStr, 
     if err != 0 {
         return err;
     }
-    // SAFETY: the embedded unload template, static.
-    let blob = unsafe { unload_blob() };
-    // SAFETY: NULL or the static blob.
-    let Some(b) = (unsafe { blob.as_ref() }).filter(|b| !b.data.is_null() && b.size != 0) else {
-        error(b"embedded unload template missing");
-        return -ENOENT;
-    };
-    // SAFETY: the static blob's `size` bytes.
-    let data = unsafe { crate::ffi::slice(b.data.cast::<u8>(), b.size) };
+    let data = UNLOAD_TEMPLATE;
     // Named as libbpf names it opened from unload.bpf.o: from memory,
     // libbpf would name it from its address, and its .rodata map so.
     let mut obj = match Object::open(data, b"unload") {

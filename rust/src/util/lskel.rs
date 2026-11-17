@@ -11,8 +11,8 @@
 //! context and leaves their descriptors in its context; it can neither
 //! attach nor pin them, which its caller does.
 //!
-//! A skeleton built into the binary comes with the Rust tools/bpf-lskel
-//! writes of it (rust/src/skel.rs): typed handles to its maps and
+//! A skeleton built into the binary is embedded by the Rust tools/bpf-lskel
+//! writes of it (rust/src/skel.rs), with typed handles to its maps and
 //! programs, made from the Skeleton loaded here.
 
 use core::ffi::{CStr, c_int};
@@ -23,7 +23,6 @@ use std::os::fd::{AsRawFd, OwnedFd};
 use crate::bpf::lskel::{Lskel, Program};
 use crate::errno::{E2BIG, EINVAL, ENOENT};
 use crate::sys::libc::{close, errno, fcntl};
-use crate::sys::loader::EmbeddedBpf;
 use crate::util::bpf_sys::{
     Attr, BPF_ANY, BPF_MAP_CREATE, BPF_MAP_FREEZE, BPF_MAP_UPDATE_ELEM, BPF_PROG_LOAD,
     bpf_map_freeze, bpf_map_lookup_elem, bpf_map_update_elem, bpf_obj_pin, link_create,
@@ -364,31 +363,15 @@ pub(crate) struct Skeleton {
 }
 
 impl Skeleton {
-    /// Runs the loader of the skeleton embedded as `blob`, which must
-    /// hold the maps and programs `maps` and `progs` name, those
-    /// tools/bpf-lskel wrote the Rust of, the maps it reuses taken from
+    /// Runs the loader of the skeleton `data`, embedded by the Rust
+    /// tools/bpf-lskel wrote with it, the maps it reuses taken from
     /// `shared`.
     pub(crate) fn load(
         name: &'static [u8],
-        blob: *const EmbeddedBpf,
-        maps: &[&[u8]],
-        progs: &[&[u8]],
+        data: &'static [u8],
         shared: impl Fn(usize) -> Option<c_int>,
     ) -> Result<Self, Failed> {
-        // SAFETY: NULL or the static blob.
-        let Some(b) = (unsafe { blob.as_ref() }).filter(|b| !b.data.is_null() && b.size != 0)
-        else {
-            return Err(("embedded skeleton", -ENOENT));
-        };
-        // SAFETY: the blob's `size` static bytes.
-        let data = unsafe { crate::ffi::slice(b.data.cast::<u8>(), b.size) };
         let skel = Lskel::parse(data).ok_or(("embedded skeleton", -EINVAL))?;
-        if skel.maps != maps || !skel.progs.iter().map(|p| p.name).eq(progs.iter().copied()) {
-            return Err((
-                "embedded skeleton not the one the binary was built with",
-                -EINVAL,
-            ));
-        }
         let cx = run(&skel, shared)?;
         Ok(Skeleton { name, skel, cx })
     }

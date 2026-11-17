@@ -9,7 +9,6 @@ pub mod curl;
 pub mod elf;
 pub mod identity;
 pub mod libc;
-pub mod loader;
 pub mod luajit;
 pub mod openssl;
 pub mod ssl;

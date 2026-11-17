@@ -15,7 +15,6 @@ use crate::sys::libc::{
     SYS_KEYCTL, Statx, W_OK, access, close, errno, fclose, fgets, fopen, geteuid, open, read,
     statx, strerror, syscall,
 };
-use crate::sys::loader::{EmbeddedBpf, bpf2_blob, seal_blob};
 use crate::text::{cstr, decimal, strscpy, strsprintf};
 use crate::util::config::{self, Scrubbed};
 use crate::util::crypto_openssl::{Cert, cert_free, cert_key_algorithm};
@@ -438,15 +437,8 @@ fn check_keyring(r: &mut PreflightResult) {
 
 fn check_embedded_loader(r: &mut PreflightResult) {
     let i = r.next_slot(PRE_EMBEDDED_LOADER, c"embedded_loader");
-    let whole = |b: Option<&EmbeddedBpf>| {
-        b.filter(|b| !b.data.is_null() && b.size != 0)
-            .is_some_and(|b| {
-                // SAFETY: the blob's `size` static bytes.
-                Lskel::parse(unsafe { crate::ffi::slice(b.data.cast::<u8>(), b.size) }).is_some()
-            })
-    };
-    // SAFETY: the embedded skeletons, NULL or static.
-    let (bpf2, seal) = unsafe { (bpf2_blob().as_ref(), seal_blob().as_ref()) };
+    let whole = |b: &[u8]| Lskel::parse(b).is_some();
+    let (bpf2, seal) = (crate::skel::bpf2::LOADER, crate::skel::seal::LOADER);
 
     if whole(bpf2) && whole(seal) {
         r.pass(i);

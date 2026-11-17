@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! bpf-lskel: the light skeleton of an object of bpf/, which
-//! util/loader.c embeds so that init loads the object without reading
-//! it. The loader is generated at build time, as libbpf's gen_loader
+//! bpf-lskel: the light skeleton of an object of bpf/, which the Rust
+//! it writes with --rust embeds, so that init loads the object without
+//! reading it. The loader is generated at build time, as libbpf's gen_loader
 //! generates it, by shirudo's own reading of the object
 //! (rust/src/bpf/), which this build tool takes with std alone.
 //!
@@ -63,6 +63,18 @@ fn open(path: &str, name: &[u8]) -> Result<Object, String> {
     Object::open(&data, name).map_err(|e| format!("{path}: open: {e}"))
 }
 
+/// The skeleton `out` as the Rust at `rust_out` embeds it: by name
+/// beside it, else by its absolute path.
+fn lskel_from(rust_out: &str, out: &str) -> Result<String, String> {
+    let (rust_out, out) = (std::path::Path::new(rust_out), std::path::Path::new(out));
+    match (rust_out.parent(), out.parent(), out.file_name()) {
+        (Some(a), Some(b), Some(name)) if a == b => Ok(name.to_string_lossy().into_owned()),
+        _ => std::path::absolute(out)
+            .map(|p| p.to_string_lossy().into_owned())
+            .map_err(|e| format!("{}: {e}", out.display())),
+    }
+}
+
 fn run(args: &[String]) -> Result<(), String> {
     let usage = || "usage: bpf-lskel <object.bpf.o> <name> [--share <object.bpf.o> --maps <map>[,<map>...]] [--rust <out.rs>] -o <out>";
     let (mut pos, mut share, mut names, mut out) = (Vec::new(), None, None, None);
@@ -107,7 +119,7 @@ fn run(args: &[String]) -> Result<(), String> {
                 reuse_map_mask |= 1 << i;
             }
             let module = String::from_utf8_lossy(other_name).into_owned();
-            let (_, structs) = rskel::write(&other, &module, other_path, None)
+            let (_, structs) = rskel::write(&other, &module, other_path, "", None)
                 .map_err(|e| format!("{other_path}: {e}"))?;
             shared = Some((module, structs));
         }
@@ -119,8 +131,9 @@ fn run(args: &[String]) -> Result<(), String> {
             structs,
             maps: (0..64).filter(|i| reuse_map_mask & (1 << i) != 0).collect(),
         });
-        let (src, _) =
-            rskel::write(&obj, name, path, share.as_ref()).map_err(|e| format!("{path}: {e}"))?;
+        let lskel = lskel_from(rust_out, out)?;
+        let (src, _) = rskel::write(&obj, name, path, &lskel, share.as_ref())
+            .map_err(|e| format!("{path}: {e}"))?;
         let tmp = format!("{rust_out}.tmp");
         std::fs::write(&tmp, src)
             .and_then(|()| std::fs::rename(&tmp, rust_out))

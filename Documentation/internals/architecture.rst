@@ -79,14 +79,14 @@ Figure 1 shows the components and the paths between them.
    Figure 1. Components on the operator host and on a target. Nothing
    connects into the target; it pulls packages and pushes telemetry.
 
-The binary embeds three BPF objects, compiled from :src:`bpf/` and included
-with ``.incbin`` in :src:`util/loader.c`, ``bpf2`` and ``seal`` as light
-skeletons: their loaders, which :src:`tools/bpf-lskel` generates when the
-binary is built, and the names of the maps and programs those make. The
-tool also writes the Rust :src:`rust/src/skel.rs` includes: the types of
-the maps' keys and values, read from each object's BTF and checked by
-size and field offset where the binary compiles, and handles to the
-maps of those types. A layout the BPF changes fails the build instead
+The binary embeds three BPF objects, compiled from :src:`bpf/`: ``bpf2``
+and ``seal`` as light skeletons, whose loaders :src:`tools/bpf-lskel`
+generates when the binary is built, and ``unload`` as the object
+``shirudo-build`` makes unload directives from. With each loader the tool
+writes the Rust :src:`rust/src/skel.rs` includes, which embeds the
+loader: the types of the maps' keys and values, read from the object's
+BTF and checked by size and field offset where the binary compiles, and
+handles to the maps of those types. A layout the BPF changes fails the build instead
 of a boot. The ``seal`` takes the maps it shares with ``bpf2`` from
 ``bpf2``, which init passes it as maps of ``bpf2``'s types:
 

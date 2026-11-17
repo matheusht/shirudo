@@ -7,8 +7,8 @@
 #   1. vendored libbpf (vendor/libbpf) and the vmlinux.h generator
 #   2. generated headers   (vendor/linux/vmlinux.h)
 #   3. compiled objects    (util/*.o, build/main/*.o, bpf/*.bpf.o)
-#   4. embedded BPF        (bpf/*.lskel in util/loader.o and typed
-#                           bpf/*.skel.rs in Rust)
+#   4. embedded BPF        (bpf/*.lskel, bpf/*.skel.rs, and the unload
+#                           template in Rust)
 #   5. link                (shirudo, shirudo-target, shirudo-build)
 
 include Makefile.version
@@ -234,7 +234,6 @@ CLANG_BPF := $(CLANG) -target bpf -mcpu=v4 -fno-jump-tables -O2 -g -Wall -Wextra
 # ----- source manifests -------------------------------------------
 
 UTIL_SRCS := \
-    util/loader.c \
     util/sysinfo_image.c \
     util/io_trusted.c \
     util/xdp.c \
@@ -285,8 +284,9 @@ BPF_LIB_HEADERS    := bpf/lib/misc.h \
                       bpf/lib/xattr.h \
                       bpf/lib/decoder.h
 
-# bpf/*.bpf.c sources compiled with clang -target bpf and embedded via
-# .incbin into util/loader.o. bpf/lib/ is include-only.
+# bpf/*.bpf.c sources compiled with clang -target bpf, which the Rust
+# library embeds: bpf2 and the seal as light skeletons, unload as the
+# object. bpf/lib/ is include-only.
 BPF_SRCS := \
     bpf/bpf2.c \
     bpf/seal.c \
@@ -306,10 +306,10 @@ QUOTE_CHECK_SRCS := \
 
 # ----- derived names ----------------------------------------------
 
-UTIL_OBJS    := $(foreach s,$(UTIL_SRCS),$(call obj,$(s:.c=.o)))
 BPF_OBJS     := $(BPF_SRCS:.c=.bpf.o)
 BPF_LSKELS   := bpf/bpf2.lskel bpf/seal.lskel
 BPF_SKEL_RS  := $(BPF_LSKELS:.lskel=.skel.rs)
+BPF_EMBEDDED := $(BPF_LSKELS) $(BPF_SKEL_RS) bpf/unload.bpf.o
 BUILD_OBJS   := $(foreach s,$(BUILD_SRCS),$(call obj,$(s:.c=.o)))
 QUOTE_CHECK_OBJS := $(foreach s,$(QUOTE_CHECK_SRCS),$(call obj,$(s:.c=.o)))
 
@@ -386,7 +386,7 @@ endif
 
 rust: $(RUST_LIB)
 
-$(RUST_LIB): $(RUST_SRCS) $(BPF_SKEL_RS) $(RUST_LIBEXEC_CHANGED)
+$(RUST_LIB): $(RUST_SRCS) $(BPF_EMBEDDED) $(RUST_LIBEXEC_CHANGED)
 	@printf '  CARGO   $@\n'
 	$(Q)RUSTFLAGS="$(RUSTFLAGS_WERROR)" \
 	    CARGO_PROFILE_RELEASE_DEBUG=$(if $(DEBUG_CFLAGS),true,false) \
@@ -435,7 +435,6 @@ build/target/%.o: %.c Makefile.shirudo $(CONFIG_MK_DEP)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
--include $(DEPS)
 
 # The tree walk limits of util/bpm_tree.h and the keepalive window of
 # util/keepalive.h. The test VM bundle builds its target with them low,
@@ -478,7 +477,8 @@ bpf/%.bpf.o: bpf/%.c $(VMLINUX_H) $(BPF_LIBBPF_HEADERS) \
 # them without reading an object: tools/bpf-lskel, a build tool rustc
 # builds with std alone from the BPF object model of the Rust library,
 # generates their loaders, and the Rust rust/src/skel.rs includes: the
-# types of their maps from the objects' BTF, and handles to the maps.
+# loader, embedded, the types of their maps from the objects' BTF, and
+# handles to the maps.
 # The seal's loader takes the maps SEAL_SHARED_MAPS names from bpf2,
 # defined alike in both, which init passes it as seal::Shared.
 RUSTC            ?= rustc
@@ -571,17 +571,10 @@ shirudo-target: $(MAIN_OBJ)  $(UTIL_OBJS) $(VERSION_OBJ) $(LIBBPF_A) \
 	$(Q)sh .github/scripts/check-static-target.sh $@ || \
 	    { rm -f $@; exit 1; }
 
-# util/loader.o has a make-level dep on every embedded bpf object.
-util/loader.o: $(BPF_OBJS) $(BPF_LSKELS)
-build/target/util/loader.o: $(BPF_OBJS) $(BPF_LSKELS)
-
-# shirudo-build links Rust CMS signer (CMS signer) plus a subset of util,
-# util/loader.o for its .incbin of bpf/unload.bpf.o (used by the
-# --unload directive emission path), and the OCI client for the
-# util/loader.o embeds BPF objects. Remaining C helpers support the
-# operator commands on current main.
+# shirudo-build uses a Rust main() and embeds its BPF template in Rust.
+# Remaining C helpers support operator commands on current main.
 tools/shirudo-build/shirudo-build: $(BUILD_MAIN_OBJ) $(BUILD_OBJS) \
-                                   util/log.o util/loader.o \
+                                   util/log.o \
                                    util/malloc.o util/paths.o \
                                    util/string.o util/curl.o \
                                    util/bpm_tree_overlap.o \
@@ -1106,9 +1099,9 @@ testing/helper/test-image-cleanup: testing/helper/test-image-cleanup.c \
 		$(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
 testing/helper/test-mode-objects: testing/helper/test-mode-objects.c \
-		$(call obj,util/loader.o)
+		$(RUST_LIB)
 	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+	$(Q)$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(RUST_TEST_LDLIBS)
 
 testing/helper/test-seal-output: testing/helper/test-seal-output.c \
 		util/log.o util/string.o util/malloc.o $(RUST_LIB)
@@ -1213,7 +1206,7 @@ RUST_FUZZ_FLAGS  := -Cpasses=sancov-module \
                     -Cllvm-args=-sanitizer-coverage-pc-table \
                     -Cllvm-args=-sanitizer-coverage-trace-compares
 
-$(RUST_FUZZ_LIB): $(RUST_SRCS) $(BPF_SKEL_RS)
+$(RUST_FUZZ_LIB): $(RUST_SRCS) $(BPF_EMBEDDED)
 	@printf '  CARGO   $@\n'
 	$(Q)RUSTFLAGS="$(RUSTFLAGS_WERROR) $(RUST_FUZZ_FLAGS)" \
 	    $(CARGO) build --quiet --release --locked --offline \

@@ -173,8 +173,9 @@ Build the operator binary
       $ ./shirudo version
 
 The build compiles the vendored libbpf, generates ``vmlinux.h``,
-compiles the userspace objects and the BPF objects under :src:`bpf/`,
-embeds the BPF objects into ``util/loader.o`` and links. These make
+compiles the BPF objects under :src:`bpf/`, generates the light
+skeletons of ``bpf2`` and ``seal``, builds the Rust library, which embeds
+the BPF objects, and links. These make
 variables change it:
 
 .. list-table::
