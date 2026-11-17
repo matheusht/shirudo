@@ -1074,8 +1074,8 @@ fn status_on(tpm: *mut Tpm, st: &mut ChainStatus) -> c_int {
 }
 
 pub(crate) use capi::{
-    chain_anchor, chain_bound, chain_extend, chain_fold, chain_key_event, chain_tree_event,
-    chain_upatch_event,
+    chain_anchor, chain_bound, chain_extend, chain_fold, chain_key_event, chain_read,
+    chain_tree_event, chain_upatch_event,
 };
 
 pub(crate) use capi::chain_init_event;

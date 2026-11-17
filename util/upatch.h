@@ -49,6 +49,7 @@ struct upatch {
 	bool				owned;
 	bool				rodata_offset_in_header;
 	const struct upatch_decoder_blob *decoder_blob;
+	__u32				decoder_blob_len;
 	__u32				nr_decoders;
 	const char			*signed_name;	/* UPATCH_NAME_MAX */
 	const __u8			*signed_attach;
@@ -148,50 +149,18 @@ int upatch_select(const struct dirent *e);
 struct prog_spec {
 	__u32 role;
 	__u32 kind;
-	__u32 device_classes;
 	__u64 offset;
 	char target[UPATCH_ATTACH_TARGET_MAX];
 	char map[UPATCH_PROG_MAP_MAX];
 	char *uprobe_path;
+	__u32 uprobe_path_len;
 	__u8 build_id[UPATCH_BUILD_ID_MAX];
 	__u32 build_id_len;
 	__u64 *uprobe_offsets;
 	__u32 nr_uprobe_offsets;
-	char *kprobe_sym_buf;
-	size_t kprobe_sym_buf_len;
-	const char **kprobe_syms;
-	__u32 nr_kprobe_syms;
 	int target_fd;
 	struct stat target_stat;
 };
-
-static inline bool kind_is_uprobe_multi(__u32 kind)
-{
-	return kind == UPATCH_ATTACH_UPROBE_MULTI || kind == UPATCH_ATTACH_URETPROBE_MULTI;
-}
-
-static inline bool kind_is_uprobe_single(__u32 kind)
-{
-	return kind == UPATCH_ATTACH_UPROBE || kind == UPATCH_ATTACH_URETPROBE;
-}
-
-/* The kinds that attach to a userspace binary named in the UPUT block. */
-static inline bool kind_has_uprobe_target(__u32 kind)
-{
-	return kind_is_uprobe_multi(kind) || kind_is_uprobe_single(kind);
-}
-
-static inline bool kind_is_kprobe_multi(__u32 kind)
-{
-	return kind == UPATCH_ATTACH_KPROBE_MULTI || kind == UPATCH_ATTACH_KRETPROBE_MULTI;
-}
-
-/*
- * Whether the len bytes at sym can be one name of a kprobe multi target:
- * 1 to UPATCH_KPROBE_SYM_MAX - 1 printable ASCII bytes, none of them a
- * space or one of the list and glob characters ",*?|".
- */
-bool kprobe_sym_valid(const char *sym, size_t len);
 
 /*
  * The attach metadata of a load upatch, parsed strictly into one spec
@@ -200,29 +169,23 @@ bool kprobe_sym_valid(const char *sym, size_t len);
 int prog_specs_parse(const void *metadata, __u32 metadata_len,
 		     __u32 nr_maps, __u32 nr_progs, struct prog_spec **out);
 void prog_specs_free(struct prog_spec *specs, __u32 nr_progs);
-/* Every device class an XDP program among the specs selects. */
-__u32 prog_specs_xdp_classes(const struct prog_spec *specs, __u32 nr_progs);
 
 /*
- * The target's upatch lifecycle, which builtin-upatch.c implements for
- * init, bpm and keys: boot restore, install, unload.
+ * The signed loader of builtin-upatch.c: upatch_apply() for init's boot
+ * restore, and for the operations of rust/src/builtin/upatch/ops.rs
+ * upatch_apply_signed(), which with verify_only checks the signature
+ * alone, and upatch_trust_anchor(), the kernel's BPF keyring checked
+ * against the anchor init froze. Each says what failed in rep.
  */
-int upatch_restore(const char *path);
-int upatch_install(const char *path);
-int upatch_remove(const char *path);
+struct op_report;
 
-/* A missing optional kprobe module permits tree projection advancement. */
-#define UPATCH_INSTALL_TARGET_MISSING	2
+int upatch_apply(const char *path);
+int upatch_apply_signed(const char *path, bool verify_only,
+			struct op_report *rep);
+int upatch_trust_anchor(__s32 *keyring, __s32 *serial,
+			struct op_report *rep);
 
-struct cert;
-
-/*
- * Detach, unpin and unarchive without a directive, because the key
- * that signed the upatch was revoked: 1 when the unload was measured,
- * 0 when only the archive went, -ESTALE when the archive under the name
- * is no longer one signer signed and stays, -errno otherwise.
- */
-int upatch_purge(const char *name, const struct cert *signer,
-		 const char *reason);
+/* The pins of upatch name removed, which detaches it: 0 or -errno. */
+int upatch_remove_pins(const char *name);
 
 #endif /* SHIRUDO_UTIL_UPATCH_H */

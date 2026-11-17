@@ -22,25 +22,46 @@ const VERIFIER_LOG_MAX: usize = 16 * 1024 * 1024;
 /// `struct op_report`.
 #[repr(C)]
 pub struct OpReport {
-    ok: bool,
-    op: *const c_char,
-    phase: *const c_char,
-    err: c_int,
-    category: *const c_char,
-    message: [c_char; 256],
-    verifier_log: *mut c_char,
-    loader_return: c_int,
-    path: *const c_char,
-    name: *const c_char,
-    payload_hex: [c_char; 65],
-    tpm_present: bool,
-    chain_after: [c_char; 65],
+    pub(crate) ok: bool,
+    pub(crate) op: *const c_char,
+    pub(crate) phase: *const c_char,
+    pub(crate) err: c_int,
+    pub(crate) category: *const c_char,
+    pub(crate) message: [c_char; 256],
+    pub(crate) verifier_log: *mut c_char,
+    pub(crate) loader_return: c_int,
+    pub(crate) path: *const c_char,
+    pub(crate) name: *const c_char,
+    pub(crate) payload_hex: [c_char; 65],
+    pub(crate) tpm_present: bool,
+    pub(crate) chain_after: [c_char; 65],
 }
 
 const _: () = assert!(size_of::<OpReport>() == 464);
 const _: () = assert!(core::mem::offset_of!(OpReport, verifier_log) == 296);
 const _: () = assert!(core::mem::offset_of!(OpReport, path) == 312);
 const _: () = assert!(core::mem::offset_of!(OpReport, chain_after) == 394);
+
+impl OpReport {
+    /// A report of operation `op`, done until a failure says otherwise.
+    pub(crate) fn new(op: &'static CStr) -> Self {
+        OpReport {
+            ok: false,
+            op: op.as_ptr(),
+            phase: c"done".as_ptr(),
+            err: 0,
+            category: core::ptr::null(),
+            message: [0; 256],
+            verifier_log: core::ptr::null_mut(),
+            loader_return: 0,
+            path: core::ptr::null(),
+            name: core::ptr::null(),
+            payload_hex: [0; 65],
+            tpm_present: false,
+            chain_after: [0; 65],
+        }
+    }
+}
 
 /// The string of a nullable C string field, or `default` for NULL.
 ///
@@ -136,7 +157,7 @@ unsafe fn encode(e: &mut JsonEmit, r: &OpReport, vlog: &[u8], nv_index: &[u8]) {
 /// # Safety
 ///
 /// `path` is a C string, and the strings of `r` are NULL or C strings.
-unsafe fn report_emit(path: *const c_char, r: &OpReport) -> c_int {
+pub(crate) unsafe fn report_emit(path: *const c_char, r: &OpReport) -> c_int {
     // SAFETY: the caller passes a C string or NULL.
     let vlog = unsafe { or(r.verifier_log, b"") };
     // The worst case of escaping, and slack for the rest.
@@ -218,6 +239,8 @@ unsafe fn report_set_log(r: &mut OpReport, log: *const c_char) {
     // SAFETY: a C string, and a bound.
     r.verifier_log = unsafe { xstrndup(log, VERIFIER_LOG_MAX) };
 }
+
+pub(crate) use capi::report_free;
 
 mod capi {
     use core::ffi::{c_char, c_int};

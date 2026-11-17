@@ -4,12 +4,12 @@
 //! Loading and unloading upatches, of `util/upatch.h`, which
 //! builtin-upatch.c implements.
 
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_char, c_int};
 
 use crate::sys::btf::Btf;
 
-/// What upatch_install() gives for a valid upatch whose target module
-/// is not loaded.
+/// What an install gives for a valid upatch whose target module is not
+/// loaded.
 pub const UPATCH_INSTALL_TARGET_MISSING: c_int = 2;
 
 /// `struct map_summary`: a map of an upatch, as upatch_maps lists it.
@@ -58,14 +58,4 @@ unsafe extern "C" {
     pub fn upatch_open_first_link(name: *const c_char) -> c_int;
     /// Loads the archived upatch at `path`: 0 or -errno.
     pub fn upatch_apply(path: *const c_char) -> c_int;
-    /// Loads the upatch at `path`: 0, UPATCH_INSTALL_TARGET_MISSING or
-    /// -errno.
-    pub fn upatch_install(path: *const c_char) -> c_int;
-    /// Runs the unload directive at `path`: 0 or -errno.
-    pub fn upatch_remove(path: *const c_char) -> c_int;
-    /// Unloads, when loaded, and purges from the archive upatch `name`
-    /// that the certificate at `signer` signed: 1 unloaded, 0 purged
-    /// alone, -ESTALE for one the signer no longer signed, or -errno.
-    pub fn upatch_purge(name: *const c_char, signer: *const c_void, reason: *const c_char)
-    -> c_int;
 }

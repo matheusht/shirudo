@@ -21,7 +21,6 @@ use super::{
 };
 use crate::errno::{E2BIG, EEXIST, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT};
 use crate::sys::libc::{F_OK, O_CREAT, O_EXCL, O_NOFOLLOW, O_TRUNC, O_WRONLY, access};
-use crate::sys::upatch::{upatch_install, upatch_remove};
 use crate::text::{cstr, strscpy, strsprintf};
 use crate::util::bpm_oci::{
     Client, MAX_NAME, digest_matches, manifest_layers, name_ok, version_ok,
@@ -162,13 +161,11 @@ fn old_pairs(old: &[u8]) -> Result<Vec<(CString, CString)>> {
 }
 
 fn install_one(load: &CStr) -> bool {
-    // SAFETY: a C string.
-    unsafe { upatch_install(load.as_ptr()) == 0 }
+    crate::builtin::upatch::install(load) == 0
 }
 
 fn remove_one(unload: &CStr) -> bool {
-    // SAFETY: a C string.
-    unsafe { upatch_remove(unload.as_ptr()) == 0 }
+    crate::builtin::upatch::remove(unload) == 0
 }
 
 /// Unloads what loaded, newest first, and loads the old version again.

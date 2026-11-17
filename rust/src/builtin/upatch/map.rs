@@ -14,7 +14,7 @@ use std::io::Write;
 use std::os::fd::{FromRawFd, IntoRawFd};
 use std::os::unix::fs::FileExt;
 
-use super::{JSON_MAX, Summaries, err, help, item, log_err, log_warn, strerr, type_name};
+use super::{JSON_MAX, Opt, Summaries, err, help, item, log_err, log_warn, opt, strerr, type_name};
 use crate::errno::{EINVAL, EIO, ENODATA};
 use crate::sys::libc::{
     LOCK_UN, O_APPEND, O_CREAT, O_RDWR, STDOUT_FILENO, close, errno, ferror, flock, stdout,
@@ -91,30 +91,6 @@ struct Args<'a> {
     s3_uri: Option<&'a CStr>,
     upatch: Option<&'a CStr>,
     map: Option<&'a CStr>,
-}
-
-/// A valued option: its value after an equals sign or as the next
-/// argument, which it steps past.
-enum Opt<'a> {
-    No,
-    Value(&'a CStr),
-    Missing,
-}
-
-fn opt<'a>(name: &[u8], args: &[&'a CStr], i: &mut usize) -> Opt<'a> {
-    let a = args[*i].to_bytes_with_nul();
-    let Some(rest) = a.strip_prefix(name) else {
-        return Opt::No;
-    };
-    match rest {
-        [b'=', value @ ..] => CStr::from_bytes_with_nul(value).map_or(Opt::No, Opt::Value),
-        [0] if *i + 1 >= args.len() => Opt::Missing,
-        [0] => {
-            *i += 1;
-            Opt::Value(args[*i])
-        }
-        _ => Opt::No,
-    }
 }
 
 /// A tenant ID: 1 to 128 of `[A-Za-z0-9._-]`.

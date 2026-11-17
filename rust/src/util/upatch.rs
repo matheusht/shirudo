@@ -611,7 +611,7 @@ pub(crate) fn signed_name(u: &Upatch) -> *const c_char {
     }
 }
 
-fn name_signed(u: &Upatch) -> bool {
+pub(crate) fn name_signed(u: &Upatch) -> bool {
     let name = signed_name(u);
 
     // SAFETY: a signed name lies within the open container, NAME_MAX
@@ -730,6 +730,19 @@ impl Opened {
         let mut u: Box<Upatch> = Box::new(unsafe { core::mem::zeroed() });
         // SAFETY: a C string and the container to fill.
         match unsafe { capi::upatch_open(path.as_ptr(), &mut *u) } {
+            0 => Ok(Opened(u)),
+            err => Err(err),
+        }
+    }
+}
+
+impl Opened {
+    /// The upatch in the file open on `fd`, or -errno.
+    pub(crate) fn open_fd(fd: c_int) -> Result<Self, c_int> {
+        // SAFETY: an all-zero container is a closed one.
+        let mut u: Box<Upatch> = Box::new(unsafe { core::mem::zeroed() });
+        // SAFETY: the caller's descriptor and the container to fill.
+        match unsafe { capi::upatch_open_fd(fd, &mut *u) } {
             0 => Ok(Opened(u)),
             err => Err(err),
         }

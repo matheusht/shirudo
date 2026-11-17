@@ -2,20 +2,21 @@
 // Copyright (c) 2026 Authors of shirudo
 
 //! `shirudo upatch`: describe an upatch file, list the archived and the
-//! loaded upatches, and describe a loaded one from the kernel. Loading,
-//! unloading and reading maps are the C's still, which this dispatches
-//! to.
+//! loaded upatches, describe a loaded one and read its maps from the
+//! kernel, and load and unload upatches through the signed loader of
+//! builtin-upatch.c.
 
 mod get;
 mod info;
 mod list;
 mod map;
+mod ops;
 
 use core::ffi::{CStr, c_char, c_int};
 use std::ffi::CString;
 
 use crate::sys::libc::{fwrite, stderr, stdout};
-use crate::sys::log::{pr_err, pr_warn};
+use crate::sys::log::{pr_audit, pr_err, pr_info, pr_warn};
 use crate::sys::malloc::xfree;
 use crate::sys::upatch::{
     MapSummary, map_summary_free, upatch_maps_list_all, upatch_maps_list_one,
@@ -29,11 +30,7 @@ use crate::util::json::JsonEmit;
 /// JSON_MAX_BYTES of util/json.h: the most a document grows to.
 const JSON_MAX: usize = 8 * 1024 * 1024;
 
-unsafe extern "C" {
-    /// The subcommands still in builtin-upatch.c.
-    fn cmd_upatch_load(argc: c_int, argv: *const *const c_char) -> c_int;
-    fn cmd_upatch_unload(argc: c_int, argv: *const *const c_char) -> c_int;
-}
+pub(crate) use ops::{install, purge, remove};
 
 const fn item(name: &'static CStr, summary: &'static CStr) -> HelpItem {
     HelpItem {
@@ -106,8 +103,8 @@ fn err(text: &[u8]) {
     unsafe { fwrite(text.as_ptr().cast(), 1, text.len(), stderr) };
 }
 
-/// A message through the log, as pr_err() would make it.
-fn log_err(text: &[u8]) {
+/// A message through the log function `f`, a pr_*() of util/log.h.
+fn log(f: unsafe extern "C" fn(*const c_char, ...), text: &[u8]) {
     let text = CString::new(
         text.iter()
             .copied()
@@ -116,20 +113,47 @@ fn log_err(text: &[u8]) {
     )
     .unwrap_or_default();
     // SAFETY: a "%s" format with a C string.
-    unsafe { pr_err(c"%s".as_ptr(), text.as_ptr()) };
+    unsafe { f(c"%s".as_ptr(), text.as_ptr()) };
 }
 
-/// A warning through the log, as pr_warn() would make it.
+fn log_err(text: &[u8]) {
+    log(pr_err, text);
+}
+
 fn log_warn(text: &[u8]) {
-    let text = CString::new(
-        text.iter()
-            .copied()
-            .filter(|&c| c != 0)
-            .collect::<Vec<u8>>(),
-    )
-    .unwrap_or_default();
-    // SAFETY: a "%s" format with a C string.
-    unsafe { pr_warn(c"%s".as_ptr(), text.as_ptr()) };
+    log(pr_warn, text);
+}
+
+fn log_info(text: &[u8]) {
+    log(pr_info, text);
+}
+
+fn log_audit(text: &[u8]) {
+    log(pr_audit, text);
+}
+
+/// A valued option: its value after an equals sign or as the next
+/// argument, which it steps past.
+enum Opt<'a> {
+    No,
+    Value(&'a CStr),
+    Missing,
+}
+
+fn opt<'a>(name: &[u8], args: &[&'a CStr], i: &mut usize) -> Opt<'a> {
+    let a = args[*i].to_bytes_with_nul();
+    let Some(rest) = a.strip_prefix(name) else {
+        return Opt::No;
+    };
+    match rest {
+        [b'=', value @ ..] => CStr::from_bytes_with_nul(value).map_or(Opt::No, Opt::Value),
+        [0] if *i + 1 >= args.len() => Opt::Missing,
+        [0] => {
+            *i += 1;
+            Opt::Value(args[*i])
+        }
+        _ => Opt::No,
+    }
 }
 
 /// The maps the loaded upatches pin: upatch `upatch`'s, or every
@@ -245,7 +269,8 @@ fn run(args: &[*const c_char]) -> c_int {
         return 2;
     }
     let rest = &args[1..];
-    let n = rest.len() as c_int;
+    // SAFETY: the caller's C strings.
+    let cargs: Vec<&CStr> = rest.iter().map(|&a| unsafe { CStr::from_ptr(a) }).collect();
     // SAFETY: the subcommand's name, a C string.
     let words: Vec<&[u8]> = rest
         .iter()
@@ -256,17 +281,9 @@ fn run(args: &[*const c_char]) -> c_int {
         b"info" => info::run(&words),
         b"list" => list::run(&words),
         b"get" => get::run(&words),
-        // SAFETY: the rest of the caller's arguments.
-        b"load" => unsafe { cmd_upatch_load(n, rest.as_ptr()) },
-        // SAFETY: as above.
-        b"unload" => unsafe { cmd_upatch_unload(n, rest.as_ptr()) },
-        // SAFETY: the caller's C strings.
-        b"map" => map::run(
-            &rest
-                .iter()
-                .map(|&a| unsafe { CStr::from_ptr(a) })
-                .collect::<Vec<_>>(),
-        ),
+        b"load" => ops::run_load(&cargs),
+        b"unload" => ops::run_unload(&cargs),
+        b"map" => map::run(&cargs),
         _ => 2,
     }
 }

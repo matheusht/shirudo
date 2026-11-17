@@ -29,7 +29,6 @@ use crate::sys::openssl::{
     d2i_X509_bio, i2d_PUBKEY,
 };
 use crate::sys::paths::{key_paths, keys_dir_resolve, path_exists};
-use crate::sys::upatch::upatch_purge;
 use crate::text::cstr;
 use crate::util::chain::{chain_extend, chain_key_event};
 use crate::util::crypto_openssl::{
@@ -1245,14 +1244,7 @@ fn purge_signed_by(der: &[u8]) -> c_int {
         }
         let name = cstr(&name);
         let name_c = message(&[name]);
-        // SAFETY: a C string, the certificate and a C string.
-        let prc = unsafe {
-            upatch_purge(
-                name_c.as_ptr(),
-                (&raw const cert).cast(),
-                c"key_revoke".as_ptr(),
-            )
-        };
+        let prc = crate::builtin::upatch::purge(&name_c, (&raw const cert).cast(), c"key_revoke");
         if prc == -ESTALE {
             info(&[
                 b"keys revoke: ",

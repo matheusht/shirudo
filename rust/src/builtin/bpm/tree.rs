@@ -12,7 +12,7 @@ use super::{
     finish, lock, message, path, print, remove, status, warn,
 };
 use crate::errno::{EINVAL, EIO, EKEYREJECTED, ENOENT, ERANGE};
-use crate::sys::upatch::{UPATCH_INSTALL_TARGET_MISSING, upatch_install, upatch_remove};
+use crate::sys::upatch::UPATCH_INSTALL_TARGET_MISSING;
 use crate::text::{cstr, strscpy};
 use crate::util::bpm_oci::{MAX_DIGEST, package_name_ok};
 use crate::util::bpm_tree::{
@@ -292,10 +292,8 @@ fn apply(op: &TreeOperation, state: &mut TreeState, counts: &mut Counts) -> Resu
     };
     let add = cstr(&op.op) == b"add";
     let mut ret = match cstr(&op.op) {
-        // SAFETY: a C string.
-        b"add" => unsafe { upatch_install(artifact.as_ptr()) },
-        // SAFETY: a C string.
-        b"delete" => unsafe { upatch_remove(artifact.as_ptr()) },
+        b"add" => crate::builtin::upatch::install(&artifact),
+        b"delete" => crate::builtin::upatch::remove(&artifact),
         _ => return Err(-EINVAL),
     };
     let skipped_module = add && ret == UPATCH_INSTALL_TARGET_MISSING;
