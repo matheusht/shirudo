@@ -139,16 +139,20 @@ and tooling call:
 
    shirudo-build image sign-root <root-hash-file> -o <signature>
                  [--keys-dir <dir>] [--key <signing-key>] [--cert <certificate>]
-   shirudo-build upatch rewrite-rodata <original> <modified> -o <output>
-                 --data-range <offset>:<length> [--data-range ...]
+   shirudo-build upatch set <input> <symbol>=@<file>... (-o <output> | --dry-run)
                  [--keys-dir <dir>] [--key <signing-key>] [--cert <certificate>]
    shirudo-build skeleton <object.bpf.o> [name <name>]
                  [--key <signing-key> --cert <certificate>] [-o <output.lskel.h>]
 
 ``image sign-root`` signs the 64 lowercase hexadecimal characters of a
-dm-verity root hash. ``shirudo-gen-verity`` calls it. ``upatch
-rewrite-rodata`` re-signs an artifact whose ``.rodata`` changed inside the
-given ranges. ``skeleton`` writes the C light skeleton of a compiled BPF
+dm-verity root hash. ``shirudo-gen-verity`` calls it. ``upatch set``
+writes the bytes of each file into the ``.rodata`` variable it names in a
+signed upatch, found through the upatch's BTF, as ``bpm build`` fills the
+variables a Beefile generates; a value must be exactly the variable's
+size. The input must verify against the certificate, and the result is
+signed with the key into the output, which may not be the input. It
+prints each variable's size and offset in the loader data;
+``--dry-run`` makes the same checks without keys and writes nothing. ``skeleton`` writes the C light skeleton of a compiled BPF
 object, byte for byte the header ``bpftool gen skeleton -L`` writes, to
 standard output or ``-o``, named after the object or ``name``; with
 ``--key`` and ``--cert``, an ML-DSA-87 pair, it signs the loader as
@@ -212,6 +216,11 @@ Options
      - off
      - Sign the directive of a Java upatch. Only with ``--unload`` and
        ``--payload-sha256``.
+   * - ``--dry-run``
+     - none
+     - off
+     - With ``upatch set``, check the variables and their values and
+       write nothing.
    * - ``-h``, ``--help``
      - none
      -

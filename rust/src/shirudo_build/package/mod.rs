@@ -8,9 +8,9 @@
 //! signed with the data, past the end the loader addresses; CMS signs
 //! the loader and the data; and the container puts a header in front.
 //! An unload directive is the embedded unload template so packaged,
-//! naming the upatch and the payload it unloads. Re-signing takes a
-//! package whose data differs from a signed one only in named .rodata
-//! symbols, and signs it anew.
+//! naming the upatch and the payload it unloads. Setting .rodata writes
+//! values into named symbols of a signed package, each found and its
+//! size checked through the package's BTF, and signs it anew.
 
 mod decoders;
 mod meta;
@@ -22,9 +22,8 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
 use super::{KeyFiles, error, info, strerr};
 use crate::bpf::object::{self, GenOpts, Object};
-use crate::errno::{E2BIG, EBADMSG, EINVAL, EIO, ENAMETOOLONG, ENOENT, EOVERFLOW, EPERM};
+use crate::errno::{E2BIG, EBADMSG, EINVAL, EIO, ENAMETOOLONG, ENOENT, EOVERFLOW};
 use crate::sys::loader::unload_blob;
-use crate::text::{digits, parse_u64};
 use crate::util::bpm_package::verify_cms;
 use crate::util::crypto_openssl::sha256_calc;
 use crate::util::upatch::{
@@ -45,9 +44,8 @@ use crate::util::upatch_rodata::{
 const MAX_SIG_SIZE: usize = 16384;
 /// The verifier log the target gives a load.
 const LOG_BUF_SZ: u32 = 1024 * 1024;
-/// The symbols `upatch rewrite-rodata` may change.
-const RESIGN_SYMBOLS: [&CStr; 2] = [c"obs_watch_v4", c"obs_watch_v6"];
-const RANGES_MAX: usize = 16;
+/// The symbols one `upatch set` sets at most.
+const SET_MAX: usize = 16;
 const BPF_MAP_TYPE_SK_STORAGE: u32 = 24;
 const BPF_MAP_TYPE_TASK_STORAGE: u32 = 29;
 const BPF_F_NO_PREALLOC: u32 = 1;
@@ -215,10 +213,6 @@ impl Opened {
         )
     }
 
-    fn map(&self) -> &[u8] {
-        part(self.0.map.cast(), self.0.map_size as u32)
-    }
-
     fn is_unload(&self) -> bool {
         upatch::is_unload(&self.0)
     }
@@ -257,137 +251,45 @@ fn verify_payload(u: &Opened, cert: &CStr) -> c_int {
     0
 }
 
-/// An output that is one of the inputs, under whatever name, is refused
-/// before it is truncated, so that a write that fails cannot take the
-/// input with it.
-fn output_is_input(out: &std::fs::File, original: &CStr, modified: &CStr) -> bool {
+/// An output that is the input, under whatever name, is refused before
+/// it is truncated, so that a write that fails cannot take the input
+/// with it.
+fn output_is_input(out: &std::fs::File, input: &CStr) -> bool {
     let Ok(o) = out.metadata() else {
         return true;
     };
-    [original, modified].iter().any(|p| {
-        std::fs::metadata(super::path(p.to_bytes()))
-            .is_ok_and(|i| i.dev() == o.dev() && i.ino() == o.ino())
-    })
+    std::fs::metadata(super::path(input.to_bytes()))
+        .is_ok_and(|i| i.dev() == o.dev() && i.ino() == o.ino())
 }
 
-/// A data range a re-signed package may change.
-#[derive(Clone, Copy)]
-struct DataRange {
-    offset: u32,
-    length: u32,
-}
-
-/// Signs `modified` anew into `output`: it must be `original` but in the
-/// data `ranges` cover, each the whole of a distinct one of `symbols`,
-/// and `original` must verify against the certificate.
-fn resign(
-    original: &CStr,
-    modified: &CStr,
+/// Signs `data` with the loader of `src` into `output`, a package with
+/// the header of `src` but for where its parts lie and its digest.
+fn write_signed(
+    src: &Opened,
+    input: &CStr,
+    data: &[u8],
     output: &CStr,
-    ranges: &[DataRange],
-    symbols: &[&CStr],
     keys: &KeyFiles,
-) -> c_int {
-    if ranges.is_empty()
-        || ranges.len() > RANGES_MAX
-        || symbols.len() != ranges.len()
-        || original == output
-        || modified == output
-    {
-        return -EINVAL;
-    }
-    let src = match Opened::open(original) {
-        Ok(u) => u,
-        Err(err) => return err,
-    };
-    let m = match Opened::open(modified) {
-        Ok(u) => u,
-        Err(err) => return err,
-    };
-    let (sh, mh) = (&src.0.hdr, &m.0.hdr);
-    if src.is_unload()
-        || m.is_unload()
-        || src.map()[..HEADER_SIZE] != m.map()[..HEADER_SIZE]
-        || sh.loader_insns_len != mh.loader_insns_len
-        || sh.signature_len != mh.signature_len
-        || sh.data_len != mh.data_len
-        || sh.metadata_len != mh.metadata_len
-        || src.loader() != m.loader()
-        || src.signature() != m.signature()
-        || src.metadata() != m.metadata()
-    {
-        return -EINVAL;
-    }
-    let data_len = sh.data_len;
-    let mut prev_end = 0u64;
-    for (i, r) in ranges.iter().enumerate() {
-        if r.length == 0
-            || r.offset > data_len
-            || r.length > data_len - r.offset
-            || (i > 0 && u64::from(r.offset) < prev_end)
-        {
-            return -EINVAL;
-        }
-        prev_end = u64::from(r.offset) + u64::from(r.length);
-    }
-    let covered = |at: usize| {
-        ranges
-            .iter()
-            .any(|r| at >= r.offset as usize && at - (r.offset as usize) < r.length as usize)
-    };
-    if src
-        .data()
-        .iter()
-        .zip(m.data())
-        .enumerate()
-        .any(|(i, (a, b))| a != b && !covered(i))
-    {
-        return -EPERM;
-    }
-    if !sh.name.contains(&0) {
-        return -EINVAL;
-    }
-    let ret = verify_payload(&src, &keys.cert);
-    if ret != 0 {
-        return ret;
-    }
-    let mut expected = Vec::with_capacity(symbols.len());
-    for s in symbols {
-        match src.symbol_range(s) {
-            Ok(r) => expected.push(r),
-            Err(err) => return err,
-        }
-    }
-    let mut found = vec![false; symbols.len()];
-    for r in ranges {
-        let hit = (0..symbols.len())
-            .find(|&j| r.offset == expected[j].offset && r.length == expected[j].size && !found[j]);
-        match hit {
-            Some(j) => found[j] = true,
-            None => return -EPERM,
-        }
-    }
-    let (sig, digest) = match sign(m.loader(), m.data(), (&keys.pkey, &keys.cert)) {
-        Ok(s) => s,
-        Err(err) => return err,
-    };
-    let (insns_len, data, meta) = (m.loader().len(), m.data(), m.metadata());
+) -> Result<(), SetFailed> {
+    let (sig, digest) =
+        sign(src.loader(), data, (&keys.pkey, &keys.cert)).map_err(SetFailed::Output)?;
+    let (sh, insns_len, meta) = (&src.0.hdr, src.loader().len(), src.metadata());
     let loader_off = HEADER_SIZE;
     let sig_off = loader_off + insns_len;
     let data_off = sig_off + sig.len();
     let meta_off = data_off + data.len();
     if meta_off > u32::MAX as usize {
-        return -EOVERFLOW;
+        return Err(SetFailed::Output(-EOVERFLOW));
     }
     if meta_off + meta.len() > FILE_MAX {
-        return -E2BIG;
+        return Err(SetFailed::Output(-E2BIG));
     }
     let mut name = [0u8; NAME_MAX + 1];
-    upatch::header_name(&m.0, &mut name);
+    upatch::header_name(&src.0, &mut name);
     let hdr = Header {
         name: crate::text::cstr(&name),
-        ty: mh.ty,
-        flags: mh.flags,
+        ty: sh.ty,
+        flags: sh.flags,
         payload_sha256: &digest,
         loader: (loader_off as u32, insns_len as u32),
         signature: (sig_off as u32, sig.len() as u32),
@@ -399,48 +301,113 @@ fn resign(
             if data.is_empty() { 0 } else { data_off as u32 },
             data.len() as u32,
         ),
-        log_buf_sz: mh.log_buf_sz,
-        rodata_data_off: mh.rodata_data_off,
-        nr_maps: mh.nr_maps,
-        nr_progs: mh.nr_progs,
+        log_buf_sz: sh.log_buf_sz,
+        rodata_data_off: sh.rodata_data_off,
+        nr_maps: sh.nr_maps,
+        nr_progs: sh.nr_progs,
     };
     let out_path = super::path(output.to_bytes());
-    // Truncated only once it is known not to be one of the inputs.
+    // Truncated only once it is known not to be the input.
     let file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(false)
         .mode(0o644)
         .open(out_path);
-    let mut file = match file {
-        Ok(f) => f,
-        Err(e) => return errno_of(&e),
-    };
-    if output_is_input(&file, original, modified) {
-        return -EINVAL;
+    let mut file = file.map_err(|e| SetFailed::Output(errno_of(&e)))?;
+    if output_is_input(&file, input) {
+        return Err(SetFailed::OutputIsInput);
     }
-    if let Err(e) = file.set_len(0) {
-        return errno_of(&e);
-    }
-    let written = [&hdr.bytes()[..], m.loader(), &sig, data, meta]
-        .iter()
-        .try_for_each(|b| file.write_all(b))
+    let written = file
+        .set_len(0)
+        .and_then(|()| {
+            [&hdr.bytes()[..], src.loader(), &sig, data, meta]
+                .iter()
+                .try_for_each(|b| file.write_all(b))
+        })
         .and_then(|()| file.sync_all());
     drop(file);
     if let Err(e) = written {
         let _ = std::fs::remove_file(out_path);
-        return errno_of(&e);
+        return Err(SetFailed::Output(errno_of(&e)));
     }
-    0
+    Ok(())
 }
 
-/// A temporary file, removed when it goes.
-struct Temp(CString);
+/// Why setting .rodata failed.
+pub(super) enum SetFailed {
+    /// The input does not open, or is an unload directive.
+    Package(c_int),
+    /// The input does not verify against the certificate.
+    Unverified(c_int),
+    /// Symbol `i` of the values is not one variable of the .rodata.
+    Symbol(usize, c_int),
+    /// Symbol `i` is given a second time.
+    Twice(usize),
+    /// The value of symbol `i` is not the symbol's size, which it gives.
+    Size(usize, u32),
+    /// The output is the input, under whatever name.
+    OutputIsInput,
+    /// Signing or writing the output.
+    Output(c_int),
+}
 
-impl Drop for Temp {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(super::path(self.0.to_bytes()));
+impl SetFailed {
+    pub(super) fn errno(&self) -> c_int {
+        match *self {
+            SetFailed::Package(err)
+            | SetFailed::Unverified(err)
+            | SetFailed::Symbol(_, err)
+            | SetFailed::Output(err) => err,
+            SetFailed::Twice(_) | SetFailed::Size(..) | SetFailed::OutputIsInput => -EINVAL,
+        }
     }
+}
+
+/// Sets each symbol of `values` in the .rodata of the package at
+/// `input` to its value, the symbol found and its size checked through
+/// the package's BTF: where each lies in the loader data. With
+/// `output`, the package must verify against the certificate, and the
+/// result is signed there; without, nothing is written.
+pub(super) fn set_rodata(
+    input: &CStr,
+    output: Option<(&CStr, &KeyFiles)>,
+    values: &[(&CStr, &[u8])],
+) -> Result<Vec<RodataRange>, SetFailed> {
+    if values.is_empty() || values.len() > SET_MAX {
+        return Err(SetFailed::Package(-EINVAL));
+    }
+    let twice = (1..values.len()).find(|&i| values[..i].iter().any(|(s, _)| *s == values[i].0));
+    if let Some(i) = twice {
+        return Err(SetFailed::Twice(i));
+    }
+    let src = Opened::open(input).map_err(SetFailed::Package)?;
+    if src.is_unload() {
+        return Err(SetFailed::Package(-EINVAL));
+    }
+    if let Some((_, keys)) = output {
+        match verify_payload(&src, &keys.cert) {
+            0 => {}
+            err => return Err(SetFailed::Unverified(err)),
+        }
+    }
+    let mut data = src.data().to_vec();
+    let mut placed = Vec::with_capacity(values.len());
+    for (i, &(symbol, value)) in values.iter().enumerate() {
+        let r = src
+            .symbol_range(symbol)
+            .map_err(|e| SetFailed::Symbol(i, e))?;
+        if value.is_empty() || value.len() != r.size as usize {
+            return Err(SetFailed::Size(i, r.size));
+        }
+        let at = r.offset as usize;
+        data[at..at + value.len()].copy_from_slice(value);
+        placed.push(r);
+    }
+    if let Some((output, keys)) = output {
+        write_signed(&src, input, &data, output, keys)?;
+    }
+    Ok(placed)
 }
 
 /// Sets `symbol` in the .rodata of the package at `input` to `value` and
@@ -452,61 +419,10 @@ pub(super) fn patch_rodata(
     value: &[u8],
     keys: &KeyFiles,
 ) -> c_int {
-    if value.is_empty() || input == output {
-        return -EINVAL;
+    match set_rodata(input, Some((output, keys)), &[(symbol, value)]) {
+        Ok(_) => 0,
+        Err(f) => f.errno(),
     }
-    let src = match Opened::open(input) {
-        Ok(u) => u,
-        Err(err) => return err,
-    };
-    if src.is_unload() {
-        return -EINVAL;
-    }
-    let ret = verify_payload(&src, &keys.cert);
-    if ret != 0 {
-        return ret;
-    }
-    let range = match src.symbol_range(symbol) {
-        Ok(r) => r,
-        Err(err) => return err,
-    };
-    let data_len = src.0.hdr.data_len as usize;
-    if value.len() != range.size as usize
-        || range.offset as usize > data_len
-        || value.len() > data_len - range.offset as usize
-    {
-        return -EINVAL;
-    }
-    let mut candidate = src.map().to_vec();
-    let at = src.0.hdr.data_off as usize + range.offset as usize;
-    candidate[at..at + value.len()].copy_from_slice(value);
-    let mut tmpl = *b"/tmp/shirudo-rodata-XXXXXX\0";
-    // SAFETY: the template, which mkstemp() fills in.
-    let fd = unsafe { crate::sys::libc::mkstemp(tmpl.as_mut_ptr().cast()) };
-    if fd < 0 {
-        return super::last_err();
-    }
-    let temp = Temp(CString::new(crate::text::cstr(&tmpl).to_vec()).unwrap_or_default());
-    // SAFETY: the descriptor mkstemp() opened, the file's from here.
-    let mut file = unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(fd) };
-    let mut ret = match file.write_all(&candidate).and_then(|()| file.sync_all()) {
-        Ok(()) => 0,
-        Err(e) => errno_of(&e),
-    };
-    // SAFETY: the descriptor the file gives up.
-    if unsafe { crate::sys::libc::close(std::os::fd::IntoRawFd::into_raw_fd(file)) } != 0
-        && ret == 0
-    {
-        ret = super::last_err();
-    }
-    if ret != 0 {
-        return ret;
-    }
-    let allowed = [DataRange {
-        offset: range.offset,
-        length: range.size,
-    }];
-    resign(input, &temp.0, output, &allowed, &[symbol], keys)
 }
 
 pub(super) fn verify_package(input: &CStr, cert: &CStr) -> c_int {
@@ -517,38 +433,40 @@ pub(super) fn verify_package(input: &CStr, cert: &CStr) -> c_int {
     }
 }
 
-/// `offset:length`, both decimal and within 32 bits, the length not 0.
-fn parse_range(s: &[u8]) -> Option<DataRange> {
-    let off_len = digits(s);
-    if off_len == 0 || off_len >= s.len() || s[off_len] != b':' {
-        return None;
-    }
-    let length = &s[off_len + 1..];
-    let len_len = digits(length);
-    let max = u64::from(u32::MAX);
-    let (Ok(offset), Ok(len)) = (
-        parse_u64(&s[..off_len], max),
-        parse_u64(&length[..len_len], max),
-    ) else {
-        return None;
+const SET_USAGE: &[u8] = b"usage: shirudo-build upatch set <input.upatch> <symbol>=@<file>... \
+(-o <output.upatch> | --dry-run) [--keys-dir <dir>] [--key <signing_key.pem>] [--cert <cert.der>]\n";
+
+/// `<symbol>=@<file>`: the symbol, and the bytes the file holds.
+fn parse_value(arg: &CStr) -> Result<(CString, Vec<u8>), Vec<u8>> {
+    let a = arg.to_bytes();
+    let Some(eq) = a.iter().position(|&c| c == b'=') else {
+        return Err([b"expected <symbol>=@<file>, not ", a].concat());
     };
-    if len_len != length.len() || len == 0 {
-        return None;
-    }
-    Some(DataRange {
-        offset: offset as u32,
-        length: len as u32,
-    })
+    let (symbol, file) = (&a[..eq], &a[eq + 1..]);
+    let Some(file) = file
+        .strip_prefix(b"@")
+        .filter(|f| !f.is_empty() && !symbol.is_empty())
+    else {
+        return Err([b"expected <symbol>=@<file>, not ", a].concat());
+    };
+    let value = match std::fs::read(super::path(file)) {
+        Ok(v) if v.len() <= FILE_MAX => v,
+        Ok(_) => return Err([file, b": ", strerr(EOVERFLOW)].concat()),
+        Err(e) => return Err([file, b": ", strerr(-errno_of(&e))].concat()),
+    };
+    Ok((CString::new(symbol).unwrap_or_default(), value))
 }
 
-/// `shirudo-build upatch rewrite-rodata`, from `upatch` on.
+/// `shirudo-build upatch set`, from `upatch` on: each symbol's value
+/// written into a signed package's .rodata, signed anew into the
+/// output, or with --dry-run checked alone.
 pub(super) fn upatch_cli(args: &[&CStr]) -> c_int {
     let mut keys = KeyFiles::default();
-    let (mut original, mut modified, mut output, mut keys_dir) = (None, None, None, None);
-    let mut ranges: Vec<DataRange> = Vec::new();
+    let (mut input, mut output, mut keys_dir, mut dry_run) = (None, None, None, false);
+    let mut sets: Vec<(CString, Vec<u8>)> = Vec::new();
 
-    if args.get(1).map(|a| a.to_bytes()) != Some(b"rewrite-rodata") {
-        super::print(false, b"usage: shirudo-build upatch rewrite-rodata <original.upatch> <modified.upatch> -o <output.upatch> --data-range <offset:length>... [--keys-dir <dir>] [--key <signing_key.pem>] [--cert <cert.der>]\n");
+    if args.get(1).map(|a| a.to_bytes()) != Some(b"set") {
+        super::print(false, SET_USAGE);
         return 2;
     }
     let mut i = 2;
@@ -556,31 +474,35 @@ pub(super) fn upatch_cli(args: &[&CStr]) -> c_int {
         let a = args[i].to_bytes();
         let next = args.get(i + 1).copied();
         match (a, next) {
-            (b"-o" | b"--output", Some(v)) => output = Some(v),
-            (b"--data-range", Some(v)) => {
-                if ranges.len() == RANGES_MAX {
-                    return 2;
-                }
-                match parse_range(v.to_bytes()) {
-                    Some(r) => ranges.push(r),
-                    None => return 2,
-                }
+            (b"--dry-run", _) => {
+                dry_run = true;
+                i += 1;
+                continue;
             }
+            (b"-o" | b"--output", Some(v)) => output = Some(v),
             (b"--keys-dir", Some(v)) => keys_dir = Some(v),
             (b"--key", Some(v)) => keys.set_pkey(v),
             (b"--cert", Some(v)) => keys.set_cert(v),
+            _ if a.first() == Some(&b'-') => {
+                error(&[b"upatch set: unknown option ", a].concat());
+                return 2;
+            }
+            _ if input.is_none() => {
+                input = Some(args[i]);
+                i += 1;
+                continue;
+            }
             _ => {
-                if a.first() == Some(&b'-') {
-                    error(&[b"upatch rewrite-rodata: unknown option ", a].concat());
+                if sets.len() == SET_MAX {
+                    error(format!("upatch set: more than {SET_MAX} symbols").as_bytes());
                     return 2;
                 }
-                if original.is_none() {
-                    original = Some(args[i]);
-                } else if modified.is_none() {
-                    modified = Some(args[i]);
-                } else {
-                    error(&[b"upatch rewrite-rodata: unexpected argument ", a].concat());
-                    return 2;
+                match parse_value(args[i]) {
+                    Ok(v) => sets.push(v),
+                    Err(msg) => {
+                        error(&[b"upatch set: ", &msg[..]].concat());
+                        return 2;
+                    }
                 }
                 i += 1;
                 continue;
@@ -588,20 +510,71 @@ pub(super) fn upatch_cli(args: &[&CStr]) -> c_int {
         }
         i += 2;
     }
-    let (Some(original), Some(modified), Some(output), false) =
-        (original, modified, output, ranges.is_empty())
-    else {
-        error(b"upatch rewrite-rodata requires two inputs, -o, and data ranges");
+    let (Some(input), false) = (input, sets.is_empty()) else {
+        super::print(false, SET_USAGE);
         return 2;
     };
-    if keys.resolve(keys_dir).is_err() {
+    if output.is_none() && !dry_run {
+        error(b"upatch set: -o <output.upatch> or --dry-run");
         return 2;
     }
-    let ret = resign(original, modified, output, &ranges, &RESIGN_SYMBOLS, &keys);
-    if ret != 0 {
-        error(&[b"upatch rewrite-rodata: ", strerr(-ret)].concat());
+    if !dry_run && keys.resolve(keys_dir).is_err() {
+        return 2;
     }
-    if ret != 0 { 1 } else { 0 }
+    let values: Vec<(&CStr, &[u8])> = sets.iter().map(|(s, v)| (s.as_c_str(), &v[..])).collect();
+    let output = output.filter(|_| !dry_run);
+    let placed = match set_rodata(input, output.map(|o| (o, &keys)), &values) {
+        Ok(p) => p,
+        Err(f) => {
+            let (input, symbol) = (input.to_bytes(), |i: usize| values[i].0.to_bytes());
+            let msg = match f {
+                SetFailed::Package(err) => [input, b": ", strerr(-err)].concat(),
+                SetFailed::Unverified(err) => {
+                    let cert = keys.cert.to_bytes();
+                    [
+                        input,
+                        b": does not verify against ",
+                        cert,
+                        b": ",
+                        strerr(-err),
+                    ]
+                    .concat()
+                }
+                SetFailed::Symbol(i, err) if err == -ENOENT => {
+                    [b"no .rodata variable ", symbol(i), b" in ", input].concat()
+                }
+                SetFailed::Symbol(i, err) => [symbol(i), b": ", strerr(-err)].concat(),
+                SetFailed::Twice(i) => [symbol(i), b" given twice"].concat(),
+                SetFailed::Size(i, size) => format!(
+                    "{}: the value is {} bytes, the variable {size}",
+                    String::from_utf8_lossy(symbol(i)),
+                    values[i].1.len()
+                )
+                .into_bytes(),
+                SetFailed::OutputIsInput => b"the output is the input".to_vec(),
+                SetFailed::Output(err) => {
+                    let out = output.map_or(&b""[..], CStr::to_bytes);
+                    [out, b": ", strerr(-err)].concat()
+                }
+            };
+            error(&[b"upatch set: ", &msg[..]].concat());
+            return 1;
+        }
+    };
+    let mut out = String::new();
+    for ((symbol, _), r) in values.iter().zip(&placed) {
+        out += &format!(
+            "{}: {} bytes at data offset {}\n",
+            String::from_utf8_lossy(symbol.to_bytes()),
+            r.size,
+            r.offset
+        );
+    }
+    if dry_run {
+        out += "dry run: nothing written\n";
+    }
+    super::print(true, out.as_bytes());
+    0
 }
 
 /// Every target refuses a name upatch_name_valid() does not take.

@@ -1412,8 +1412,9 @@ Commands and procedures
   option.
 - ``status --show-full``, and ``--include-eventlog`` on a target:
   ``t4007`` reads a log on the host.
-- ``upatch rewrite-rodata`` in ``shirudo-build``, which
-  ``kernel-obs`` uses to rewrite its watch lists.
+- ``upatch set`` in ``shirudo-build``, which
+  ``kernel-obs`` uses to rewrite its watch lists. ``bpm build``
+  tests the shared .rodata writer.
 - The ``kernel-cve`` packages, and :src:`tools/put-shields`, which
   builds and pushes them. A copy of an earlier Beefile of them is a
   seed of the ``beefile`` fuzz target.

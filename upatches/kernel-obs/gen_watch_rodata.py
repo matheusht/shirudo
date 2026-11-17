@@ -16,11 +16,11 @@ CHILD_OFFSET = 0
 TERMINAL_OFFSET = 512
 
 
-def node_capacity(symbol):
+def node_capacity(symbol, header=Path("watch_generated.h")):
 	version = {"obs_watch_v4": "V4", "obs_watch_v6": "V6"}.get(symbol)
 	if not version:
 		raise ValueError(f"unsupported watch symbol: {symbol}")
-	text = Path("watch_generated.h").read_text()
+	text = header.read_text()
 	match = re.search(rf"^#define OBS_WATCH_{version}_NODES (\d+)u$",
 			  text, re.MULTILINE)
 	if not match:

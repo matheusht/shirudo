@@ -126,13 +126,23 @@ rebuild the package. There is nothing to configure on the target.
 
 To update only the watch addresses in an existing `.upatch`, run
 `python3 rewrite_watch_upatch.py watch.list kernel-obs.upatch`. It takes
-the same address and CIDR format as `gen_watch.py`, preserves the compiled
-loader and BTF, and re-signs the changed `.rodata` with the operator key
-from `/var/lib/shirudo/keys` (or `--keys-dir`). Use `--dry-run` to check
-that the new tries fit the arrays in the existing BTF layout, or `-o` to
-write a separate artifact. The tool refuses a list that needs more trie
-nodes than the existing arrays hold; changing those capacities still
-requires rebuilding the BPF object.
+the same address and CIDR format as `gen_watch.py`, builds the tries as
+`bpm build` does, at the capacities `watch_generated.h` gives, and prints
+how many trie nodes each needs of those. `shirudo-build upatch set` then
+writes them into the package's `.rodata` and re-signs it with the
+operator key from `/var/lib/shirudo/keys` (or `--keys-dir`), the
+compiled loader and BTF unchanged. Use `--dry-run` to check that the new
+tries fit without writing, or `-o` to write a separate artifact. The
+tool refuses a list that needs more trie nodes than the arrays hold, and
+a package whose arrays are not the size `watch_generated.h` gives;
+changing those capacities requires rebuilding the BPF object. By hand,
+the same update is:
+
+```sh
+python3 gen_watch_rodata.py --input watch.list --symbol obs_watch_v4 --output v4.bin
+python3 gen_watch_rodata.py --input watch.list --symbol obs_watch_v6 --output v6.bin
+shirudo-build upatch set kernel-obs.upatch obs_watch_v4=@v4.bin obs_watch_v6=@v6.bin -o new.upatch
+```
 
 The Beefile also declares `watch.list` as the input for both watch trie
 variables. `bpm build` uses `gen_watch_rodata.py` to create their raw BTF
