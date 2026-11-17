@@ -171,6 +171,7 @@ _Static_assert(NV_INDEX == 0x01818E00u,
 /* Site config. */
 #define CONF_PATH		"/etc/shirudo/shirudo.conf"
 
+/* In rust/src/util/paths.rs, as is path_exists(). */
 int format_key_path(char *out, size_t out_sz,
 		    const char *keys_dir, const char *file);
 int key_paths(const char *keys_dir,

@@ -28,7 +28,6 @@ use crate::sys::openssl::{
     X509_get_issuer_name, X509_get_subject_name, X509_get0_notBefore, X509_get0_pubkey, X509Name,
     d2i_X509_bio, i2d_PUBKEY,
 };
-use crate::sys::paths::{key_paths, keys_dir_resolve, path_exists};
 use crate::text::cstr;
 use crate::util::chain::{chain_extend, chain_key_event};
 use crate::util::crypto_openssl::{
@@ -54,6 +53,7 @@ use crate::util::keys::{
     KEYS_MAX, TrustedSet, keys_cert_der, keys_digest_der, keys_install, keys_is_revoked, keys_load,
     keys_read_der, keys_verify_vouch, members,
 };
+use crate::util::paths::{key_paths, keys_dir_resolve, path_exists};
 use crate::util::upatch::{
     self, Upatch, upatch_close, upatch_open, upatch_select, upatch_signature,
 };

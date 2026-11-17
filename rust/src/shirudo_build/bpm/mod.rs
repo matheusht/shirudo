@@ -19,9 +19,9 @@ use std::os::unix::ffi::OsStrExt;
 
 use crate::errno::{EINVAL, EIO};
 use crate::sys::log::{pr_err, pr_info};
-use crate::sys::paths::keys_dir_resolve;
 use crate::text::cstr;
 use crate::text::name_has_suffix;
+use crate::util::paths::keys_dir_resolve;
 
 pub(crate) use build::upatch_name;
 

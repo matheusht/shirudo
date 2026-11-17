@@ -26,12 +26,12 @@ use crate::sys::openssl::{
     X509_new, X509_set_issuer_name, X509_set_pubkey, X509_set_subject_name, X509_set_version,
     X509_sign, X509V3_EXT_conf_nid, X509V3_set_ctx, X509v3Ctx, i2d_X509_bio,
 };
-use crate::sys::paths::{key_paths, keys_dir_resolve, path_exists};
 use crate::sys::string::strsprintf;
 use crate::util::crypto_openssl::openssl_complain;
 use crate::util::help::{Help, HelpItem, HelpSection, is_help, print_help};
 use crate::util::identity;
 use crate::util::io::stat_fd;
+use crate::util::paths::{key_paths, keys_dir_resolve, path_exists};
 use crate::util::seal::seal_mkdir_p;
 
 const CERT_CN: &CStr = c"shirudo";

@@ -22,7 +22,6 @@ use super::{error, hex, print};
 use crate::errno::{E2BIG, EACCES, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT, EOVERFLOW};
 use crate::shirudo_build::{check_keys, key_path};
 use crate::sys::curl::{CURL_GLOBAL_DEFAULT, curl_global_cleanup, curl_global_init};
-use crate::sys::paths::keys_dir_resolve;
 use crate::util::bpm_oci::{Client, MANIFEST_MEDIA, package_name_ok, trim};
 use crate::util::bpm_package::{fetch_publication, read_member_in};
 use crate::util::bpm_tree::{
@@ -31,6 +30,7 @@ use crate::util::bpm_tree::{
     tree_selector_copy, tree_selector_free,
 };
 use crate::util::json::JsonEmit;
+use crate::util::paths::keys_dir_resolve;
 use crate::util::upatch;
 
 const TREE_MEDIA: &CStr = c"application/vnd.shirudo.upatch.tree.v1+json";

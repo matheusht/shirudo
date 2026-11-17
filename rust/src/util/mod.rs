@@ -48,6 +48,7 @@ pub(crate) mod map_render;
 pub(crate) mod measured;
 pub(crate) mod nv_writer;
 pub(crate) mod otel;
+pub(crate) mod paths;
 pub(crate) mod preflight;
 pub(crate) mod report;
 pub(crate) mod seal;

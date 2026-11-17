@@ -16,7 +16,6 @@ pub mod loader;
 pub mod log;
 pub mod luajit;
 pub mod openssl;
-pub mod paths;
 pub mod ssl;
 pub mod string;
 pub mod tss2;
