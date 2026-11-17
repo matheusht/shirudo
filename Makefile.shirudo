@@ -238,7 +238,7 @@ UTIL_SRCS := \
     util/io_trusted.c \
     util/xdp.c \
     util/identity.c \
-    util/tamper.c \
+     \
     util/integrity.c \
     util/paths.c \
      \

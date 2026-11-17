@@ -47,6 +47,7 @@ pub(crate) mod seal;
 mod serializer;
 pub(crate) mod similar;
 pub(crate) mod sysinfo;
+pub(crate) mod tamper;
 pub(crate) mod timefmt;
 mod tls_openssl;
 pub(crate) mod tpm;

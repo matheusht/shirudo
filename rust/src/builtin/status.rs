@@ -25,7 +25,6 @@ use crate::sys::libc::{
 use crate::sys::log::{pr_err, pr_warn};
 use crate::sys::malloc::xfree;
 use crate::sys::string::name_has_suffix;
-use crate::sys::tamper::{TamperCounts, tamper_meaning, tamper_name, tamper_read};
 use crate::sys::upatch::{MapSummary, map_summary_free, upatch_maps_list_one};
 use crate::sys::version::shirudo_version_id;
 use crate::text::cstr;
@@ -54,6 +53,7 @@ use crate::util::measured::{
 };
 use crate::util::otel::{OtelOpts, otel_send_log_json, status_otel_severity};
 use crate::util::sysinfo::{Sysinfo, sysinfo_emit_json, sysinfo_gather};
+use crate::util::tamper::{self, TamperCounts};
 use crate::util::tpm::tpm_tcti;
 use crate::util::upatch::name_from_pin;
 use crate::util::upatch_resolve;
@@ -1170,10 +1170,11 @@ impl Report {
         let mut unmeasured_names = [0u8; UNMEASURED_NAMES];
         let unmeasured = unmeasured(&mut unmeasured_names);
         let assets = Assets::gather();
-        // SAFETY: an all-zero count is an empty one.
-        let mut counts: TamperCounts = unsafe { mem::zeroed() };
-        // SAFETY: the counts to fill.
-        let tamper = match unsafe { tamper_read(&mut counts) } {
+        let mut counts = TamperCounts {
+            count: [0; tamper::TAMPER_MAX],
+            total: 0,
+        };
+        let tamper = match tamper::read(&mut counts) {
             0 => Ok(counts),
             err => Err(err),
         };
@@ -1411,7 +1412,7 @@ impl Report {
                 e.kv_int(b"total", t.total as i64);
                 e.obj_open_key(b"counters");
                 for (i, &n) in t.count.iter().enumerate() {
-                    e.kv_int(tamper_label(i, tamper_name), n as i64);
+                    e.kv_int(tamper::name(i), n as i64);
                 }
                 e.obj_close();
                 e.obj_close();
@@ -1614,11 +1615,11 @@ impl Report {
                     print(
                         &[
                             &b"  "[..],
-                            &pad(tamper_label(i, tamper_name), 20),
+                            &pad(tamper::name(i), 20),
                             b" ",
                             count.as_bytes(),
                             b"  ",
-                            tamper_label(i, tamper_meaning),
+                            tamper::meaning(i),
                             b"\n",
                         ]
                         .concat(),
@@ -1779,11 +1780,6 @@ fn no_conditions() -> [Condition; CONDITIONS_MAX] {
     // SAFETY: plain data, whose NULL strings nothing reads before
     // conditions() sets them.
     unsafe { mem::zeroed() }
-}
-
-fn tamper_label(i: usize, f: unsafe extern "C" fn(c_int) -> *const c_char) -> &'static [u8] {
-    // SAFETY: a tamper point below TAMPER_MAX, whose label is static.
-    unsafe { ffi::c_str(f(i as c_int)) }
 }
 
 fn roles(is_target: bool, is_operator: bool) -> &'static [u8] {

@@ -22,7 +22,6 @@ pub mod openssl;
 pub mod paths;
 pub mod ssl;
 pub mod string;
-pub mod tamper;
 pub mod tss2;
 pub mod upatch;
 pub mod upatch_maps;

@@ -73,7 +73,8 @@ counter_names() {
 	grep -oE '= \{ "[A-Za-z]+",' "$1" | sed -E 's/.*"([A-Za-z]+)".*/\1/' |
 		sort -u
 }
-counter_names util/tamper.c >"$work/tamper_counters"
+grep -oE 'name: "[A-Za-z]+"' rust/src/util/tamper.rs | sed -E 's/.*"([A-Za-z]+)".*/\1/' |
+	sort -u >"$work/tamper_counters"
 counter_names util/integrity.c >"$work/integrity_counters"
 sort -u "$work/tamper_counters" "$work/integrity_counters" >"$work/counters"
 for kind in tamper integrity; do
