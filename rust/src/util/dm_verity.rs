@@ -21,7 +21,7 @@ use crate::sys::libc::{
     SYS_KEYCTL, Statx, close, errno, getrandom, ioctl, mknod, mount, open, pread, statx, syscall,
     umount2,
 };
-use crate::sys::string::{parse_u64, strsprintf};
+use crate::sys::string::strsprintf;
 use crate::text::{cstr, strscpy};
 use crate::util::config_image::{BLOCK_SIZE, ConfigImage, ConfigImageOpen, SIG_MAX, check_files};
 use crate::util::hex::hex_encode;
@@ -502,11 +502,12 @@ fn device_path(device: &mut DmVerity, dev: u64) -> c_int {
 
 /// dm_number(): the decimal number `token` spells.
 fn dm_number(token: &[u8], out: &mut u64) -> c_int {
-    // SAFETY: the token's bytes, and room for the number.
-    if unsafe { parse_u64(token.as_ptr().cast(), token.len(), !0, out) } != 0 {
-        -EINVAL
-    } else {
-        0
+    match crate::text::parse_u64(token, u64::MAX) {
+        Ok(v) => {
+            *out = v;
+            0
+        }
+        Err(_) => -EINVAL,
     }
 }
 

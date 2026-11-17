@@ -10,7 +10,7 @@ use core::ffi::c_int;
 use core::ptr;
 
 use crate::errno::{E2BIG, EEXIST, EINVAL, ENAMETOOLONG};
-use crate::sys::string::parse_x64;
+use crate::text::parse_x64;
 use crate::util::bpm_tree::{
     MAX_KCONFIG, MAX_LABELS, MAX_VALUES, STRING_MAX, Text, TreeSelector, TreeSelectorKv,
     tree_selector_free, tree_selector_kv_add,
@@ -531,13 +531,8 @@ fn assignment(
                         [b'0', b'x' | b'X', rest @ ..] if value.len() > 2 => rest,
                         _ => value,
                     };
-                    let mut bit = 0u64;
-                    // SAFETY: the digits, their length and room for the value.
-                    let bad = number.is_empty()
-                        || unsafe {
-                            parse_x64(number.as_ptr().cast(), number.len(), u64::MAX, &mut bit)
-                        } != 0;
-                    if bad || bit == 0 || bit & (bit - 1) != 0 {
+                    let bit = parse_x64(number, u64::MAX).unwrap_or(0);
+                    if bit == 0 || bit & (bit - 1) != 0 {
                         return -EINVAL;
                     }
                     p.bit = bit;

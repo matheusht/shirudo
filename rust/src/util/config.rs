@@ -16,8 +16,7 @@ use crate::sys::libc::{
     fcntl, fdopen, ferror, fileno, fopen, free, lseek, scrub, setvbuf, strerror,
 };
 use crate::sys::log::{pr_err, pr_warn};
-use crate::sys::string::dns_name_valid;
-use crate::text::{parse_u64, strscpy, trim_blanks};
+use crate::text::{dns_name_valid, parse_u64, strscpy, trim_blanks};
 use crate::util::hex::hex_decode_max;
 use crate::util::io::{check_trusted, read_text_line};
 use crate::util::json::MAX_BYTES;
@@ -95,8 +94,7 @@ fn tls_classical_hosts_valid(value: &[u8]) -> bool {
             return false;
         }
         name[..len].copy_from_slice(&rest[..len]);
-        // SAFETY: name is terminated within its room.
-        if !unsafe { dns_name_valid(name.as_ptr().cast()) } {
+        if !dns_name_valid(&name[..len]) {
             return false;
         }
         if len == rest.len() {

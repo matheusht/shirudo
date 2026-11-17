@@ -155,3 +155,261 @@ pub fn parse_s64(s: &[u8], min: i64, max: i64) -> Result<i64, c_int> {
 pub fn name_has_suffix(name: &[u8], suffix: &[u8]) -> bool {
     name.len() > suffix.len() && name.ends_with(suffix)
 }
+
+/// parse_x64(): parse_u64() of hexadecimal digits of either case.
+pub fn parse_x64(s: &[u8], max: u64) -> Result<u64, c_int> {
+    if s.is_empty() || !s.iter().all(u8::is_ascii_hexdigit) {
+        return Err(-EINVAL);
+    }
+    s.iter().try_fold(0u64, |v, &c| {
+        let d = u64::from((c as char).to_digit(16).unwrap_or(0));
+        v.checked_mul(16)
+            .and_then(|v| v.checked_add(d))
+            .filter(|&v| v <= max)
+            .ok_or(-ERANGE)
+    })
+}
+
+/// A label an IPv4 parser reads as a number: decimal digits, or 0x and
+/// hex digits.
+fn numeric_dns_label(label: &[u8]) -> bool {
+    match label {
+        [] => false,
+        [b'0', b'x' | b'X', rest @ ..] if !label[2..].is_empty() => {
+            rest.iter().all(u8::is_ascii_hexdigit)
+        }
+        _ => label.iter().all(u8::is_ascii_digit),
+    }
+}
+
+/// dns_name_valid(): a DNS host name, labels of letters, digits and inner
+/// hyphens, 1 to 63 bytes each and 253 in all, not all of them numbers,
+/// which an IPv4 parser would read as an address.
+pub fn dns_name_valid(name: &[u8]) -> bool {
+    if name.is_empty() || name.len() > 253 {
+        return false;
+    }
+    let mut numeric = true;
+    for label in name.split(|&c| c == b'.') {
+        if label.is_empty()
+            || label.len() > 63
+            || label[0] == b'-'
+            || label[label.len() - 1] == b'-'
+            || !label
+                .iter()
+                .all(|&c| c.is_ascii_alphanumeric() || c == b'-')
+        {
+            return false;
+        }
+        numeric &= numeric_dns_label(label);
+    }
+    !numeric
+}
+
+/// utf8_width(): the length of the well-formed UTF-8 sequence `s` starts
+/// with, by Table 3-7 of the Unicode Standard, or 0 for none.
+pub fn utf8_width(s: &[u8]) -> usize {
+    let Some(&c) = s.first() else {
+        return 0;
+    };
+    if c < 0x80 {
+        return 1;
+    }
+    let (width, mut cp) = match c {
+        _ if c & 0xe0 == 0xc0 => (2, u32::from(c & 0x1f)),
+        _ if c & 0xf0 == 0xe0 => (3, u32::from(c & 0x0f)),
+        _ if c & 0xf8 == 0xf0 => (4, u32::from(c & 0x07)),
+        _ => return 0,
+    };
+    if width > s.len() {
+        return 0;
+    }
+    for &b in &s[1..width] {
+        if b & 0xc0 != 0x80 {
+            return 0;
+        }
+        cp = (cp << 6) | u32::from(b & 0x3f);
+    }
+    let shortest = [0, 0, 0x80, 0x800, 0x10000][width];
+    if cp < shortest || cp > 0x10_ffff || (0xd800..=0xdfff).contains(&cp) {
+        return 0;
+    }
+    width
+}
+
+/// text_sanitize(): `s` made safe to show on a terminal, its length
+/// unchanged: every byte of a C0 or C1 control, DEL or an ill-formed
+/// sequence becomes `?`, and with `lines` tabs, line feeds and a carriage
+/// return before one stay.
+pub fn sanitize(s: &mut [u8], lines: bool) {
+    let mut i = 0;
+    while i < s.len() {
+        let c = s[i];
+        let n = utf8_width(&s[i..]);
+        let shown = match c {
+            b'\t' | b'\n' => lines,
+            b'\r' => lines && s.get(i + 1) == Some(&b'\n'),
+            _ => match n {
+                1 => c >= 0x20 && c != 0x7f,
+                2 => c != 0xc2 || s[i + 1] >= 0xa0,
+                _ => n != 0,
+            },
+        };
+        let n = n.max(1);
+        if !shown {
+            s[i..i + n].fill(b'?');
+        }
+        i += n;
+    }
+}
+
+/// The helpers of `include/shirudo/string.h` for C, and for Rust that
+/// walks C strings, but the formatters, which as C-variadic functions
+/// stay in util/string.c.
+pub(crate) mod capi {
+    use core::ffi::{CStr, c_char, c_int};
+
+    use crate::errno::E2BIG;
+    use crate::sys::libc::strnlen;
+
+    /// # Safety
+    ///
+    /// `s` holds `len` bytes.
+    unsafe fn bytes<'a>(s: *const c_char, len: usize) -> &'a [u8] {
+        // SAFETY: as the caller passes them.
+        unsafe { crate::ffi::slice(s.cast::<u8>(), len) }
+    }
+
+    /// # Safety
+    ///
+    /// `s` holds `len` bytes.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn digits(s: *const c_char, len: usize) -> usize {
+        // SAFETY: the caller's bytes.
+        super::digits(unsafe { bytes(s, len) })
+    }
+
+    fn put<T>(r: Result<T, c_int>, out: *mut T) -> c_int {
+        match r {
+            Ok(v) => {
+                // SAFETY: the caller's room for the value.
+                unsafe { out.write(v) };
+                0
+            }
+            Err(e) => e,
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `s` holds `len` bytes, and `out` is room for the value.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn parse_u64(
+        s: *const c_char,
+        len: usize,
+        max: u64,
+        out: *mut u64,
+    ) -> c_int {
+        // SAFETY: the caller's bytes.
+        put(super::parse_u64(unsafe { bytes(s, len) }, max), out)
+    }
+
+    /// # Safety
+    ///
+    /// As parse_u64().
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn parse_x64(
+        s: *const c_char,
+        len: usize,
+        max: u64,
+        out: *mut u64,
+    ) -> c_int {
+        // SAFETY: the caller's bytes.
+        put(super::parse_x64(unsafe { bytes(s, len) }, max), out)
+    }
+
+    /// # Safety
+    ///
+    /// As parse_u64().
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn parse_s64(
+        s: *const c_char,
+        len: usize,
+        min: i64,
+        max: i64,
+        out: *mut i64,
+    ) -> c_int {
+        // SAFETY: the caller's bytes.
+        put(super::parse_s64(unsafe { bytes(s, len) }, min, max), out)
+    }
+
+    /// # Safety
+    ///
+    /// `dst` is room for `size` bytes, and `src` a C string or `size`
+    /// readable bytes.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn strscpy(dst: *mut c_char, src: *const c_char, size: usize) -> isize {
+        if size == 0 {
+            return -(E2BIG as isize);
+        }
+        // SAFETY: the caller's string, read no further than size bytes,
+        // and the caller's room.
+        let (src, dst) = unsafe {
+            let len = strnlen(src, size);
+            (
+                bytes(src, len),
+                core::slice::from_raw_parts_mut(dst.cast::<u8>(), size),
+            )
+        };
+        match super::strscpy(dst, src) {
+            Ok(n) => n as isize,
+            Err(e) => e as isize,
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `name` holds `len` bytes, and `suffix` is a C string.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn name_has_suffix(
+        name: *const c_char,
+        len: usize,
+        suffix: *const c_char,
+    ) -> bool {
+        // SAFETY: the caller's bytes and C string.
+        unsafe { super::name_has_suffix(bytes(name, len), CStr::from_ptr(suffix).to_bytes()) }
+    }
+
+    /// # Safety
+    ///
+    /// `name` is a C string.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn dns_name_valid(name: *const c_char) -> bool {
+        // SAFETY: the caller's C string.
+        super::dns_name_valid(unsafe { CStr::from_ptr(name) }.to_bytes())
+    }
+
+    /// # Safety
+    ///
+    /// `s` holds `n` bytes.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn utf8_width(s: *const c_char, n: usize) -> usize {
+        // SAFETY: the caller's bytes.
+        super::utf8_width(unsafe { bytes(s, n) })
+    }
+
+    /// # Safety
+    ///
+    /// `s` holds `len` writable bytes.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn text_sanitize(s: *mut c_char, len: usize, lines: bool) {
+        if len == 0 {
+            return;
+        }
+        // SAFETY: the caller's bytes.
+        super::sanitize(
+            unsafe { core::slice::from_raw_parts_mut(s.cast::<u8>(), len) },
+            lines,
+        );
+    }
+}

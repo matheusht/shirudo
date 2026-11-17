@@ -24,9 +24,8 @@ use crate::sys::libc::{
     access, close, explicit_bzero, fwrite, gethostname, stderr, stdout, strerror,
 };
 use crate::sys::log::{pr_err, pr_warn};
-use crate::sys::string::name_has_suffix;
 use crate::sys::version::shirudo_version_id;
-use crate::text::cstr;
+use crate::text::{cstr, name_has_suffix};
 use crate::util::bpm_tree_state::tree_emit_status;
 use crate::util::chain::{self, ChainStatus};
 use crate::util::conditions::{self, Condition, ConditionsInput};
@@ -149,9 +148,7 @@ fn list_dir(dir: &str) -> Option<Vec<Vec<u8>>> {
 }
 
 fn is_upatch(name: &[u8]) -> bool {
-    let n = message(&[name]);
-    // SAFETY: a C string, its length and a suffix.
-    unsafe { name_has_suffix(n.as_ptr(), n.as_bytes().len(), c".upatch".as_ptr()) }
+    name_has_suffix(cstr(name), b".upatch")
 }
 
 fn count_dir(dir: &str, upatch_only: bool) -> Option<usize> {

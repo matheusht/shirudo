@@ -19,9 +19,10 @@ use crate::sys::libc::{
     getrandom, open, read, scrub, statx,
 };
 use crate::sys::log::pr_err;
-use crate::sys::string::{digits, parse_u64, parse_x64, strscpy as c_strscpy, strsprintf};
+use crate::sys::string::strsprintf;
 use crate::sys::tss2::NV_WRITTEN;
 use crate::sys::version::shirudo_version_id;
+use crate::text::capi::{digits, parse_u64, parse_x64, strscpy as c_strscpy};
 use crate::text::{cstr, strscpy};
 use crate::util::chain::{
     ANCHOR_MAX, PCR as CHAIN_PCR, PCR_MASK as CHAIN_PCR_MASK, PHASE_PCR as CHAIN_PHASE_PCR,

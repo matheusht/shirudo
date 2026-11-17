@@ -24,8 +24,7 @@ use crate::heap::xfree;
 use crate::sys::libc::{access, close, fwrite, mkstemps, stderr, stdout, strerror, unlink};
 use crate::sys::log::{log_init, pr_err, pr_info};
 use crate::sys::paths::{format_key_path, key_paths, keys_dir_resolve};
-use crate::sys::string::name_has_suffix;
-use crate::text::cstr;
+use crate::text::{cstr, name_has_suffix};
 use crate::util::harden::{harden_self, harden_stdio};
 use crate::util::hex::hex_decode;
 use crate::util::upatch::{Upatch, upatch_close, upatch_open};
@@ -126,8 +125,7 @@ bpm: the operator-only package commands (`shirudo bpm build`,
 }
 
 fn has_suffix(s: &CStr, suffix: &CStr) -> bool {
-    // SAFETY: a C string, its length and a suffix.
-    unsafe { name_has_suffix(s.as_ptr(), s.to_bytes().len(), suffix.as_ptr()) }
+    name_has_suffix(s.to_bytes(), suffix.to_bytes())
 }
 
 /// `stem` and then `ext`, as long as the path fits PATH_MAX.

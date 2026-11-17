@@ -1081,7 +1081,7 @@ mod capi {
     use crate::errno::EINVAL;
     use crate::ffi;
     use crate::sys::libc::Dirent;
-    use crate::sys::string::name_has_suffix;
+    use crate::text::capi::name_has_suffix;
 
     /// # Safety
     ///

@@ -13,8 +13,7 @@ use super::{Init, cat, error, hex, info, strerr, warn};
 use crate::builtin::upatch::loader;
 use crate::errno::{EACCES, EEXIST, EINVAL, ENAMETOOLONG, ENODEV, ENOENT, ENOSPC, EPERM};
 use crate::sys::libc::{close, explicit_bzero};
-use crate::sys::string::name_has_suffix;
-use crate::text::cstr;
+use crate::text::{cstr, name_has_suffix};
 use crate::util::bpm_tree::TreeState;
 use crate::util::bpm_tree_state::tree_state_read;
 use crate::util::chain::{self, ChainInitInfo, MeasuredUpatch, chain_init_event};
@@ -62,9 +61,7 @@ fn archived() -> Result<Option<Vec<Vec<u8>>>, c_int> {
     for e in entries {
         let e = e.map_err(|e| -e.raw_os_error().unwrap_or(crate::errno::EIO))?;
         let name = e.file_name().as_bytes().to_vec();
-        let c = CString::new(name.clone()).unwrap_or_default();
-        // SAFETY: a C string, its length and a suffix.
-        if unsafe { name_has_suffix(c.as_ptr(), name.len(), c".upatch".as_ptr()) } {
+        if name_has_suffix(&name, b".upatch") {
             names.push(name);
         }
     }

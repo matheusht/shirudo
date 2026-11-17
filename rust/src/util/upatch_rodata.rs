@@ -21,7 +21,7 @@ use crate::sys::btf::{
 };
 use crate::sys::libc::{STDOUT_FILENO, VaList, printf, putchar, stdout, vfprintf};
 use crate::sys::log::pr_err;
-use crate::sys::string::{strsprintf, text_sanitize};
+use crate::sys::string::strsprintf;
 use crate::util::io::write_complete;
 use crate::util::json::{JsonEmit, MAX_BYTES};
 use crate::util::upatch::{NAME_MAX, Upatch, header_name, is_unload};
@@ -1295,7 +1295,7 @@ unsafe fn print_rodata_text(u: &Upatch, path: *const c_char, view: &View) -> c_i
     // SAFETY: the name, a C string of len bytes, sanitised in place; the
     // C's format with C strings and integers.
     unsafe {
-        text_sanitize(name.as_mut_ptr().cast(), len, false);
+        crate::text::sanitize(&mut name[..len], false);
         printf(
             c"upatch %s (%s) .rodata: %u bytes at data+%u, file+%u\n".as_ptr(),
             name.as_ptr(),

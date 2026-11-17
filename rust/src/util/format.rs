@@ -7,7 +7,6 @@ use core::ffi::{CStr, c_int};
 
 use crate::errno::E2BIG;
 use crate::sys::libc::{File, fputs, snprintf};
-use crate::sys::string::text_sanitize;
 use crate::text::{decimal, strscpy, strsprintf};
 
 /// `bytes` with a binary unit, `512B`, `1.50K`, `12.3M` or `256G`: two
@@ -61,12 +60,10 @@ pub(crate) unsafe fn fputs_sanitized(s: &[u8], f: *mut File) {
     let mut shown = [0u8; 512];
     let n = strscpy(&mut shown, s).unwrap_or(shown.len() - 1);
 
-    // SAFETY: n bytes of shown, terminated after them, and the caller's
+    crate::text::sanitize(&mut shown[..n], false);
+    // SAFETY: shown, terminated after its n bytes, and the caller's
     // stream.
-    unsafe {
-        text_sanitize(shown.as_mut_ptr().cast(), n, false);
-        fputs(shown.as_ptr().cast(), f);
-    }
+    unsafe { fputs(shown.as_ptr().cast(), f) };
 }
 
 mod capi {

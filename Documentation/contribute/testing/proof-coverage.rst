@@ -34,33 +34,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
      - Code
      - Inputs
      - Properties
-   * - ``string-number``
-     - ``parse_u64()``, ``parse_x64()``, ``parse_s64()``, ``digits()``
-     - Up to 22 bytes, past the 20 digits of the largest value
-     - Refuses exactly what is empty or holds a non-digit; a number
-       within its bounds and of the sign the string spells; nothing
-       written on refusal; ``digits()`` finds the whole run
-   * - ``string-number-model``
-     - ``parse_u64()``, ``parse_x64()``
-     - Up to 4 bytes
-     - The value of the Lean model ``Shirudo.Number``, or ``-ERANGE``
-       exactly where the model refuses
-   * - ``string-utf8``
-     - ``utf8_width()``
-     - Every input
-     - Equals Table 3-7 of the Unicode Standard, the well-formed byte
-       sequences, row by row
-   * - ``string-sanitize``
-     - ``text_sanitize()``
-     - Lengths 0 to 6, with and without line breaks
-     - Leaves well-formed UTF-8 without a C0, DEL or C1 control but a
-       kept line break; changes a byte only to ``?``; keeps every
-       printable character
-   * - ``string-copy``
-     - ``strscpy()``
-     - Strings and buffers up to 8 bytes
-     - Terminates what it writes; the whole string and its length, or
-       what fits and ``-E2BIG``
    * - ``string-span``
      - ``span_to_str()``
      - Spans and buffers up to 6 bytes, apart and the span in the buffer
@@ -68,11 +41,6 @@ or shorter, and "lengths 0 to 6" every input of each of those lengths.
        fit with a terminator, ``-EINVAL`` and ``-E2BIG`` otherwise; the
        string is the bytes, terminated behind them; nothing past the
        span read and nothing written on a refusal
-   * - ``string-suffix``
-     - ``name_has_suffix()``
-     - Names up to 6 bytes, suffixes up to 3
-     - True exactly when the name's last bytes are the suffix and at
-       least one byte comes before them
    * - ``string-prefix``
      - ``str_after_prefix()``, ``str_has_prefix_nocase()``,
        ``str_skip_prefix_nocase()``, ``span_equals_str()``,

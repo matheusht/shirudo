@@ -1,16 +1,10 @@
 # Each harness of this directory and the CBMC options it runs with.
 # --unwind must exceed the longest loop the harness's bound allows.
-string-number		--unwind 24
-string-utf8		--unwind 10
-string-copy		--unwind 10
 string-span		--unwind 9
-string-suffix		--unwind 8
 string-prefix		--unwind 8
 string-tokens		--unwind 8 LEN=0-4
 string-search		--unwind 8 LEN=0-5
-string-sanitize		--unwind 8 LEN=0-6
 paths-bpffs-name	--unwind 18
-string-number-model	--unwind 6
 bpm-tree-signers	--unwind 8
 tpm-signer		--unwind 35
 attest-replay-model	--slice-formula --unwind 20 --unwindset memneq_explicit.0:33,strlen.0:70 LEN=1-3

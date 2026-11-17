@@ -28,7 +28,7 @@ use crate::sys::libbpf::{
     GenLoaderOpts, libbpf_register_prog_handler, libbpf_unregister_prog_handler,
 };
 use crate::sys::loader::unload_blob;
-use crate::sys::string::{digits, parse_u64};
+use crate::text::{digits, parse_u64};
 use crate::util::bpm_package::verify_cms;
 use crate::util::crypto_openssl::sha256_calc;
 use crate::util::upatch::{
@@ -526,26 +526,20 @@ pub(super) fn verify_package(input: &CStr, cert: &CStr) -> c_int {
 
 /// `offset:length`, both decimal and within 32 bits, the length not 0.
 fn parse_range(s: &[u8]) -> Option<DataRange> {
-    // SAFETY: the bytes and their length.
-    let off_len = unsafe { digits(s.as_ptr().cast(), s.len()) };
+    let off_len = digits(s);
     if off_len == 0 || off_len >= s.len() || s[off_len] != b':' {
         return None;
     }
     let length = &s[off_len + 1..];
-    // SAFETY: the bytes and their length.
-    let len_len = unsafe { digits(length.as_ptr().cast(), length.len()) };
-    let (mut offset, mut len) = (0u64, 0u64);
-    // SAFETY: the digits, their lengths and room for the values.
-    let parsed = unsafe {
-        parse_u64(s.as_ptr().cast(), off_len, u64::from(u32::MAX), &mut offset) == 0
-            && parse_u64(
-                length.as_ptr().cast(),
-                len_len,
-                u64::from(u32::MAX),
-                &mut len,
-            ) == 0
+    let len_len = digits(length);
+    let max = u64::from(u32::MAX);
+    let (Ok(offset), Ok(len)) = (
+        parse_u64(&s[..off_len], max),
+        parse_u64(&length[..len_len], max),
+    ) else {
+        return None;
     };
-    if len_len == 0 || len_len != length.len() || !parsed || len == 0 {
+    if len_len != length.len() || len == 0 {
         return None;
     }
     Some(DataRange {

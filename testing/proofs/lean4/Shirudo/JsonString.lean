@@ -19,9 +19,8 @@ byte, and copies each sequence of Table 3-7; `emit_byte()` refuses with
 room for a byte and the NUL.
 
 The models follow the code step by step on byte lists, each byte its value.
-Well-formed UTF-8 is Table 3-7, as `table_width()` of
-testing/proofs/cbmc/string-utf8.c states it, which proves that
-`utf8_width()` computes it for every input; `%04x` writes four lowercase
+Well-formed UTF-8 is Table 3-7, row by row as `rowWidth` states it,
+which `utf8_width()` of rust/src/text.rs checks; `%04x` writes four lowercase
 hex digits. The writer's emitter is assumed to have room: a `put()` that
 fails sets the sticky error that fails the whole document.
 
@@ -79,9 +78,9 @@ instance (n b0 b1 b2 b3 : Nat) : Decidable (Row4 n b0 b1 b2 b3) := by
   unfold Row4; infer_instance
 
 /-- Table 3-7 row by row on the first bytes `b0` to `b3` of `n`: the
-length of the well-formed sequence they start, or 0. This is
-`table_width()` of testing/proofs/cbmc/string-utf8.c, which proves that
-`utf8_width()` of util/string.c computes it for every input. -/
+length of the well-formed sequence they start, or 0. The CBMC proof that
+`utf8_width()` of util/string.c computed it for every input went with the
+C in the port to Rust. -/
 def rowWidth (n b0 b1 b2 b3 : Nat) : Nat :=
   if Row1 n b0 then 1
   else if Row2 n b0 b1 then 2

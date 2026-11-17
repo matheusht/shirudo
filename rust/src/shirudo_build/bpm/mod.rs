@@ -20,8 +20,8 @@ use std::os::unix::ffi::OsStrExt;
 use crate::errno::{EINVAL, EIO};
 use crate::sys::log::{pr_err, pr_info};
 use crate::sys::paths::keys_dir_resolve;
-use crate::sys::string;
 use crate::text::cstr;
+use crate::text::name_has_suffix;
 
 pub(crate) use build::upatch_name;
 
@@ -78,15 +78,6 @@ fn hex(bytes: &[u8]) -> Vec<u8> {
 
 fn path(p: &[u8]) -> &OsStr {
     OsStr::from_bytes(p)
-}
-
-fn name_has_suffix(name: &[u8], suffix: &[u8]) -> bool {
-    let (n, s) = (
-        CString::new(name.to_vec()).unwrap_or_default(),
-        CString::new(suffix.to_vec()).unwrap_or_default(),
-    );
-    // SAFETY: two C strings and the first's length.
-    unsafe { string::name_has_suffix(n.as_ptr(), n.as_bytes().len(), s.as_ptr()) }
 }
 
 /// `--help`, `-h` or `help`.

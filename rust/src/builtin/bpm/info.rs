@@ -12,8 +12,7 @@ use std::os::fd::AsRawFd;
 use super::{Result, curl_ready, eprint, error, fail, finish, message, remove, status, temporary};
 use crate::errno::{E2BIG, EINVAL, EIO, ENODATA, ENOENT, EOPNOTSUPP};
 use crate::sys::libc::STDOUT_FILENO;
-use crate::sys::string::text_sanitize;
-use crate::text::cstr;
+use crate::text::{cstr, sanitize};
 use crate::util::bpm_package::{
     UpatchMember, archive_rel_ok, read_member_in, upatch_member, visit_members,
 };
@@ -118,8 +117,7 @@ fn readme(source: &[u8]) -> Result {
         }
     };
     let text = readme.bytes_mut();
-    // SAFETY: the README's bytes, its own.
-    unsafe { text_sanitize(text.as_mut_ptr().cast(), text.len(), true) };
+    sanitize(text, true);
     stdout_write(readme.bytes())
 }
 
@@ -143,8 +141,7 @@ fn listed(list: &mut Vec<u8>, member: &[u8], ty: c_char, all: bool) -> Result {
     }
     let start = list.len();
     list.extend_from_slice(member);
-    // SAFETY: the bytes just added, the list's own.
-    unsafe { text_sanitize(list[start..].as_mut_ptr().cast(), member.len(), false) };
+    sanitize(&mut list[start..], false);
     list.push(b'\n');
     Ok(())
 }

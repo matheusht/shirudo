@@ -18,7 +18,8 @@ use crate::sys::btf::{
     members,
 };
 use crate::sys::libc::strerror;
-use crate::sys::string::{strscpy, strsprintf};
+use crate::sys::string::strsprintf;
+use crate::text::capi::strscpy;
 
 const MAP_SHA_SIZE: u32 = 32;
 const BTF_MAX_UNWRAP: usize = 32;

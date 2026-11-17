@@ -3,9 +3,9 @@
  * Copyright (c) 2026 Authors of shirudo
  *
  * Bounded number parsing, string copies and formatting, file name
- * suffixes, tokens, DNS names, UTF-8 characters and text for a terminal,
- * from util/string.c, the compares of a prefix and of a span, and the
- * scrub and compare for secrets.
+ * suffixes, tokens, DNS names, UTF-8 characters and text for a terminal.
+ * Most helpers are in rust/src/text.rs; formatting, spans, tokens and
+ * glob matching remain in util/string.c.
  */
 
 #ifndef SHIRUDO_STRING_H

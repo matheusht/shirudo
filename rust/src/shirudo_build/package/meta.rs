@@ -13,7 +13,7 @@ use std::ffi::CString;
 use super::bpf::{Object, Prog};
 use super::{error, strerr};
 use crate::errno::{EINVAL, ENAMETOOLONG, ENOENT, EOPNOTSUPP, EOVERFLOW};
-use crate::sys::string::{parse_u64, parse_x64};
+use crate::text::{parse_u64, parse_x64};
 use crate::util::elf_target::{ElfTarget, elf_target_free, elf_target_resolve};
 use crate::util::upatch::{
     ATTACH_CGROUP_SKB_EGRESS, ATTACH_CGROUP_SKB_INGRESS, ATTACH_FMOD_RET, ATTACH_KPROBE,
@@ -155,24 +155,14 @@ fn split_probe_target(src: &[u8]) -> Result<(&[u8], u64), c_int> {
         Some(0) => return Err(-EINVAL),
         Some(plus) => {
             let num = &src[plus + 1..];
-            // SAFETY: the digits and their length, and room for the value.
-            let ret = unsafe {
-                if num.len() > 2 && (num.starts_with(b"0x") || num.starts_with(b"0X")) {
-                    parse_x64(
-                        num[2..].as_ptr().cast(),
-                        num.len() - 2,
-                        u64::MAX,
-                        &mut offset,
-                    )
-                } else if num.len() > 1 && num[0] == b'0' {
-                    -EINVAL
-                } else {
-                    parse_u64(num.as_ptr().cast(), num.len(), u64::MAX, &mut offset)
-                }
+            let parsed = if num.len() > 2 && (num.starts_with(b"0x") || num.starts_with(b"0X")) {
+                parse_x64(&num[2..], u64::MAX)
+            } else if num.len() > 1 && num[0] == b'0' {
+                Err(-EINVAL)
+            } else {
+                parse_u64(num, u64::MAX)
             };
-            if ret != 0 {
-                return Err(-EINVAL);
-            }
+            offset = parsed.map_err(|_| -EINVAL)?;
             &src[..plus]
         }
         None => src,

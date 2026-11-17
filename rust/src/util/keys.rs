@@ -19,7 +19,7 @@ use crate::sys::libc::{
     scandirat, statx, strerror, unlink,
 };
 use crate::sys::log::pr_err;
-use crate::sys::string::name_has_suffix;
+use crate::text::capi::name_has_suffix;
 use crate::text::{cstr, strscpy, strsprintf};
 use crate::util::crypto_openssl::{
     Cert, cert_free, cert_pubkey_digest, cert_read_der, sha256_buffer, verify_detached,

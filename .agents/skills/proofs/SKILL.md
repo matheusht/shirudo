@@ -20,7 +20,7 @@ there, and one a harness starts to read leaves that list:
 
 ```sh
 make proofs                                  # CBMC and Lean 4
-make proofs-cbmc PROOFS="string-number hex"  # some CBMC proofs
+make proofs-cbmc PROOFS="paths-bpffs-name log-escape"  # some CBMC proofs
 make proofs-cbmc CHANGED=origin/main..HEAD   # those reading a changed file
 testing/proofs/cbmc/run.sh -v <proof>        # whole output and traces
 make proofs-lean4                            # the Lean 4 proofs
@@ -162,9 +162,9 @@ determining its events.
   `declaration not found` and the name. Prove with `decide`, `omega`
   or `simp` instead, and keep `nanoda.json`'s list as it is.
 - A model proves the algorithm, not the C. Link the two with a CBMC
-  proof where one is cheap, as `string-number-model.c` checks
-  `parse_u64()` against `Number.lean` up to 4 bytes and
-  `bpm-tree-sync-model.c` runs the tree sync against `TreeSync.lean`'s
+  proof where one is cheap, as `paths-bpffs-name-model.c` checks
+  pin name encoding against `PinName.lean` and
+  `bpm-tree-sync-model.c` runs tree sync against `TreeSync.lean`'s
   steps; the coverage page says which models follow the C by review.
 - The toolchain is the one `lean-toolchain` names; elan installs it.
 

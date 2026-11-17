@@ -2,8 +2,8 @@
 -- Copyright (c) 2026 Authors of shirudo
 
 /-!
-The number parsers of util/string.c. `parse_base()` reads the digits most
-significant first and refuses with `-ERANGE` once the value would reach
+The number parsers of rust/src/text.rs, `parse_base()` of util/string.c
+before the port to Rust. Each reads the digits most significant first and refuses with `-ERANGE` once the value would reach
 2^64 or pass `max`. For digit strings of every length it yields exactly
 the value they spell, or that refusal when the value passes `max`.
 -/

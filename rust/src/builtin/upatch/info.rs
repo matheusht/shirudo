@@ -10,8 +10,7 @@ use core::ffi::c_int;
 use std::ffi::CString;
 
 use super::{JSON_MAX, err, help, hex, log_err, out, print_json, strerr};
-use crate::sys::string::text_sanitize;
-use crate::text::cstr;
+use crate::text::{cstr, sanitize};
 use crate::util::help::is_help;
 use crate::util::json::JsonEmit;
 use crate::util::upatch::{self, DecoderView, NAME_MAX, Opened, Upatch};
@@ -53,13 +52,8 @@ fn signal(s: u32) -> &'static [u8] {
 /// The bytes up to a NUL made printable, as the C library's
 /// text_sanitize() makes them.
 fn printable(s: &[u8]) -> Vec<u8> {
-    let mut buf = CString::new(cstr(s))
-        .unwrap_or_default()
-        .into_bytes_with_nul();
-    let len = buf.len() - 1;
-    // SAFETY: the C string and its length.
-    unsafe { text_sanitize(buf.as_mut_ptr().cast(), len, false) };
-    buf.truncate(len);
+    let mut buf = cstr(s).to_vec();
+    sanitize(&mut buf, false);
     buf
 }
 

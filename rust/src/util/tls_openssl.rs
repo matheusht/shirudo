@@ -32,7 +32,7 @@ use crate::sys::ssl::{
     SSL_CTX_set_info_callback, SSL_ctrl, SSL_get_servername, SSL_group_to_name, Ssl, SslCtx,
     TLS1_3_VERSION, TLSEXT_NAMETYPE_HOST_NAME,
 };
-use crate::sys::string::dns_name_valid;
+use crate::text::capi::dns_name_valid;
 use crate::text::cstr;
 use crate::util::config::{self, Scrubbed};
 use crate::util::image_config;
