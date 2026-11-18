@@ -1103,25 +1103,9 @@ pub(crate) use capi::chain_init_event;
 mod tests;
 
 mod capi {
-    use core::ffi::{c_char, c_int, c_void};
+    use core::ffi::{c_char, c_int};
 
     use super::{ChainInitInfo, ChainLive, ChainStatus, DIGEST_LEN, MeasuredUpatch};
-
-    /// # Safety
-    ///
-    /// `a` and `b` hold their lengths' bytes and `out` has room for a
-    /// digest.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn sha256_2(
-        a: *const c_void,
-        a_len: usize,
-        b: *const c_void,
-        b_len: usize,
-        out: *mut u8,
-    ) -> c_int {
-        // SAFETY: the caller passes the bytes and the room.
-        unsafe { super::sha256_2(a, a_len, b, b_len, out) }
-    }
 
     /// # Safety
     ///

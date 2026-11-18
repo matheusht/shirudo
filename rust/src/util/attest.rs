@@ -2526,6 +2526,9 @@ pub(crate) use capi::{
     attest_parse_pcr_value, attest_parse_pcrs, attest_verify,
 };
 
+#[cfg(test)]
+mod tests;
+
 mod capi {
     use core::ffi::{c_char, c_int};
 
@@ -2624,7 +2627,6 @@ mod capi {
     /// # Safety
     ///
     /// `list` is a C string and `mask` room for a mask.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn attest_parse_pcrs(list: *const c_char, mask: *mut u32) -> c_int {
         // SAFETY: the caller passes a C string and the room.
         unsafe { super::parse_pcrs(list, &mut *mask) }
@@ -2633,7 +2635,6 @@ mod capi {
     /// # Safety
     ///
     /// `arg` is a C string, and `pcr` and `value` rooms.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn attest_parse_pcr_value(
         arg: *const c_char,
         pcr: *mut u64,
@@ -2647,7 +2648,6 @@ mod capi {
     ///
     /// `spec` is a C string, `name` room for UPATCH_NAME_MAX + 1 bytes
     /// and `digest` for a digest.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn attest_parse_name_digest(
         spec: *const c_char,
         name: *mut c_char,

@@ -69,11 +69,6 @@ pub(crate) unsafe fn write_complete(fd: c_int, buf: *const c_void, len: usize) -
     0
 }
 
-/// How much of `buf` is whole records, each ending in its newline.
-fn lines_len(buf: &[u8]) -> usize {
-    buf.iter().rposition(|&c| c == b'\n').map_or(0, |i| i + 1)
-}
-
 /// The offset after the last newline of the `size` bytes of `fd`, read
 /// back from its end a chunk at a time, or 0 for none.
 fn last_line_end(fd: c_int, size: i64, end: &mut i64) -> c_int {
@@ -552,10 +547,12 @@ pub(crate) fn lock_exclusive(fd: c_int) -> c_int {
     0
 }
 
+#[cfg(test)]
+mod tests;
+
 mod capi {
     use core::ffi::{c_char, c_int, c_void};
 
-    use crate::ffi;
     use crate::sys::libc::File;
 
     /// # Safety
@@ -565,29 +562,6 @@ mod capi {
     pub unsafe extern "C" fn write_complete(fd: c_int, buf: *const c_void, len: usize) -> c_int {
         // SAFETY: the caller passes the bytes.
         unsafe { super::write_complete(fd, buf, len) }
-    }
-
-    /// # Safety
-    ///
-    /// `buf` holds `len` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn lines_len(buf: *const c_char, len: usize) -> usize {
-        // SAFETY: the caller passes the bytes.
-        super::lines_len(unsafe { ffi::slice(buf.cast::<u8>(), len) })
-    }
-
-    /// # Safety
-    ///
-    /// `path` is a C string and `line` holds `len` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn append_line(
-        fd: c_int,
-        path: *const c_char,
-        line: *const c_char,
-        len: usize,
-    ) -> c_int {
-        // SAFETY: the caller passes a C string and the line.
-        unsafe { super::append_line(fd, path, line, len) }
     }
 
     /// # Safety
@@ -655,22 +629,8 @@ mod capi {
     }
 
     #[unsafe(no_mangle)]
-    pub extern "C" fn lock_exclusive(fd: c_int) -> c_int {
-        super::lock_exclusive(fd)
-    }
-
-    #[unsafe(no_mangle)]
     pub extern "C" fn kernel_dev(dev: u64) -> u32 {
         super::kernel_dev(dev)
-    }
-
-    /// # Safety
-    ///
-    /// `path` is a C string.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn bpffs_mounted_at(path: *const c_char) -> c_int {
-        // SAFETY: the caller passes a C string.
-        unsafe { super::bpffs_mounted_at(path) }
     }
 }
 

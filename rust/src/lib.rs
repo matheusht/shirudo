@@ -18,5 +18,7 @@ mod quote_check;
 mod shirudo_build;
 mod skel;
 mod sys;
+#[cfg(test)]
+mod testutil;
 mod text;
 mod util;
