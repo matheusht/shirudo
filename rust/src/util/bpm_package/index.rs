@@ -8,7 +8,7 @@ use core::ffi::{c_int, c_void};
 use super::IndexEntry;
 use crate::errno::{E2BIG, EINVAL};
 use crate::text::cstr;
-use crate::util::bpm_oci::{MAX_DIGEST, MAX_ENDPOINT, MAX_ENTRIES, MAX_NAME, name_ok, version_ok};
+use crate::util::bpm_oci::{MAX_DIGEST, MAX_ENDPOINT, MAX_NAME, name_ok, version_ok};
 use crate::util::json::{JsonArray, JsonField, parse_schema};
 
 /// Where the entries go, and the scratch entry the schema fills for each
@@ -16,6 +16,7 @@ use crate::util::json::{JsonArray, JsonField, parse_schema};
 struct IndexSink {
     items: *mut IndexEntry,
     n: usize,
+    max: usize,
     scratch: IndexEntry,
 }
 
@@ -25,9 +26,9 @@ unsafe extern "C" fn on_index_entry(ud: *mut c_void) -> c_int {
     // SAFETY: the sink index_parse() made the array's context, read and
     // written through this pointer alone, as the parser writes the
     // scratch entry through its own and is not running now; items has
-    // room for MAX_ENTRIES entries.
+    // room for max entries.
     unsafe {
-        if (*s).n >= MAX_ENTRIES {
+        if (*s).n >= (*s).max {
             return -E2BIG;
         }
         let e = (*s).scratch;
@@ -50,12 +51,13 @@ unsafe extern "C" fn on_index_entry(ud: *mut c_void) -> c_int {
     0
 }
 
-/// The entries of an index of schema 1 into the `MAX_ENTRIES` at
-/// `entries`, and how many there are.
-pub(super) fn index_parse(body: &[u8], entries: *mut IndexEntry, n_entries: &mut c_int) -> c_int {
+/// The entries of an index of schema 1, as many as `entries` has room
+/// for, into it, and how many there are.
+pub(super) fn index_parse(body: &[u8], entries: &mut [IndexEntry], n_entries: &mut c_int) -> c_int {
     let mut sink = IndexSink {
-        items: entries,
+        items: entries.as_mut_ptr(),
         n: 0,
+        max: entries.len(),
         scratch: IndexEntry::new(),
     };
     let mut schema = 0i64;

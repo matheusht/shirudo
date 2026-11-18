@@ -226,7 +226,9 @@ fn fetch_checked(
     if f.layers.is_null() {
         return -ENOMEM;
     }
-    let ret = parse_manifest(manifest, f.layers, MAX_ENTRIES as c_int, &mut nl, None);
+    // SAFETY: xcalloc() gave room for MAX_ENTRIES descriptors, zeroed.
+    let room = unsafe { core::slice::from_raw_parts_mut(f.layers, MAX_ENTRIES) };
+    let ret = parse_manifest(manifest, room, &mut nl, None);
     if ret != 0 {
         return ret;
     }

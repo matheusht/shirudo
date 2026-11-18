@@ -13,7 +13,7 @@ fn manifest_of(layers: &str) -> (core::ffi::c_int, core::ffi::c_int) {
     let mut descs = [const { Descriptor::new() }; 4];
     let text = format!(r#"{{"schemaVersion":2,"layers":[{layers}]}}"#);
     let mut n = -1;
-    let ret = manifest::parse_manifest(text.as_bytes(), descs.as_mut_ptr(), 4, &mut n, None);
+    let ret = manifest::parse_manifest(text.as_bytes(), &mut descs[..4], &mut n, None);
 
     (ret, n)
 }

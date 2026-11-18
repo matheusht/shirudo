@@ -48,19 +48,18 @@ unsafe extern "C" fn on_descriptor(ud: *mut c_void) -> c_int {
     0
 }
 
-/// The layers of an image manifest of schema 2, at most `max_layers` of
-/// them into `layers`, and the package name its annotations give.
+/// The layers of an image manifest of schema 2, as many as `layers`
+/// has room for, into it, and the package name its annotations give.
 pub(crate) fn parse_manifest(
     body: &[u8],
-    layers: *mut Descriptor,
-    max_layers: c_int,
+    layers: &mut [Descriptor],
     n_layers: &mut c_int,
     package_name: Option<&mut [u8]>,
 ) -> c_int {
     let mut sink = DescSink {
-        items: layers,
+        items: layers.as_mut_ptr(),
         n: 0,
-        max: max_layers,
+        max: c_int::try_from(layers.len()).unwrap_or(c_int::MAX),
         scratch: Descriptor::new(),
         package_name: [0; MAX_NAME],
     };

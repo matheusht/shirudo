@@ -49,7 +49,16 @@ pub unsafe extern "C" fn bpm_pkg_read_member(
             dir: None,
         };
 
-        archive::read_member_in(archive, opt_bytes(member), None, &mut found, max)
+        if archive.is_null() {
+            return -crate::errno::EINVAL;
+        }
+        archive::read_member_in(
+            CStr::from_ptr(archive),
+            opt_bytes(member),
+            None,
+            &mut found,
+            max,
+        )
     }
 }
 
@@ -61,8 +70,11 @@ pub unsafe extern "C" fn bpm_pkg_load_info(
     archive: *const c_char,
     info: *mut PackageInfo,
 ) -> c_int {
-    // SAFETY: the caller passes its info.
-    info::load_info(archive, unsafe { &mut *info })
+    if archive.is_null() {
+        return -crate::errno::EINVAL;
+    }
+    // SAFETY: the caller passes a C string and its info.
+    unsafe { info::load_info(CStr::from_ptr(archive), &mut *info) }
 }
 
 /// The manifest of a tree publication whose layers are `payload` and

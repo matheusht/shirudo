@@ -148,7 +148,7 @@ pub(crate) fn index_parse(body: &[u8]) -> Result<Vec<IndexEntry>> {
     let mut entries = vec![IndexEntry::new(); MAX_ENTRIES];
     let mut n = 0;
 
-    match index::index_parse(body, entries.as_mut_ptr(), &mut n) {
+    match index::index_parse(body, &mut entries, &mut n) {
         0 => {
             entries.truncate(usize::try_from(n).map_err(|_| -EINVAL)?);
             Ok(entries)

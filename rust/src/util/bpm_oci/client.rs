@@ -171,8 +171,7 @@ pub(crate) fn manifest_layers(
 
     status(manifest::parse_manifest(
         body,
-        layers.as_mut_ptr(),
-        c_int::try_from(max).map_err(|_| -EINVAL)?,
+        &mut layers,
         &mut n,
         with_name.then_some(&mut name[..]),
     ))?;
