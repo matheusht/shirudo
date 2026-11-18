@@ -18,7 +18,7 @@ use crate::sys::libc::{
 };
 use crate::util::image_config;
 use crate::util::io::stat_fd;
-use crate::util::keyring::{keyring_bpf_serial, keyring_holds_cert};
+use crate::util::keyring;
 use crate::util::keys::{
     TrustedSet, keys_cert_der, keys_digest_der, keys_load_image_root, keys_read_der_fd, members,
 };
@@ -269,14 +269,11 @@ pub(crate) fn check_set_with(set: &TrustedSet, mut holds: impl FnMut(&[u8]) -> c
 
 /// [`check_set_with`] the BPF keyring: keys_check_image_set().
 pub(crate) fn check_set(set: &TrustedSet) -> c_int {
-    let ring = keyring_bpf_serial();
+    let ring = keyring::bpf_serial();
     if ring < 0 {
         return ring;
     }
-    // SAFETY: the keyring and a certificate's bytes.
-    check_set_with(set, |der| unsafe {
-        keyring_holds_cert(ring, der.as_ptr(), der.len())
-    })
+    check_set_with(set, |der| keyring::holds_cert(ring, der))
 }
 
 /// Validates the trust set of the image at `root_fd`, from the runtime's

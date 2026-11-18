@@ -44,9 +44,7 @@ use crate::util::integrity::{self, IntegrityCounts};
 use crate::util::io::{bpffs_mounted_at, read_file};
 use crate::util::json::{JsonEmit, JsonField, MAX_BYTES, parse_schema};
 use crate::util::kernel_btf;
-use crate::util::keyring::{
-    self, KeyringLink, keyring_bpf_serial, keyring_dm_verity_serial, keyring_links,
-};
+use crate::util::keyring;
 use crate::util::keys::{self, TrustedSet, keys_digest_der, keys_read_der};
 use crate::util::map_read;
 use crate::util::measured::{
@@ -569,29 +567,19 @@ impl KeyringView {
         let links = if serial < 0 {
             Err(serial)
         } else {
-            let (mut raw, mut n): (*mut KeyringLink, usize) = (ptr::null_mut(), 0);
-            // SAFETY: the serial and room for the links and their count.
-            match unsafe { keyring_links(serial, &mut raw, &mut n) } {
-                0 => {
-                    // SAFETY: the n links read.
-                    let all = unsafe { ffi::slice(raw, n) };
-                    let links = all
-                        .iter()
-                        .map(|l| Link {
-                            serial: l.serial(),
-                            err: l.err(),
-                            ty: l.ty().to_vec(),
-                            description: l.description().to_vec(),
-                            frozen: frozen.contains(&l.serial()),
-                            cert: false,
-                        })
-                        .collect();
-                    // SAFETY: keyring_links()'s array of n links.
-                    unsafe { xfree(raw.cast(), n * size_of::<KeyringLink>()) };
-                    Ok(links)
-                }
-                err => Err(err),
-            }
+            keyring::links(serial).map(|links| {
+                links
+                    .into_iter()
+                    .map(|l| Link {
+                        frozen: frozen.contains(&l.serial),
+                        serial: l.serial,
+                        err: l.err,
+                        ty: l.ty,
+                        description: l.description,
+                        cert: false,
+                    })
+                    .collect()
+            })
         };
         KeyringView {
             serial,
@@ -618,14 +606,10 @@ impl KeyringView {
     /// Adds a certificate, with its subject, key and dates, and the link
     /// whose key it is.
     fn add(&mut self, mut c: CertView, der: &[u8]) {
-        let mut desc = [0u8; keyring::DESC_MAX];
-
         c.info = cert_info(der);
-        // SAFETY: the DER and room for the description.
-        let described =
-            unsafe { keyring::cert_description(der.as_ptr(), der.len(), &mut desc) } == 0;
-        if let (true, Ok(links)) = (described, &mut self.links) {
-            let desc = cstr(&desc);
+        let described = keyring::cert_description(der);
+        if let (Ok(desc), Ok(links)) = (&described, &mut self.links) {
+            let desc = &desc[..];
             if let Some(i) = links
                 .iter()
                 .position(|l| l.asymmetric() && !l.cert && l.description == desc)
@@ -1247,7 +1231,7 @@ impl Report {
             pinned = ident.keyring_serial;
         }
         let serial = if pinned >= 1 {
-            keyring_bpf_serial()
+            keyring::bpf_serial()
         } else {
             -ENOKEY
         };
@@ -1267,7 +1251,7 @@ impl Report {
             ident.dm_verity_ring
         };
         let dmv_serial = if dmv_pinned >= 1 {
-            keyring_dm_verity_serial()
+            keyring::dm_verity_serial()
         } else {
             -ENOKEY
         };

@@ -26,7 +26,7 @@ use crate::text::{cstr, strscpy};
 use crate::util::config_image::{BLOCK_SIZE, ConfigImage, ConfigImageOpen, SIG_MAX, check_files};
 use crate::util::hex::hex_encode;
 use crate::util::image_guards::{ConfigRootGuard, config_root_begin, config_root_end};
-use crate::util::keyring::keyring_unlink_key;
+use crate::util::keyring;
 
 const DM_BUFFER_SIZE: usize = 4096;
 const DM_VERSION_MAJOR: u32 = 4;
@@ -824,7 +824,7 @@ fn signature_key(fd: c_int, description: &mut [u8; 64]) -> i32 {
     {
         let ret = -errno();
 
-        keyring_unlink_key(KEY_SPEC_THREAD_KEYRING, key as i32);
+        keyring::unlink_key(KEY_SPEC_THREAD_KEYRING, key as i32);
         return ret;
     }
     key as i32
@@ -1012,7 +1012,7 @@ unsafe fn create(image: *const ConfigImageOpen, name: *const c_char, out: *mut D
         ret = cleanup;
     }
     if key >= 0 {
-        keyring_unlink_key(KEY_SPEC_THREAD_KEYRING, key);
+        keyring::unlink_key(KEY_SPEC_THREAD_KEYRING, key);
     }
     if ret != 0 {
         if created {

@@ -12,7 +12,7 @@ use std::ffi::CString;
 
 use super::{err, helper_main, strerror};
 use crate::errno::{EEXIST, EINVAL, EIO, EKEYREJECTED, ENOKEY};
-use crate::util::keyring::{KeyringCert, holds_exactly, keyring_unlink_key, seal_set};
+use crate::util::keyring::{holds_exactly, seal_set, unlink_key};
 use crate::util::keys::{TrustedSet, read_der_bytes};
 
 helper_main!(shirudo_helper_test_keyring_seal, run);
@@ -59,16 +59,8 @@ fn expect(what: &str, got: c_int, want: c_int) -> u32 {
     1
 }
 
-fn holds(ring: i32, certs: &[KeyringCert]) -> c_int {
-    // SAFETY: certificates whose bytes outlive the call.
-    unsafe { holds_exactly(ring, certs) }
-}
-
-fn cert(der: &[u8]) -> KeyringCert {
-    KeyringCert {
-        der: der.as_ptr(),
-        len: der.len(),
-    }
+fn holds(ring: i32, certs: &[&[u8]]) -> c_int {
+    holds_exactly(ring, certs)
 }
 
 /// A key `add` makes in `ring` around `check`, unlinked after: what
@@ -76,16 +68,16 @@ fn cert(der: &[u8]) -> KeyringCert {
 fn with_key(ring: i32, key: i32, check: impl FnOnce() -> c_int) -> c_int {
     let ret = if key < 0 { key } else { check() };
     if key > 0 {
-        keyring_unlink_key(ring, key);
+        unlink_key(ring, key);
     }
     ret
 }
 
 /// Every link counts, of any type and whether it can be described.
 fn exact(a: &[u8], b: &[u8]) -> c_int {
-    let both = [cert(a), cert(b)];
-    let swapped = [cert(b), cert(a)];
-    let twice = [cert(a), cert(a)];
+    let both = [a, b];
+    let swapped = [b, a];
+    let twice = [a, a];
     let ring = add(
         c"keyring",
         Some(c"shirudo-test-exact"),
@@ -129,7 +121,7 @@ fn exact(a: &[u8], b: &[u8]) -> c_int {
         0,
     );
     fails += expect("two again", holds(ring, &both), 1);
-    keyring_unlink_key(libc::KEY_SPEC_THREAD_KEYRING, ring);
+    unlink_key(libc::KEY_SPEC_THREAD_KEYRING, ring);
     if fails > 0 { -EKEYREJECTED } else { 0 }
 }
 
@@ -197,7 +189,7 @@ fn seal(mode: &[u8], set: &TrustedSet, own: &[u8], other: &[u8]) -> c_int {
         }
         _ => return -EINVAL,
     }
-    keyring_unlink_key(libc::KEY_SPEC_THREAD_KEYRING, ring);
+    unlink_key(libc::KEY_SPEC_THREAD_KEYRING, ring);
     if fails > 0 { -EKEYREJECTED } else { 0 }
 }
 

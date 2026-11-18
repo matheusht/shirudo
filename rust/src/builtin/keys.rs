@@ -48,13 +48,10 @@ use crate::util::identity;
 use crate::util::image_config;
 use crate::util::io::check_trusted;
 use crate::util::json::JsonEmit;
-use crate::util::keyring::{
-    KeyringLink, keyring_bpf_serial, keyring_dm_verity_serial, keyring_find_cert,
-    keyring_holds_cert, keyring_links, keyring_unlink_key,
-};
+use crate::util::keyring;
 use crate::util::keys::{
-    KEYS_MAX, TrustedSet, keys_cert_der, keys_digest_der, keys_install, keys_is_revoked, keys_load,
-    keys_read_der, keys_verify_vouch, members,
+    KEYS_MAX, TrustedSet, keys_digest_der, keys_install, keys_is_revoked, keys_load, keys_read_der,
+    keys_verify_vouch, members,
 };
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::paths::{key_files, keys_dir, path_exists};
@@ -395,7 +392,7 @@ fn dump_disk_material(out: &mut Out, cert_path: &CStr, pkey_path: &CStr) -> c_in
 /// A keyring init froze: its serial and the keys it recorded in it.
 struct Anchor<'a> {
     label: &'a [u8],
-    serial: extern "C" fn() -> i32,
+    serial: fn() -> i32,
     frozen: i32,
     keys: &'a [i32],
 }
@@ -415,30 +412,17 @@ struct Member {
     description: Vec<u8>,
 }
 
-/// The members of `ring`, as keyring_links() gives them.
+/// The members of `ring`, as keyring::links() gives them.
 fn links(ring: i32) -> Result<Vec<Member>, c_int> {
-    let mut list: *mut KeyringLink = ptr::null_mut();
-    let mut n = 0;
-
-    // SAFETY: room for the list and its count.
-    let ret = unsafe { keyring_links(ring, &mut list, &mut n) };
-    if ret != 0 {
-        return Err(ret);
-    }
-    // SAFETY: the n links the list holds.
-    let all = unsafe { ffi::slice(list, n) };
-    let out = all
-        .iter()
+    Ok(keyring::links(ring)?
+        .into_iter()
         .map(|l| Member {
-            serial: l.serial(),
-            err: l.err(),
-            ty: l.ty().to_vec(),
-            description: l.description().to_vec(),
+            serial: l.serial,
+            err: l.err,
+            ty: l.ty,
+            description: l.description,
         })
-        .collect();
-    // SAFETY: the list keyring_links() allocated.
-    unsafe { xfree(list.cast(), n * size_of::<KeyringLink>()) };
-    Ok(out)
+        .collect())
 }
 
 fn list_keyring(out: &mut Out, ring: i32, a: &Anchor, id_rc: c_int) -> c_int {
@@ -780,22 +764,18 @@ fn check_voucher_live(set: &TrustedSet, voucher: &[u8; 32]) -> c_int {
     if identity::read(&mut id) != 0 || id.keyring_type != SIG_KEYRING_BPF {
         return 0;
     }
-    let ring = keyring_bpf_serial();
+    let ring = keyring::bpf_serial();
     if ring <= 0 {
         return 0;
     }
     let Some(c) = members(set).iter().find(|c| c.fingerprint() == voucher) else {
         return -ENOKEY;
     };
-    let mut der: *const u8 = ptr::null();
-    let mut len = 0;
-    // SAFETY: the member and room for its bytes.
-    let ret = unsafe { keys_cert_der(c, &mut der, &mut len) };
-    if ret != 0 {
-        return ret;
-    }
-    // SAFETY: the member's kept bytes.
-    let ret = unsafe { keyring_holds_cert(ring, der, len) };
+    let der = match crate::util::keys::cert_der(c) {
+        Ok(der) => der,
+        Err(ret) => return ret,
+    };
+    let ret = keyring::holds_cert(ring, der);
     if ret < 0 {
         return ret;
     }
@@ -1163,18 +1143,17 @@ fn purge_signed_by(der: &[u8]) -> c_int {
 /// Revokes the certificate `der` of a config image: out of the .bpf
 /// keyring, measured unless at boot, and what it signed purged.
 pub(crate) fn revoke_image(der: &[u8], boot: bool) -> c_int {
-    let ring = keyring_bpf_serial();
+    let ring = keyring::bpf_serial();
 
     if ring < 0 {
         return ring;
     }
-    // SAFETY: the certificate's bytes.
-    let key = unsafe { keyring_find_cert(ring, der.as_ptr(), der.len()) };
+    let key = keyring::find_cert(ring, der);
     if key != -ENOKEY && key < 0 {
         return key;
     }
     if key >= 0 {
-        let ret = keyring_unlink_key(ring, key);
+        let ret = keyring::unlink_key(ring, key);
         if ret != 0 {
             return ret;
         }
@@ -1334,13 +1313,13 @@ fn keys_show(args: &[*const c_char]) -> c_int {
     let anchors = [
         Anchor {
             label: b".bpf",
-            serial: keyring_bpf_serial,
+            serial: keyring::bpf_serial,
             frozen: id.keyring_serial,
             keys: &id.key_serials[..n_keys],
         },
         Anchor {
             label: b".dm-verity",
-            serial: keyring_dm_verity_serial,
+            serial: keyring::dm_verity_serial,
             frozen: id.dm_verity_ring,
             keys: &id.dm_verity_keys[..n_dm_keys],
         },

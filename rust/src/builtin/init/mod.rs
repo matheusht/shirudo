@@ -36,7 +36,7 @@ use crate::util::image_runtime;
 use crate::util::initrd;
 use crate::util::io::bpffs_mounted_at;
 use crate::util::json::JsonEmit;
-use crate::util::keyring::{self, keyring_bpf_serial};
+use crate::util::keyring;
 use crate::util::keys::{self, TrustedSet};
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::preflight::{PreflightResult, preflight_run};
@@ -231,7 +231,7 @@ fn print_preflight_json(r: &PreflightResult) -> c_int {
 /// Enrols the trusted certificates in the bpf keyring and seals it; on
 /// a re-run, checks that the anchor init froze is still this keyring.
 fn init_keyring(init: &mut Init) -> c_int {
-    let ring = keyring_bpf_serial();
+    let ring = keyring::bpf_serial();
     let mut id = Identity::zeroed();
 
     if ring <= 0 {

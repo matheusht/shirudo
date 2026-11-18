@@ -34,7 +34,7 @@ use crate::util::image_guards::{
 };
 use crate::util::image_runtime;
 use crate::util::io::kernel_dev;
-use crate::util::keyring::{self, keyring_bpf_serial, keyring_dm_verity_serial};
+use crate::util::keyring;
 use crate::util::lskel::{Failed, Prog, Skeleton, pin};
 use crate::util::nv_writer::nv_writer_create;
 use crate::util::tpm::{Tpm, tpm_close, tpm_ek_name, tpm_open};
@@ -144,7 +144,7 @@ fn asymmetric_keys(ring: i32) -> Result<(Vec<i32>, bool), c_int> {
 /// Boot validation checked the complete config verification key set;
 /// init freezes the keys the sealed keyring holds.
 fn dm_verity_anchor(id: &mut Identity) -> c_int {
-    let ring = keyring_dm_verity_serial();
+    let ring = keyring::dm_verity_serial();
 
     if ring <= 0 {
         let err = if ring != 0 { ring } else { -ENOKEY };
@@ -356,7 +356,7 @@ impl Attached {
         // this kind, is admitted from userspace. The keyring is enrolled
         // and sealed by now, so this resolves the serial the kernel
         // records for a load that names it as keyring_id.
-        let keyring = keyring_bpf_serial();
+        let keyring = keyring::bpf_serial();
         id.keyring_type = SIG_KEYRING_BPF;
         if keyring <= 0 {
             let err = if keyring != 0 { keyring } else { -ENOKEY };

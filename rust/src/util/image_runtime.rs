@@ -62,10 +62,7 @@ use crate::util::image_guards::image_guards_ready;
 use crate::util::image_keys::{self, RUNTIME_CERT_PATH};
 use crate::util::io::{kernel_dev, read_fd};
 use crate::util::json::JsonEmit;
-use crate::util::keyring::{
-    KeyringCert, keyring_dm_verity_add_cert, keyring_dm_verity_seal, keyring_dm_verity_serial,
-    keyring_holds_exactly,
-};
+use crate::util::keyring;
 use crate::util::keys::{KEYS_MAX, TrustedCert, TrustedSet, keys_read_der_fd, members};
 use crate::util::seal::seal_label;
 use crate::util::tpm::{Tpm, tpm_boot_identity, tpm_close, tpm_open, tpm_pcr_extend, tpm_pcr_read};
@@ -1030,26 +1027,22 @@ fn boot_keys_error(step: &str, ret: c_int) -> c_int {
 /// roots, so whether init sealed it now or earlier this boot, it must
 /// hold exactly the runtime image's set.
 fn enroll_config_keys(s: &State) -> c_int {
-    let ring = keyring_dm_verity_serial();
+    let ring = keyring::dm_verity_serial();
     if ring < 0 {
         return boot_keys_error("lookup dm-verity keyring", ring);
     }
     let mut certs = Vec::with_capacity(s.certificates.len());
     let mut added = false;
     for c in &s.certificates {
-        certs.push(KeyringCert {
-            der: c.der.as_ptr(),
-            len: c.der.len(),
-        });
-        // SAFETY: the certificate's bytes.
-        let key = unsafe { keyring_dm_verity_add_cert(c.der.as_ptr(), c.der.len()) };
+        certs.push(&c.der[..]);
+        let key = keyring::dm_verity_add_cert(&c.der);
         if key < 0 && key != -EPERM && key != -EACCES {
             return boot_keys_error("add config verification certificate", key);
         }
         added |= key >= 0;
     }
     if added {
-        let ret = keyring_dm_verity_seal();
+        let ret = keyring::dm_verity_seal();
         if ret == -EEXIST {
             return boot_keys_error(
                 "seal dm-verity keyring restricted by another task (tampered)",
@@ -1060,16 +1053,13 @@ fn enroll_config_keys(s: &State) -> c_int {
             return boot_keys_error("seal dm-verity keyring", ret);
         }
     }
-    // SAFETY: the keyring and no certificates.
-    if !added && unsafe { keyring_holds_exactly(ring, ptr::null(), 0) } == 1 {
+    if !added && keyring::holds_exactly(ring, &[]) == 1 {
         return boot_keys_error(
             "dm-verity keyring sealed empty at boot; boot with dm_verity.keyring_unsealed=1",
             -ENOKEY,
         );
     }
-    // SAFETY: the keyring and the certificates' views, whose bytes the
-    // state holds.
-    let ret = unsafe { keyring_holds_exactly(ring, certs.as_ptr(), certs.len()) };
+    let ret = keyring::holds_exactly(ring, &certs);
     if ret != 1 {
         return boot_keys_error(
             "check dm-verity verification keys",
