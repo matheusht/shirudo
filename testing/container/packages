@@ -3,6 +3,7 @@ autoconf-archive
 automake
 build-essential
 ca-certificates
+cargo
 cryptsetup-bin
 curl
 dpkg-dev
@@ -26,6 +27,7 @@ perl
 pkg-config
 python3
 rsync
+rustc
 swtpm
 xz-utils
 zlib1g-dev
