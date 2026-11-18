@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The JSON emitter and schema parser behind `util/json.h`; the parser
+//! The JSON emitter and schema parser; the parser
 //! dispatches declared keys and parses and discards the rest.
 
 mod emit;

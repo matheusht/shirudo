@@ -11,8 +11,7 @@
 A ``.upatch`` file is the signed container that :doc:`/reference/cli/build`
 writes and that :doc:`/reference/cli/upatch-load` and
 :doc:`/reference/cli/upatch-unload` consume. One layout serves both a load
-artifact and an unload directive. The structures are defined in
-:src:`include/shirudo/upatch.h`. The writer is
+artifact and an unload directive, which this page defines. The writer is
 :src:`rust/src/shirudo_build/package/mod.rs` and the reader is
 :src:`rust/src/util/upatch.rs`.
 

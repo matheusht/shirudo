@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The pre-flight gate of `util/preflight.h`: whether the node has what
+//! The pre-flight gate: whether the node has what
 //! shirudo needs before init touches any kernel state, each check with
 //! why it failed.
 

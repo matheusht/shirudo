@@ -54,10 +54,10 @@ test_expect_success 'an invalid later verification key rejects the whole bootstr
 '
 
 test_expect_success 'config verification keys have a bounded count' '
-	python3 - ../util/keys.h "$WORK/max.conf" "$WORK/too-many.conf" <<"PYTEST" &&
+	python3 - ../rust/src/util/keys.rs "$WORK/max.conf" "$WORK/too-many.conf" <<"PYTEST" &&
 import re, sys
 from pathlib import Path
-limit = int(re.search(r"#define KEYS_MAX\s+(\d+)", Path(sys.argv[1]).read_text())[1])
+limit = int(re.search(r"const KEYS_MAX: usize = (\d+);", Path(sys.argv[1]).read_text())[1])
 lines = [f"config.verification_key = /run/shirudo/runtime/keys/config-{i}.der\n"
          for i in range(limit + 1)]
 Path(sys.argv[2]).write_text("".join(lines[:-1]))

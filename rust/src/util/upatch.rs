@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The `.upatch` container parser behind `util/upatch.h`: the header and
+//! The `.upatch` container parser: the header and
 //! the bounds of its sections, the signed sections behind the loader
 //! data, the programs' metadata, and the names of upatches.
 
@@ -83,7 +83,7 @@ pub(crate) const ROLE_ATTACH: u32 = 0;
 pub(crate) const ROLE_SERIALIZER: u32 = 1;
 pub(crate) const ROLE_TEST_RUN: u32 = 2;
 
-/// The sizes of the records of `include/shirudo/upatch.h`, which the
+/// The sizes of the records of the .upatch format, which the
 /// parser reads at their offsets, little-endian.
 pub(crate) const POLICY_LABEL_HEADER: usize = 20;
 pub(crate) const POLICY_LABEL_ENTRY: usize = 8 + POLICY_NAME_MAX + POLICY_PATH_MAX;

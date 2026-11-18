@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The one parser of command line options behind `util/options.h`: every
+//! The one parser of command line options: every
 //! command's options come from a table indexed by its own enum of them,
 //! and the parser holds each to the same rules.
 

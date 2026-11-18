@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The file helpers behind `util/io.h`: whole writes and reads, the log
+//! The file helpers: whole writes and reads, the log
 //! records an append keeps whole, opens beneath a directory, text lines,
 //! and whether a file may steer what shirudo trusts.
 

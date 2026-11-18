@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The local security conditions `shirudo status` shows, behind
-//! `util/conditions.h`: one condition for each guarantee, and the
+//! The local security conditions `shirudo status` shows:
+//! one condition for each guarantee, and the
 //! verdict and reason that sum them up.
 
 use core::ffi::{CStr, c_char, c_int};

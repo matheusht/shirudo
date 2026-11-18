@@ -57,8 +57,8 @@ use crate::util::upatch::{
 use crate::util::upatch_resolve::XATTR_PAYLOAD;
 use crate::util::upatch_verify::archive_verify;
 
-/// LSM_LINK_PIN and XATTR_PAYLOAD of util/paths.h, and UPATCH_FILE_MAX of
-/// util/upatch.h.
+/// LSM_LINK_PIN and XATTR_PAYLOAD of util/paths.h, and the most a
+/// .upatch file holds.
 const UPATCHES_DIR_C: &CStr = c"/var/lib/shirudo/upatches";
 pub(super) const LSM_LINK_PIN: &CStr = c"/run/shirudo/bpffs/lsm_link";
 const UPATCH_FILE_MAX: usize = 16 * 1024 * 1024;

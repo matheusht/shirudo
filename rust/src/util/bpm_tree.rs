@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The signed upatch tree's publications, behind `util/bpm_tree.h`: the
+//! The signed upatch tree's publications: the
 //! operations a publication carries, the canonical form and operation
 //! digests that publisher and target share, and what a sync checks
 //! before it applies anything.

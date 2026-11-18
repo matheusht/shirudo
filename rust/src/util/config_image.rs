@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The config image behind `util/config_image.h`: a data file, its
+//! The config image: a data file, its
 //! dm-verity hash tree behind the veritysetup superblock, its root hash,
 //! and the signature of the root, opened and checked against each other.
 

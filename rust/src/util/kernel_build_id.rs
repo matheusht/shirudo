@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The running kernel's build ID behind `util/kernel_build_id.h`: the
+//! The running kernel's build ID: the
 //! GNU build ID note of /sys/kernel/notes, in hex.
 
 use core::ffi::{c_char, c_int};

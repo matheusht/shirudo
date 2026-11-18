@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The shirudo.quote of a keepalive, behind `util/keepalive_quote.h`: the
+//! The shirudo.quote of a keepalive: the
 //! attestation key's quote of the SHA-256 of the body, as the attest, sig
 //! and ak fields in base64.
 

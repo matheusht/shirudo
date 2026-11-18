@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The hardening of the process at its start, behind `util/harden.h`:
+//! The hardening of the process at its start:
 //! its standard descriptors, and what it allows of itself.
 
 use core::ffi::{CStr, c_int, c_ulong};

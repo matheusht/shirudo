@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The measured set behind `util/measured.h`: the upatches the eventlog
+//! The measured set: the upatches the eventlog
 //! records as loaded, each with the payload of its load, and the pins
 //! and archives that set does not account for.
 
@@ -45,9 +45,9 @@ pub struct MeasuredSet {
     n: usize,
 }
 
-/// What util/measured.h's pin walk calls with each upatch it finds.
+/// What the pin walk calls with each upatch it finds.
 type PinFn = unsafe extern "C" fn(name: *const c_char, ctx: *mut c_void) -> c_int;
-/// What util/measured.h's archive walk calls with each upatch it finds.
+/// What the archive walk calls with each upatch it finds.
 type ArchiveFn =
     unsafe extern "C" fn(name: *const c_char, path: *const c_char, ctx: *mut c_void) -> c_int;
 

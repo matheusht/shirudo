@@ -26,7 +26,7 @@ use crate::util::help::{
 use crate::util::json::JsonEmit;
 use crate::util::map_read;
 
-/// JSON_MAX_BYTES of util/json.h: the most a document grows to.
+/// The most a JSON document grows to.
 const JSON_MAX: usize = 8 * 1024 * 1024;
 
 pub(crate) use ops::{install, purge, remove};

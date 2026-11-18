@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The libtss2 client behind `util/tpm.h` and `util/tpm_internal.h`: the
+//! The libtss2 client: the
 //! measurement register and its NV writer key, PCRs, the endorsement and
 //! attestation keys, quotes, certifications and credentials. Every
 //! command goes through a salted HMAC session bound to the endorsement
@@ -32,8 +32,7 @@ const EK_CERT_NV_RSA: u32 = 0x01C0_0002;
 const EK_CERT_NV_ECC: u32 = 0x01C0_000A;
 const NV_READ_CHUNK: usize = 512;
 
-/// TPM_DIGEST_LEN, TPM_NAME_LEN and the sizes of util/tpm.h and
-/// util/tpm_wire.h.
+/// The sizes of digests, names and the TPM's other records.
 const DIGEST_LEN: usize = 32;
 const NAME_LEN: usize = 34;
 const NV_RSA_BYTES: usize = 384;
@@ -42,11 +41,11 @@ pub(crate) const PUBLIC_MAX: usize = 512;
 pub(crate) const ATTEST_MAX: usize = 1024;
 pub(crate) const SIGNATURE_MAX: usize = 160;
 const PCR_SELECT_LEN: u8 = 3;
-/// TPM_TCTI_MAX of util/config.h.
+/// The longest TCTI a config names.
 const TCTI_MAX: usize = 256;
 
 /// The measurement register's NV attributes, the NV writer's object
-/// attributes and the TCG endorsement key's, of util/tpm_wire.h.
+/// attributes and the TCG endorsement key's.
 pub(crate) const REGISTER_ATTRS: u32 = 0x0e06_0048;
 const WRITER_ATTRS: u32 = 0x0004_0072;
 pub(crate) const EK_ATTRS: u32 = 0x0003_00b2;
@@ -78,8 +77,7 @@ impl TpmKey {
     }
 }
 
-/// `struct tpm`, as util/tpm_internal.h lays it out for the tests that
-/// look inside.
+/// A TPM client, laid out for the tests that look inside.
 #[repr(C)]
 pub struct Tpm {
     pub(crate) session_key: TpmKey,

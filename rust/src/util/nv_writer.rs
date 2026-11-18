@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The NV writer key behind `util/nv_writer.h`: the TPM key that alone
+//! The NV writer key: the TPM key that alone
 //! may extend the measurement register, created from a fresh seed at
 //! init, and read back from the identity map after.
 

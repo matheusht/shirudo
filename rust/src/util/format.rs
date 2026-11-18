@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The human-readable formats behind `util/format.h`.
+//! The human-readable formats.
 
 use core::ffi::{CStr, c_int};
 

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The map reading of `util/upatch_maps.h`, which hands an export what
+//! The map reading, which hands an export what
 //! a map holds.
 
 use core::ffi::{c_char, c_void};

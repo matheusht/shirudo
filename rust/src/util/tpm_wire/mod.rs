@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! TPM 2.0 wire-format helpers that need no TPM, behind
-//! `util/tpm_wire.h`: policy digests, NV and object names, the key
+//! TPM 2.0 wire-format helpers that need no TPM:
+//! policy digests, NV and object names, the key
 //! derivations and credential protection, and the attestation
 //! structures a verifier parses from evidence.
 

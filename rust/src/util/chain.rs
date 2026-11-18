@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The measurement register behind `util/chain.h`: an NV extend index
+//! The measurement register: an NV extend index
 //! bound to this boot and anchored in a PCR, after systemd's NvPCR, and
 //! the digests every measuring path shares.
 

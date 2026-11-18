@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The build identity of `util/version.h`, which the generated
+//! The build identity, which the generated
 //! build/main/version_id.rs defines, an object of its own: each the
 //! first byte of a C string.
 

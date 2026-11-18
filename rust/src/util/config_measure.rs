@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The measurement of a config root behind `util/config_measure.h`: the
+//! The measurement of a config root: the
 //! PCRs a config may be measured into, and the event of a root.
 
 use core::ffi::c_int;

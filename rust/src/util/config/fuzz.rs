@@ -9,7 +9,7 @@ use crate::fuzzing::{fuzz_target, input_file};
 use crate::util::bpm_source_config::{parse_source_line, parse_tree_line};
 
 const PATH_MAX: usize = 4096;
-/// BPM_MAX_ENDPOINT, BPM_MAX_KEY and BPM_MAX_DIGEST of util/bpm_oci.h.
+/// The rooms of an OCI client's endpoint, key and digest.
 const MAX_ENDPOINT: usize = 512;
 const MAX_KEY: usize = 256;
 const MAX_DIGEST: usize = 128;

@@ -29,7 +29,7 @@ use crate::util::bpf_sys::{
     prog_test_run,
 };
 
-/// VERIFIER_LOG_MAX of util/report.h: the room for the verifier's log.
+/// The room for the verifier's log.
 pub(crate) const VERIFIER_LOG_MAX: usize = 16 * 1024 * 1024;
 
 pub(crate) const MAP_TYPE_ARRAY: u32 = 2;

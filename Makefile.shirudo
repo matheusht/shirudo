@@ -6,7 +6,7 @@
 # Five strict build phases:
 #   1. vendored libbpf (vendor/libbpf) and the vmlinux.h generator
 #   2. generated headers   (vendor/linux/vmlinux.h)
-#   3. compiled objects    (util/*.o, build/main/*.o, bpf/*.bpf.o)
+#   3. compiled objects    (build/main/*.o, bpf/*.bpf.o)
 #   4. embedded BPF        (bpf/*.lskel, bpf/*.skel.rs, and the unload
 #                           template in Rust)
 #   5. link                (shirudo, shirudo-target, shirudo-build)
@@ -237,20 +237,6 @@ CLANG_BPF := $(CLANG) -target bpf -mcpu=v4 -fno-jump-tables -O2 -g -Wall -Wextra
 
 # ----- source manifests -------------------------------------------
 
-UTIL_SRCS := \
-    util/sysinfo_image.c \
-    util/io_trusted.c \
-    util/java_agent.c \
-    util/paths.c \
-    util/kernel_prereq.c \
-    util/log.c \
-    util/string.c \
-    util/bpm_tree_outcomes.c \
-    util/bpm_tree_sync_compat.c \
-    util/kconfig.c \
-    util/malloc.c \
-    util/upatch_verify.c
-
 # BPF-side libbpf headers, used straight from vendor/libbpf (the BPF
 # compile rule adds it to the include path so <bpf/...> resolves) and
 # installed for shirudo build on operator hosts.
@@ -272,10 +258,6 @@ BPF_SRCS := \
     bpf/seal.c \
     bpf/unload.c
 
-# shirudo-build has a Rust main() and Rust commands. These C helpers
-# remain for current main behavior not yet ported.
-BUILD_SRCS := tools/shirudo-build/jar.c util/elf_target_func.c
-
 # shirudo-quote-check is a backend's program: it checks keepalive quotes
 # with the TPM parsers of the Rust library, rust/src/quote_check.rs, from
 # a main() of its own, and is never linked into shirudo.
@@ -286,7 +268,6 @@ BPF_OBJS     := $(BPF_SRCS:.c=.bpf.o)
 BPF_LSKELS   := bpf/bpf2.lskel bpf/seal.lskel
 BPF_SKEL_RS  := $(BPF_LSKELS:.lskel=.skel.rs)
 BPF_EMBEDDED := $(BPF_LSKELS) $(BPF_SKEL_RS) bpf/unload.bpf.o
-BUILD_OBJS   := $(foreach s,$(BUILD_SRCS),$(call obj,$(s:.c=.o)))
 
 # main() of each binary and the build identity: objects rustc builds
 # with no std, apart from the Rust library, which the unit, fuzz and
@@ -298,13 +279,6 @@ BUILD_MAIN_OBJ := $(MAIN_DIR)/shirudo-build.o
 QUOTE_CHECK_MAIN_OBJ := $(MAIN_DIR)/shirudo-quote-check.o
 VERSION_RS     := $(MAIN_DIR)/version_id.rs
 VERSION_OBJ    := $(MAIN_DIR)/version_id.o
-
-# Header-dependency tracking (-MMD -MP writes a .d per .o). Without this,
-# changing a header would leave dependent .o files stale -- e.g. a struct
-# whose size grew in a header but whose .c was not re-touched, producing
-# an ABI mismatch and memory corruption at runtime.
-DEP_OBJS := $(UTIL_OBJS) $(BUILD_OBJS)
-DEPS     := $(DEP_OBJS:.o=.d)
 
 # ----- top-level goals --------------------------------------------
 
@@ -515,7 +489,7 @@ $(VERSION_RS):
 	    echo "// Copyright (c) 2026 Authors of shirudo"; \
 	    echo "// AUTO-GENERATED. Do not edit. Do not commit."; \
 	    echo ""; \
-	    echo "//! The build identity of util/version.h, each a C string."; \
+	    echo "//! The build identity, each a C string."; \
 	    echo ""; \
 	    echo "#![no_std]"; \
 	    echo "#![allow(non_upper_case_globals)]"; \
@@ -540,33 +514,28 @@ $(MAIN_OBJ) $(BUILD_MAIN_OBJ) $(QUOTE_CHECK_MAIN_OBJ) $(VERSION_OBJ):
 
 # ----- phase 5: link ---------------------------------------------
 
-shirudo: $(MAIN_OBJ)  $(UTIL_OBJS) $(VERSION_OBJ) $(LIBBPF_A) \
+shirudo: $(MAIN_OBJ) $(VERSION_OBJ) $(LIBBPF_A) \
          $(RUST_LIB)
 	@printf '  LD      $@\n'
 	$(Q)$(LD) $(CFLAGS) $(HARDEN_LDFLAGS) $(LDFLAGS) $(RPATH_LDFLAGS) -o $@ \
-	    $(MAIN_OBJ)  $(UTIL_OBJS) $(VERSION_OBJ) \
+	    $(MAIN_OBJ) $(VERSION_OBJ) \
 	    $(RUST_LIB) $(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_LDLIBS)
 
-shirudo-target: $(MAIN_OBJ)  $(UTIL_OBJS) $(VERSION_OBJ) $(LIBBPF_A) \
+shirudo-target: $(MAIN_OBJ) $(VERSION_OBJ) $(LIBBPF_A) \
                 $(RUST_LIB) \
                 Makefile.shirudo $(CONFIG_MK_DEP) .github/scripts/check-static-target.sh
 	@printf '  LD      $@ (static PIE)\n'
 	$(Q)$(LD) $(CFLAGS) $(TARGET_TLS_CFLAGS) \
 	    $(HARDEN_STATIC_PIE_LDFLAGS) $(LDFLAGS) \
 	    -static-pie -static-libgcc -o $@ \
-	    $(MAIN_OBJ)  $(UTIL_OBJS) $(VERSION_OBJ) \
+	    $(MAIN_OBJ) $(VERSION_OBJ) \
 	    $(RUST_LIB) $(STATIC_LIBS) $(TARGET_TLS_STATIC_LINK_LIBS) \
 	    $(TARGET_STATIC_RUNTIME_LINK_LIBS) $(RUST_LDLIBS)
 	$(Q)sh .github/scripts/check-static-target.sh $@ || \
 	    { rm -f $@; exit 1; }
 
 # shirudo-build uses a Rust main() and embeds its BPF template in Rust.
-# Remaining C helpers support operator commands on current main.
-tools/shirudo-build/shirudo-build: $(BUILD_MAIN_OBJ) $(BUILD_OBJS) \
-                                   util/log.o \
-                                   util/malloc.o util/paths.o \
-                                   util/string.o util/bpm_tree_sync_compat.o \
-                                   $(VERSION_OBJ) \
+tools/shirudo-build/shirudo-build: $(BUILD_MAIN_OBJ) $(VERSION_OBJ) \
                                    $(LIBBPF_A) $(RUST_LIB)
 	@printf '  LD      $@\n'
 	$(Q)$(LD) $(CFLAGS) $(HARDEN_LDFLAGS) $(LDFLAGS) $(RPATH_LDFLAGS) -o $@ $^ \
@@ -783,7 +752,7 @@ else
 VERITY_TEST_LIBS := $(DYNAMIC_LIBS)
 endif
 
-build/verity-tests/shirudo-image-fault: $(MAIN_OBJ) $(UTIL_OBJS) $(VERSION_OBJ) \
+build/verity-tests/shirudo-image-fault: $(MAIN_OBJ) $(VERSION_OBJ) \
 		$(LIBBPF_A) $(RUST_HELPER_LIB)
 	@printf '  LD      $@\n'
 	$(Q)mkdir -p $(dir $@)
@@ -857,14 +826,6 @@ testing/helper/test-harden: $(HELPER_MAIN_DIR)/test-harden.o \
 
 # The measurement register and TPM client live in Rust. Their symbols
 # must resolve even for a helper that never extends.
-# util/malloc.o provides x*/libc_free used by the Rust library.
-REGISTER_OBJS := \
-                  \
-                  util/string.o \
-                   \
-                 util/log.o util/malloc.o \
-                  \
-                 $(VERSION_OBJ) $(LIBBPF_A) $(RUST_LIB)
 REGISTER_LIBS := $(LIBCRYPTO_LIBS) $(LIBSSL_LIBS) $(TSS2_LIBS) \
                  $(LIBBPF_A) $(LIBELF_LIBS) $(ZLIB_LIBS) $(RUST_TEST_LDLIBS)
 
@@ -1116,17 +1077,11 @@ UNIT_LIB   := build/unit/libshirudo.a
 UNIT_RUST  := build/unit/shirudo-unit
 RUST_TEST_TARGET := build/rust-test
 
-UNIT_UTIL_OBJS := $(UTIL_OBJS)
-
-$(UNIT_LIB): $(UNIT_UTIL_OBJS) $(VERSION_OBJ)
+$(UNIT_LIB): $(VERSION_OBJ)
 	@printf '  AR      $@\n'
 	$(Q)mkdir -p $(dir $@)
 	$(Q)rm -f $@
 	$(Q)$(AR) rcs $@ $^
-
-# The same for the builder's jar check.
-build/unit/jar: UNIT_OBJS := tools/shirudo-build/jar.o
-build/unit/jar: tools/shirudo-build/jar.o
 
 UNIT_COVERAGE_CFLAGS = $(if $(filter --coverage,$(CFLAGS)),-DUNIT_GCOV)
 
@@ -1135,7 +1090,7 @@ build/unit/%: testing/unit/%.c testing/unit/unit.c testing/unit/unit.h \
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) $(UNIT_COVERAGE_CFLAGS) $(LDFLAGS) -Itesting/unit \
 		-o $@ $< testing/unit/unit.c \
-		$(UNIT_OBJS) -Wl,--start-group $(UNIT_LIB) $(RUST_LIB) -Wl,--end-group \
+		-Wl,--start-group $(UNIT_LIB) $(RUST_LIB) -Wl,--end-group \
 		$(LIBBPF_A) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
 # cargo names the binary by a hash, which its JSON says.
@@ -1167,7 +1122,7 @@ unit-tests: $(UNIT_TESTS) $(if $(SANITIZE_MEMORY),,$(UNIT_RUST))
 # compiler would. sparse predefines no __FLT_EVAL_METHOD__, which
 # glibc's <math.h> tests, so -Wundef is the compiler's to check.
 SPARSE_TYPES_H ?= /usr/include/linux/types.h
-SPARSE_SRCS    := $(UTIL_SRCS) $(BUILD_SRCS)
+SPARSE_SRCS    :=
 
 .PHONY: sparse
 sparse:
@@ -1222,82 +1177,16 @@ $(RUST_FUZZ_LIB): $(RUST_SRCS) $(BPF_EMBEDDED)
 FUZZ_LIBS := $(RUST_FUZZ_LIB) $(LIBCRYPTO_LIBS) $(LIBSSL_LIBS) \
              $(LIBCURL_LIBS) $(ZLIB_LIBS) $(RUST_TEST_LDLIBS) \
              -Wl,-z,start-stop-gc
-FUZZ_BASE := util/string.c  util/malloc.c testing/fuzz/log.c
-FUZZ_SEAL :=
-FUZZ_OCI := $(FUZZ_SEAL)
-FUZZ_PACKAGE :=   \
-                 $(FUZZ_OCI)
-
+# One C fuzz target remains for the TPM command parser.
 FUZZ_TARGETS := $(patsubst testing/fuzz/%.c,$(FUZZ_OUT)/%, \
                 $(wildcard testing/fuzz/fuzz-*.c))
-
-$(FUZZ_OUT)/fuzz-tpm-command: testing/fuzz/fuzz-tpm-command.c $(FUZZ_BASE) \
+$(FUZZ_OUT)/fuzz-tpm-command: testing/fuzz/fuzz-tpm-command.c \
                                include/shirudo/tpm_command.h
 
-$(FUZZ_OUT)/fuzz-rodata: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
-$(FUZZ_OUT)/fuzz-rodata: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS) $(ZLIB_LIBS)
-$(FUZZ_OUT)/fuzz-attest: FUZZ_CFLAGS += $(TSS2_CFLAGS) $(LIBELF_CFLAGS)
-$(FUZZ_OUT)/fuzz-attest: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) $(LIBELF_LIBS) $(ZLIB_LIBS)
-$(FUZZ_OUT)/fuzz-serializer: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
-$(FUZZ_OUT)/fuzz-serializer: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS) \
-	-Wl,--wrap=syscall
-$(FUZZ_OUT)/fuzz-decoder: FUZZ_CFLAGS += $(LUAJIT_CFLAGS) -DHAVE_LUAJIT \
-	-DFUZZ_SOURCE_TREE='"$(CURDIR)"'
+# These Rust fuzz entry points need the corresponding host libraries.
+$(FUZZ_OUT)/fuzz-attest: FUZZ_LIBS += $(TSS2_LIBS)
 $(FUZZ_OUT)/fuzz-decoder: FUZZ_LIBS += $(LUAJIT_LIBS)
-FUZZ_TREE_STATE :=  \
-                     $(FUZZ_OCI) \
-                   util/kconfig.c
-
-$(FUZZ_OUT)/fuzz-upatch-info: testing/fuzz/fuzz-upatch-info.c $(FUZZ_BASE) \
-                              testing/fuzz/output.c  \
-                              builtin.h \
-                                                         \
-                               util/java_agent.c  \
-                              \
-                              util/paths.c \
-                               \
-                               \
-                                \
-                                \
-                               \
-                              util/upatch_verify.c $(VERSION_OBJ) \
-                               $(FUZZ_SEAL) $(LIBBPF_A)
-# Rust defines upatch_decode_map_signal(), which
-#  calls, with LuaJIT alone; upatch info runs no Lua.
-$(FUZZ_OUT)/fuzz-upatch-info: FUZZ_CFLAGS += $(TSS2_CFLAGS) $(LIBELF_CFLAGS) \
-                                             $(LUAJIT_CFLAGS) -DHAVE_LUAJIT
-$(FUZZ_OUT)/fuzz-upatch-info: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) \
-                                           $(LIBELF_LIBS) $(LUAJIT_LIBS)
-$(FUZZ_OUT)/fuzz-bpm-info: testing/fuzz/fuzz-bpm-info.c $(FUZZ_BASE) \
-                           testing/fuzz/output.c  builtin.h \
-                           $(FUZZ_PACKAGE) \
-                           util/kconfig.c \
-                                                     util/paths.c \
-                            \
-                            \
-                            $(LIBBPF_A)
-$(FUZZ_OUT)/fuzz-bpm-info: FUZZ_CFLAGS += $(TSS2_CFLAGS) $(LIBELF_CFLAGS)
-$(FUZZ_OUT)/fuzz-bpm-info: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) $(LIBELF_LIBS)
-$(FUZZ_OUT)/fuzz-attest-report: testing/fuzz/fuzz-attest-report.c \
-                               $(FUZZ_BASE) testing/fuzz/output.c \
-                                builtin.h  \
-                                \
-                               \
-                                \
-                               \
-                               util/paths.c  \
-                                $(VERSION_OBJ) $(FUZZ_SEAL) \
-                               $(LIBBPF_A)
-$(FUZZ_OUT)/fuzz-attest-report: FUZZ_CFLAGS += $(TSS2_CFLAGS) $(LIBELF_CFLAGS)
-$(FUZZ_OUT)/fuzz-attest-report: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) \
-                                             $(LIBELF_LIBS)
-
-# A target that reaches static parsers or printers includes their source,
-# which it then depends on without linking it a second time.
-$(FUZZ_OUT)/fuzz-serializer: FUZZ_INCLUDED :=
-$(FUZZ_OUT)/fuzz-upatch-info: FUZZ_INCLUDED :=
-$(FUZZ_OUT)/fuzz-bpm-info: FUZZ_INCLUDED :=
-$(FUZZ_OUT)/fuzz-attest-report: FUZZ_INCLUDED :=
+$(FUZZ_OUT)/fuzz-serializer: FUZZ_LIBS += -Wl,--wrap=syscall
 
 # A target compiles its sources and links in one step, so it depends on
 # every header a source may include, and on the compiler and flags it was
@@ -1356,13 +1245,13 @@ clean:
 	$(Q)rm -f shirudo shirudo-target tools/shirudo-build/shirudo-build \
 	          tools/quote-check/shirudo-quote-check $(TEST_HELPERS) \
 	          $(PARITY_ORACLES)
-	$(Q)rm -f $(MAIN_OBJ) $(UTIL_OBJS) $(BUILD_MAIN_OBJ) \
-	          $(BUILD_OBJS) $(QUOTE_CHECK_MAIN_OBJ) $(VERSION_OBJ) $(VERSION_RS)
+	$(Q)rm -f $(MAIN_OBJ) $(BUILD_MAIN_OBJ) \
+	          $(QUOTE_CHECK_MAIN_OBJ) $(VERSION_OBJ) $(VERSION_RS)
 	$(Q)rm -rf build/target build/unit build/fuzz-afl \
 	    build/fuzz-afl-cmplog $(RUST_TARGET) $(RUST_TEST_TARGET) \
 	    $(RUST_HELPER_TARGET) $(HELPER_MAIN_DIR) $(RUST_FUZZ_TARGET) \
 	    $(FUZZ_MAIN_DIR)
-	$(Q)rm -f $(DEPS) testing/helper/*.d
+	$(Q)rm -f testing/helper/*.d
 	$(Q)rm -f $(BPF_OBJS) $(BPF_LSKELS) $(BPF_SKEL_RS) $(BPF_LSKEL_TOOL) $(VMLINUX_H) \
 	    systemd/shirudo.service \
 	    systemd/shirudo-initrd.service \

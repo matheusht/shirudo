@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! Attestation behind `util/attest.h`: the evidence a target emits, the
+//! Attestation: the evidence a target emits, the
 //! challenge an operator makes for its keys, and the verification the
 //! operator runs against the evidence.
 
@@ -70,12 +70,12 @@ const RECORDS_MAX: usize = 4096;
 const EK_CERT_B64_MAX: usize = 4 * EK_CERT_MAX.div_ceil(3) + 1;
 /// restricted | sign | fixedTPM | fixedParent | sensitiveDataOrigin
 const AK_ATTRS_REQUIRED: u32 = 0x0005_0032;
-/// `ATTEST_NONCE_MAX` of util/attest.h.
+/// The longest nonce.
 pub(crate) const NONCE_MAX: usize = 64;
-/// `ATTEST_PCR_DEFAULT` of util/attest.h: the PCRs a quote covers when
+/// The PCRs a quote covers when
 /// the operator names none.
 pub(crate) const PCR_DEFAULT: u32 = 0x0000_FAFF;
-/// `ATTEST_CHALLENGE_MAX` of util/attest.h.
+/// The longest challenge.
 const CHALLENGE_MAX: usize = 16 * 1024;
 /// The label of a credential's seed, which the TPM takes with its NUL.
 const IDENTITY: &CStr = c"IDENTITY";

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The JSON report of `upatch load` and `unload --report`, behind
-//! `util/report.h`: what the operation did, the phase it stopped at and
+//! The JSON report of `upatch load` and `unload --report`:
+//! what the operation did, the phase it stopped at and
 //! why, and the verifier's log verbatim.
 
 use core::ffi::{CStr, c_char, c_int};

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The lines of a registry source and of an upatch tree config behind
-//! `util/bpm_source_config.h`: `key = value`, cut apart in place as the
+//! The lines of a registry source and of an upatch tree config:
+//! `key = value`, cut apart in place as the
 //! C cut them.
 
 use core::ffi::c_int;

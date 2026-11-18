@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The C interface of `util/tpm_wire.h`. A function copies its digests,
+//! The C-shaped interface the crate still calls. A function copies its digests,
 //! names and keys before it writes an output, so that an output may be
 //! one of them, as the policy digests' `prev` and `out` are; it zeroes
 //! a structure it parses into, padding included, as the C's memset()

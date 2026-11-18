@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The certificates a target trusts, behind `util/keys.h`: the primary
+//! The certificates a target trusts: the primary
 //! one, and each certificate under trusted/ that a member vouched for,
 //! less those revoked, read from a directory or through a config image's
 //! descriptor.

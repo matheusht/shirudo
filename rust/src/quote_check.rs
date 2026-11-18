@@ -6,9 +6,8 @@
 //! The checks are those a backend runs on a keepalive quote, without a
 //! TPM, a key list or state: the attestation key signed it as an
 //! endorsement primary, and it covers the SHA-256 of the body the record
-//! carries. main() is tools/quote-check/quote-check.rs; the rows'
-//! interface is tools/quote-check/row.h, which the unit suite and the
-//! fuzzer drive.
+//! carries. main() is tools/quote-check/quote-check.rs; the unit suite
+//! and the fuzzer drive the rows.
 
 use core::ffi::{c_char, c_int};
 use std::io::{BufRead, Write};
@@ -25,7 +24,7 @@ use crate::util::tpm_wire::{
     TpmAttest, TpmPublic, attest_parse, attest_signer, attest_verify, object_name, public_parse,
 };
 
-/// `BASE64_LEN()` of util/crypto.h: standard base64 of `n` bytes.
+/// The length of the standard base64 of `n` bytes.
 const fn base64_len(n: usize) -> usize {
     4 * n.div_ceil(3)
 }

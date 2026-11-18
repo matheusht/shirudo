@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The kernel keyrings through raw add_key(2) and keyctl(2), behind
-//! `util/keyring.h`, with no libkeyutils: what a keyring links and how
+//! The kernel keyrings through raw add_key(2) and keyctl(2),
+//! with no libkeyutils: what a keyring links and how
 //! the kernel describes it, whether it holds a certificate or exactly a
 //! set of them, and the bpf and dm-verity keyrings that anchor trust.
 

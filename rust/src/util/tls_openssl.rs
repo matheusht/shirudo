@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The TLS policy of `util/crypto.h` for every libcurl handle shirudo
+//! The TLS policy for every libcurl handle shirudo
 //! opens: TLS 1.3 alone, hybrid ML-KEM key exchange unless the
 //! configuration lets a host fall back to classical groups, and the CA
 //! a client trusts added to what libcurl does. The policy does not

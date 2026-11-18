@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The structured help of the commands, behind `util/help.h`: their
+//! The structured help of the commands: their
 //! usage and sections of items wrapped to the terminal, the subcommand
 //! list bash completion reads, and the did-you-mean of a mistyped
 //! subcommand. It prints through the C library's streams, as the C

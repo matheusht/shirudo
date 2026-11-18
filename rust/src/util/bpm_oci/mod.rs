@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The OCI distribution client behind `util/bpm_oci.h`: libcurl carries
+//! The OCI distribution client: libcurl carries
 //! HTTP and TLS, this module owns registry auth, blob and manifest
 //! transfer, and reference parsing.
 

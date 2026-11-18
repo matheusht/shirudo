@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The upatches-loaded table of `shirudo status` and `upatch list`,
-//! behind `util/upatch_table.h`: printed, or as JSON.
+//! The upatches-loaded table of `shirudo status` and `upatch list`:
+//! printed, or as JSON.
 
 use core::ffi::{c_char, c_long};
 

@@ -81,7 +81,7 @@ open Shirudo
 
 /-! ### Bytes, digests and tags -/
 
-/-- `UPATCH_NAME_MAX` of include/shirudo/upatch.h. -/
+/-- The room for a upatch's name, `NAME_MAX` of rust/src/util/upatch.rs. -/
 def nameMax : Nat := 256
 
 /-- The bytes of a C string literal before its NUL. -/

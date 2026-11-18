@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The config image cache behind `util/image_cache.h`: an image's four
+//! The config image cache: an image's four
 //! parts fetched over HTTPS or copied from a local path into a sealed
 //! staging directory, verified through a dm-verity mapping, and published
 //! under the image's root hash.
@@ -39,7 +39,7 @@ use crate::util::tls_openssl::tls_curl_policy;
 const IMAGE_CACHE_DIR: &CStr = c"/var/lib/shirudo/images";
 /// `XATTR_SEAL` of util/paths.h.
 pub(crate) const XATTR_SEAL: &CStr = c"security.bpf.shirudo";
-/// `SEAL_LABEL` of util/seal.h.
+/// The seal's label, which the image cache's files carry.
 pub(crate) const SEAL_LABEL: &CStr =
     c"94442b45cfcdc59aabc2a91364ed2ae129418e05a5c1985231b9c032e673f469";
 

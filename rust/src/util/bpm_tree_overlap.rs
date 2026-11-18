@@ -3,7 +3,7 @@
 
 //! Which operations of an upatch tree can meet on one node, from their
 //! selectors alone: the checks `bpm tree append` makes before it signs a
-//! publication, behind `util/bpm_tree_overlap.h`.
+//! publication.
 
 use crate::text::cstr;
 use crate::util::bpm_tree::{

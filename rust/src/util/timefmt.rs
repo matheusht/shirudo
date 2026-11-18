@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The time formats behind `util/timefmt.h`: a compact duration, and a
+//! The time formats: a compact duration, and a
 //! time as ISO-8601 UTC.
 
 use core::ffi::{c_int, c_long};
@@ -58,34 +58,6 @@ pub(crate) fn iso8601(t: i64, out: &mut [u8]) -> c_int {
         *first = 0;
     }
     -EINVAL
-}
-
-mod capi {
-    use core::ffi::{c_char, c_int, c_long};
-
-    use crate::ffi;
-
-    /// # Safety
-    ///
-    /// `buf` has room for `cap` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn format_duration(
-        seconds: c_long,
-        buf: *mut c_char,
-        cap: usize,
-    ) -> c_int {
-        // SAFETY: the caller passes the room.
-        super::format_duration(seconds, unsafe { ffi::bytes_mut(buf.cast(), cap) })
-    }
-
-    /// # Safety
-    ///
-    /// `out` has room for `cap` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn iso8601(t: i64, out: *mut c_char, cap: usize) -> c_int {
-        // SAFETY: the caller passes the room.
-        super::iso8601(t, unsafe { ffi::bytes_mut(out.cast(), cap) })
-    }
 }
 
 /// The seconds since the epoch now, as time() gives them.

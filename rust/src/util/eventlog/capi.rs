@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The C interface of `util/eventlog.h`.
+//! The C-shaped interface the crate still calls.
 
 use core::ffi::{CStr, c_char, c_int, c_void};
 

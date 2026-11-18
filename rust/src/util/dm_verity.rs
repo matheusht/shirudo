@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The dm-verity mappings behind `util/dm_verity.h`: a config image's data
+//! The dm-verity mappings: a config image's data
 //! and hash tree attached to read-only loop devices and mapped through
 //! device-mapper's verity target, and the mappings listed, inspected, read
 //! back whole, mounted and removed.

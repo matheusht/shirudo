@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Authors of shirudo
 
 //! The allocator of every Rust allocation, and of the xmalloc family
-//! `util/malloc.h` declares for C: memory comes zeroed from the C library
+//! the C-shaped code calls: memory comes zeroed from the C library
 //! and is scrubbed before it goes back.
 
 use core::alloc::{GlobalAlloc, Layout};
@@ -68,7 +68,7 @@ unsafe impl GlobalAlloc for Scrubbing {
 #[global_allocator]
 static ALLOCATOR: Scrubbing = Scrubbing;
 
-/// The allocator of `util/malloc.h`, for memory that C code frees or
+/// The xmalloc family's allocator, for memory that C code frees or
 /// hands over and that Rust code hands to C: zeroed when it is given out
 /// and scrubbed when it comes back, as every Rust allocation is.
 pub(crate) use capi::{

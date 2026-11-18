@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The kernel release match behind `util/kernel_release.h`.
+//! The kernel release match.
 
 use crate::text::at;
 

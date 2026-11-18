@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The commands of `builtin.h` that have moved to Rust, one module for
-//! each `builtin-<command>.c` they replace. The table in `commands`
+//! The commands, one module for each. The table in `commands`
 //! dispatches to them with the command line from the command's name on.
 
 use core::ffi::{c_char, c_int};

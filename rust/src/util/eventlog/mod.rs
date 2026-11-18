@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The eventlog behind `util/eventlog.h`: one JSON line per register
+//! The eventlog: one JSON line per register
 //! extension, appended only after the extend succeeded, so that a replay
 //! reproduces the live value. A walk reads the log and the record the
 //! initrd left pending, and hands each line on, terminated in place as

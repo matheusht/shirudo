@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Authors of shirudo
 
 //! The packages bpm installed, as /var/lib/shirudo/bpm/state.json records
-//! them, behind `util/bpm_state.h`.
+//! them.
 
 use core::ffi::{CStr, c_char, c_int, c_void};
 

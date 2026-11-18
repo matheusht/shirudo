@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The bootstrap file behind `util/image_bootstrap.h`: where the runtime
+//! The bootstrap file: where the runtime
 //! and config images and the config's verification keys are, the runtime
 //! image's root hash and the PCR the config is measured into.
 

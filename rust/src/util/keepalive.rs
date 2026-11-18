@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The keepalive body, the status record a node's TPM quotes, behind
-//! `util/keepalive.h`, and its packed fields: the outcome mask of the
+//! The keepalive body, the status record a node's TPM quotes,
+//! and its packed fields: the outcome mask of the
 //! operations of the window and the conditions word.
 
 use core::ffi::{CStr, c_char, c_int, c_void};

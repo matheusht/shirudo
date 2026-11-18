@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The config activation journal behind `util/config_update.h`: the
+//! The config activation journal: the
 //! state file of the selection a target runs, the events file of every
 //! selection measured into the config PCR, and the steps from one to
 //! the next, under the journal's lock, through the operations the

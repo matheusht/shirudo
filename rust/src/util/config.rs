@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The site configuration behind `util/config.h`: the `key = value`
+//! The site configuration: the `key = value`
 //! lines of /etc/shirudo/shirudo.conf, or the settings a config image
 //! carries, and the TPM settings the environment overrides.
 

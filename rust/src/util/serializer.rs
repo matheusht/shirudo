@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The user side of the map serializer, behind `util/serializer.h`: the
+//! The user side of the map serializer: the
 //! lock that keeps one reader on a map, the ID of a read, and the check
 //! of each chunk the BPF side hands back.
 

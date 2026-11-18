@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The upatch tree's state on a target, behind `util/bpm_tree.h`: whether
+//! The upatch tree's state on a target: whether
 //! an operation's selector matches the node, the cursor and the pending
 //! record a sync keeps, and the tree eventlog whose projection chain it
 //! replays.

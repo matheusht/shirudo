@@ -22,9 +22,8 @@ pub(crate) mod seal {
 
 use core::ffi::c_char;
 
-/// `struct embedded_bpf` of util/loader.h: an embedded skeleton, which
-/// the C test test-mode-objects inspects through bpf2_blob() and
-/// seal_blob().
+/// An embedded skeleton, which the test helper test-mode-objects
+/// inspects through bpf2_blob() and seal_blob().
 #[repr(C)]
 pub struct EmbeddedBpf {
     name: *const c_char,

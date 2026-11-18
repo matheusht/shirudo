@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The host's overview, behind `util/sysinfo.h`: its name, OS, kernel and
+//! The host's overview: its name, OS, kernel and
 //! its configuration, CPUs, memory, root disk and uptime, from /proc,
 //! /etc, /boot and uname(2), with no subprocess. Lines are read and
 //! scanned with the C library's own calls, so that every file reads as

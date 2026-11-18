@@ -50,7 +50,7 @@ const BPF_MAP_TYPE_PERCPU_HASH: u32 = 5;
 const BPF_MAP_TYPE_PERCPU_ARRAY: u32 = 6;
 const BPF_MAP_TYPE_LRU_PERCPU_HASH: u32 = 10;
 const KEEPALIVE_BODY_FILE_MAX: u64 = 64 * 1024;
-/// UPATCH_DECODER_* of include/shirudo/upatch.h.
+/// The language and input of a .upatch's decoder.
 const DECODER_LANG_LUA: u32 = 1;
 const DECODER_INPUT_MAP_V1: u32 = 1;
 const DECODER_EXPORT_LOG: u32 = 1;

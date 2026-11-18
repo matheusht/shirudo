@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! `.bee` archives, signed repository indexes and tree publications,
-//! behind `util/bpm_package.h`: the index a target picks a package from,
+//! `.bee` archives, signed repository indexes and tree publications:
+//! the index a target picks a package from,
 //! the order of versions, the ustar members of a package, and the signed
 //! tree it fetches.
 

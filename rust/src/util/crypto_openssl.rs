@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The crypto of `util/crypto.h` on libcrypto, linked into both profiles:
+//! The crypto on libcrypto, linked into both profiles:
 //! SHA-256, HMAC and AES, base64, the P-256 and RSA-OAEP operations of
 //! the TPM's protocol, and the X.509 certificates and CMS signatures a
 //! target trusts. Every key algorithm the kernel verifies comes from one
@@ -49,7 +49,7 @@ use crate::util::io::{check_trusted, read_fd};
 
 pub(crate) const SHA256_LEN: usize = 32;
 
-/// `KEYS_DER_MAX` of util/keys.h: the largest certificate read.
+/// The largest certificate read.
 const KEYS_DER_MAX: usize = 1024 * 1024;
 
 /// `struct cert`: an X.509 certificate, NULL before one is read.

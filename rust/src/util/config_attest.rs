@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The config's history as attestation evidence, behind
-//! `util/config_attest.h`: collected from the update records, emitted
+//! The config's history as attestation evidence:
+//! collected from the update records, emitted
 //! with a quote, parsed back by a verifier, and checked there against
 //! the quoted PCR, the TPM boot and the root an operator approved.
 

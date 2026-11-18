@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! Where init runs, behind `util/initrd.h`: the initrd, with the root
+//! Where init runs: the initrd, with the root
 //! file system at /sysroot, and so where the keys it enrols are.
 
 use core::ffi::CStr;

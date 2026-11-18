@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Authors of shirudo
 
 //! Levenshtein distance and the did-you-mean helpers of the dispatchers,
-//! allocation-free, behind the C interface of `util/similar.h`.
+//! allocation-free.
 
 use core::ffi::c_int;
 

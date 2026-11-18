@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The config image a target runs from, behind `util/image_config.h`:
+//! The config image a target runs from:
 //! its verified root, held open, and the configuration it carries in
 //! place of /etc/shirudo/shirudo.conf. What the image holds is opened
 //! from its root and never through a path: a path, /proc/<pid>/fd

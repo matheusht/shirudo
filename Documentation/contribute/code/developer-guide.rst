@@ -431,9 +431,8 @@ Project layout
        in :src:`rust/src/builtin/commands.rs`: an object of its own,
        built with no std, as the tests link the Rust library with a
        ``main()`` of their own.
-   * - :src:`builtin.h`
-     - The C declarations of the commands, one module per top-level
-       command in :src:`rust/src/builtin/`: ``attest``, ``bpm``,
+   * - :src:`rust/src/builtin/`
+     - The commands, one module per top-level command: ``attest``, ``bpm``,
        ``build``, ``config``, ``genkey``, ``image``, ``init``, ``keys``,
        ``status``, ``upatch`` and ``version``. The signed loader under
        ``upatch load``, ``unload`` and boot restore is
@@ -462,9 +461,8 @@ Project layout
      - The ``main()`` of ``shirudo-quote-check``, a program of its own
        that checks keepalive quotes with the TPM parsers of
        :src:`rust/src/util/tpm_wire/`; its rows are
-       :src:`rust/src/quote_check.rs`, and the header the unit suite and
-       the fuzz target include is :src:`tools/quote-check/row.h`. No
-       other binary links it.
+       :src:`rust/src/quote_check.rs`, which the unit suite and the fuzz
+       target drive. No other binary links it.
    * - :src:`tools/gen-image/`
      - ``shirudo-gen-image``, ``shirudo-gen-runtime`` and
        ``shirudo-gen-verity``, which make the runtime and config images,

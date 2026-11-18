@@ -6,7 +6,7 @@
 
 #include <shirudo/tpm.h>
 
-/* Frozen ABI shared with struct identity in util/identity.h. */
+/* Frozen ABI shared with rust/src/sys/identity.rs. */
 #define IDENTITY_KEYS_MAX	16u
 
 struct sb_id {

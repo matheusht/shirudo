@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The kernel ABI check behind `util/kernel_abi.h`. The signed loader
+//! The kernel ABI check. The signed loader
 //! requires map hashing, exclusive-map binding and signed program
 //! metadata. Stock kernels can expose BPF and the BPF LSM while still
 //! lacking this contract, so those kernels are rejected before

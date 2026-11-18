@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The `.rodata` of a upatch behind `util/upatch_rodata.h`: found through
+//! The `.rodata` of a upatch: found through
 //! the loader's own sys_bpf() calls, the BTF it loads and the map update
 //! that fills the section, then printed as text as libbpf's dumper
 //! prints it, or as JSON from the BTF.
@@ -61,7 +61,7 @@ const ATTR_BTF: u32 = 0;
 const ATTR_BTF_SIZE: usize = 16;
 const ATTR_BTF_SIZE_END: u32 = 20;
 
-/// `struct rodata_range` of `util/upatch_rodata.h`.
+/// Where a variable of a upatch's .rodata lies.
 #[repr(C)]
 pub struct RodataRange {
     pub(crate) offset: u32,

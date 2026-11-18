@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! What `util/upatch.h` and `util/upatch_maps.h` share with the C: an
-//! install's result and a map's summary.
+//! An install's result and a map's summary, as the C-shaped code
+//! shares them.
 
 use core::ffi::{c_char, c_int};
 
