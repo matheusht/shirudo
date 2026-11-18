@@ -74,6 +74,8 @@ pub const CURLINFO_RESPONSE_CODE: c_int = 0x200002;
 pub const CURLUE_OK: CurlUCode = 0;
 pub const CURLUPART_URL: CurlUPart = 0;
 pub const CURLUPART_SCHEME: CurlUPart = 1;
+pub const CURLUPART_USER: CurlUPart = 2;
+pub const CURLUPART_PASSWORD: CurlUPart = 3;
 pub const CURLUPART_HOST: CurlUPart = 5;
 
 // The binaries link libcurl themselves; the crate's tests, which rustc

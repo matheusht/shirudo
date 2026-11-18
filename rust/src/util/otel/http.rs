@@ -17,15 +17,15 @@ use crate::sys::curl::{
     CURL_GLOBAL_DEFAULT, CURLE_OK, CURLINFO_RESPONSE_CODE, CURLOPT_HEADERDATA,
     CURLOPT_HEADERFUNCTION, CURLOPT_HTTPHEADER, CURLOPT_NOSIGNAL, CURLOPT_POSTFIELDS,
     CURLOPT_POSTFIELDSIZE_LARGE, CURLOPT_SSL_VERIFYHOST, CURLOPT_SSL_VERIFYPEER, CURLOPT_URL,
-    CURLOPT_WRITEDATA, CURLOPT_WRITEFUNCTION, CURLUPART_HOST, CURLUPART_SCHEME, CURLUPART_URL,
-    Curl, CurlCode, CurlSlist, curl_easy_cleanup, curl_easy_getinfo, curl_easy_init,
-    curl_easy_perform, curl_easy_strerror, curl_free, curl_global_cleanup, curl_global_init,
-    curl_slist_append, curl_url, curl_url_cleanup, curl_url_get, curl_url_set, set_callback,
+    CURLOPT_WRITEDATA, CURLOPT_WRITEFUNCTION, CURLUPART_HOST, CURLUPART_PASSWORD, CURLUPART_SCHEME,
+    CURLUPART_USER, Curl, CurlCode, curl_easy_cleanup, curl_easy_getinfo, curl_easy_init,
+    curl_easy_perform, curl_easy_strerror, curl_global_cleanup, curl_global_init, set_callback,
     set_long, set_off, set_ptr,
 };
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{Tm, getrandom, strptime, timegm};
 use crate::text::parse_s64;
+use crate::util::curl::{Slist, Url};
 use crate::util::json::{JsonField, parse_schema};
 use crate::util::tls_openssl::tls_curl_policy;
 
@@ -46,8 +46,6 @@ pub(super) const CURLOPT_CAINFO: c_int = 10065;
 const CURLOPT_POST: c_int = 47;
 const CURLOPT_SSLCERT: c_int = 10025;
 const CURLOPT_SSLKEY: c_int = 10087;
-const CURLUPART_USER: c_int = 2;
-const CURLUPART_PASSWORD: c_int = 3;
 const CURLE_OPERATION_TIMEDOUT: CurlCode = 28;
 
 fn say(text: String) {
@@ -58,41 +56,6 @@ fn say(text: String) {
 
 fn shown(b: &[u8]) -> std::borrow::Cow<'_, str> {
     String::from_utf8_lossy(b)
-}
-
-/// A curl header list, freed when it goes.
-pub(crate) struct Slist(*mut CurlSlist);
-
-impl Default for Slist {
-    fn default() -> Self {
-        Slist(core::ptr::null_mut())
-    }
-}
-
-impl Slist {
-    pub(super) fn append(&mut self, line: &[u8]) -> c_int {
-        let Ok(line) = CString::new(line) else {
-            return -EINVAL;
-        };
-        // SAFETY: the list or NULL, and a C string, which curl copies.
-        let next = unsafe { curl_slist_append(self.0, line.as_ptr()) };
-        if next.is_null() {
-            return -ENOMEM;
-        }
-        self.0 = next;
-        0
-    }
-
-    pub(super) fn raw(&self) -> *mut CurlSlist {
-        self.0
-    }
-}
-
-impl Drop for Slist {
-    fn drop(&mut self) {
-        // SAFETY: the list, or NULL, freed once.
-        unsafe { crate::util::curl::slist_free_sensitive(self.0) };
-    }
 }
 
 /// An environment setting, unset when empty.
@@ -161,44 +124,14 @@ pub(super) fn loopback_host(host: &[u8]) -> bool {
 /// A URL's scheme and host as curl reads them: -EINVAL for one that does
 /// not parse or carries credentials.
 pub(super) fn url_parts(url: &[u8]) -> Result<(Vec<u8>, Vec<u8>), c_int> {
-    struct Url(*mut crate::sys::curl::CurlU);
-    impl Drop for Url {
-        fn drop(&mut self) {
-            // SAFETY: the handle, freed once.
-            unsafe { curl_url_cleanup(self.0) };
-        }
-    }
-    fn part(u: &Url, what: c_int) -> (bool, Vec<u8>) {
-        let mut p: *mut c_char = core::ptr::null_mut();
-        // SAFETY: the handle and room for the part.
-        let ok = unsafe { curl_url_get(u.0, what, &mut p, 0) } == 0;
-        if p.is_null() {
-            return (ok, Vec::new());
-        }
-        // SAFETY: curl's C string, freed once.
-        let v = unsafe { CStr::from_ptr(p) }.to_bytes().to_vec();
-        // SAFETY: as above.
-        unsafe { curl_free(p.cast()) };
-        (ok, v)
-    }
-
-    // SAFETY: a new handle.
-    let u = Url(unsafe { curl_url() });
-    if u.0.is_null() {
-        return Err(-ENOMEM);
-    }
-    let c = CString::new(url).map_err(|_| -EINVAL)?;
-    // SAFETY: the handle and a C string.
-    if unsafe { curl_url_set(u.0, CURLUPART_URL, c.as_ptr(), 0) } != 0 {
+    let u = Url::parse(url)?;
+    let scheme = u.part(CURLUPART_SCHEME);
+    let host = u.part(CURLUPART_HOST);
+    let (Some(scheme), Some(host)) = (scheme, host) else {
         return Err(-EINVAL);
-    }
-    let (scheme_ok, scheme) = part(&u, CURLUPART_SCHEME);
-    let (host_ok, host) = part(&u, CURLUPART_HOST);
-    if !scheme_ok || !host_ok {
-        return Err(-EINVAL);
-    }
-    let (_, user) = part(&u, CURLUPART_USER);
-    let (_, password) = part(&u, CURLUPART_PASSWORD);
+    };
+    let user = u.part(CURLUPART_USER).unwrap_or_default();
+    let password = u.part(CURLUPART_PASSWORD).unwrap_or_default();
     if !user.is_empty() || !password.is_empty() {
         return Err(-EINVAL);
     }

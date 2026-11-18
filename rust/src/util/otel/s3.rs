@@ -13,8 +13,8 @@ use std::os::unix::ffi::OsStringExt;
 
 use super::http::{
     self, CURLOPT_CAINFO, CURLOPT_TIMEOUT_MS, CURLOPT_USERAGENT, DEFAULT_TIMEOUT_MS, ENDPOINT_MAX,
-    Response, Slist, Transport, attempt_error, curl_error, loopback_host, response_header,
-    response_write, retry_wait, retryable_curl, retryable_http, url_parts,
+    Response, Transport, attempt_error, curl_error, loopback_host, response_header, response_write,
+    retry_wait, retryable_curl, retryable_http, url_parts,
 };
 use super::{LOG, MapView, OtelOpts, eprint, otlp};
 use crate::errno::{
@@ -29,6 +29,7 @@ use crate::sys::curl::{
 use crate::util::crypto_openssl::{
     Sha256Ctx, base64_encode, sha256_final, sha256_free, sha256_init, sha256_update,
 };
+use crate::util::curl::Slist;
 use crate::util::decode::decode_map;
 use crate::util::gzip::GzWrite;
 use crate::util::tls_openssl::tls_curl_policy;

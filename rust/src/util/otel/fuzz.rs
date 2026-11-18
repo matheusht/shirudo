@@ -7,9 +7,10 @@
 
 use core::ffi::{CStr, c_char};
 
-use super::http::{self, Slist};
+use super::http;
 use super::{LOG, METRIC};
 use crate::fuzzing::fuzz_target;
+use crate::util::curl::Slist;
 
 /// `struct curl_slist`, which the list's nodes are.
 #[repr(C)]

@@ -611,7 +611,8 @@ pub(crate) fn lock_exclusive(fd: c_int) -> c_int {
 mod tests;
 
 mod capi {
-    use core::ffi::{c_char, c_int, c_void};
+    use core::ffi::{CStr, c_char, c_int, c_void};
+    use std::os::fd::IntoRawFd;
 
     use crate::sys::libc::File;
 
@@ -651,8 +652,10 @@ mod capi {
         out: *mut c_void,
         len: *mut usize,
     ) -> c_int {
-        // SAFETY: the caller passes a C string and the rooms.
-        unsafe { super::read_fd(fd, label, max, out, len) }
+        // SAFETY: the caller passes a C string.
+        let label = unsafe { CStr::from_ptr(label) };
+        // SAFETY: the caller provides rooms for the output pointer and length.
+        unsafe { super::hand_over(super::read_whole(fd, label, max), out, len) }
     }
 
     /// # Safety
@@ -660,8 +663,15 @@ mod capi {
     /// `rel` is NULL or a C string.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn open_beneath(dirfd: c_int, rel: *const c_char, flags: c_int) -> c_int {
-        // SAFETY: the caller passes NULL or a C string.
-        unsafe { super::open_beneath(dirfd, rel, flags) }
+        if rel.is_null() {
+            return -crate::errno::EINVAL;
+        }
+        // SAFETY: the caller passes a C string.
+        let rel = unsafe { CStr::from_ptr(rel) };
+        match super::open_beneath(dirfd, rel, flags) {
+            Ok(fd) => fd.into_raw_fd(),
+            Err(err) => err,
+        }
     }
 
     /// # Safety

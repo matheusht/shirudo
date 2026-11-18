@@ -22,19 +22,17 @@ use crate::errno::EINVAL;
 use crate::sys::curl::{
     CURL_SSLVERSION_TLSV1_3, CURLE_OK, CURLE_SSL_CACERT_BADFILE, CURLE_SSL_CIPHER,
     CURLE_SSL_CONNECT_ERROR, CURLINFO_EFFECTIVE_URL, CURLOPT_FORBID_REUSE, CURLOPT_SSL_CTX_DATA,
-    CURLOPT_SSL_CTX_FUNCTION, CURLOPT_SSL_SESSIONID_CACHE, CURLOPT_SSLVERSION, CURLUE_OK,
-    CURLUPART_HOST, CURLUPART_SCHEME, CURLUPART_URL, Curl, CurlCode, SslCtxCallback,
-    curl_easy_getinfo, curl_easy_setopt, curl_free, curl_url, curl_url_cleanup, curl_url_get,
-    curl_url_set,
+    CURLOPT_SSL_CTX_FUNCTION, CURLOPT_SSL_SESSIONID_CACHE, CURLOPT_SSLVERSION, CURLUPART_HOST,
+    CURLUPART_SCHEME, Curl, CurlCode, SslCtxCallback, curl_easy_getinfo, curl_easy_setopt,
 };
-use crate::sys::libc::{O_CLOEXEC, O_RDONLY, open, strcasecmp, strncasecmp};
+use crate::sys::libc::{O_CLOEXEC, O_RDONLY, open, strcasecmp};
 use crate::sys::openssl::{
     SSL_CB_HANDSHAKE_DONE, SSL_CTRL_GET_NEGOTIATED_GROUP, SSL_CTX_set_info_callback,
     SSL_group_to_name,
 };
-use crate::text::capi::dns_name_valid;
-use crate::text::cstr;
+use crate::text::{cstr, dns_name_valid};
 use crate::util::config::{self, Scrubbed};
+use crate::util::curl::Url;
 use crate::util::image_config;
 use crate::util::io::check_trusted;
 
@@ -55,50 +53,13 @@ pub struct TlsCa {
 /// Whether `host`, without its trailing dot, is a DNS name the list of
 /// exact names apart by commas holds, case aside. An entry too long to
 /// be a name, or not one, matches nothing.
-///
-/// # Safety
-///
-/// `host` is a C string of curl's, which loses its trailing dot.
-unsafe fn host_listed(host: *mut c_char, list: &[u8]) -> bool {
-    let host_bytes = host.cast::<u8>();
-    // SAFETY: the caller's C string.
-    let mut host_len = unsafe { CStr::from_ptr(host) }.count_bytes();
+fn host_listed(host: &[u8], list: &[u8]) -> bool {
+    let host = host.strip_suffix(b".").unwrap_or(host);
 
-    // SAFETY: the last byte of the string, and then its new end, both
-    // within it.
-    unsafe {
-        if host_len != 0 && *host_bytes.add(host_len - 1) == b'.' {
-            host_len -= 1;
-            *host_bytes.add(host_len) = 0;
-        }
-    }
-    // SAFETY: the caller's C string, still terminated.
-    if !unsafe { dns_name_valid(host) } {
-        return false;
-    }
-    let mut rest = list;
-    while !rest.is_empty() {
-        let end = rest.iter().position(|&c| c == b',');
-        let len = end.unwrap_or(rest.len());
-        let mut entry = [0u8; 254];
-
-        if len < entry.len() {
-            entry[..len].copy_from_slice(&rest[..len]);
-            let entry = entry.as_ptr().cast::<c_char>();
-            // SAFETY: the entry, terminated within its room, and the
-            // caller's C string.
-            let same = unsafe { dns_name_valid(entry) && strncasecmp(host, entry, len) == 0 };
-
-            if same && host_len == len {
-                return true;
-            }
-        }
-        let Some(end) = end else {
-            break;
-        };
-        rest = &rest[end + 1..];
-    }
-    false
+    dns_name_valid(host)
+        && list
+            .split(|&c| c == b',')
+            .any(|entry| dns_name_valid(entry) && entry.eq_ignore_ascii_case(host))
 }
 
 /// Whether the configuration lets the host `curl` is connecting to fall
@@ -127,28 +88,16 @@ unsafe fn classical_host_allowed(curl: *mut Curl) -> bool {
     if got != CURLE_OK || effective_url.is_null() {
         return false;
     }
-    let mut scheme: *mut c_char = ptr::null_mut();
-    let mut host: *mut c_char = ptr::null_mut();
-    // SAFETY: a new URL handle, which copies the URL libcurl keeps, and
-    // the parts it hands out, C strings it allocated.
-    let (url, allowed) = unsafe {
-        let url = curl_url();
-        let allowed = !url.is_null()
-            && curl_url_set(url, CURLUPART_URL, effective_url, 0) == CURLUE_OK
-            && curl_url_get(url, CURLUPART_SCHEME, &raw mut scheme, 0) == CURLUE_OK
-            && strcasecmp(scheme, c"https".as_ptr()) == 0
-            && curl_url_get(url, CURLUPART_HOST, &raw mut host, 0) == CURLUE_OK
-            && host_listed(host, cstr(&c.tls_classical_hosts));
-
-        (url, allowed)
+    // SAFETY: the URL libcurl keeps, a C string.
+    let effective_url = unsafe { CStr::from_ptr(effective_url) };
+    let Ok(url) = Url::parse(effective_url.to_bytes()) else {
+        return false;
     };
-    // SAFETY: what curl allocated, or NULL, each freed once.
-    unsafe {
-        curl_free(host.cast());
-        curl_free(scheme.cast());
-        curl_url_cleanup(url);
-    }
-    allowed
+    url.part(CURLUPART_SCHEME)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case(b"https"))
+        && url
+            .part(CURLUPART_HOST)
+            .is_some_and(|host| host_listed(&host, cstr(&c.tls_classical_hosts)))
 }
 
 /// libssl's info callback on a connection to a host allowed classical
@@ -321,3 +270,6 @@ pub(crate) unsafe fn tls_ca_cleanup(ca: *mut TlsCa) {
         unsafe { (*ca).imp = ptr::null_mut() };
     }
 }
+
+#[cfg(test)]
+mod tests;

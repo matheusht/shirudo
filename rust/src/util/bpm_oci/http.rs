@@ -19,9 +19,10 @@ use crate::errno::{
 };
 use crate::ffi;
 use crate::heap::{xfree, xreallocarray};
-use crate::sys::curl::{self, Curl, CurlSlist};
+use crate::sys::curl::{self, Curl};
 use crate::sys::libc::{self, SEEK_SET, scrub};
 use crate::util::crypto_openssl::sha256;
+use crate::util::curl::Slist;
 use crate::util::hex::encode;
 use crate::util::io::write_complete;
 use crate::util::tls_openssl::{tls_ca_cleanup, tls_curl_policy};
@@ -226,25 +227,35 @@ fn deadlines(handle: *mut Curl, room: u64) {
 
 /// A `Name: value` header appended to `list` through a buffer of `CAP`
 /// bytes, scrubbed after: -E2BIG when it does not fit, -ENOMEM.
-fn append_header<const CAP: usize>(list: &mut *mut CurlSlist, name: &[u8], value: &[u8]) -> c_int {
+fn append_header<const CAP: usize>(
+    list: &mut Slist,
+    name: &[u8],
+    value: &[u8],
+) -> Result<(), c_int> {
     let mut h = [0u8; CAP];
-    let fits = strsprintf(&mut h, &[name, value]).is_ok();
-    let next = if fits {
-        // SAFETY: a NUL-terminated line, which curl copies.
-        unsafe { curl::curl_slist_append(*list, c_ptr(&h)) }
-    } else {
-        ptr::null_mut()
+    let ret = match strsprintf(&mut h, &[name, value]) {
+        Ok(_) => list.append(cstr(&h)),
+        Err(_) => -E2BIG,
     };
 
     scrub(&mut h);
-    if !fits {
-        return -E2BIG;
+    if ret != 0 { Err(ret) } else { Ok(()) }
+}
+
+/// The header lines `req` sends, with `auth` as its Authorization.
+fn request_headers(req: &Request, auth: Option<&[u8]>) -> Result<Slist, c_int> {
+    let mut headers = Slist::default();
+
+    if let Some(accept) = req.accept {
+        append_header::<256>(&mut headers, b"Accept: ", accept.to_bytes())?;
     }
-    if next.is_null() {
-        return -ENOMEM;
+    if let Some(content_type) = req.content_type {
+        append_header::<256>(&mut headers, b"Content-Type: ", content_type.to_bytes())?;
     }
-    *list = next;
-    0
+    if let Some(auth) = auth {
+        append_header::<8192>(&mut headers, b"Authorization: ", auth)?;
+    }
+    Ok(headers)
 }
 
 /// What one request sends.
@@ -264,44 +275,13 @@ fn curl_once(
     file: Option<&mut FileSink>,
     follow: bool,
 ) -> c_int {
-    let mut headers: *mut CurlSlist = ptr::null_mut();
-    let ret = curl_once_headers(c, req, auth, r, file, follow, &mut headers);
-
-    // SAFETY: a list curl built, or NULL, which the handle is done with.
-    unsafe { crate::util::curl::slist_free_sensitive(headers) };
-    ret
-}
-
-fn curl_once_headers(
-    c: &mut OciClient,
-    req: &Request,
-    auth: Option<&[u8]>,
-    r: &mut HttpResponse,
-    file: Option<&mut FileSink>,
-    follow: bool,
-    headers: &mut *mut CurlSlist,
-) -> c_int {
+    let headers = match request_headers(req, auth) {
+        Ok(headers) => headers,
+        Err(err) => return err,
+    };
     let mut errbuf = [0u8; curl::CURL_ERROR_SIZE];
     let mut status: c_long = 0;
 
-    if let Some(accept) = req.accept {
-        let ret = append_header::<256>(headers, b"Accept: ", accept.to_bytes());
-        if ret != 0 {
-            return ret;
-        }
-    }
-    if let Some(content_type) = req.content_type {
-        let ret = append_header::<256>(headers, b"Content-Type: ", content_type.to_bytes());
-        if ret != 0 {
-            return ret;
-        }
-    }
-    if let Some(auth) = auth {
-        let ret = append_header::<8192>(headers, b"Authorization: ", auth);
-        if ret != 0 {
-            return ret;
-        }
-    }
     // SAFETY: curl_easy_init() takes nothing.
     let handle = unsafe { curl::curl_easy_init() };
     if handle.is_null() {
@@ -323,7 +303,7 @@ fn curl_once_headers(
         if req.method.to_bytes().eq_ignore_ascii_case(b"HEAD") {
             curl::set_long(handle, curl::CURLOPT_NOBODY, 1);
         }
-        curl::set_ptr(handle, curl::CURLOPT_HTTPHEADER, *headers);
+        curl::set_ptr(handle, curl::CURLOPT_HTTPHEADER, headers.raw());
         curl::set_ptr(handle, curl::CURLOPT_ERRORBUFFER, errbuf.as_mut_ptr());
         curl::set_long(handle, curl::CURLOPT_NOSIGNAL, 1);
         deadlines(handle, room);
@@ -451,7 +431,7 @@ fn get_bearer_token(c: &mut OciClient, challenge: &[u8]) -> c_int {
     }
     let mut basic = [0u8; BASIC_ENCODED_SIZE];
     let mut auth_header = [0u8; BASIC_HEADER_SIZE];
-    let mut headers: *mut CurlSlist = ptr::null_mut();
+    let mut headers = Slist::default();
     let mut r = HttpResponse::new();
     let mut esc = [ptr::null_mut::<c_char>(); 2];
 
@@ -469,13 +449,12 @@ fn get_bearer_token(c: &mut OciClient, challenge: &[u8]) -> c_int {
     );
     scrub(&mut basic);
     scrub(&mut auth_header);
-    // SAFETY: what curl allocated for the escapes and the list, NULL when
-    // it did not, the handle and the client's TLS state.
+    // SAFETY: what curl allocated for the escapes, NULL when it did not,
+    // the handle and the client's TLS state.
     unsafe {
         curl::curl_free(esc[0].cast());
         curl::curl_free(esc[1].cast());
         curl::curl_easy_cleanup(handle);
-        crate::util::curl::slist_free_sensitive(headers);
         tls_ca_cleanup(&mut c.tls_ca);
     }
     buffer_free(&mut r.body);
@@ -491,7 +470,7 @@ fn token_exchange(
     scope: &[u8],
     basic: &mut [u8],
     auth_header: &mut [u8],
-    headers: &mut *mut CurlSlist,
+    headers: &mut Slist,
     r: &mut HttpResponse,
     esc: &mut [*mut c_char; 2],
 ) -> c_int {
@@ -530,10 +509,9 @@ fn token_exchange(
         if strsprintf(auth_header, &[b"Authorization: Basic ", cstr(basic)]).is_err() {
             return -E2BIG;
         }
-        // SAFETY: a NUL-terminated line, which curl copies.
-        *headers = unsafe { curl::curl_slist_append(*headers, c_ptr(auth_header)) };
-        if headers.is_null() {
-            return -ENOMEM;
+        ret = headers.append(cstr(auth_header));
+        if ret != 0 {
+            return ret;
         }
     }
     // The realm is the registry's to name and the credentials go there:
@@ -550,7 +528,7 @@ fn token_exchange(
         curl::set_ptr(handle, curl::CURLOPT_URL, c_ptr(&url));
         curl::set_ptr(handle, curl::CURLOPT_PROTOCOLS_STR, protocols.as_ptr());
         curl::set_long(handle, curl::CURLOPT_HTTPGET, 1);
-        curl::set_ptr(handle, curl::CURLOPT_HTTPHEADER, *headers);
+        curl::set_ptr(handle, curl::CURLOPT_HTTPHEADER, headers.raw());
         curl::set_long(handle, curl::CURLOPT_NOSIGNAL, 1);
         deadlines(handle, MAX_HTTP_BODY as u64);
         curl::set_callback(handle, curl::CURLOPT_WRITEFUNCTION, write_memory);
