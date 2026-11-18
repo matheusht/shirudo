@@ -11,6 +11,7 @@ mod list;
 pub(crate) mod loader;
 mod map;
 mod ops;
+mod reconcile;
 
 use core::ffi::{CStr, c_char, c_int};
 use std::ffi::CString;
@@ -30,7 +31,7 @@ const JSON_MAX: usize = 8 * 1024 * 1024;
 
 pub(crate) use ops::{install, purge, remove};
 
-static SUBCMDS: [HelpItem; 6] = [
+static SUBCMDS: [HelpItem; 7] = [
     HelpItem::new(
         c"load",
         c"load a signed .upatch into the target kernel (target-only)",
@@ -54,6 +55,10 @@ static SUBCMDS: [HelpItem; 6] = [
     HelpItem::new(
         c"map",
         c"read pinned map contents (target-only; BTF type-aware)",
+    ),
+    HelpItem::new(
+        c"reconcile",
+        c"attach loaded XDP upatches to devices that appeared later (target-only)",
     ),
 ];
 
@@ -201,6 +206,7 @@ fn run(args: &[*const c_char]) -> c_int {
         b"load" => ops::run_load(rest),
         b"unload" => ops::run_unload(rest),
         b"map" => map::run(rest),
+        b"reconcile" => reconcile::run(rest),
         _ => 2,
     }
 }

@@ -59,7 +59,7 @@ use crate::util::upatch_resolve::XATTR_PAYLOAD;
 /// UPATCH_FILE_MAX of util/upatch.h.
 const INCOMING_DIR: &CStr = c"/var/lib/shirudo/incoming";
 const UPATCHES_DIR_C: &CStr = c"/var/lib/shirudo/upatches";
-const LSM_LINK_PIN: &CStr = c"/run/shirudo/bpffs/lsm_link";
+pub(super) const LSM_LINK_PIN: &CStr = c"/run/shirudo/bpffs/lsm_link";
 const UPATCH_FILE_MAX: usize = 16 * 1024 * 1024;
 const DIGEST_LEN: usize = 32;
 const KERNEL_ABI_DETAIL_MAX: usize = 256;
@@ -1004,7 +1004,7 @@ fn set_payload_hex(rep: &mut OpReport, payload: &[u8]) {
 }
 
 /// Emits the report a caller asked for, and frees it.
-fn finish(rep: &mut OpReport, report: Option<&CStr>) {
+pub(super) fn finish(rep: &mut OpReport, report: Option<&CStr>) {
     if let Some(path) = report {
         // SAFETY: a C string, and the report, whose strings outlive it.
         unsafe { report_emit(path.as_ptr(), rep) };
