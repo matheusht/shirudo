@@ -19,7 +19,7 @@ use crate::text::{cstr, decimal, strscpy, strsprintf};
 use crate::util::config::{self, Scrubbed};
 use crate::util::crypto_openssl::{Cert, cert_free, cert_key_algorithm};
 use crate::util::initrd;
-use crate::util::kernel_abi::{self, kernel_abi_check};
+use crate::util::kernel_abi;
 use crate::util::keys::{self, TrustedSet};
 
 /// `PREFLIGHT_DETAIL_MAX`.
@@ -200,10 +200,7 @@ fn check_bpffs(r: &mut PreflightResult) {
 
 fn check_signed_loader_abi(r: &mut PreflightResult) {
     let i = r.next_slot(PRE_SIGNED_LOADER_ABI, c"signed_loader_kernel_abi");
-    let detail = r.checks[i].detail.as_mut_ptr();
-
-    // SAFETY: the check's detail, and its size.
-    if unsafe { kernel_abi_check(detail.cast(), DETAIL_MAX) } == 0 {
+    if kernel_abi::check_into(&mut r.checks[i].detail) == 0 {
         r.pass(i);
     } else {
         r.checks[i].ok = false;

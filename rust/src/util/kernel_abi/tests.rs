@@ -3,7 +3,6 @@
 
 use super::*;
 use crate::btf_builder::BtfBuilder;
-use crate::text::cstr;
 
 const INT_SIGNED: u32 = 1;
 const INT_CHAR: u32 = 2;
@@ -114,13 +113,7 @@ fn fixture(f: Fixture) -> Btf {
 
 /// validate_btf() of the fixture: Ok, or the detail of its refusal.
 fn validated(f: Fixture) -> Result<(), Vec<u8>> {
-    let btf = fixture(f);
-    let mut detail = [0u8; DETAIL_MAX];
-    // SAFETY: room for the detail.
-    match unsafe { validate_btf(Some(&btf), detail.as_mut_ptr().cast(), detail.len()) } {
-        0 => Ok(()),
-        _ => Err(cstr(&detail).to_vec()),
-    }
+    validate_btf(Some(&fixture(f))).map_err(|why| why.to_bytes().to_vec())
 }
 
 fn refused_for(f: Fixture, want: &str) {

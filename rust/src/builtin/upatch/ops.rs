@@ -43,7 +43,7 @@ use crate::util::help::{Help, HelpSection};
 use crate::util::hex::hex_decode;
 use crate::util::io::read_file;
 use crate::util::json::JsonEmit;
-use crate::util::kernel_abi::kernel_abi_check;
+use crate::util::kernel_abi;
 use crate::util::measured::{
     MeasuredSet, measured_set_boot, measured_set_free, measured_unmeasured_archives,
     measured_unmeasured_pins,
@@ -600,8 +600,7 @@ fn undo_unmeasured(rep: &mut OpReport, op: &[u8]) -> Result<(), ()> {
 /// state changes.
 fn preflight(expect_chain: Option<&CStr>, rep: &mut OpReport) -> Result<(), ()> {
     let mut detail = [0u8; KERNEL_ABI_DETAIL_MAX];
-    // SAFETY: room for the detail.
-    if unsafe { kernel_abi_check(detail.as_mut_ptr().cast(), detail.len()) } != 0 {
+    if kernel_abi::check_into(&mut detail) != 0 {
         let detail = cstr(&detail);
         log_err(
             &[
