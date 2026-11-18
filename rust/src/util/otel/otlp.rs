@@ -7,7 +7,7 @@
 use core::ffi::{CStr, c_int};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{Buffer, Decoded, cstr_or_empty, hex_lower, is_c_space};
+use super::{Buffer, Decoded, hex_lower, is_c_space, name_or_empty};
 use crate::errno::{E2BIG, EBADMSG, EINVAL, ENODATA, ENOMEM};
 use crate::sys::libc::gethostname;
 use crate::sys::upatch_maps::MapView;
@@ -168,7 +168,7 @@ pub(super) fn map_attributes(e: &mut JsonEmit, v: &MapView) {
     kv_string(e, b"shirudo.upatch.name", cstr(&v.upatch));
     kv_string(e, b"shirudo.upatch.location", cstr(&v.location));
     kv_string(e, b"shirudo.map.name", cstr(&v.name));
-    kv_string(e, b"shirudo.map.type", cstr_or_empty(v.type_name));
+    kv_string(e, b"shirudo.map.type", name_or_empty(v.type_name));
     kv_int(e, b"shirudo.map.max_entries", i64::from(v.max_entries));
     kv_int(e, b"shirudo.map.n_entries", i64::from(v.n_entries));
     kv_int(e, b"shirudo.map.n_cpus", i64::from(v.n_cpus));
@@ -194,7 +194,7 @@ fn log_map_data(e: &mut JsonEmit, v: &MapView) {
     let percpu = map_format::is_percpu(v.ty);
 
     kv_string(e, b"name", cstr(&v.name));
-    kv_string(e, b"type", cstr_or_empty(v.type_name));
+    kv_string(e, b"type", name_or_empty(v.type_name));
     kv_int(e, b"max_entries", i64::from(v.max_entries));
     kv_int(e, b"n_entries", i64::from(v.n_entries));
     if percpu {
@@ -230,7 +230,7 @@ fn log_map_data(e: &mut JsonEmit, v: &MapView) {
     }
     kv_bool(e, b"serialized", false);
     if v.skipped {
-        kv_string(e, b"skipped", cstr_or_empty(v.skipped_reason));
+        kv_string(e, b"skipped", name_or_empty(v.skipped_reason));
         return;
     }
     kv_bool(e, b"truncated", v.truncated);

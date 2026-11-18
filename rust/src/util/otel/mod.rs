@@ -66,26 +66,33 @@ impl OtelOpts {
     }
 
     fn endpoint(&self) -> Option<&CStr> {
-        opt_cstr(self.endpoint)
+        // SAFETY: the options' strings, NULL or C strings that outlive
+        // the export.
+        unsafe { opt_cstr(self.endpoint) }
     }
 
     fn tenant_id(&self) -> Option<&CStr> {
-        opt_cstr(self.tenant_id)
+        // SAFETY: as endpoint().
+        unsafe { opt_cstr(self.tenant_id) }
     }
 
     fn s3_uri(&self) -> Option<&CStr> {
-        opt_cstr(self.s3_uri)
+        // SAFETY: as endpoint().
+        unsafe { opt_cstr(self.s3_uri) }
     }
 }
 
-fn opt_cstr<'a>(p: *const c_char) -> Option<&'a CStr> {
-    // SAFETY: the options' strings outlive the export.
+/// # Safety
+///
+/// `p` is NULL or a C string that outlives `'a`.
+unsafe fn opt_cstr<'a>(p: *const c_char) -> Option<&'a CStr> {
+    // SAFETY: the caller's C string.
     (!p.is_null()).then(|| unsafe { CStr::from_ptr(p) })
 }
 
-/// A C string the maps code holds, empty for NULL.
-fn cstr_or_empty<'a>(p: *const c_char) -> &'a [u8] {
-    opt_cstr(p).map_or(&[], CStr::to_bytes)
+/// A name of a map view, empty for none.
+fn name_or_empty(s: Option<&'static CStr>) -> &'static [u8] {
+    s.map_or(b"", CStr::to_bytes)
 }
 
 /// isspace() of the C locale, `\v` and `\f` with the rest.
@@ -345,13 +352,20 @@ mod capi {
 
     use super::{OtelOpts, http, otlp};
 
-    fn opts<'a>(p: *const OtelOpts) -> Option<&'a OtelOpts> {
+    /// # Safety
+    ///
+    /// `p` is NULL or options that outlive `'a`.
+    unsafe fn opts<'a>(p: *const OtelOpts) -> Option<&'a OtelOpts> {
         // SAFETY: the caller's options, or NULL.
         unsafe { p.as_ref() }
     }
 
-    fn path<'a>(p: *const c_char) -> Option<&'a CStr> {
-        super::opt_cstr(p)
+    /// # Safety
+    ///
+    /// `p` is NULL or a C string that outlives `'a`.
+    unsafe fn path<'a>(p: *const c_char) -> Option<&'a CStr> {
+        // SAFETY: the caller's C string or NULL.
+        unsafe { super::opt_cstr(p) }
     }
 
     /// Sends the `body_len` bytes at `body` as the string body of one
@@ -374,13 +388,17 @@ mod capi {
         attr_key: *const c_char,
         attr_value: *const c_char,
     ) -> c_int {
-        let (Some(scope), Some(event), Some(text), Some(key), Some(value)) = (
-            path(scope_name),
-            path(event_name),
-            path(severity_text),
-            path(attr_key),
-            path(attr_value),
-        ) else {
+        // SAFETY: the caller's C strings, or NULL, which outlive the call.
+        let names = unsafe {
+            (
+                path(scope_name),
+                path(event_name),
+                path(severity_text),
+                path(attr_key),
+                path(attr_value),
+            )
+        };
+        let (Some(scope), Some(event), Some(text), Some(key), Some(value)) = names else {
             return -crate::errno::EINVAL;
         };
         if body.is_null() {
@@ -396,7 +414,8 @@ mod capi {
             attr_key: key.to_bytes(),
             attr_value: value.to_bytes(),
         };
-        http::send_log_string(self::opts(opts), &record)
+        // SAFETY: the caller's options, or NULL.
+        http::send_log_string(unsafe { self::opts(opts) }, &record)
     }
 
     /// The OTLP severity of a status verdict, its text into `text`.

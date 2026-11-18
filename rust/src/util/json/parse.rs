@@ -299,7 +299,12 @@ impl Field {
 }
 
 /// Calls an array field's `on_elem`, read afresh as C reads it.
-fn call_on_elem(sink: *const JsonArray) -> Result {
+///
+/// # Safety
+///
+/// `sink` is NULL or the array field's sink of the schema
+/// [`parse_schema`]'s caller vouched for.
+unsafe fn call_on_elem(sink: *const JsonArray) -> Result {
     if sink.is_null() {
         return Ok(());
     }
@@ -313,7 +318,12 @@ fn call_on_elem(sink: *const JsonArray) -> Result {
 }
 
 /// Calls a map field's `on_member` with the member's key.
-fn call_on_member(sink: *const JsonMap, key: &CStr) -> Result {
+///
+/// # Safety
+///
+/// `sink` is NULL or the map field's sink of the schema
+/// [`parse_schema`]'s caller vouched for.
+unsafe fn call_on_member(sink: *const JsonMap, key: &CStr) -> Result {
     if sink.is_null() {
         return Ok(());
     }
@@ -687,7 +697,9 @@ impl Parser<'_, '_> {
                 // Not an object, as the sub fields ask.
                 return Err(-EINVAL);
             }
-            call_on_elem(sink)?;
+            // SAFETY: the array field's sink, of the schema the parse was
+            // given.
+            unsafe { call_on_elem(sink) }?;
             if self.cur.next_or_end(b']')? {
                 break;
             }
@@ -718,7 +730,10 @@ impl Parser<'_, '_> {
             }
             self.cur.pos += 1;
             self.value(if sub.n != 0 { Some(sub.get(0)) } else { None })?;
-            call_on_member(sink, decoded(&key)?)?;
+            let key = decoded(&key)?;
+            // SAFETY: the map field's sink, of the schema the parse was
+            // given.
+            unsafe { call_on_member(sink, key) }?;
             if self.cur.next_or_end(b'}')? {
                 break;
             }

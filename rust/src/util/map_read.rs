@@ -698,7 +698,7 @@ pub(crate) fn read(upatch: &[u8], map: &[u8], cap: u32, flags: u32, out: &mut Ma
     let fd = Fds(vec![fd]);
     let ty = info.u32_at(MAP_TYPE);
     out.ty = ty;
-    out.type_name = map_type_name(ty).as_ptr();
+    out.type_name = Some(map_type_name(ty));
     out.key_size = info.u32_at(MAP_KEY_SIZE);
     out.value_size = info.u32_at(MAP_VALUE_SIZE);
     out.value_stride = stride_of(ty, out.value_size);
@@ -732,7 +732,7 @@ pub(crate) fn read(upatch: &[u8], map: &[u8], cap: u32, flags: u32, out: &mut Ma
     }
     if let Some(reason) = map_skip_reason(ty) {
         out.skipped = true;
-        out.skipped_reason = reason.as_ptr();
+        out.skipped_reason = Some(reason);
         return 0;
     }
     let btf_id = info.u32_at(MAP_BTF_ID);
@@ -781,7 +781,7 @@ fn scan(upatch: &[u8], list: &mut Vec<MapSummary>) {
         let _ = strscpy(&mut one.name, name);
         let ty = info.u32_at(MAP_TYPE);
         one.ty = ty;
-        one.type_name = map_type_name(ty).as_ptr();
+        one.type_name = Some(map_type_name(ty));
         one.max_entries = info.u32_at(MAP_MAX_ENTRIES);
         one.n_cpus = 1;
         if is_percpu(ty) {

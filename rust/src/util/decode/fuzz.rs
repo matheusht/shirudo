@@ -96,7 +96,7 @@ fuzz_target!(
         // SAFETY: a view of nothing, for which zeros are the value, filled
         // as the C target set it.
         let mut v: Box<MapView> = Box::new(unsafe { core::mem::zeroed() });
-        v.type_name = c"array".as_ptr();
+        v.type_name = Some(c"array");
         v.key_size = 4;
         v.value_size = 8;
         v.value_stride = 8;

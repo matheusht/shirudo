@@ -941,7 +941,7 @@ pub(super) fn open_for_map(
             format!(
                 "otel: selected {} for {} map {}: {reason}\n",
                 if signal == LOG { "log" } else { "metric" },
-                shown(super::cstr_or_empty(v.type_name)),
+                shown(super::name_or_empty(v.type_name)),
                 shown(crate::text::cstr(&v.name)),
             )
             .as_bytes(),

@@ -322,7 +322,10 @@ pub(crate) mod capi {
         super::digits(unsafe { bytes(s, len) })
     }
 
-    fn put<T>(r: Result<T, c_int>, out: *mut T) -> c_int {
+    /// # Safety
+    ///
+    /// `out` is room for a `T`.
+    unsafe fn put<T>(r: Result<T, c_int>, out: *mut T) -> c_int {
         match r {
             Ok(v) => {
                 // SAFETY: the caller's room for the value.
@@ -342,8 +345,8 @@ pub(crate) mod capi {
         max: u64,
         out: *mut u64,
     ) -> c_int {
-        // SAFETY: the caller's bytes.
-        put(super::parse_u64(unsafe { bytes(s, len) }, max), out)
+        // SAFETY: the caller's bytes, and its room for the value.
+        unsafe { put(super::parse_u64(bytes(s, len), max), out) }
     }
 
     /// # Safety
@@ -356,8 +359,8 @@ pub(crate) mod capi {
         max: u64,
         out: *mut u64,
     ) -> c_int {
-        // SAFETY: the caller's bytes.
-        put(super::parse_x64(unsafe { bytes(s, len) }, max), out)
+        // SAFETY: the caller's bytes, and its room for the value.
+        unsafe { put(super::parse_x64(bytes(s, len), max), out) }
     }
 
     /// # Safety

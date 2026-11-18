@@ -85,7 +85,7 @@ fn decoded(source: &str) -> Result<Vec<u8>, c_int> {
     put_str(&mut view.name, 0, "records");
     view.serialized = true;
     view.max_entries = 1;
-    view.type_name = c"array".as_ptr();
+    view.type_name = Some(c"array");
     let (mut out, mut out_len) = (ptr::null_mut(), 0);
     // SAFETY: a C string, the view, and room for the output.
     let ret = unsafe {

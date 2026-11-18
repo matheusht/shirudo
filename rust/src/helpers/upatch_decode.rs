@@ -85,7 +85,7 @@ fn run(args: &[&CStr]) -> c_int {
     let mut view: Box<MapView> = Box::new(unsafe { core::mem::zeroed() });
     view.serialized = true;
     view.max_entries = 1;
-    view.type_name = c"array".as_ptr();
+    view.type_name = Some(c"array");
     view.serial_bytes_total = serial_bytes_total;
     view.upatch[..5].copy_from_slice(b"t3002");
     view.name[..9].copy_from_slice(b"t0005_map");

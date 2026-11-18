@@ -218,7 +218,7 @@ fn fixture(map_type: u32, is_signed: bool, with_btf: bool) -> Option<Box<Fixture
     put_str(&mut f.view.name, "hits_total");
     put_str(&mut f.view.location, "fentry/test_hook");
     f.view.ty = map_type;
-    f.view.type_name = if array { c"array" } else { c"percpu_array" }.as_ptr();
+    f.view.type_name = Some(if array { c"array" } else { c"percpu_array" });
     f.view.key_size = 4;
     f.view.value_size = 4;
     f.view.value_stride = if array { 4 } else { 8 };

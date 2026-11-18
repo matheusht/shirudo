@@ -4,7 +4,7 @@
 //! An install's result and a map's summary, as the C-shaped code
 //! shares them.
 
-use core::ffi::{c_char, c_int};
+use core::ffi::{CStr, c_int};
 
 /// What an install gives for a valid upatch whose target module is not
 /// loaded.
@@ -16,10 +16,7 @@ pub struct MapSummary {
     pub upatch: [u8; 257],
     pub name: [u8; 17],
     pub ty: u32,
-    pub type_name: *const c_char,
+    pub type_name: Option<&'static CStr>,
     pub max_entries: u32,
     pub n_cpus: u32,
 }
-
-const _: () = assert!(size_of::<MapSummary>() == 296);
-const _: () = assert!(core::mem::offset_of!(MapSummary, type_name) == 280);

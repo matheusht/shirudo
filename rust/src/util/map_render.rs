@@ -5,7 +5,7 @@
 //! the table of maps, one map's detail with its types and contents or
 //! its serialized pages, and the same as JSON.
 
-use core::ffi::c_char;
+use core::ffi::CStr;
 
 use crate::sys::libc::{fwrite, stdout};
 use crate::sys::upatch::MapSummary;
@@ -32,14 +32,9 @@ fn field(label: &[u8], value: &[u8]) -> Vec<u8> {
     [&pad(label, 22)[..], b" ", value, b"\n"].concat()
 }
 
-/// A static C string of the view or "(null)", as glibc prints NULL.
-fn c_or_null(s: *const c_char) -> &'static [u8] {
-    if s.is_null() {
-        b"(null)"
-    } else {
-        // SAFETY: a static C string of the map type tables.
-        unsafe { crate::ffi::c_str(s) }
-    }
+/// A name of the view, or "(null)" for none, as glibc printed NULL.
+fn c_or_null(s: Option<&'static CStr>) -> &'static [u8] {
+    s.map_or(b"(null)", CStr::to_bytes)
 }
 
 fn entries(v: &MapView) -> &[MapEntry] {
@@ -190,7 +185,7 @@ pub(crate) fn print_detail(v: &MapView) {
     }
     t.extend(field(b"Max entries:", v.max_entries.to_string().as_bytes()));
     if v.skipped {
-        let reason = if v.skipped_reason.is_null() {
+        let reason = if v.skipped_reason.is_none() {
             &b"(no reason)"[..]
         } else {
             c_or_null(v.skipped_reason)
@@ -339,7 +334,7 @@ pub(crate) fn emit_json_fields(e: &mut JsonEmit, v: &MapView) {
     }
     e.kv_bool(b"serialized", false);
     if v.skipped {
-        let reason = if v.skipped_reason.is_null() {
+        let reason = if v.skipped_reason.is_none() {
             &b""[..]
         } else {
             c_or_null(v.skipped_reason)

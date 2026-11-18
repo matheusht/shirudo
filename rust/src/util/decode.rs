@@ -927,12 +927,7 @@ unsafe fn push_map_input(l: *mut LuaState, v: &MapView) {
     };
     let name = CString::new(cstr(&v.name)).unwrap_or_default();
     let upatch = CString::new(cstr(&v.upatch)).unwrap_or_default();
-    let type_name = if v.type_name.is_null() {
-        c""
-    } else {
-        // SAFETY: the view's C string.
-        unsafe { CStr::from_ptr(v.type_name) }
-    };
+    let type_name = v.type_name.unwrap_or(c"");
     // SAFETY: the caller's state and view.
     unsafe {
         lua_newtable(l);

@@ -188,7 +188,7 @@ fn run(_: &[&CStr]) -> c_int {
     // with the two pages.
     let mut v: Box<MapView> = Box::new(unsafe { core::mem::zeroed() });
     v.name[..10].copy_from_slice(b"tree_arena");
-    v.type_name = c"arena".as_ptr();
+    v.type_name = Some(c"arena");
     v.max_entries = 32;
     v.serialized = true;
     v.n_serial_pages = 2;

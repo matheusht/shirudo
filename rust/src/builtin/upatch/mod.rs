@@ -131,12 +131,7 @@ impl Summaries {
 
 /// A map's type name, "" for none.
 fn type_name(m: &MapSummary) -> &'static [u8] {
-    if m.type_name.is_null() {
-        b""
-    } else {
-        // SAFETY: a static C string of the map type table.
-        unsafe { crate::ffi::c_str(m.type_name) }
-    }
+    m.type_name.map_or(b"", CStr::to_bytes)
 }
 
 /// The category of a pin that could not be opened: the guards refused

@@ -163,7 +163,12 @@ fn sign(insns: &[u8], data: &[u8], keys: (&CStr, &CStr)) -> Result<(Vec<u8>, [u8
 }
 
 /// The parts of an open container.
-fn part(p: *const c_void, len: u32) -> &'static [u8] {
+///
+/// # Safety
+///
+/// `p` is NULL or holds `len` bytes of a container that stays open
+/// while the part is read.
+unsafe fn part<'a>(p: *const c_void, len: u32) -> &'a [u8] {
     if p.is_null() || len == 0 {
         return &[];
     }
@@ -186,32 +191,23 @@ impl Opened {
     }
 
     fn loader(&self) -> &[u8] {
-        // SAFETY: the open container.
-        part(
-            unsafe { upatch_loader(&*self.0) },
-            self.0.hdr.loader_insns_len,
-        )
+        // SAFETY: the open container, and the part of it the header sizes.
+        unsafe { part(upatch_loader(&*self.0), self.0.hdr.loader_insns_len) }
     }
 
     fn data(&self) -> &[u8] {
-        // SAFETY: the open container.
-        part(unsafe { upatch_data(&*self.0) }, self.0.hdr.data_len)
+        // SAFETY: the open container, and the part of it the header sizes.
+        unsafe { part(upatch_data(&*self.0), self.0.hdr.data_len) }
     }
 
     fn signature(&self) -> &[u8] {
-        // SAFETY: the open container.
-        part(
-            unsafe { upatch_signature(&*self.0) },
-            self.0.hdr.signature_len,
-        )
+        // SAFETY: the open container, and the part of it the header sizes.
+        unsafe { part(upatch_signature(&*self.0), self.0.hdr.signature_len) }
     }
 
     fn metadata(&self) -> &[u8] {
-        // SAFETY: the open container.
-        part(
-            unsafe { upatch_metadata(&*self.0) },
-            self.0.hdr.metadata_len,
-        )
+        // SAFETY: the open container, and the part of it the header sizes.
+        unsafe { part(upatch_metadata(&*self.0), self.0.hdr.metadata_len) }
     }
 
     fn is_unload(&self) -> bool {
