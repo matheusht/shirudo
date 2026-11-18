@@ -5,8 +5,10 @@
 //! event, and the journal's events scanned whole and partial.
 
 use std::ffi::{CString, OsStr};
+use std::io::Write;
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::sync::OnceLock;
 
 use super::{events_scan, record_decode};
@@ -54,7 +56,15 @@ fuzz_target!(
         let _ = record_decode(data, true);
         let _ = record_decode(data, false);
         let events = std::path::Path::new(OsStr::from_bytes(dir.to_bytes())).join("events");
-        if std::fs::write(events, data).is_err() {
+        // The journal reads no events file that others may read or write.
+        let written = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(events)
+            .and_then(|mut file| file.write_all(data));
+        if written.is_err() {
             return;
         }
         for partial in [false, true] {
