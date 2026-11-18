@@ -12,6 +12,7 @@ use core::ffi::{CStr, c_char, c_int, c_uint};
 use core::mem::MaybeUninit;
 
 use crate::errno::{E2BIG, EINVAL, EIO, ELOOP, ENOENT, ENOTDIR, EPERM};
+use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW, F_DUPFD_CLOEXEC, O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW,
     O_RDONLY, S_IFDIR, S_IFMT, S_IFREG, STATX_TYPE, Statx, close, closedir, errno, explicit_bzero,
@@ -185,9 +186,9 @@ fn validate_tree(root_fd: c_int, device: Dev, depth: u32, entries: &mut u32) -> 
             ret = -errno();
             break;
         }
-        let kind = st.mode & S_IFMT;
+        let kind = st.stx_mode & S_IFMT;
 
-        if (st.dev_major, st.dev_minor) != device || (kind != S_IFREG && kind != S_IFDIR) {
+        if (st.stx_dev_major, st.stx_dev_minor) != device || (kind != S_IFREG && kind != S_IFDIR) {
             ret = -EPERM;
             break;
         }
@@ -330,10 +331,15 @@ pub(crate) fn validate(root_fd: c_int) -> c_int {
     if unsafe { statx(root_fd, c"".as_ptr(), AT_EMPTY_PATH, STATX_TYPE, &mut st) } != 0 {
         return -errno();
     }
-    if st.mode & S_IFMT != S_IFDIR {
+    if st.stx_mode & S_IFMT != S_IFDIR {
         return -ENOTDIR;
     }
-    let mut ret = validate_tree(root_fd, (st.dev_major, st.dev_minor), 0, &mut entries);
+    let mut ret = validate_tree(
+        root_fd,
+        (st.stx_dev_major, st.stx_dev_minor),
+        0,
+        &mut entries,
+    );
 
     if ret == 0 {
         ret = validate_settings(root_fd);

@@ -21,6 +21,7 @@ use super::words;
 use crate::errno::{EEXIST, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT, ENOKEY, ENOTBLK, EROFS};
 use crate::ffi;
 use crate::sys::identity::Identity;
+use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     Statfs, Statvfs, fwrite, mount, statfs, statvfs, stdout, strerror, umount2,
 };

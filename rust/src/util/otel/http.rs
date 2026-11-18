@@ -23,6 +23,7 @@ use crate::sys::curl::{
     curl_slist_append, curl_url, curl_url_cleanup, curl_url_get, curl_url_set, set_callback,
     set_long, set_off, set_ptr,
 };
+use crate::sys::libc::Zeroed;
 use crate::sys::libc::{Tm, getrandom, strptime, timegm};
 use crate::text::parse_s64;
 use crate::util::json::{JsonField, parse_schema};

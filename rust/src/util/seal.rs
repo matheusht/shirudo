@@ -18,6 +18,7 @@ use std::os::unix::fs::MetadataExt;
 use crate::errno::{
     EEXIST, EINVAL, ELOOP, ENAMETOOLONG, ENODATA, ENOENT, ENOTDIR, EOPNOTSUPP, EPERM, ERANGE,
 };
+use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     AT_SYMLINK_NOFOLLOW, O_APPEND, O_CLOEXEC, O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_NONBLOCK,
     O_TRUNC, S_IFMT, S_IFREG, Statx, close, fgetxattr, fsetxattr, fsync, ftruncate, lgetxattr,
@@ -467,7 +468,7 @@ fn stat(fd: c_int) -> Result<Statx, c_int> {
 /// refused.
 fn regular(fd: c_int) -> c_int {
     match stat(fd) {
-        Ok(st) if st.mode & S_IFMT == S_IFREG => 0,
+        Ok(st) if st.stx_mode & S_IFMT == S_IFREG => 0,
         Ok(_) => -EINVAL,
         Err(err) => err,
     }
@@ -694,8 +695,8 @@ fn commit(fd: Fd, dir: Fd, name: &[u8], buf: &[u8]) -> c_int {
                     &mut named,
                 )
             } == 0;
-            let same_inode = (named.dev_major, named.dev_minor, named.ino)
-                == (wrote.dev_major, wrote.dev_minor, wrote.ino);
+            let same_inode = (named.stx_dev_major, named.stx_dev_minor, named.stx_ino)
+                == (wrote.stx_dev_major, wrote.stx_dev_minor, wrote.stx_ino);
             if found && same_inode {
                 // SAFETY: the directory and a C string.
                 unsafe { unlinkat(dir.0, name.as_ptr(), 0) };

@@ -10,6 +10,7 @@ use core::mem::MaybeUninit;
 
 use crate::bpf::lskel::Lskel;
 use crate::errno::{ENOENT, ENOPKG};
+use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     AT_FDCWD, O_CLOEXEC, O_RDONLY, R_OK, S_IFMT, S_IFREG, STATX_SIZE, STATX_TYPE, SYS_ADD_KEY,
     SYS_KEYCTL, Statx, W_OK, access, close, errno, fclose, fgets, fopen, geteuid, open, read,
@@ -271,7 +272,7 @@ fn check_cert(r: &mut PreflightResult) {
         )
     } == 0;
 
-    if found && st.mode & S_IFMT == S_IFREG && st.size > 0 {
+    if found && st.stx_mode & S_IFMT == S_IFREG && st.stx_size > 0 {
         r.pass(i);
     } else {
         r.fail(

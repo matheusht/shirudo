@@ -9,6 +9,7 @@ use core::ffi::{CStr, c_char, c_int};
 
 use crate::errno::{E2BIG, ENOMEM};
 use crate::heap::{xfree, xmalloc, xstrfree, xstrndup};
+use crate::sys::libc::Zeroed;
 use crate::sys::libc::{Utsname, printf, strerror, strerrorname_np, uname};
 use crate::text::{cstr, strsprintf};
 use crate::util::eventlog::NV_INDEX;
@@ -132,7 +133,7 @@ unsafe fn encode(e: &mut JsonEmit, r: &OpReport, vlog: &[u8], nv_index: &[u8]) {
     e.obj_open_key(b"kernel");
     // SAFETY: a struct utsname to fill.
     let release = if unsafe { uname(&mut uts) } == 0 {
-        cstr(&uts.release)
+        cstr(crate::sys::libc::bytes(&uts.release))
     } else {
         b""
     };

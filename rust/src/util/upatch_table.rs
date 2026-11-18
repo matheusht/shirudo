@@ -6,6 +6,7 @@
 
 use core::ffi::{c_char, c_long};
 
+use crate::sys::libc::Zeroed;
 use crate::sys::libc::{Tm, printf, strptime, time, timegm};
 use crate::util::json::JsonEmit;
 use crate::util::timefmt::format_duration;

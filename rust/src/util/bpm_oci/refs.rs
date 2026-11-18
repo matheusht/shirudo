@@ -12,6 +12,7 @@ use super::{
     strscpy, strsprintf, trim, version_ok,
 };
 use crate::errno::{EINVAL, ENAMETOOLONG, EPERM};
+use crate::sys::libc::Zeroed;
 use crate::sys::libc::{self, AT_FDCWD, S_IFMT, S_IFREG, STATX_SIZE, STATX_TYPE, Statx};
 use crate::util::crypto_openssl::{Cert, cert_free, cert_read_file};
 
@@ -91,7 +92,7 @@ fn regular_nonempty(path: &[u8]) -> bool {
     if unsafe { libc::statx(AT_FDCWD, c_ptr(path), 0, STATX_TYPE | STATX_SIZE, &mut stx) } != 0 {
         return false;
     }
-    stx.mode & S_IFMT == S_IFREG && stx.size > 0
+    stx.stx_mode & S_IFMT == S_IFREG && stx.stx_size > 0
 }
 
 /// Each `/`-separated part of `repo` is a name: not empty, not `..`, and

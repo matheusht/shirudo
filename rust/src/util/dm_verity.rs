@@ -15,6 +15,7 @@ use crate::errno::{
     ESTALE,
 };
 use crate::heap::{xcalloc, xfree};
+use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, O_CLOEXEC, O_DIRECT, O_NOFOLLOW, O_NONBLOCK,
     O_RDONLY, O_RDWR, PATH_MAX, S_IFBLK, S_IFCHR, S_IFMT, S_IFREG, STATX_BASIC_STATS, SYS_ADD_KEY,
@@ -223,15 +224,15 @@ unsafe fn stat_path(path: *const c_char, nofollow: bool, st: &mut Statx) -> c_in
 }
 
 fn file_type(st: &Statx) -> u16 {
-    st.mode & S_IFMT
+    st.stx_mode & S_IFMT
 }
 
 fn rdev(st: &Statx) -> u64 {
-    makedev(st.rdev_major, st.rdev_minor)
+    makedev(st.stx_rdev_major, st.stx_rdev_minor)
 }
 
 fn dev(st: &Statx) -> u64 {
-    makedev(st.dev_major, st.dev_minor)
+    makedev(st.stx_dev_major, st.stx_dev_minor)
 }
 
 /// dm_name_ok(): 1 to 127 of `[A-Za-z0-9._-]`, not `.` or `..`.
@@ -737,10 +738,11 @@ fn signature_key(fd: c_int, description: &mut [u8; 64]) -> i32 {
     if stat_fd(fd, &mut st) != 0 {
         return -errno();
     }
-    if file_type(&st) != S_IFREG || st.size as i64 <= 0 || st.size > signature.len() as u64 {
+    if file_type(&st) != S_IFREG || st.stx_size as i64 <= 0 || st.stx_size > signature.len() as u64
+    {
         return -EINVAL;
     }
-    let size = st.size as usize;
+    let size = st.stx_size as usize;
     while done < size {
         // SAFETY: the file's fd, and the room left in the buffer.
         let n = unsafe {
@@ -911,10 +913,10 @@ unsafe fn create(image: *const ConfigImageOpen, name: *const c_char, out: *mut D
                 params.as_mut_ptr().cast(),
                 params.len(),
                 c"1 %u:%u %u:%u 4096 4096 %llu 1 sha256 %s %s".as_ptr(),
-                data_st.rdev_major,
-                data_st.rdev_minor,
-                hash_st.rdev_major,
-                hash_st.rdev_minor,
+                data_st.stx_rdev_major,
+                data_st.stx_rdev_minor,
+                hash_st.stx_rdev_major,
+                hash_st.stx_rdev_minor,
                 image.image.data_blocks,
                 root.as_ptr(),
                 salt.as_ptr(),
@@ -1088,10 +1090,10 @@ fn loop_check(loop_fd: c_int, file_fd: c_int, bytes: u64) -> c_int {
         return -errno();
     }
     if file_type(&st) != S_IFREG
-        || (st.size as i64) < 0
-        || st.size != bytes
+        || (st.stx_size as i64) < 0
+        || st.stx_size != bytes
         || info.lo_device != dev(&st)
-        || info.lo_inode != st.ino
+        || info.lo_inode != st.stx_ino
         || info.lo_offset != 0
         || info.lo_sizelimit != bytes
         || info.lo_flags & LO_FLAGS_READ_ONLY == 0

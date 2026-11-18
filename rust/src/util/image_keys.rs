@@ -11,6 +11,7 @@ use std::ffi::CString;
 
 use crate::errno::{EINVAL, EKEYREJECTED, ENOENT, ENOKEY};
 use crate::heap::xfree;
+use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW, O_NONBLOCK, S_IFMT, S_IFREG, Statx, close, closedir,
     fdopendir, openat, readdir, set_errno,
@@ -123,10 +124,10 @@ fn revoked_cert(dir: c_int, name: &CStr, dev: (u32, u32)) -> Result<Vec<u8>, c_i
     if ret != 0 {
         return Err(ret);
     }
-    if st.mode & S_IFMT != S_IFREG
-        || (st.dev_major, st.dev_minor) != dev
-        || st.size == 0
-        || st.size > DER_MAX
+    if st.stx_mode & S_IFMT != S_IFREG
+        || (st.stx_dev_major, st.stx_dev_minor) != dev
+        || st.stx_size == 0
+        || st.stx_size > DER_MAX
     {
         return Err(-EINVAL);
     }
@@ -169,7 +170,7 @@ fn revocations(root_fd: c_int, apply: bool, boot: bool) -> c_int {
     if ret != 0 {
         return ret;
     }
-    let dev = (root.dev_major, root.dev_minor);
+    let dev = (root.stx_dev_major, root.stx_dev_minor);
     let keys = match open_dir(root_fd, c"keys") {
         Ok(Some(fd)) => fd,
         Ok(None) => return 0,

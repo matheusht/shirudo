@@ -8,6 +8,7 @@
 use core::ffi::{CStr, c_char, c_int};
 
 use crate::errno::{EAGAIN, EBADMSG, EBUSY, EINTR, EINVAL, EIO, ENAMETOOLONG};
+use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     AT_EMPTY_PATH, LOCK_EX, LOCK_NB, O_CLOEXEC, O_CREAT, O_DIRECTORY, O_NOFOLLOW, O_RDONLY, O_RDWR,
     S_IFMT, S_IFREG, STATX_TYPE, Statx, close, errno, flock, getrandom, open, openat, statx,
@@ -124,7 +125,7 @@ fn lock_acquire_at(dir: &CStr, map_id: u32) -> c_int {
         unsafe { close(fd) };
         return ret;
     }
-    if st.mode & S_IFMT != S_IFREG {
+    if st.stx_mode & S_IFMT != S_IFREG {
         // SAFETY: the fd openat() gave, closed once.
         unsafe { close(fd) };
         return -EINVAL;

@@ -22,6 +22,7 @@ use openssl::x509::{X509, X509Extension, X509NameBuilder, X509Ref};
 
 use crate::errno::{EINVAL, EIO, ENAMETOOLONG, ENOENT, EPERM};
 use crate::ffi::{self, c_splice};
+use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     O_CLOEXEC, O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_RDONLY, O_WRONLY, PATH_MAX, Statx,
     close, errno, fchmod, geteuid, link, open, openat, rename, strerror, unlink,
@@ -114,7 +115,7 @@ fn check_user_keys_dir(keys_dir: &[u8]) -> c_int {
         unsafe { close(dirfd) };
         return r;
     }
-    if st.uid != 0 || st.mode & 0o022 != 0 {
+    if st.stx_uid != 0 || st.stx_mode & 0o022 != 0 {
         // SAFETY: as above.
         unsafe { close(dirfd) };
         return -EPERM;
@@ -155,7 +156,10 @@ fn check_user_keys_dir(keys_dir: &[u8]) -> c_int {
             break;
         }
         let last = end.is_none_or(|e| rest.get(e + 1).is_none());
-        if (st.uid != 0 && st.uid != euid()) || (last && st.uid != euid()) || st.mode & 0o022 != 0 {
+        if (st.stx_uid != 0 && st.stx_uid != euid())
+            || (last && st.stx_uid != euid())
+            || st.stx_mode & 0o022 != 0
+        {
             ret = -EPERM;
             // SAFETY: as above.
             unsafe { close(nextfd) };

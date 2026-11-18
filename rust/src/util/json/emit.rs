@@ -342,7 +342,7 @@ impl JsonEmit {
         self.put_raw(digits);
     }
 
-    fn u64_value(&mut self, val: u64) {
+    pub(crate) fn u64_value(&mut self, val: u64) {
         let mut buf = [0; 20];
         let digits = format_u64_full(val, &mut buf);
         self.raw_value(digits);

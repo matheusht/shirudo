@@ -15,6 +15,7 @@ use crate::errno::{
 };
 use crate::ffi;
 use crate::heap::{xcalloc, xfree, xmalloc};
+use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     AT_FDCWD, O_CLOEXEC, O_RDONLY, STATX_BASIC_STATS, Statx, close, errno, explicit_bzero,
     getrandom, open, read, scrub, statx,
@@ -665,9 +666,9 @@ unsafe fn evidence(
         .wrapping_add(config.n_events.wrapping_mul(160));
     // SAFETY: the eventlog's path, and room for its state.
     if unsafe { statx(AT_FDCWD, eventlog_path(), 0, STATX_BASIC_STATS, &mut st) } == 0
-        && st.size as i64 > 0
+        && st.stx_size as i64 > 0
     {
-        need = need.saturating_add(2usize.saturating_mul(st.size as usize));
+        need = need.saturating_add(2usize.saturating_mul(st.stx_size as usize));
     }
     if need > JSON_MAX_BYTES {
         need = JSON_MAX_BYTES;

@@ -15,6 +15,7 @@ use crate::errno::{
     EUCLEAN,
 };
 use crate::ffi;
+use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     AT_EMPTY_PATH, EOF, File, LOCK_EX, LOCK_NB, O_APPEND, O_CLOEXEC, O_CREAT, O_DIRECTORY, O_EXCL,
     O_NOFOLLOW, O_NONBLOCK, O_RDONLY, O_RDWR, O_WRONLY, S_IFMT, S_IFREG, STATX_BASIC_STATS, Statx,
@@ -356,11 +357,11 @@ fn regular_file(fd: c_int) -> c_int {
     if ret != 0 {
         return ret;
     }
-    if st.mode & S_IFMT != S_IFREG || st.nlink != 1 {
+    if st.stx_mode & S_IFMT != S_IFREG || st.stx_nlink != 1 {
         return -EPERM;
     }
     // SAFETY: a call that takes nothing.
-    if st.uid != unsafe { geteuid() } || st.mode & 0o77 != 0 {
+    if st.stx_uid != unsafe { geteuid() } || st.stx_mode & 0o77 != 0 {
         return -EPERM;
     }
     0
@@ -453,7 +454,7 @@ unsafe fn open_journal(
             break 'fail ret;
         }
         // SAFETY: a call that takes nothing.
-        if st.uid != unsafe { geteuid() } || st.mode & 0o22 != 0 {
+        if st.stx_uid != unsafe { geteuid() } || st.stx_mode & 0o22 != 0 {
             break 'fail -EPERM;
         }
         let ret = u.seal(u.dir_fd);
@@ -545,16 +546,16 @@ fn selection_read(u: &ConfigUpdate, name: &CStr, out: &mut ConfigUpdateRecord) -
     if ret == 0 {
         ret = stat_fd(fd, &mut st);
     }
-    if ret == 0 && (st.size == 0 || st.size >= wire.len() as u64) {
+    if ret == 0 && (st.stx_size == 0 || st.stx_size >= wire.len() as u64) {
         ret = -EBADMSG;
     }
-    while ret == 0 && done < st.size as usize {
+    while ret == 0 && done < st.stx_size as usize {
         // SAFETY: the file's fd and the room left in wire.
         let got = unsafe {
             read(
                 fd,
                 wire[done..].as_mut_ptr().cast(),
-                st.size as usize - done,
+                st.stx_size as usize - done,
             )
         };
 

@@ -13,6 +13,7 @@ use core::ptr;
 use crate::errno::{E2BIG, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT, ENOKEY, ENOMEM, EPERM};
 use crate::ffi;
 use crate::heap::{libc_free, xcalloc, xfree, xmalloc};
+use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     AT_EMPTY_PATH, Dirent, F_OK, O_CLOEXEC, O_DIRECTORY, O_RDONLY, PATH_MAX, S_IFMT, S_IFREG,
     STATX_SIZE, STATX_TYPE, Statx, access, alphasort, close, errno, faccessat, open, read, scandir,
@@ -229,7 +230,10 @@ unsafe fn read_der(path: *const c_char, out: &mut *mut u8, out_sz: &mut usize) -
     // SAFETY: the fd, and the caller's C string; then the fd closed once
     // on a refusal.
     let refused = unsafe {
-        let ret = if st.mode & S_IFMT != S_IFREG || st.size == 0 || st.size > DER_MAX as u64 {
+        let ret = if st.stx_mode & S_IFMT != S_IFREG
+            || st.stx_size == 0
+            || st.stx_size > DER_MAX as u64
+        {
             -EINVAL
         } else if check_trusted(fd, path, false) != 0 {
             -EPERM
@@ -244,7 +248,7 @@ unsafe fn read_der(path: *const c_char, out: &mut *mut u8, out_sz: &mut usize) -
     if refused != 0 {
         return refused;
     }
-    let size = st.size as usize;
+    let size = st.stx_size as usize;
     // SAFETY: a size of at most DER_MAX.
     let buf = unsafe { xmalloc(size) }.cast::<u8>();
 

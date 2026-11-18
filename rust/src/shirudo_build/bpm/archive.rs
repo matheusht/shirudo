@@ -176,8 +176,8 @@ fn environment(spec: &Spec, version: &[u8], fingerprint: &[u8]) -> Result<Vec<u8
     e.kv_string(b"name", &spec.name);
     e.kv_string(b"version", version);
     e.obj_close();
-    e.kv_string(b"os", cstr(&un.sysname));
-    e.kv_string(b"arch", cstr(&un.machine));
+    e.kv_string(b"os", cstr(crate::sys::libc::bytes(&un.sysname)));
+    e.kv_string(b"arch", cstr(crate::sys::libc::bytes(&un.machine)));
     e.kv_string(b"bpm_version", version_str);
     e.obj_open_key(b"shirudo");
     e.kv_string(b"path", &me);

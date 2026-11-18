@@ -10,6 +10,7 @@ use core::ffi::{CStr, c_char, c_int, c_void};
 use crate::errno::{E2BIG, EFBIG, EINTR, EINVAL, EIO, ENOENT, ENOMEM, EPERM};
 use crate::ffi;
 use crate::heap::{xfree, xmalloc};
+use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, File, LOCK_EX, O_CLOEXEC, O_DIRECTORY,
     O_NOFOLLOW, O_PATH, O_RDONLY, PATH_MAX, S_IFDIR, S_IFMT, S_IFREG, S_ISVTX,
@@ -142,7 +143,7 @@ pub(crate) unsafe fn append_line(
     if ret != 0 {
         return ret;
     }
-    let size = st.size as i64;
+    let size = st.stx_size as i64;
     let ret = last_line_end(fd, size, &mut end);
     if ret != 0 {
         return ret;
@@ -251,7 +252,7 @@ pub(crate) unsafe fn read_fd(
     if ret != 0 {
         return ret;
     }
-    if st.mode & S_IFMT != S_IFREG {
+    if st.stx_mode & S_IFMT != S_IFREG {
         return -EINVAL;
     }
     // SAFETY: the caller's C string.
@@ -259,10 +260,10 @@ pub(crate) unsafe fn read_fd(
     if ret != 0 {
         return ret;
     }
-    if st.size > max as u64 {
+    if st.stx_size > max as u64 {
         return -EFBIG;
     }
-    let size = st.size as usize;
+    let size = st.stx_size as usize;
     // SAFETY: an allocation of size + 1 zeroed bytes, which the caller
     // frees by that size.
     let buf = unsafe { xmalloc(size + 1) }.cast::<u8>();
@@ -410,9 +411,9 @@ pub(crate) unsafe fn check_trusted(fd: c_int, path: *const c_char, secret: bool)
     if ret != 0 {
         return ret;
     }
-    if st.mode & S_IFMT != S_IFREG
-        || !trusted_owner(st.uid)
-        || st.mode & if secret { 0o77 } else { 0o22 } != 0
+    if st.stx_mode & S_IFMT != S_IFREG
+        || !trusted_owner(st.stx_uid)
+        || st.stx_mode & if secret { 0o77 } else { 0o22 } != 0
     {
         let could = if secret { c"read or change" } else { c"change" };
 
@@ -422,8 +423,8 @@ pub(crate) unsafe fn check_trusted(fd: c_int, path: *const c_char, secret: bool)
                 crate::log::err,
                 c"%s: owner %u, mode %04o: refusing a file another user could %s".as_ptr(),
                 path,
-                st.uid,
-                u32::from(st.mode & 0o7777),
+                st.stx_uid,
+                u32::from(st.stx_mode & 0o7777),
                 could.as_ptr(),
             )
         };
@@ -455,9 +456,9 @@ pub(crate) unsafe fn check_trusted(fd: c_int, path: *const c_char, secret: bool)
         {
             return -errno();
         }
-        if st.mode & S_IFMT != S_IFDIR
-            || !trusted_owner(st.uid)
-            || (st.mode & 0o22 != 0 && !(st.mode & S_ISVTX != 0 && st.uid == 0))
+        if st.stx_mode & S_IFMT != S_IFDIR
+            || !trusted_owner(st.stx_uid)
+            || (st.stx_mode & 0o22 != 0 && !(st.stx_mode & S_ISVTX != 0 && st.stx_uid == 0))
         {
             // SAFETY: the C's format and its arguments.
             unsafe {
@@ -466,8 +467,8 @@ pub(crate) unsafe fn check_trusted(fd: c_int, path: *const c_char, secret: bool)
                         .as_ptr(),
                     path,
                     real.as_ptr(),
-                    st.uid,
-                    u32::from(st.mode & 0o7777),
+                    st.stx_uid,
+                    u32::from(st.stx_mode & 0o7777),
                 )
             };
             return -EPERM;
@@ -518,8 +519,8 @@ pub(crate) unsafe fn bpffs_mounted_at(path: *const c_char) -> c_int {
     } else {
         c_int::from(
             fs.f_type == BPF_FS_MAGIC
-                && stx.attributes_mask & STATX_ATTR_MOUNT_ROOT != 0
-                && stx.attributes & STATX_ATTR_MOUNT_ROOT != 0,
+                && stx.stx_attributes_mask & STATX_ATTR_MOUNT_ROOT != 0
+                && stx.stx_attributes & STATX_ATTR_MOUNT_ROOT != 0,
         )
     };
     // SAFETY: the path's fd, closed once.

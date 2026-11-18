@@ -12,6 +12,7 @@ use core::ptr;
 
 use crate::errno::ENOENT;
 use crate::heap::{xfree, xreallocarray, xstrdup, xstrfree};
+use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     O_CLOEXEC, O_RDONLY, SC_NPROCESSORS_ONLN, Statvfs, Utsname, close, fclose, fgets, fopen,
     gethostname, open, qsort, read, sscanf, statvfs, strcmp, sysconf, uname,
@@ -541,11 +542,17 @@ fn gather(si: &mut Sysinfo) {
     si.hostname[255] = 0;
     // SAFETY: a struct utsname to fill.
     if unsafe { uname(&mut u) } == 0 {
-        let _ = strscpy(&mut si.kernel_release, cstr(&u.release));
-        let _ = strscpy(&mut si.kernel_version, cstr(&u.version));
-        let _ = strscpy(&mut si.machine, cstr(&u.machine));
+        let _ = strscpy(
+            &mut si.kernel_release,
+            cstr(crate::sys::libc::bytes(&u.release)),
+        );
+        let _ = strscpy(
+            &mut si.kernel_version,
+            cstr(crate::sys::libc::bytes(&u.version)),
+        );
+        let _ = strscpy(&mut si.machine, cstr(crate::sys::libc::bytes(&u.machine)));
         if si.hostname[0] == 0 {
-            let _ = strscpy(&mut si.hostname, cstr(&u.nodename));
+            let _ = strscpy(&mut si.hostname, cstr(crate::sys::libc::bytes(&u.nodename)));
         }
     }
     let pretty = read_os_release(c"/etc/os-release", c"/usr/lib/os-release")

@@ -406,33 +406,3 @@ pub unsafe extern "C" fn bpm_tree_fetch_publication(
         )
     }
 }
-
-/// The manifest of a tree publication whose layers are `payload` and
-/// `sig`, as bpm tree append writes it, into `out` of `cap` bytes with
-/// its length in `*len`: 0 or -errno.
-///
-/// # Safety
-///
-/// `payload` and `sig` are descriptors, `out` has room for `cap` bytes
-/// and `len` for a size.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn bpm_tree_manifest(
-    payload: *const crate::util::bpm_oci::Descriptor,
-    sig: *const crate::util::bpm_oci::Descriptor,
-    out: *mut c_char,
-    cap: usize,
-    len: *mut usize,
-) -> c_int {
-    // SAFETY: the caller's descriptors, room and size.
-    unsafe {
-        *len = 0;
-        let room = ffi::bytes_mut(out.cast(), cap);
-        match publication::emit_tree_manifest(&*payload, &*sig, room) {
-            Ok(n) => {
-                *len = n;
-                0
-            }
-            Err(err) => err,
-        }
-    }
-}

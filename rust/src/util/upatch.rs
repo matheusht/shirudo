@@ -11,6 +11,7 @@ use core::ptr;
 use crate::errno::{EFBIG, EINTR, EINVAL, EIO, ENOENT, ENOMEM, EOPNOTSUPP, EOVERFLOW};
 use crate::ffi;
 use crate::heap::{xcalloc, xfree, xmalloc, xstrfree, xstrndup};
+use crate::sys::libc::Zeroed;
 use crate::sys::libc::{O_CLOEXEC, O_RDONLY, S_IFMT, S_IFREG, Statx, close, errno, open, pread};
 use crate::util::hex::hex_decode;
 use crate::util::io::stat_fd;
@@ -560,14 +561,14 @@ unsafe fn open_fd(fd: c_int, out: *mut Upatch) -> c_int {
     if ret != 0 {
         return ret;
     }
-    if st.mode & S_IFMT != S_IFREG || st.size == 0 {
+    if st.stx_mode & S_IFMT != S_IFREG || st.stx_size == 0 {
         return -EINVAL;
     }
     // Refuse pathologically large inputs; .upatch is small.
-    if st.size > FILE_MAX as u64 {
+    if st.stx_size > FILE_MAX as u64 {
         return -EFBIG;
     }
-    let size = st.size as usize;
+    let size = st.stx_size as usize;
     // SAFETY: a size.
     let buf = unsafe { xmalloc(size) }.cast::<u8>();
     if buf.is_null() {

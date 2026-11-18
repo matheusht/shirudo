@@ -12,6 +12,8 @@ publish = false
 # Each crate is vendored in rust/vendor and pinned in Cargo.lock, which
 # .cargo/config.toml takes it from, so that cargo builds offline.
 [dependencies]
+# The C library, through the rust-lang bindings (rust/src/sys/libc.rs).
+libc = { version = "0.2", default-features = false }
 # Inflate and deflate for gzip (rust/src/util/gzip.rs), in place of zlib.
 miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
 # libcrypto and libssl, the system's or the static target's, through the

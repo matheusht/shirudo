@@ -61,8 +61,8 @@ fn drop_inherited() -> c_int {
         return failed(c"cannot reset the personality");
     }
     let unlimited = Rlimit {
-        cur: RLIM_INFINITY,
-        max: RLIM_INFINITY,
+        rlim_cur: RLIM_INFINITY,
+        rlim_max: RLIM_INFINITY,
     };
     for limit in [RLIMIT_FSIZE, RLIMIT_CPU] {
         // SAFETY: the limit above.
@@ -75,8 +75,8 @@ fn drop_inherited() -> c_int {
         tv_usec: 0,
     };
     let off = Itimerval {
-        interval: none(),
-        value: none(),
+        it_interval: none(),
+        it_value: none(),
     };
     for timer in [ITIMER_REAL, ITIMER_VIRTUAL, ITIMER_PROF] {
         // SAFETY: the timer value above, and no room for the old one.
@@ -94,7 +94,10 @@ fn drop_inherited() -> c_int {
 /// the environment. glibc's own files and dns services answer host
 /// lookups without a module, in a static binary too.
 pub(crate) fn harden_self() -> c_int {
-    let no_core = Rlimit { cur: 0, max: 0 };
+    let no_core = Rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
     let (zero, one): (c_ulong, c_ulong) = (0, 1);
 
     let ret = drop_inherited();

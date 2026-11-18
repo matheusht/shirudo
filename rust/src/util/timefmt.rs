@@ -7,6 +7,7 @@
 use core::ffi::{c_int, c_long};
 
 use crate::errno::{E2BIG, EINVAL};
+use crate::sys::libc::Zeroed;
 use crate::sys::libc::{Tm, gmtime_r, strftime};
 use crate::text::{decimal, strscpy, strsprintf};
 

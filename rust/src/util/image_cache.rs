@@ -17,6 +17,7 @@ use crate::sys::curl::{
     CURLOPT_REDIR_PROTOCOLS_STR, CURLOPT_URL, CURLOPT_WRITEDATA, CURLOPT_WRITEFUNCTION,
     WriteCallback, curl_easy_cleanup, curl_easy_init, curl_easy_perform, curl_easy_setopt,
 };
+use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     AT_EMPTY_PATH, O_CLOEXEC, O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_NONBLOCK, O_RDONLY,
     O_WRONLY, PATH_MAX, S_IFMT, S_IFREG, STATX_BASIC_STATS, Statx, close, errno, fsetxattr, fsync,
@@ -156,7 +157,7 @@ unsafe fn copy_local(source: *const c_char, d: &mut Download) -> c_int {
     // SAFETY: the file's fd, and room for its state.
     if unsafe { statx(fd, c"".as_ptr(), AT_EMPTY_PATH, STATX_BASIC_STATS, &mut st) } != 0 {
         ret = -errno();
-    } else if st.mode & S_IFMT != S_IFREG || (st.size as i64) < 0 || st.size > d.limit {
+    } else if st.stx_mode & S_IFMT != S_IFREG || (st.stx_size as i64) < 0 || st.stx_size > d.limit {
         ret = -EINVAL;
     } else {
         loop {

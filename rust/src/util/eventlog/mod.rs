@@ -22,6 +22,7 @@ use core::ffi::{CStr, c_int};
 
 use crate::errno::{EFBIG, EINVAL, ENAMETOOLONG, ENOENT, ENOMEM};
 use crate::heap::{xfree, xmalloc};
+use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     AT_FDCWD, F_OK, O_CLOEXEC, O_RDONLY, PATH_MAX, STATX_SIZE, Statx, access, close, env, errno,
     open, read, statx, strerror, time, unlink,
@@ -102,7 +103,7 @@ fn would_exceed(max: u64) -> c_int {
     }
     // SAFETY: a C string and a statx to fill.
     if unsafe { statx(AT_FDCWD, path().as_ptr(), 0, STATX_SIZE, &mut st) } == 0 {
-        cur = st.size;
+        cur = st.stx_size;
     }
     c_int::from(cur.wrapping_add(LINE_MAX) > max)
 }

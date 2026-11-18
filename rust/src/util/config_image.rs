@@ -8,6 +8,7 @@
 use core::ffi::{CStr, c_int};
 
 use crate::errno::{EFBIG, EINTR, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG};
+use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     AT_EMPTY_PATH, O_CLOEXEC, O_NOFOLLOW, O_NONBLOCK, O_RDONLY, PATH_MAX, S_IFMT, S_IFREG,
     STATX_SIZE, STATX_TYPE, Statx, close, errno, open, pread, statx,
@@ -112,10 +113,10 @@ fn regular_file_size(fd: c_int) -> Result<u64, c_int> {
     {
         return Err(-errno());
     }
-    if st.mode & S_IFMT != S_IFREG {
+    if st.stx_mode & S_IFMT != S_IFREG {
         return Err(-EINVAL);
     }
-    Ok(st.size)
+    Ok(st.stx_size)
 }
 
 /// `buf.len()` bytes from the start of `fd`; -EIO when it ends first.

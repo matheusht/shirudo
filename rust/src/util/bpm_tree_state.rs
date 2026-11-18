@@ -16,6 +16,7 @@ use std::sync::Mutex;
 use crate::errno::{E2BIG, EBADMSG, EINTR, EINVAL, EIO, ENAMETOOLONG, ENOENT, ENOMEM, ENOSPC};
 use crate::ffi;
 use crate::heap::{libc_free, xfree, xmalloc};
+use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     File, O_RDONLY, PATH_MAX, R_OK, Utsname, access, close, errno, fclose, fdopen, fopen, strerror,
     uname,
@@ -567,7 +568,7 @@ unsafe fn selector_matches(s: *const TreeSelector) -> c_int {
     if unsafe { uname(&mut u) } != 0 {
         return 0;
     }
-    let release = cstr(&u.release);
+    let release = cstr(crate::sys::libc::bytes(&u.release));
 
     if s.n_kernel_release_prefix != 0
         && !s.kernel_release_prefix[..count(s.n_kernel_release_prefix, MAX_VALUES)]
@@ -595,7 +596,7 @@ unsafe fn selector_matches(s: *const TreeSelector) -> c_int {
     if s.n_architecture != 0
         && !s.architecture[..count(s.n_architecture, MAX_VALUES)]
             .iter()
-            .any(|arch| cstr(arch) == cstr(&u.machine))
+            .any(|arch| cstr(arch) == cstr(crate::sys::libc::bytes(&u.machine)))
     {
         return 0;
     }

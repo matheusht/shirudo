@@ -428,7 +428,7 @@ fn exchange(
     }
     buf.resize(NETLINK_BUFFER_SIZE, 0u8);
     req.0[8..12].copy_from_slice(&1u32.to_ne_bytes());
-    let kernel = libc::SockaddrNl::kernel();
+    let kernel = libc::netlink_kernel();
     // SAFETY: the socket, the request's bytes and the kernel's address.
     if unsafe {
         libc::sendto(
@@ -444,7 +444,7 @@ fn exchange(
         return errno();
     }
     loop {
-        let mut sender = libc::SockaddrNl::kernel();
+        let mut sender = libc::netlink_kernel();
         sender.nl_family = 0;
         let mut iov = libc::Iovec {
             iov_base: buf.as_mut_ptr().cast(),

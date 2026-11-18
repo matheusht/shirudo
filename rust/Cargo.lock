@@ -132,6 +132,7 @@ name = "shirudo"
 version = "0.0.0"
 dependencies = [
  "foreign-types",
+ "libc",
  "miniz_oxide",
  "openssl",
  "openssl-sys",
