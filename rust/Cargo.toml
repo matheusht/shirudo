@@ -32,6 +32,11 @@ name = "shirudo_rs"
 path = "src/lib.rs"
 crate-type = ["staticlib"]
 
+[features]
+# The test helpers, programs the functional tests run, which make links
+# from a build of the archive with them; the shipped one has none.
+test-helpers = []
+
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 # A fuzz build, which logs nothing.

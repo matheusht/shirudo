@@ -64,6 +64,7 @@
 /testing/end2end/policy-exec
 !/testing/helper/*.c
 !/testing/helper/*.h
+!/testing/helper/main.rs.in
 !/testing/helper/otel-mock.py
 !/testing/helper/otel-s3-mock.py
 !/testing/helper/test-bpm-key.py

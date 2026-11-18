@@ -726,7 +726,15 @@ fn close_candidate(s: &mut State, journal_open: bool) {
 
 /// `remove` until it is not -EBUSY, 100 times at most and 10 ms apart:
 /// a just-rejected mapping stays busy while udev probes it.
-fn retry_busy(mut remove: impl FnMut() -> c_int) -> c_int {
+fn retry_busy(remove: impl FnMut() -> c_int) -> c_int {
+    retry_busy_with(remove, std::thread::sleep)
+}
+
+/// As [`retry_busy`], with `pause` for each wait between two attempts.
+pub(crate) fn retry_busy_with(
+    mut remove: impl FnMut() -> c_int,
+    mut pause: impl FnMut(std::time::Duration),
+) -> c_int {
     let mut ret = 0;
     for attempt in 0..100 {
         ret = remove();
@@ -734,7 +742,7 @@ fn retry_busy(mut remove: impl FnMut() -> c_int) -> c_int {
             return ret;
         }
         if attempt < 99 {
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            pause(std::time::Duration::from_millis(10));
         }
     }
     ret

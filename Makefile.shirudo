@@ -740,6 +740,29 @@ TPMSIM_CFLAGS := $(shell pkg-config --cflags libtpms 2>/dev/null)
 TPMSIM_LIBS := $(shell pkg-config --libs libtpms 2>/dev/null)
 TPMSIM_HELPER := $(if $(TPMSIM_LIBS),testing/helper/tpmsim-cmd,)
 
+# The test helpers written in Rust: functions of a build of the Rust
+# library with its test-helpers feature, each run by a main object made
+# from testing/helper/main.rs.in, which make links as the C ones.
+RUST_HELPER_TARGET := build/rust-helpers
+RUST_HELPER_LIB    := $(RUST_HELPER_TARGET)/release/libshirudo_rs.a
+HELPER_MAIN_DIR    := build/helper-main
+
+$(RUST_HELPER_LIB): $(RUST_SRCS) $(BPF_EMBEDDED) $(RUST_PATHS_CHANGED)
+	@printf '  CARGO   $@\n'
+	$(Q)RUSTFLAGS="$(RUSTFLAGS_WERROR)" \
+	    CARGO_PROFILE_RELEASE_DEBUG=$(if $(DEBUG_CFLAGS),true,false) \
+	    $(CARGO) build --quiet --release --locked --offline \
+	    --features test-helpers --manifest-path $(RUST_DIR)/Cargo.toml \
+	    --target-dir $(RUST_HELPER_TARGET)
+	$(Q)touch $@
+
+$(HELPER_MAIN_DIR)/%.o: testing/helper/main.rs.in
+	@printf '  RUSTC   $@\n'
+	$(Q)mkdir -p $(dir $@)
+	$(Q)sed 's/@HELPER@/$(subst -,_,$*)/g' $< > $(HELPER_MAIN_DIR)/$*.rs
+	$(Q)$(RUSTC_OBJ) --crate-name $(subst -,_,$*)_main -o $@ \
+	    $(HELPER_MAIN_DIR)/$*.rs
+
 # Target fixtures must run without the host ELF interpreter or sanitizer.
 VERITY_TEST_HELPERS := build/verity-tests/shirudo-policy-probe
 
@@ -825,14 +848,14 @@ TEST_HELPERS += testing/helper/test-keyring-seal
 TEST_HELPERS += testing/helper/test-tpm-preopened
 TEST_HELPERS += testing/helper/test-keepalive-quote
 
-testing/helper/test-conditions: testing/helper/test-conditions.c util/log.o \
-                                util/string.o util/malloc.o $(RUST_LIB)
-	@printf '  CC      $@\n'
+testing/helper/test-conditions: $(HELPER_MAIN_DIR)/test-conditions.o \
+		$(RUST_HELPER_LIB)
+	@printf '  LD      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(RUST_TEST_LDLIBS)
 
-testing/helper/test-harden: testing/helper/test-harden.c util/log.o \
-		util/string.o util/malloc.o $(RUST_LIB)
-	@printf '  CC      $@\n'
+testing/helper/test-harden: $(HELPER_MAIN_DIR)/test-harden.o \
+		$(RUST_HELPER_LIB)
+	@printf '  LD      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ -Wl,--wrap=mlockall \
 		$(LIBCRYPTO_LIBS) $(ZLIB_LIBS) $(RUST_TEST_LDLIBS)
 
@@ -1072,14 +1095,10 @@ testing/helper/test-image-cli: testing/helper/test-image-cli.c \
 		-Wl,--wrap=keys_load_image_root -Wl,--wrap=keys_check_image_set \
 		$(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
-testing/helper/test-image-cleanup: testing/helper/test-image-cleanup.c \
-		testing/helper/image-cleanup.h   \
-		$(filter-out $(call obj,),$(UTIL_OBJS)) \
-		$(VERSION_OBJ) $(LIBBPF_A) $(RUST_LIB)
-	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) $(LDFLAGS) $(RPATH_LDFLAGS) -o $@ \
-		$(filter-out %.h ,$^) \
-		-Wl,--wrap=dm_verity_remove,--wrap=nanosleep \
+testing/helper/test-image-cleanup: $(HELPER_MAIN_DIR)/test-image-cleanup.o \
+		$(VERSION_OBJ) $(LIBBPF_A) $(RUST_HELPER_LIB)
+	@printf '  LD      $@\n'
+	$(Q)$(CC) $(CFLAGS) $(LDFLAGS) $(RPATH_LDFLAGS) -o $@ $^ \
 		$(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
 testing/helper/test-mode-objects: testing/helper/test-mode-objects.c \
@@ -1405,7 +1424,8 @@ clean:
 	$(Q)rm -f $(MAIN_OBJ) $(UTIL_OBJS) $(BUILD_MAIN_OBJ) \
 	          $(BUILD_OBJS) $(QUOTE_CHECK_MAIN_OBJ) $(VERSION_OBJ) $(VERSION_RS)
 	$(Q)rm -rf build/target build/unit build/fuzz-afl \
-	    build/fuzz-afl-cmplog $(RUST_TARGET) $(RUST_TEST_TARGET) $(RUST_FUZZ_TARGET)
+	    build/fuzz-afl-cmplog $(RUST_TARGET) $(RUST_TEST_TARGET) \
+	    $(RUST_HELPER_TARGET) $(HELPER_MAIN_DIR) $(RUST_FUZZ_TARGET)
 	$(Q)rm -f $(DEPS) testing/helper/*.d
 	$(Q)rm -f $(BPF_OBJS) $(BPF_LSKELS) $(BPF_SKEL_RS) $(BPF_LSKEL_TOOL) $(VMLINUX_H) \
 	    systemd/shirudo.service \

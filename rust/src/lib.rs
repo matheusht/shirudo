@@ -11,6 +11,8 @@ mod builtin;
 mod errno;
 mod ffi;
 mod heap;
+#[cfg(feature = "test-helpers")]
+mod helpers;
 mod log;
 #[cfg(not(test))]
 mod panic;

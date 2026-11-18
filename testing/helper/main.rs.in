@@ -1,0 +1,23 @@
+// SPDX-License-Identifier: BSD-2-Clause
+// Copyright (c) 2026 Authors of shirudo
+
+//! main() of the test helper @HELPER@, which hands the command line to
+//! its function in the test helpers of the Rust library, built with no
+//! std as the binaries' main() is.
+
+#![no_std]
+
+use core::ffi::{c_char, c_int};
+
+unsafe extern "C" {
+    fn shirudo_helper_@HELPER@(argc: c_int, argv: *const *const c_char) -> c_int;
+}
+
+/// # Safety
+///
+/// The arguments the C runtime passes main().
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn main(argc: c_int, argv: *const *const c_char) -> c_int {
+    // SAFETY: the C runtime's arguments, handed on.
+    unsafe { shirudo_helper_@HELPER@(argc, argv) }
+}
