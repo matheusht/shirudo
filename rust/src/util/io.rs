@@ -17,7 +17,7 @@ use crate::sys::libc::{
     STATX_BASIC_STATS, Statfs, Statx, close, closedir, errno, fdopendir, flock, fstatfs, fsync,
     ftruncate, geteuid, getline, open, openat, pread, readdir, set_errno, statx, syscall, write,
 };
-use crate::util::seal::seal_open_read;
+use crate::util::seal;
 use core::ptr::NonNull;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
 
@@ -414,13 +414,7 @@ fn under_dir(p: &[u8], dir: &CStr) -> bool {
 /// /var/lib/shirudo opened through its seal.
 pub(crate) fn read(path: &CStr, max: usize) -> Result<Vec<u8>, c_int> {
     let fd = if under_dir(path.to_bytes(), VAR_LIB) {
-        // SAFETY: a C string.
-        let fd = unsafe { seal_open_read(path.as_ptr()) };
-
-        if fd < 0 {
-            return Err(fd);
-        }
-        fd
+        seal::open_read(path.to_bytes())?
     } else {
         // SAFETY: a C string and flags.
         let fd = unsafe { open(path.as_ptr(), O_RDONLY | O_CLOEXEC) };
@@ -428,10 +422,10 @@ pub(crate) fn read(path: &CStr, max: usize) -> Result<Vec<u8>, c_int> {
         if fd < 0 {
             return Err(-errno());
         }
-        fd
+        // SAFETY: the fd just opened, owned from here and closed when it
+        // goes.
+        unsafe { OwnedFd::from_raw_fd(fd) }
     };
-    // SAFETY: the fd just opened, owned from here and closed when it goes.
-    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
     read_whole(fd.as_raw_fd(), path, max)
 }
 

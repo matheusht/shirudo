@@ -6,15 +6,16 @@
 //! of each chunk the BPF side hands back.
 
 use core::ffi::{CStr, c_char, c_int};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 
 use crate::errno::{EAGAIN, EBADMSG, EBUSY, EINTR, EINVAL, EIO, ENAMETOOLONG};
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     AT_EMPTY_PATH, LOCK_EX, LOCK_NB, O_CLOEXEC, O_CREAT, O_DIRECTORY, O_NOFOLLOW, O_RDONLY, O_RDWR,
-    S_IFMT, S_IFREG, STATX_TYPE, Statx, close, errno, flock, getrandom, open, openat, statx,
+    S_IFMT, S_IFREG, STATX_TYPE, Statx, errno, flock, getrandom, open, openat, statx,
 };
 use crate::text::{decimal, strsprintf};
-use crate::util::seal::{seal_inherit, seal_mkdir_p};
+use crate::util::seal;
 
 /// `SERIAL_MAGIC`, "SRLZ" little-endian, and `SERIAL_VERSION` of
 /// bpf/lib/serializer.h.
@@ -49,20 +50,16 @@ pub struct SerialChunk {
 const _: () = assert!(size_of::<SerialChunk>() == 4096);
 
 /// The lock of map `map_id` in `dir`, created sealed when it is not
-/// there and held exclusively until the fd returned is closed; -EBUSY
-/// when another holds it, or another -errno.
-pub(crate) fn lock_acquire_at(dir: &CStr, map_id: u32) -> c_int {
+/// there and held exclusively until the fd returned goes; -EBUSY when
+/// another holds it, or another -errno.
+pub(crate) fn lock_acquire_at(dir: &CStr, map_id: u32) -> Result<OwnedFd, c_int> {
     let mut name = [0u8; 64];
     let mut id = [0u8; 20];
 
     if dir.is_empty() || map_id == 0 {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
-    // SAFETY: a C string and a mode.
-    let ret = unsafe { seal_mkdir_p(dir.as_ptr(), 0o700) };
-    if ret != 0 {
-        return ret;
-    }
+    seal::mkdir_p(dir.to_bytes(), 0o700)?;
     // SAFETY: a C string and flags without a mode.
     let dir_fd = unsafe {
         open(
@@ -71,8 +68,10 @@ pub(crate) fn lock_acquire_at(dir: &CStr, map_id: u32) -> c_int {
         )
     };
     if dir_fd < 0 {
-        return -errno();
+        return Err(-errno());
     }
+    // SAFETY: the fd open() just gave, owned from here.
+    let dir_fd = unsafe { OwnedFd::from_raw_fd(dir_fd) };
     if strsprintf(
         &mut name,
         &[
@@ -83,64 +82,51 @@ pub(crate) fn lock_acquire_at(dir: &CStr, map_id: u32) -> c_int {
     )
     .is_err()
     {
-        // SAFETY: the fd open() gave, closed once.
-        unsafe { close(dir_fd) };
-        return -ENAMETOOLONG;
+        return Err(-ENAMETOOLONG);
     }
     // SAFETY: the directory's fd, the name just written, flags and a
     // mode.
     let fd = unsafe {
         openat(
-            dir_fd,
+            dir_fd.as_raw_fd(),
             name.as_ptr().cast::<c_char>(),
             O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW,
             0o600 as core::ffi::c_uint,
         )
     };
     if fd < 0 {
-        let ret = -errno();
-
-        // SAFETY: the fd open() gave, closed once.
-        unsafe { close(dir_fd) };
-        return ret;
+        return Err(-errno());
     }
-    // SAFETY: the two fds, the directory's closed once, here.
-    let ret = unsafe {
-        let ret = seal_inherit(dir_fd, fd);
-
-        close(dir_fd);
-        ret
-    };
-    if ret != 0 {
-        // SAFETY: the fd openat() gave, closed once.
-        unsafe { close(fd) };
-        return ret;
-    }
+    // SAFETY: the fd openat() just gave, owned from here.
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    let inherited = seal::inherit(dir_fd.as_fd(), fd.as_fd());
+    drop(dir_fd);
+    inherited?;
     let mut st = Statx::zeroed();
     // SAFETY: the fd, an empty path, and a struct statx to fill.
-    if unsafe { statx(fd, c"".as_ptr(), AT_EMPTY_PATH, STATX_TYPE, &mut st) } != 0 {
-        let ret = -errno();
-
-        // SAFETY: the fd openat() gave, closed once.
-        unsafe { close(fd) };
-        return ret;
+    if unsafe {
+        statx(
+            fd.as_raw_fd(),
+            c"".as_ptr(),
+            AT_EMPTY_PATH,
+            STATX_TYPE,
+            &mut st,
+        )
+    } != 0
+    {
+        return Err(-errno());
     }
     if st.stx_mode & S_IFMT != S_IFREG {
-        // SAFETY: the fd openat() gave, closed once.
-        unsafe { close(fd) };
-        return -EINVAL;
+        return Err(-EINVAL);
     }
-    // The open fd owns the lock; callers release it with close().
+    // The open fd holds the lock, which goes when it does.
     // SAFETY: the fd openat() gave, and flags.
-    if unsafe { flock(fd, LOCK_EX | LOCK_NB) } != 0 {
+    if unsafe { flock(fd.as_raw_fd(), LOCK_EX | LOCK_NB) } != 0 {
         let e = errno();
-        let ret = if e == EAGAIN { -EBUSY } else { -e };
 
-        // SAFETY: the fd openat() gave, closed once.
-        unsafe { close(fd) };
-        return ret;
+        return Err(if e == EAGAIN { -EBUSY } else { -e });
     }
-    fd
+    Ok(fd)
 }
 
 /// A random ID for one read of a map, never 0.
@@ -204,6 +190,6 @@ pub(crate) fn chunk_validate(
 }
 
 /// The lock of the serializer of the map `map_id`: its fd, or -errno.
-pub(crate) fn lock_acquire(map_id: u32) -> c_int {
+pub(crate) fn lock_acquire(map_id: u32) -> Result<OwnedFd, c_int> {
     lock_acquire_at(LOCKS_DIR, map_id)
 }

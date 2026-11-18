@@ -28,7 +28,7 @@ use crate::util::curl::Easy;
 use crate::util::dm_verity::{self, DmVerity};
 use crate::util::hex::hex_encode;
 use crate::util::io::write_complete;
-use crate::util::seal::seal_label;
+use crate::util::seal;
 use crate::util::tls_openssl::tls_curl_policy;
 
 /// `IMAGE_CACHE_DIR` of util/paths.h.
@@ -315,7 +315,7 @@ unsafe fn fetch(
     // with what they convert.
     unsafe {
         'out: {
-            ret = seal_label(staging_p);
+            ret = seal::label(CStr::from_ptr(staging_p)).err().unwrap_or(0);
             if ret != 0 {
                 break 'out;
             }

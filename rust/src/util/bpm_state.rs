@@ -11,7 +11,7 @@ use crate::sys::libc::PATH_MAX;
 use crate::text::{cstr, strsprintf};
 use crate::util::bpm_oci::{MAX_NAME, name_ok, version_ok};
 use crate::util::json::{JsonEmit, JsonField, parse_schema};
-use crate::util::seal::{seal_mkdir_p, seal_write_file};
+use crate::util::seal;
 
 /// `BPM_MAX_STATE`: the most packages the state records.
 const MAX_STATE: c_int = 256;
@@ -169,12 +169,10 @@ pub(crate) fn write(st: &[BpmStateEntry]) -> c_int {
     let mut ret = emit(st, &mut buf, &mut len);
 
     if ret == 0 {
-        // SAFETY: a C string and a mode.
-        ret = unsafe { seal_mkdir_p(VAR_DIR.as_ptr(), 0o700) };
-    }
-    if ret == 0 {
-        // SAFETY: a C string, the len bytes emitted, and a mode.
-        ret = unsafe { seal_write_file(STATE_PATH.as_ptr(), buf.as_ptr().cast(), len, 0o600) };
+        ret = seal::mkdir_p(VAR_DIR.to_bytes(), 0o700)
+            .and_then(|()| seal::write_file(STATE_PATH.to_bytes(), &buf[..len], 0o600))
+            .err()
+            .unwrap_or(0);
     }
     ret
 }

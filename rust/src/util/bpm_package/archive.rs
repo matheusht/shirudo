@@ -5,7 +5,9 @@
 //! one member, the names of all, or all of it unpacked.
 
 use core::ffi::{CStr, c_char, c_int};
+use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::PermissionsExt;
 
 use super::tar::{
     BLOCK, NAME, PREFIX, SIZE, TYPEFLAG, archive_rel_ok, header_ok, octal, package_member_name_ok,
@@ -14,12 +16,11 @@ use super::tar::{
 use crate::errno::{E2BIG, EFBIG, EINVAL, EIO, ENAMETOOLONG, ENOENT, ENOMEM, EPERM};
 use crate::ffi;
 use crate::heap::{xfree, xmalloc};
-use crate::sys::libc::{O_CREAT, O_EXCL, O_WRONLY, PATH_MAX, close, errno, fchmod};
+use crate::sys::libc::{O_CREAT, O_EXCL, O_WRONLY, PATH_MAX, errno};
 use crate::text::{at, cstr, strsprintf};
 use crate::util::bpm_oci::{MAX_PACKAGE_BYTES, MAX_PACKAGE_ENTRIES};
 use crate::util::gzip::{GzRead, Z_OK};
-use crate::util::io::write_complete;
-use crate::util::seal::{seal_mkdir_p, seal_open};
+use crate::util::seal;
 
 /// The most a read asks zlib for at once.
 const CHUNK: usize = 65536;
@@ -372,9 +373,7 @@ pub(super) fn extract(archive: &CStr, dest: &CStr) -> c_int {
     let Some(mut gz) = Gz::open(archive) else {
         return -EINVAL;
     };
-    // SAFETY: a C string.
-    let ret = unsafe { seal_mkdir_p(dest.as_ptr(), 0o700) };
-    if ret != 0 {
+    if let Err(ret) = seal::mkdir_p(dest.to_bytes(), 0o700) {
         gz.close();
         return ret;
     }
@@ -460,9 +459,7 @@ fn unpack(gz: &mut Gz, dest: &[u8]) -> (c_int, bool) {
 /// A directory member at `path`, its data read as the other walkers do,
 /// whatever a directory carries.
 fn make_dir(gz: &mut Gz, path: &[u8; PATH_MAX], size: u64, buf: &mut [u8]) -> c_int {
-    // SAFETY: strsprintf() terminated path.
-    let ret = unsafe { seal_mkdir_p(path.as_ptr().cast(), 0o700) };
-    if ret != 0 {
+    if let Err(ret) = seal::mkdir_p(cstr(path), 0o700) {
         return ret;
     }
     if !skip(gz, size, buf) {
@@ -476,40 +473,32 @@ fn write_file(gz: &mut Gz, path: &[u8; PATH_MAX], size: u64, buf: &mut [u8]) -> 
     let file = cstr(path);
 
     if let Some(slash) = file.iter().rposition(|&c| c == b'/') {
-        let mut parent = [0u8; PATH_MAX];
-
-        parent[..slash].copy_from_slice(&file[..slash]);
-        // SAFETY: parent is terminated within its room.
-        let ret = unsafe { seal_mkdir_p(parent.as_ptr().cast(), 0o700) };
-        if ret != 0 {
+        if let Err(ret) = seal::mkdir_p(&file[..slash], 0o700) {
             return ret;
         }
     }
-    // SAFETY: strsprintf() terminated path.
-    let fd = unsafe { seal_open(path.as_ptr().cast(), O_WRONLY | O_CREAT | O_EXCL, 0o644) };
-    if fd < 0 {
-        return fd;
-    }
-    let mut ret = 0;
+    let mut out = match seal::open(file, O_WRONLY | O_CREAT | O_EXCL, 0o644) {
+        Ok(fd) => std::fs::File::from(fd),
+        Err(err) => return err,
+    };
     let mut remain = size;
     while remain != 0 {
         let want = remain.min(CHUNK as u64) as usize;
         let n = gz.read(&mut buf[..want]);
-
-        // SAFETY: n bytes gzread() wrote at buf, to the fd seal_open()
-        // gave.
-        if n <= 0 || unsafe { write_complete(fd, buf.as_ptr().cast(), n as usize) } != 0 {
-            ret = -EIO;
-            break;
+        let Some(chunk) = usize::try_from(n)
+            .ok()
+            .filter(|&n| n != 0)
+            .and_then(|n| buf.get(..n))
+        else {
+            return -EIO;
+        };
+        if out.write_all(chunk).is_err() {
+            return -EIO;
         }
-        remain -= n as u64;
+        remain -= chunk.len() as u64;
     }
-    // SAFETY: the fd seal_open() gave, closed once, here.
-    unsafe {
-        if ret == 0 && fchmod(fd, 0o644) != 0 {
-            ret = -errno();
-        }
-        close(fd);
+    match out.set_permissions(std::fs::Permissions::from_mode(0o644)) {
+        Ok(()) => 0,
+        Err(e) => -e.raw_os_error().unwrap_or(EIO),
     }
-    ret
 }

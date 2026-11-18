@@ -14,6 +14,7 @@ use core::ffi::{CStr, c_int, c_long, c_void};
 use core::sync::atomic::{AtomicI32, Ordering};
 use std::ffi::OsStr;
 use std::fs;
+use std::os::fd::IntoRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 
@@ -428,11 +429,11 @@ fn read_serialized(upatch: &[u8], map: &[u8], flags: u32, out: &mut MapView) -> 
     // Clearing, running and reading are one transaction, under a lock
     // keyed by the output map's kernel ID: every process sharing the map
     // contends, and unrelated upatches stay independent.
-    let lock = crate::util::serializer::lock_acquire(info.u32_at(MAP_ID));
-    if lock < 0 {
-        return lock;
-    }
-    fds.0.push(lock);
+    let lock = match crate::util::serializer::lock_acquire(info.u32_at(MAP_ID)) {
+        Ok(lock) => lock,
+        Err(err) => return err,
+    };
+    fds.0.push(lock.into_raw_fd());
     let mut invocation_id = 0u64;
     let ret = new_invocation_id(&mut invocation_id);
     if ret != 0 {

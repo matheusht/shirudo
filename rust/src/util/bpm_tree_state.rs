@@ -9,7 +9,7 @@
 use core::ffi::{CStr, c_char, c_int};
 use core::ptr;
 use std::ffi::CString;
-use std::os::fd::{FromRawFd, IntoRawFd};
+use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::fs::FileExt;
 
 use crate::errno::{
@@ -34,9 +34,7 @@ use crate::util::io::{read, read_text_line};
 use crate::util::json::{JsonEmit, JsonField, MAX_BYTES, parse_schema};
 use crate::util::kernel_build_id::read_build_id;
 use crate::util::kernel_release::prefix_matches;
-use crate::util::seal::{
-    seal_append_line, seal_mkdir_p, seal_open, seal_open_read, seal_write_file,
-};
+use crate::util::seal;
 use crate::util::upatch::upatch_name_valid;
 
 /// The open-addressed index of a selector's kconfig keys.
@@ -725,21 +723,10 @@ fn pending_write(op: &TreeOperation) -> c_int {
     if e.err() != 0 {
         return e.err();
     }
-    // SAFETY: a C string, and a mode.
-    let ret = unsafe { seal_mkdir_p(tree_path(b"").as_ptr(), 0o700) };
-
-    if ret != 0 {
-        return ret;
-    }
-    // SAFETY: a C string, the bytes emitted, and a mode.
-    unsafe {
-        seal_write_file(
-            tree_path(PENDING).as_ptr(),
-            e.output().as_ptr().cast(),
-            e.output().len(),
-            0o600,
-        )
-    }
+    seal::mkdir_p(tree_path(b"").to_bytes(), 0o700)
+        .and_then(|()| seal::write_file(tree_path(PENDING).to_bytes(), e.output(), 0o600))
+        .err()
+        .unwrap_or(0)
 }
 
 /// The tree state at `path` into `out`, which keeps what was read of it
@@ -824,10 +811,8 @@ fn state_write(s: &TreeState) -> c_int {
         return e.err();
     }
     let dir = tree_path(b"");
-    // SAFETY: a C string, and a mode.
-    let ret = unsafe { seal_mkdir_p(dir.as_ptr(), 0o700) };
 
-    if ret != 0 {
+    if let Err(ret) = seal::mkdir_p(dir.to_bytes(), 0o700) {
         crate::log::err(
             &[
                 &b"tree state mkdir "[..],
@@ -839,15 +824,9 @@ fn state_write(s: &TreeState) -> c_int {
         );
         return ret;
     }
-    // SAFETY: a C string, the bytes emitted, and a mode.
-    unsafe {
-        seal_write_file(
-            tree_path(STATE).as_ptr(),
-            e.output().as_ptr().cast(),
-            e.output().len(),
-            0o600,
-        )
-    }
+    seal::write_file(tree_path(STATE).to_bytes(), e.output(), 0o600)
+        .err()
+        .unwrap_or(0)
 }
 
 /// An operation applied, appended to the tree eventlog with the
@@ -885,20 +864,10 @@ unsafe fn event_append(
     if e.err() != 0 {
         return e.err();
     }
-    // SAFETY: a C string, and a mode.
-    let ret = unsafe { seal_mkdir_p(tree_path(b"").as_ptr(), 0o700) };
-
-    if ret != 0 {
-        return ret;
-    }
-    // SAFETY: a C string, and the bytes emitted.
-    unsafe {
-        seal_append_line(
-            tree_path(EVENTLOG).as_ptr(),
-            e.output().as_ptr().cast(),
-            e.output().len(),
-        )
-    }
+    seal::mkdir_p(tree_path(b"").to_bytes(), 0o700)
+        .and_then(|()| seal::append(&tree_path(EVENTLOG), e.output()))
+        .err()
+        .unwrap_or(0)
 }
 
 /// What a line of the eventlog gives.
@@ -1091,11 +1060,10 @@ struct Outcomes {
 }
 
 impl Outcomes {
-    /// The record open at `fd`, which it closes.
-    fn new(fd: c_int) -> Self {
+    /// The record open at `fd`.
+    fn new(fd: OwnedFd) -> Self {
         Outcomes {
-            // SAFETY: an fd the caller opened, which nothing else owns.
-            file: unsafe { std::fs::File::from_raw_fd(fd) },
+            file: std::fs::File::from(fd),
             end: 0,
             line: OutcomeLine::default(),
         }
@@ -1182,13 +1150,10 @@ pub(crate) fn outcome_append(
         Ok(len) => len,
         Err(err) => return err,
     };
-    // SAFETY: a C string, and a mode.
-    let ret = unsafe { seal_mkdir_p(tree_path(b"").as_ptr(), 0o700) };
-    if ret != 0 {
-        return ret;
-    }
-    // SAFETY: a C string, and the bytes emitted.
-    unsafe { seal_append_line(tree_path(OUTCOMES).as_ptr(), buf.as_ptr().cast(), len) }
+    seal::mkdir_p(tree_path(b"").to_bytes(), 0o700)
+        .and_then(|()| seal::append(&tree_path(OUTCOMES), &buf[..len]))
+        .err()
+        .unwrap_or(0)
 }
 
 /// What the record holds of the operations of seq `from` + 1 through
@@ -1205,15 +1170,14 @@ fn outcomes_read(
     if from < 0 || to < from {
         return -EINVAL;
     }
-    // SAFETY: a C string.
-    let fd = unsafe { seal_open_read(tree_path(OUTCOMES).as_ptr()) };
-    if fd == -ENOENT && to == 0 {
-        *roots = Some(([0; 32], [0; 32]));
-        return 0;
-    }
-    if fd < 0 {
-        return fd;
-    }
+    let fd = match seal::open_read(tree_path(OUTCOMES).to_bytes()) {
+        Ok(fd) => fd,
+        Err(err) if err == -ENOENT && to == 0 => {
+            *roots = Some(([0; 32], [0; 32]));
+            return 0;
+        }
+        Err(err) => return err,
+    };
     let mut o = Outcomes::new(fd);
     let read = (|| {
         o.seek(from)?;
@@ -1244,16 +1208,12 @@ pub(crate) fn outcomes_resume(last_seq: i64) -> Result<[u8; 32], c_int> {
     if last_seq < 0 {
         return Err(-EINVAL);
     }
-    // SAFETY: a C string, flags and a mode.
-    let fd = unsafe { seal_open(tree_path(OUTCOMES).as_ptr(), crate::sys::libc::O_RDWR, 0) };
-    if fd == -ENOENT && last_seq == 0 {
-        return Ok([0; 32]);
-    }
-    if fd < 0 {
-        return Err(fd);
-    }
+    let fd = match seal::open(tree_path(OUTCOMES).to_bytes(), crate::sys::libc::O_RDWR, 0) {
+        Err(err) if err == -ENOENT && last_seq == 0 => return Ok([0; 32]),
+        fd => fd?,
+    };
     let mut o = Outcomes::new(fd);
-    let resumed = match lock_exclusive(fd) {
+    let resumed = match lock_exclusive(o.file.as_raw_fd()) {
         0 => o.seek(last_seq).and_then(|()| o.cut()),
         err => Err(err),
     }

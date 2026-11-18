@@ -786,7 +786,7 @@ pub(crate) fn write_file(path: &[u8], data: &[u8], mode: u32) -> Result<(), c_in
 /// still take, over those functions.
 mod capi {
     use core::ffi::{CStr, c_char, c_int, c_void};
-    use std::os::fd::{BorrowedFd, IntoRawFd, OwnedFd};
+    use std::os::fd::{IntoRawFd, OwnedFd};
 
     use super::Output;
     use crate::errno::EBADF;
@@ -913,23 +913,6 @@ mod capi {
 
     /// # Safety
     ///
-    /// `path` is a C string and `line` holds `len` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn seal_append_line(
-        path: *const c_char,
-        line: *const c_char,
-        len: usize,
-    ) -> c_int {
-        // SAFETY: the caller's C string.
-        let path = unsafe { CStr::from_ptr(path) };
-        // SAFETY: the caller's len bytes at line.
-        let line = unsafe { crate::ffi::slice(line.cast::<u8>(), len) };
-
-        status(super::append(path, line))
-    }
-
-    /// # Safety
-    ///
     /// `path` is a C string.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn seal_output_open(
@@ -991,19 +974,6 @@ mod capi {
 
     /// # Safety
     ///
-    /// `dfd` and `fd` are open, and stay open for the call.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn seal_inherit(dfd: c_int, fd: c_int) -> c_int {
-        // SAFETY: the caller's open directory.
-        let dir = unsafe { BorrowedFd::borrow_raw(dfd) };
-        // SAFETY: the caller's open fd.
-        let fd = unsafe { BorrowedFd::borrow_raw(fd) };
-
-        status(super::inherit(dir, fd))
-    }
-
-    /// # Safety
-    ///
     /// `path` is a C string.
     pub unsafe extern "C" fn seal_inherit_path(path: *const c_char) -> c_int {
         // SAFETY: the caller's C string.
@@ -1012,7 +982,7 @@ mod capi {
 }
 
 pub(crate) use capi::{
-    SealOutput, seal_append_line, seal_inherit, seal_inherit_path, seal_label, seal_label_tree,
-    seal_lock, seal_mkdir_p, seal_open, seal_open_read, seal_output_commit, seal_output_create,
-    seal_output_open, seal_owns, seal_write_file,
+    SealOutput, seal_inherit_path, seal_label, seal_label_tree, seal_lock, seal_mkdir_p, seal_open,
+    seal_open_read, seal_output_commit, seal_output_create, seal_output_open, seal_owns,
+    seal_write_file,
 };

@@ -11,7 +11,7 @@ use core::ffi::{CStr, c_char, c_int, c_long, c_ulong};
 pub use libc::explicit_bzero;
 pub use libc::{
     _exit, abort, access, calloc, close, closedir, execv, execvp, faccessat,
-    fchmod, fclose, fcntl, fdopen, fdopendir, ferror, fgets, fgetxattr, fileno, flock,
+    fclose, fcntl, fdopen, fdopendir, ferror, fgets, fgetxattr, fileno, flock,
     fopen, fputc, fputs, free, fsetxattr, fstatfs, fstatvfs, fsync, ftruncate,
     fwrite, getenv, geteuid, gethostname, getline, getrandom, getsockopt, getxattr, gmtime_r,
     if_indextoname, ioctl, lgetxattr, link, lseek, lsetxattr, memfd_create, mkdirat, mkdtemp,

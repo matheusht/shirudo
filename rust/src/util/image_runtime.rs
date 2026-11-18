@@ -53,7 +53,7 @@ use crate::util::io::{kernel_dev, read_whole};
 use crate::util::json::JsonEmit;
 use crate::util::keyring;
 use crate::util::keys::{TrustedCert, TrustedSet, members, read_der_fd};
-use crate::util::seal::seal_label;
+use crate::util::seal;
 use crate::util::tpm::{Tpm, tpm_boot_identity, tpm_close, tpm_open, tpm_pcr_extend, tpm_pcr_read};
 
 const RUNTIME_DIR: &CStr = c"/run/shirudo/runtime";
@@ -214,8 +214,7 @@ fn mkdir_owned(p: &CStr) -> c_int {
     if !created {
         return 0;
     }
-    // SAFETY: a C string.
-    unsafe { seal_label(p.as_ptr()) }
+    seal::label(p).err().unwrap_or(0)
 }
 
 /// The dm name of the config image with this root.

@@ -62,13 +62,7 @@ fn map_locks() -> Result<(), &'static str> {
         return Err("mkdtemp failed");
     }
     let dir = CStr::from_bytes_with_nul(&template).map_err(|_| "mkdtemp failed")?;
-    let lock = |id| {
-        let fd = lock_acquire_at(dir, id);
-        // SAFETY: the lock's descriptor, owned here, closed when dropped.
-        (fd >= 0)
-            .then(|| unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd) })
-            .ok_or(fd)
-    };
+    let lock = |id| lock_acquire_at(dir, id);
     let ret = (|| {
         let first = lock(101).map_err(|_| "first serializer lock failed")?;
         if lock(101).err() != Some(-EBUSY) {

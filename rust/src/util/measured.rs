@@ -14,7 +14,7 @@ use crate::text::{at, cstr, strscpy, strsprintf};
 use crate::util::chain::MeasuredUpatch;
 use crate::util::eventlog::{self, UPATCH_INIT, UPATCH_UNLOAD};
 use crate::util::hex::hex_encode;
-use crate::util::seal::seal_owns;
+use crate::util::seal;
 use crate::util::upatch::{
     NAME_MAX, PAYLOAD_HASH_LEN, Upatch, upatch_close, upatch_header_name, upatch_member_valid,
     upatch_open,
@@ -291,13 +291,11 @@ impl MeasuredSet {
             if strsprintf(&mut path, &[UPATCHES_DIR.to_bytes(), b"/", archive]).is_err() {
                 continue;
             }
-            // SAFETY: the archive's path, and room for the upatch; the C
-            // opened only what the seal label marks.
-            let opened = unsafe {
-                seal_owns(path.as_ptr().cast())
-                    && upatch_open(path.as_ptr().cast(), u.as_mut_ptr()) == 0
-            };
-            if !opened {
+            if !seal::owns(cstr(&path)) {
+                continue;
+            }
+            // SAFETY: the archive's path, and room for the upatch.
+            if unsafe { upatch_open(path.as_ptr().cast(), u.as_mut_ptr()) } != 0 {
                 continue;
             }
             // SAFETY: the member's room and the upatch opened, closed once.

@@ -6,7 +6,7 @@
 //! and gzip for a selector's keys, and a labels file.
 
 use core::ffi::CStr;
-use std::os::fd::{AsFd, BorrowedFd, IntoRawFd};
+use std::os::fd::{AsFd, BorrowedFd};
 use std::sync::OnceLock;
 
 use super::{
@@ -48,7 +48,7 @@ fn check_file(path: &CStr, fd: BorrowedFd<'_>, size: usize) {
     let Ok(dup) = fd.try_clone_to_owned() else {
         return;
     };
-    let mut o = Outcomes::new(dup.into_raw_fd());
+    let mut o = Outcomes::new(dup);
     let mut seq = 0i64;
     while o.next().is_ok() {
         seq += 1;

@@ -14,7 +14,7 @@ use crate::sys::libc::{Utsname, printf, strerrorname_np, uname};
 use crate::text::{cstr, strsprintf};
 use crate::util::eventlog::NV_INDEX;
 use crate::util::json::JsonEmit;
-use crate::util::seal::{SealOutput, seal_output_commit, seal_output_create};
+use crate::util::seal::Output;
 
 /// `VERIFIER_LOG_MAX`: the most of a verifier log a report keeps.
 const VERIFIER_LOG_MAX: usize = 16 * 1024 * 1024;
@@ -164,36 +164,16 @@ pub(crate) fn report_emit(path: &CStr, r: &OpReport) -> c_int {
         // SAFETY: a format of one C string, and the report.
         unsafe { printf(c"%s\n".as_ptr(), doc.as_ptr()) };
     } else {
-        let mut out = SealOutput::closed();
-
-        // SAFETY: an output to fill, the caller's path, and a mode.
-        ret = unsafe { seal_output_create(&mut out, path.as_ptr(), 0o644) };
-        if ret != 0 {
-            crate::log::err(
-                &[
-                    &b"report: open "[..],
-                    path_c.to_bytes(),
-                    b": ",
-                    text(ret).as_bytes(),
-                ]
-                .concat(),
-            );
-        } else {
-            let doc = doc.as_bytes();
-            // SAFETY: the output just created, and the report's bytes.
-            ret = unsafe { seal_output_commit(&mut out, doc.as_ptr().cast(), doc.len()) };
-            if ret != 0 {
-                crate::log::err(
-                    &[
-                        &b"report: write "[..],
-                        path_c.to_bytes(),
-                        b": ",
-                        text(ret).as_bytes(),
-                    ]
-                    .concat(),
-                );
-            }
-        }
+        let failed = |what: &[u8], err: c_int| {
+            crate::log::err(&[what, path_c.to_bytes(), b": ", text(err).as_bytes()].concat());
+            err
+        };
+        ret = match Output::create(path.to_bytes(), 0o644) {
+            Ok(out) => out
+                .commit(doc.as_bytes())
+                .map_or_else(|err| failed(b"report: write ", err), |()| 0),
+            Err(err) => failed(b"report: open ", err),
+        };
     }
     ret
 }
