@@ -65,8 +65,21 @@ pub(crate) const TREE_MANIFEST_CAP: usize = 8192;
 /// The manifest of a tree publication whose payload and signature are
 /// the layers `payload` and `sig`, as bpm tree append writes it.
 pub(crate) fn tree_manifest(payload: &Descriptor, sig: &Descriptor) -> Result<Vec<u8>, c_int> {
-    let mut hex = [0u8; 65];
     let mut out = vec![0u8; TREE_MANIFEST_CAP];
+    let len = emit_tree_manifest(payload, sig, &mut out)?;
+
+    out.truncate(len);
+    Ok(out)
+}
+
+/// [`tree_manifest`] into `out`, its length then, -E2BIG where it does
+/// not fit.
+pub(super) fn emit_tree_manifest(
+    payload: &Descriptor,
+    sig: &Descriptor,
+    out: &mut [u8],
+) -> Result<usize, c_int> {
+    let mut hex = [0u8; 65];
 
     if sha256_hex(b"{}".as_ptr(), 2, &mut hex) != 0 {
         return Err(-EINVAL);
@@ -86,8 +99,7 @@ pub(crate) fn tree_manifest(payload: &Descriptor, sig: &Descriptor) -> Result<Ve
     if e.err() != 0 {
         return Err(e.err());
     }
-    out.truncate(e.written());
-    Ok(out)
+    Ok(e.written())
 }
 
 /// A registry may serve the signed layers under a manifest of its own
