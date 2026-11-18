@@ -700,22 +700,21 @@ pub(crate) unsafe fn cert_not_before(cert: *const Cert, out: *mut c_char) -> c_i
 }
 
 /// The CMS blob in `signature`, all of it and nothing more, or none.
-fn read_cms(signature: *const u8, len: usize) -> Option<CmsContentInfo> {
-    if signature.is_null() || len == 0 || len > c_int::MAX as usize {
-        return None;
-    }
-    let mut next = signature;
-    // SAFETY: the caller's len bytes of signature, and where the parse
-    // stopped in them.
-    let cms = unsafe { ffi::d2i_CMS_ContentInfo(ptr::null_mut(), &mut next, len as c_long) };
+fn read_cms(signature: &[u8]) -> Option<CmsContentInfo> {
+    let len = c_long::try_from(signature.len())
+        .ok()
+        .filter(|&n| n > 0 && n <= c_int::MAX.into())?;
+    let mut next = signature.as_ptr();
+    // SAFETY: the slice's bytes, and room for where the parse stopped in
+    // them.
+    let cms = unsafe { ffi::d2i_CMS_ContentInfo(ptr::null_mut(), &mut next, len) };
     if cms.is_null() {
         return None;
     }
     // SAFETY: the structure d2i made, owned from here.
     let cms = unsafe { CmsContentInfo::from_ptr(cms) };
 
-    // SAFETY: the end of the caller's bytes.
-    (next == unsafe { signature.add(len) }).then_some(cms)
+    (next == signature.as_ptr_range().end).then_some(cms)
 }
 
 /// Whether `signature` is a detached CMS signature of `payload` by the
@@ -764,7 +763,7 @@ pub(crate) fn verify_detached_x509(payload: &[u8], signature: &[u8], x509: &X509
         let store = store.build();
         let mut signers = Stack::new()?;
         signers.push(x509.to_owned())?;
-        let Some(mut cms) = read_cms(signature.as_ptr(), signature.len()) else {
+        let Some(mut cms) = read_cms(signature) else {
             return Err(ErrorStack::get());
         };
         cms.verify(
@@ -801,10 +800,11 @@ pub(crate) unsafe fn cms_signed_by(
     let Some(x509) = (unsafe { x509_of(cert) }) else {
         return -EINVAL;
     };
-    if signature.is_null() || signature_len > c_int::MAX as usize {
+    if signature.is_null() {
         return -EINVAL;
     }
-    let Some(cms) = read_cms(signature, signature_len) else {
+    // SAFETY: the caller's signature_len bytes.
+    let Some(cms) = read_cms(unsafe { slice(signature, signature_len) }) else {
         clear_errors();
         return -EINVAL;
     };
