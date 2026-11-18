@@ -10,7 +10,6 @@ use core::ffi::{CStr, c_int};
 
 use super::{fail, fetch, finish, info, key, package, source, tree};
 use crate::errno::{E2BIG, EIO};
-use crate::ffi;
 use crate::util::help::{
     Help, HelpItem, HelpSection, is_help, is_list_cmds, print_help, print_subcmd_list,
     resolve_subcommand,
@@ -327,16 +326,6 @@ fn word<'a>(argv: &[&'a CStr], i: usize) -> Option<&'a [u8]> {
     argv.get(i).map(|a| a.to_bytes())
 }
 
-fn help(h: &Help) {
-    // SAFETY: help of C strings and sections that live.
-    unsafe { print_help(h) };
-}
-
-fn subcmd_list(items: &[HelpItem]) {
-    // SAFETY: items whose names are C strings.
-    unsafe { print_subcmd_list(items) };
-}
-
 /// The words of a bpm subcommand, `min` to `max` of them, with the value
 /// of each option given into `values` where there is one: Ok to act, or
 /// the status to stop with, 0 where help or the option list was printed.
@@ -398,11 +387,11 @@ fn config(argv: &[&CStr]) -> c_int {
     let action = word(argv, 2);
 
     if argv.len() < 2 || is_help(word(argv, 1)) {
-        help(&CONFIG_HELP);
+        print_help(&CONFIG_HELP);
         return if argv.len() < 2 { EXIT_USAGE } else { 0 };
     }
     if is_list_cmds(word(argv, 1)) {
-        subcmd_list(&CONFIG_SUBCMDS);
+        print_subcmd_list(&CONFIG_SUBCMDS);
         return 0;
     }
     if word(argv, 1) != Some(b"register") {
@@ -414,11 +403,11 @@ fn config(argv: &[&CStr]) -> c_int {
         return EXIT_USAGE;
     }
     if action.is_none() || is_help(action) {
-        help(&CONFIG_HELP);
+        print_help(&CONFIG_HELP);
         return if action.is_some() { 0 } else { EXIT_USAGE };
     }
     if is_list_cmds(action) {
-        subcmd_list(&REGISTER_ACTIONS);
+        print_subcmd_list(&REGISTER_ACTIONS);
         return 0;
     }
     match action.unwrap_or_default() {
@@ -510,20 +499,17 @@ fn register_add(argv: &[&CStr]) -> c_int {
 /// `bpm key`, `argv` from "key" on.
 fn key(argv: &[&CStr]) -> c_int {
     if argv.len() < 2 || is_help(word(argv, 1)) {
-        help(&KEY_HELP);
+        print_help(&KEY_HELP);
         return if argv.len() < 2 { EXIT_USAGE } else { 0 };
     }
     if is_list_cmds(word(argv, 1)) {
-        subcmd_list(&KEY_SUBCMDS);
+        print_subcmd_list(&KEY_SUBCMDS);
         return 0;
     }
-    // SAFETY: a label, an argument and items with names.
-    let sub = unsafe { resolve_subcommand(c"bpm key".as_ptr(), argv[1].as_ptr(), &KEY_SUBCMDS) };
-    if sub.is_null() {
+    let Some(sub) = resolve_subcommand(c"bpm key", argv[1], &KEY_SUBCMDS) else {
         return EXIT_USAGE;
-    }
-    // SAFETY: the name of one of the items.
-    let sub = unsafe { ffi::c_str(sub) };
+    };
+    let sub = sub.to_bytes();
     if sub == b"list" {
         let mut p = OptParser::new(c"bpm key list", &KEY_LIST_OPTS, Some(&KEY_HELP), argv, 2);
         return match words(&mut p, None, 0, 0, b"") {
@@ -625,11 +611,11 @@ fn info_cmd(argv: &[&CStr]) -> c_int {
 
 fn tree_cmd(argv: &[&CStr]) -> c_int {
     if argv.len() < 3 || is_help(word(argv, 2)) {
-        help(&TREE_HELP);
+        print_help(&TREE_HELP);
         return if argv.len() < 3 { EXIT_USAGE } else { 0 };
     }
     if is_list_cmds(word(argv, 2)) {
-        subcmd_list(&TREE_SUBCMDS);
+        print_subcmd_list(&TREE_SUBCMDS);
         return 0;
     }
     match word(argv, 2).unwrap_or_default() {
@@ -673,11 +659,11 @@ fn pull(argv: &[&CStr]) -> c_int {
 
 fn repo(argv: &[&CStr]) -> c_int {
     if argv.len() < 3 || is_help(word(argv, 2)) {
-        help(&REPO_HELP);
+        print_help(&REPO_HELP);
         return if argv.len() < 3 { EXIT_USAGE } else { 0 };
     }
     if is_list_cmds(word(argv, 2)) {
-        subcmd_list(&REPO_SUBCMDS);
+        print_subcmd_list(&REPO_SUBCMDS);
         return 0;
     }
     if word(argv, 2) != Some(b"update") {
@@ -737,20 +723,16 @@ pub(super) fn run(argv: &[&CStr]) -> c_int {
     };
 
     if argv.len() < 2 || is_help(word(argv, 1)) {
-        help(h);
+        print_help(h);
         return if argv.len() < 2 { EXIT_USAGE } else { 0 };
     }
     if is_list_cmds(word(argv, 1)) {
-        subcmd_list(items);
+        print_subcmd_list(items);
         return 0;
     }
-    // SAFETY: a label, an argument and items with names.
-    let sub = unsafe { resolve_subcommand(c"shirudo bpm".as_ptr(), argv[1].as_ptr(), items) };
-    if sub.is_null() {
+    let Some(sub) = resolve_subcommand(c"shirudo bpm", argv[1], items) else {
         return EXIT_USAGE;
-    }
-    // SAFETY: the name of one of the items, which lives as they do.
-    let sub = unsafe { CStr::from_ptr(sub) };
+    };
     match sub.to_bytes() {
         b"config" if word(argv, 2) == Some(b"update") => exec_operator(sub, argv),
         b"config" => config(&argv[1..]),

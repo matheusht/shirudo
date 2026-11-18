@@ -5,13 +5,10 @@
 //! command's options come from a table indexed by its own enum of them,
 //! and the parser holds each to the same rules.
 
-use core::ffi::{CStr, c_char, c_int};
-use core::ptr;
+use core::ffi::{CStr, c_int};
 
-use crate::ffi;
-use crate::sys::libc::printf;
 use crate::text::parse_u64;
-use crate::util::help::{Help, help_suggest, is_list_cmds, print_help};
+use crate::util::help::{Help, help_suggest, is_list_cmds, out_write, print_help};
 use crate::util::similar::MAX_LEN as SIMILAR_MAX_LEN;
 
 /// The exit status of every usage error.
@@ -36,22 +33,15 @@ pub(crate) const OPT_DONE: c_int = -3;
 /// A usage error, already reported.
 pub(crate) const OPT_USAGE: c_int = -4;
 
-/// `struct opt_spec`: one option. Where `metavar` names a value, the
-/// option takes one as the next argument or after `=`; where it is NULL,
-/// it is a flag.
-#[repr(C)]
+/// One option. Where `metavar` names a value, the option takes one as
+/// the next argument or after `=`; where it is None, it is a flag.
 pub struct OptSpec {
-    pub(crate) name: *const c_char,
-    pub(crate) short_name: c_char,
-    pub(crate) flags: u32,
-    pub(crate) metavar: *const c_char,
-    pub(crate) summary: *const c_char,
+    name: &'static CStr,
+    short_name: u8,
+    flags: u32,
+    metavar: Option<&'static CStr>,
+    pub(crate) summary: &'static CStr,
 }
-
-const _: () = assert!(size_of::<OptSpec>() == 32);
-
-// SAFETY: a table of pointers to static C strings, read only.
-unsafe impl Sync for OptSpec {}
 
 impl OptSpec {
     /// A flag, or with `metavar` an option that takes a value.
@@ -63,43 +53,24 @@ impl OptSpec {
         summary: &'static CStr,
     ) -> Self {
         OptSpec {
-            name: name.as_ptr(),
-            short_name: short_name as c_char,
+            name,
+            short_name,
             flags,
-            metavar: match metavar {
-                Some(m) => m.as_ptr(),
-                None => ptr::null(),
-            },
-            summary: summary.as_ptr(),
+            metavar,
+            summary,
         }
     }
-
-    /// # Safety
-    ///
-    /// The spec's name is NULL or a C string.
-    unsafe fn name_bytes(&self) -> Option<&[u8]> {
-        // SAFETY: as the caller says.
-        (!self.name.is_null()).then(|| unsafe { ffi::c_str(self.name) })
-    }
 }
 
-/// `struct opt_name`: a name an option's value may be, and the value it
-/// stands for.
-#[repr(C)]
+/// A name an option's value may be, and the value it stands for.
 pub struct OptName {
-    pub(crate) name: *const c_char,
-    pub(crate) value: c_int,
+    name: &'static CStr,
+    value: c_int,
 }
-
-// SAFETY: as OptSpec.
-unsafe impl Sync for OptName {}
 
 impl OptName {
     pub(crate) const fn new(name: &'static CStr, value: c_int) -> Self {
-        OptName {
-            name: name.as_ptr(),
-            value,
-        }
+        OptName { name, value }
     }
 }
 
@@ -201,8 +172,7 @@ impl<'a> OptParser<'a> {
         let bytes = arg.to_bytes();
         if bytes == b"-h" || bytes == b"--help" {
             if let Some(h) = self.help {
-                // SAFETY: a command's help, of C strings.
-                unsafe { print_help(h) };
+                print_help(h);
             }
             return OPT_DONE;
         }
@@ -239,15 +209,13 @@ impl<'a> OptParser<'a> {
                 let (name, value) = long_parts(arg);
                 self.specs
                     .iter()
-                    // SAFETY: a table that passed specs_valid(), whose
-                    // names are C strings.
-                    .position(|s| unsafe { s.name_bytes() } == Some(name))
+                    .position(|s| s.name.to_bytes() == name)
                     .map(|i| (i, value))
             }
             &[b'-', short] => self
                 .specs
                 .iter()
-                .position(|s| s.short_name as u8 == short)
+                .position(|s| s.short_name == short)
                 .map(|i| (i, None)),
             _ => None,
         }
@@ -263,11 +231,7 @@ impl<'a> OptParser<'a> {
         if typed.len() > SIMILAR_MAX_LEN {
             return OPT_USAGE;
         }
-        let mut bad = typed.to_vec();
-        bad.push(0);
-        let names: Vec<*const c_char> = self.specs.iter().map(|s| s.name).collect();
-        // SAFETY: a C string, and the names of the specs, C strings.
-        unsafe { help_suggest(bad.as_ptr().cast(), &names) };
+        help_suggest(typed, self.specs.iter().map(|s| s.name));
         OPT_USAGE
     }
 
@@ -275,32 +239,24 @@ impl<'a> OptParser<'a> {
     /// "-o".
     fn list(&self) -> c_int {
         for s in self.specs {
-            let eq = if s.flags & OPT_OPTIONAL != 0 {
-                c"="
+            let name = s.name.to_bytes();
+            let eq: &[u8] = if s.flags & OPT_OPTIONAL != 0 {
+                b"="
             } else {
-                c""
+                b""
             };
-            let (tab, metavar) = if s.metavar.is_null() {
-                (c"", c"".as_ptr())
-            } else {
-                (c"\t", s.metavar)
+            let (tab, metavar): (&[u8], &[u8]) = match s.metavar {
+                Some(m) => (b"\t", m.to_bytes()),
+                None => (b"", b""),
             };
 
-            // SAFETY: formats and C strings of the spec's.
-            unsafe {
-                if s.short_name != 0 {
-                    printf(
-                        c"-%c%s%s\n".as_ptr(),
-                        c_int::from(s.short_name),
-                        tab.as_ptr(),
-                        metavar,
-                    );
-                }
-                if s.metavar.is_null() {
-                    printf(c"%s\n".as_ptr(), s.name);
-                } else {
-                    printf(c"%s%s\t%s\n".as_ptr(), s.name, eq.as_ptr(), s.metavar);
-                }
+            if s.short_name != 0 {
+                out_write(&[b"-", &[s.short_name][..], tab, metavar, b"\n"].concat());
+            }
+            if s.metavar.is_none() {
+                out_write(&[name, b"\n"].concat());
+            } else {
+                out_write(&[name, eq, b"\t", metavar, b"\n"].concat());
             }
         }
         OPT_DONE
@@ -311,7 +267,7 @@ impl<'a> OptParser<'a> {
         let (flags, metavar) = (s.flags, s.metavar);
         let name = self.opt_name(opt);
 
-        if metavar.is_null() {
+        if metavar.is_none() {
             if eq.is_none() {
                 return 0;
             }
@@ -338,9 +294,7 @@ impl<'a> OptParser<'a> {
 
     /// The name of the option of index `opt`.
     fn opt_name(&self, opt: usize) -> &'a [u8] {
-        // SAFETY: an option of a table that passed specs_valid(), whose
-        // name is a C string.
-        unsafe { ffi::c_str(self.specs[opt].name) }
+        self.specs[opt].name.to_bytes()
     }
 
     /// The value of the option last returned as a number from `min` to
@@ -372,8 +326,7 @@ impl<'a> OptParser<'a> {
             self.usage(b"no option value to read as a name");
             return Err(OPT_USAGE);
         };
-        // SAFETY: the names a command gives, C strings.
-        let name = |n: &OptName| unsafe { ffi::c_str(n.name) };
+        let name = |n: &OptName| n.name.to_bytes();
         if let Some(n) = names.iter().find(|n| name(n) == value.to_bytes()) {
             return Ok(n.value);
         }
@@ -415,33 +368,24 @@ fn long_parts(arg: &CStr) -> (&[u8], Option<&CStr>) {
     }
 }
 
-/// A table with a hole, a name twice, or a flag marked as taking a value
-/// would leave an option unreachable or read wrong, whatever the command
-/// line; refuse it before any argument is read.
+/// A table with a name that is no long option, a name twice, or a flag
+/// marked as taking a value would leave an option unreachable or read
+/// wrong, whatever the command line; refuse it before any argument is
+/// read.
 fn specs_valid(specs: &[OptSpec]) -> bool {
     if specs.len() > OPT_MAX {
         return false;
     }
     for (i, s) in specs.iter().enumerate() {
-        // SAFETY: a name, NULL or a C string.
-        let Some(name) = (unsafe { s.name_bytes() }) else {
-            return false;
-        };
-        if !name.starts_with(b"--")
-            || name.len() == 2
-            || name.contains(&b'=')
-            || s.summary.is_null()
-        {
+        let name = s.name.to_bytes();
+        if !name.starts_with(b"--") || name.len() == 2 || name.contains(&b'=') {
             return false;
         }
-        if s.metavar.is_null() && s.flags & (OPT_EMPTY | OPT_OPTIONAL) != 0 {
+        if s.metavar.is_none() && s.flags & (OPT_EMPTY | OPT_OPTIONAL) != 0 {
             return false;
         }
         for o in &specs[..i] {
-            // SAFETY: as above, for an earlier spec, checked already.
-            if unsafe { o.name_bytes() } == Some(name)
-                || (s.short_name != 0 && s.short_name == o.short_name)
-            {
+            if o.name == s.name || (s.short_name != 0 && s.short_name == o.short_name) {
                 return false;
             }
         }
@@ -452,29 +396,22 @@ fn specs_valid(specs: &[OptSpec]) -> bool {
 /// The option label help shows: "-o, --output <path>",
 /// "--json[=<path>]".
 pub(crate) fn option_label(o: &OptSpec) -> Vec<u8> {
-    // SAFETY: a spec's name and metavar, C strings or a NULL metavar.
-    let (name, metavar) = unsafe {
-        (
-            ffi::c_str(o.name),
-            (!o.metavar.is_null()).then(|| ffi::c_str(o.metavar)),
-        )
-    };
     let mut label = Vec::new();
 
     if o.short_name != 0 {
-        label.extend_from_slice(&[b'-', o.short_name as u8, b',', b' ']);
+        label.extend_from_slice(&[b'-', o.short_name, b',', b' ']);
     }
-    label.extend_from_slice(name);
-    match metavar {
+    label.extend_from_slice(o.name.to_bytes());
+    match o.metavar {
         None => {}
         Some(m) if o.flags & OPT_OPTIONAL != 0 => {
             label.extend_from_slice(b"[=");
-            label.extend_from_slice(m);
+            label.extend_from_slice(m.to_bytes());
             label.push(b']');
         }
         Some(m) => {
             label.push(b' ');
-            label.extend_from_slice(m);
+            label.extend_from_slice(m.to_bytes());
         }
     }
     label

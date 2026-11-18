@@ -12,7 +12,7 @@ pub use libc::explicit_bzero;
 pub use libc::{
     _exit, abort, access, calloc, close, closedir, execv, execvp, faccessat,
     fchmod, fclose, fcntl, fdopen, fdopendir, ferror, fgetc, fgets, fgetxattr, fileno, flock,
-    fopen, fprintf, fputc, fputs, free, fsetxattr, fstatfs, fstatvfs, fsync, ftello, ftruncate,
+    fopen, fputc, fputs, free, fsetxattr, fstatfs, fstatvfs, fsync, ftello, ftruncate,
     fwrite, getenv, geteuid, gethostname, getline, getrandom, getsockopt, getxattr, gmtime_r,
     if_indextoname, ioctl, lgetxattr, link, lseek, lsetxattr, memfd_create, mkdirat, mkdtemp,
     mknod, mkstemp, mkstemps, mlockall, mount, open, openat, opendir, openlog, personality,

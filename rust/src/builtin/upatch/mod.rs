@@ -184,24 +184,18 @@ fn print_json(e: JsonEmit, cmd: &[u8]) -> c_int {
 pub(crate) fn cmd_upatch(args: &[&CStr]) -> c_int {
     let word = |i: usize| args.get(i).map(|a| a.to_bytes());
     if args.len() < 2 || is_help(word(1)) {
-        // SAFETY: help of C strings.
-        unsafe { print_help(&UPATCH_HELP) };
+        print_help(&UPATCH_HELP);
         return if args.len() < 2 { 2 } else { 0 };
     }
     if is_list_cmds(word(1)) {
-        // SAFETY: the subcommands, constants.
-        unsafe { print_subcmd_list(&SUBCMDS) };
+        print_subcmd_list(&SUBCMDS);
         return 0;
     }
-    // SAFETY: a C string, the caller's, and the subcommands.
-    let canonical =
-        unsafe { resolve_subcommand(c"shirudo upatch".as_ptr(), args[1].as_ptr(), &SUBCMDS) };
-    if canonical.is_null() {
+    let Some(canonical) = resolve_subcommand(c"shirudo upatch", args[1], &SUBCMDS) else {
         return 2;
-    }
+    };
     let rest = &args[1..];
-    // SAFETY: the subcommand's name, a C string.
-    match unsafe { CStr::from_ptr(canonical) }.to_bytes() {
+    match canonical.to_bytes() {
         b"info" => info::run(rest),
         b"list" => list::run(rest),
         b"get" => get::run(rest),

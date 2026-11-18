@@ -5,7 +5,7 @@
 //! a target; building and verifying one is the operator's, in
 //! shirudo-build.
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
 
 use crate::errno::{EINPROGRESS, ENODEV};
 use crate::ffi;
@@ -168,13 +168,11 @@ pub(super) fn cmd_image(args: &[&CStr]) -> c_int {
     let arg = args.get(1).map(|a| a.to_bytes());
 
     if is_list_cmds(arg) {
-        // SAFETY: the subcommands, of C strings.
-        unsafe { print_subcmd_list(&SUBCMDS) };
+        print_subcmd_list(&SUBCMDS);
         return 0;
     }
     let Some(sub) = arg.filter(|&a| !is_help(Some(a))) else {
-        // SAFETY: the command's help, of C strings.
-        unsafe { print_help(&HELP) };
+        print_help(&HELP);
         return if arg.is_none() { EXIT_USAGE } else { 0 };
     };
     match sub {
@@ -191,9 +189,7 @@ pub(super) fn cmd_image(args: &[&CStr]) -> c_int {
         b"status" => status(&args[1..]),
         _ => {
             crate::log::err(&[b"image: '", sub, b"' is not a subcommand"].concat());
-            let names: Vec<*const c_char> = SUBCMDS.iter().map(|s| s.name).collect();
-            // SAFETY: the caller's C string and the subcommands' names.
-            unsafe { help_suggest(args[1].as_ptr(), &names) };
+            help_suggest(sub, SUBCMDS.iter().map(|s| s.name));
             EXIT_USAGE
         }
     }

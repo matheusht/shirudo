@@ -169,7 +169,7 @@ fn help_and_the_option_list_end_parsing() {
     let cmds = parsed(&[c"--list-cmds"])[0].0;
     // SAFETY: as above.
     unsafe {
-        libc::fflush(ptr::null_mut());
+        libc::fflush(core::ptr::null_mut());
         assert_eq!(libc::dup2(saved, 1), 1);
         libc::close(saved);
     }
@@ -210,16 +210,8 @@ fn a_choice_names_its_value() {
 
 #[test]
 fn a_malformed_table_is_refused_before_any_argument() {
-    let hole = OptSpec {
-        name: ptr::null(),
-        short_name: 0,
-        flags: 0,
-        metavar: ptr::null(),
-        summary: ptr::null(),
-    };
     let a = || OptSpec::new(c"--a", 0, 0, None, c"a");
     let tables = [
-        vec![hole, a()],
         vec![a(), OptSpec::new(c"--a", 0, 0, Some(c"<x>"), c"a again")],
         vec![OptSpec::new(c"--a", 0, OPT_EMPTY, None, c"a")],
         vec![OptSpec::new(c"a", 0, 0, None, c"a")],

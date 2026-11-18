@@ -8,10 +8,9 @@
 //! callers around it do, so that its output keeps its place among
 //! theirs.
 
-use core::ffi::{c_char, c_int};
+use core::ffi::{CStr, c_int};
 
-use crate::ffi;
-use crate::sys::libc::{fprintf, fputc, fwrite, printf, stderr};
+use crate::sys::libc::{fputc, fwrite, stderr, stdout};
 use crate::util::options::{OptSpec, option_label};
 use crate::util::similar::{Suggestion, resolve, suggest};
 
@@ -22,57 +21,43 @@ const SUBCMD_MAX: usize = 32;
 /// slack.
 const HELP_WIDTH: usize = 90;
 
-/// `struct help_item`.
-#[repr(C)]
+/// A subcommand, or another name a help section lists, and what it does.
 pub struct HelpItem {
-    pub(crate) name: *const c_char,
-    pub(crate) summary: *const c_char,
+    pub(crate) name: &'static CStr,
+    pub(crate) summary: &'static CStr,
 }
 
-/// `struct help_section`: a section lists items, or the options of a
-/// command's option table.
-#[repr(C)]
+/// A section of help: it lists items, or the options of a command's
+/// option table.
 pub struct HelpSection {
-    pub(crate) header: *const c_char,
-    pub(crate) items: *const HelpItem,
-    pub(crate) n_items: usize,
-    pub(crate) options: *const OptSpec,
-    pub(crate) n_options: usize,
+    header: &'static CStr,
+    items: &'static [HelpItem],
+    options: &'static [OptSpec],
 }
 
 impl HelpSection {
-    /// A section named `header` listing `items`, HELP_ITEMS().
-    pub(crate) const fn items(header: &'static core::ffi::CStr, items: &[HelpItem]) -> Self {
+    /// A section named `header` listing `items`.
+    pub(crate) const fn items(header: &'static CStr, items: &'static [HelpItem]) -> Self {
         HelpSection {
-            header: header.as_ptr(),
-            items: items.as_ptr(),
-            n_items: items.len(),
-            options: core::ptr::null(),
-            n_options: 0,
+            header,
+            items,
+            options: &[],
         }
     }
 
-    /// A section named `header` listing the options of `options`,
-    /// HELP_OPTIONS().
-    pub(crate) const fn options(header: &'static core::ffi::CStr, options: &[OptSpec]) -> Self {
+    /// A section named `header` listing the options of `options`.
+    pub(crate) const fn options(header: &'static CStr, options: &'static [OptSpec]) -> Self {
         HelpSection {
-            header: header.as_ptr(),
-            items: core::ptr::null(),
-            n_items: 0,
-            options: options.as_ptr(),
-            n_options: options.len(),
+            header,
+            items: &[],
+            options,
         }
     }
 }
 
 /// A row of a section: the name in a column `w` wide, the summary
 /// wrapped after it.
-///
-/// # Safety
-///
-/// `summary` is a C string.
-unsafe fn print_row(name: &[u8], summary: *const c_char, w: usize) {
-    let f = err_stream();
+fn print_row(name: &[u8], summary: &CStr, w: usize) {
     let indent = 2 + w;
     let avail = if indent < HELP_WIDTH {
         HELP_WIDTH - indent
@@ -83,71 +68,58 @@ unsafe fn print_row(name: &[u8], summary: *const c_char, w: usize) {
 
     row.extend_from_slice(name);
     row.resize(row.len().max(2 + w), b' ');
-    // SAFETY: the stream and the row's bytes, and the caller's C string.
-    unsafe {
-        fwrite(row.as_ptr().cast(), 1, row.len(), f);
-        wrap_print(ffi::c_str(summary), indent, avail);
-    }
+    err_write(&row);
+    wrap_print(summary.to_bytes(), indent, avail);
 }
 
-/// `struct help`.
-#[repr(C)]
+/// A command's help: its usage, a summary and a footer, either of which
+/// may be absent, around its sections.
 pub struct Help {
-    pub(crate) usage: *const c_char,
-    pub(crate) summary: *const c_char,
-    pub(crate) sections: *const HelpSection,
-    pub(crate) n_sections: usize,
-    pub(crate) footer: *const c_char,
+    usage: &'static CStr,
+    summary: Option<&'static CStr>,
+    sections: &'static [HelpSection],
+    footer: Option<&'static CStr>,
 }
-
-// SAFETY: help is tables of pointers to static C strings and arrays, read
-// only, as a command's statics hold it.
-unsafe impl Sync for Help {}
-// SAFETY: as above.
-unsafe impl Sync for HelpSection {}
-// SAFETY: as above.
-unsafe impl Sync for HelpItem {}
 
 impl Help {
-    /// A command's help: `usage`, `summary` and `footer` C strings or
-    /// none, around `sections`.
     pub(crate) const fn new(
-        usage: &'static core::ffi::CStr,
-        summary: Option<&'static core::ffi::CStr>,
+        usage: &'static CStr,
+        summary: Option<&'static CStr>,
         sections: &'static [HelpSection],
-        footer: Option<&'static core::ffi::CStr>,
+        footer: Option<&'static CStr>,
     ) -> Self {
         Help {
-            usage: usage.as_ptr(),
-            summary: match summary {
-                Some(s) => s.as_ptr(),
-                None => core::ptr::null(),
-            },
-            sections: sections.as_ptr(),
-            n_sections: sections.len(),
-            footer: match footer {
-                Some(s) => s.as_ptr(),
-                None => core::ptr::null(),
-            },
+            usage,
+            summary,
+            sections,
+            footer,
         }
     }
 }
 
 impl HelpItem {
-    pub(crate) const fn new(
-        name: &'static core::ffi::CStr,
-        summary: &'static core::ffi::CStr,
-    ) -> Self {
-        HelpItem {
-            name: name.as_ptr(),
-            summary: summary.as_ptr(),
-        }
+    pub(crate) const fn new(name: &'static CStr, summary: &'static CStr) -> Self {
+        HelpItem { name, summary }
     }
 }
 
 fn err_stream() -> *mut crate::sys::libc::File {
     // SAFETY: a read of the C library's stderr, which nothing changes.
     unsafe { stderr }
+}
+
+/// `bytes` on stderr, through the C library's stream, so that they keep
+/// their place among the output of the C library's other callers.
+fn err_write(bytes: &[u8]) {
+    // SAFETY: the bytes, and the stream.
+    unsafe { fwrite(bytes.as_ptr().cast(), 1, bytes.len(), err_stream()) };
+}
+
+/// `bytes` on stdout, as err_write() writes stderr.
+pub(crate) fn out_write(bytes: &[u8]) {
+    // SAFETY: the bytes, and the C library's stdout, which nothing
+    // changes.
+    unsafe { fwrite(bytes.as_ptr().cast(), 1, bytes.len(), stdout) };
 }
 
 /// `text` on stderr a word at a time, a word that would pass `avail`
@@ -206,187 +178,120 @@ pub(crate) fn is_list_cmds(arg: Option<&[u8]>) -> bool {
     arg == Some(b"--list-cmds")
 }
 
-/// # Safety
-///
-/// Each of `items` has a name.
-pub(crate) unsafe fn print_subcmd_list(items: &[HelpItem]) {
+/// The names of `items`, one a line, for completion.
+pub(crate) fn print_subcmd_list(items: &[HelpItem]) {
     for item in items {
-        // SAFETY: a format of one C string, and the item's name.
-        unsafe { printf(c"%s\n".as_ptr(), item.name) };
+        out_write(&[item.name.to_bytes(), b"\n"].concat());
     }
 }
 
-/// # Safety
-///
-/// What `h` points to, and every item of its sections, holds C strings,
-/// a header, usage, summary or footer possibly NULL, and arrays of the
-/// lengths it gives.
-pub(crate) unsafe fn print_help(h: &Help) {
-    let f = err_stream();
+/// `h` on stderr.
+pub(crate) fn print_help(h: &Help) {
+    err_write(&[b"usage: ", h.usage.to_bytes(), b"\n"].concat());
+    if let Some(summary) = h.summary.filter(|s| !s.is_empty()) {
+        err_write(&[b"\n", summary.to_bytes(), b"\n"].concat());
+    }
+    for s in h.sections {
+        if s.items.is_empty() && s.options.is_empty() {
+            continue;
+        }
+        let labels: Vec<Vec<u8>> = s.options.iter().map(option_label).collect();
+        // Per section, so an Options section reads as cleanly as a
+        // Subcommands one.
+        let w = s
+            .items
+            .iter()
+            .map(|item| item.name.count_bytes())
+            .chain(labels.iter().map(Vec::len))
+            .max()
+            .unwrap_or(0)
+            + 2;
 
-    // SAFETY: the stream, the formats, and the C strings of h, which
-    // fprintf() prints as "(null)" when a header is NULL, as before.
-    unsafe {
-        if !h.usage.is_null() {
-            fprintf(f, c"usage: %s\n".as_ptr(), h.usage);
+        err_write(&[b"\n", s.header.to_bytes(), b"\n"].concat());
+        for item in s.items {
+            print_row(item.name.to_bytes(), item.summary, w);
         }
-        if !h.summary.is_null() && *h.summary != 0 {
-            fprintf(f, c"\n%s\n".as_ptr(), h.summary);
+        for (o, label) in s.options.iter().zip(&labels) {
+            print_row(label, o.summary, w);
         }
-        for s in ffi::slice(h.sections, h.n_sections) {
-            let items = ffi::slice(s.items, s.n_items);
-            let options = ffi::slice(s.options, s.n_options);
-
-            if items.is_empty() && options.is_empty() {
-                continue;
-            }
-            let labels: Vec<Vec<u8>> = options.iter().map(option_label).collect();
-            // Per section, so an Options section reads as cleanly as a
-            // Subcommands one.
-            let w = items
-                .iter()
-                .map(|item| ffi::c_str(item.name).len())
-                .chain(labels.iter().map(Vec::len))
-                .max()
-                .unwrap_or(0)
-                + 2;
-
-            fprintf(f, c"\n%s\n".as_ptr(), s.header);
-            for item in items {
-                print_row(ffi::c_str(item.name), item.summary, w);
-            }
-            for (o, label) in options.iter().zip(&labels) {
-                print_row(label, o.summary, w);
-            }
-        }
-        if !h.footer.is_null() && *h.footer != 0 {
-            fprintf(f, c"\n%s\n".as_ptr(), h.footer);
-        }
+    }
+    if let Some(footer) = h.footer.filter(|f| !f.is_empty()) {
+        err_write(&[b"\n", footer.to_bytes(), b"\n"].concat());
     }
 }
 
 /// The names close enough to `bad`, a word that matches none, printed
 /// as a did-you-mean block on stderr.
-///
-/// # Safety
-///
-/// `bad` and each of `names` are C strings.
-pub(crate) unsafe fn help_suggest(bad: *const c_char, names: &[*const c_char]) {
-    let mut sugg = [Suggestion {
-        name: core::ptr::null::<c_char>(),
-        dist: 0,
-    }; 4];
-    // SAFETY: the caller passes a C string.
-    let bad_bytes = unsafe { ffi::c_str(bad) };
+pub(crate) fn help_suggest<'a>(bad: &[u8], names: impl IntoIterator<Item = &'a CStr>) {
+    let mut sugg = [Suggestion { name: c"", dist: 0 }; 4];
     // A quarter of the length is too tight for short words and lets
     // anything through for long ones, so half plus one, at most 3.
-    let max_dist = ((bad_bytes.len() as c_int) / 2 + 1).min(3);
-    let candidates = names.iter().map(|&name| {
-        // SAFETY: each of the names is a C string.
-        (name, unsafe { ffi::c_str(name) })
-    });
-    let n = suggest(bad_bytes, candidates, max_dist, &mut sugg);
+    let max_dist = (bad.len() / 2 + 1).min(3) as c_int;
+    let candidates = names.into_iter().map(|name| (name, name.to_bytes()));
+    let n = suggest(bad, candidates, max_dist, &mut sugg);
 
     if n == 0 {
         return;
     }
-    let f = err_stream();
-
-    // SAFETY: the stream, the formats, and the names suggest() chose.
-    unsafe {
-        fprintf(f, c"\nDid you mean one of:\n".as_ptr());
-        for s in &sugg[..n] {
-            fprintf(f, c"\t%s\n".as_ptr(), s.name);
-        }
+    err_write(b"\nDid you mean one of:\n");
+    for s in &sugg[..n] {
+        err_write(&[b"\t", s.name.to_bytes(), b"\n"].concat());
     }
 }
 
-/// # Safety
-///
-/// `cmd_label` and `bad` are C strings, and each of `subcmds` has a
-/// name.
-unsafe fn help_unknown_subcommand(
-    cmd_label: *const c_char,
-    bad: *const c_char,
-    subcmds: &[HelpItem],
-) {
-    let mut names = [core::ptr::null::<c_char>(); SUBCMD_MAX];
-    let mut n_names = 0;
+fn help_unknown_subcommand(cmd_label: &CStr, bad: &CStr, subcmds: &[HelpItem]) {
+    let (label, typed) = (cmd_label.to_bytes(), bad.to_bytes());
 
-    // SAFETY: the stream, the format, and the caller's C strings.
-    unsafe {
-        fprintf(
-            err_stream(),
-            c"%s: '%s' is not a known subcommand.\nSee '%s --help'.\n".as_ptr(),
-            cmd_label,
-            bad,
-            cmd_label,
-        )
-    };
-    for (slot, item) in names.iter_mut().zip(subcmds) {
-        *slot = item.name;
-        n_names += 1;
-    }
-    // SAFETY: bad and the names are C strings.
-    unsafe { help_suggest(bad, &names[..n_names]) };
+    err_write(
+        &[
+            label,
+            b": '",
+            typed,
+            b"' is not a known subcommand.\nSee '",
+            label,
+            b" --help'.\n",
+        ]
+        .concat(),
+    );
+    help_suggest(typed, subcmds.iter().take(SUBCMD_MAX).map(|item| item.name));
 }
 
 /// The subcommand `input` names, exactly or as the one subcommand it is
-/// a prefix of, or a prefix of; NULL with stderr written, a did-you-mean
+/// a prefix of, or a prefix of; None with stderr written, a did-you-mean
 /// block or the ambiguous matches, when there is none or more than one.
-///
-/// # Safety
-///
-/// `cmd_label` and `input` are C strings, and each of `subcmds` has a
-/// name.
-pub(crate) unsafe fn resolve_subcommand(
-    cmd_label: *const c_char,
-    input: *const c_char,
+pub(crate) fn resolve_subcommand(
+    cmd_label: &CStr,
+    input: &CStr,
     subcmds: &[HelpItem],
-) -> *const c_char {
-    let mut names = [core::ptr::null::<c_char>(); SUBCMD_MAX];
+) -> Option<&'static CStr> {
+    let names = &subcmds[..subcmds.len().min(SUBCMD_MAX)];
     let mut matches = [0usize; SUBCMD_MAX];
-    let mut n_names = 0;
 
-    if subcmds.is_empty() {
-        // SAFETY: the caller's C strings, and no subcommand.
-        unsafe { help_unknown_subcommand(cmd_label, input, subcmds) };
-        return core::ptr::null();
+    if names.is_empty() {
+        help_unknown_subcommand(cmd_label, input, subcmds);
+        return None;
     }
-    for (slot, item) in names.iter_mut().zip(subcmds) {
-        *slot = item.name;
-        n_names += 1;
-    }
-    let names = &names[..n_names];
-    // SAFETY: the caller passes a C string.
-    let typed = unsafe { ffi::c_str(input) };
-    let candidate = |i: usize| {
-        // SAFETY: each of the names is a C string.
-        unsafe { ffi::c_str(names[i]) }
-    };
-    let n = resolve(typed, names.len(), candidate, &mut matches);
+    let candidate = |i: usize| names[i].name.to_bytes();
+    let n = resolve(input.to_bytes(), names.len(), candidate, &mut matches);
 
     if n == 1 {
-        return names[matches[0]];
+        return Some(names[matches[0]].name);
     }
     if n == 0 {
-        // SAFETY: the caller's C strings and subcommands.
-        unsafe { help_unknown_subcommand(cmd_label, input, subcmds) };
-        return core::ptr::null();
+        help_unknown_subcommand(cmd_label, input, subcmds);
+        return None;
     }
-    let f = err_stream();
-
-    // SAFETY: the stream, the formats, and the caller's C strings.
-    unsafe {
-        fprintf(
-            f,
-            c"%s: '%s' is ambiguous; matches:\n".as_ptr(),
-            cmd_label,
-            input,
-        );
-        for &i in &matches[..n] {
-            fprintf(f, c"\t%s\n".as_ptr(), names[i]);
-        }
+    err_write(
+        &[
+            cmd_label.to_bytes(),
+            b": '",
+            input.to_bytes(),
+            b"' is ambiguous; matches:\n",
+        ]
+        .concat(),
+    );
+    for &i in &matches[..n] {
+        err_write(&[b"\t", names[i].name.to_bytes(), b"\n"].concat());
     }
-    core::ptr::null()
+    None
 }

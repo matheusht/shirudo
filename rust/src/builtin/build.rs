@@ -34,6 +34,8 @@ const SUMMARY: &CStr = c_splice!(
      Run the selected helper with --help for the full option list.",
 );
 
+static HELP: Help = Help::new(USAGE, Some(SUMMARY), &[], None);
+
 /// The helper, and whether to look it up on PATH: SHIRUDO_BUILD,
 /// possibly empty, which the callers refuse, the installed one, or else
 /// the bare name.
@@ -171,16 +173,7 @@ pub(super) fn forward(label: &CStr, words: &[&CStr], args: &[&CStr]) -> c_int {
 /// `shirudo build`: the helper, run on the caller's arguments.
 pub(super) fn cmd_build(args: &[&CStr]) -> c_int {
     if is_help(args.get(1).map(|a| a.to_bytes())) {
-        let help = Help {
-            usage: USAGE.as_ptr(),
-            summary: SUMMARY.as_ptr(),
-            sections: ptr::null(),
-            n_sections: 0,
-            footer: ptr::null(),
-        };
-
-        // SAFETY: the help, its strings constants.
-        unsafe { print_help(&help) };
+        print_help(&HELP);
         return 0;
     }
     forward(c"build", &[], args.get(1..).unwrap_or_default())

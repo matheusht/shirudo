@@ -1379,30 +1379,24 @@ pub(crate) fn cmd_keys(args: &[&CStr]) -> c_int {
     let word = |i: usize| args.get(i).map(|a| a.to_bytes());
 
     if is_help(word(1)) {
-        // SAFETY: the command's help, of C strings.
-        unsafe { print_help(&HELP) };
+        print_help(&HELP);
         return 0;
     }
     if is_list_cmds(word(1)) {
-        // SAFETY: items whose names are C strings.
-        unsafe { print_subcmd_list(&SUBCMDS) };
+        print_subcmd_list(&SUBCMDS);
         return 0;
     }
     let Some(typed) = args.get(1).filter(|a| a.to_bytes().first() != Some(&b'-')) else {
         return keys_show(args);
     };
-    // SAFETY: a label, the caller's word and items with names.
-    let sub = unsafe { resolve_subcommand(c"shirudo keys".as_ptr(), typed.as_ptr(), &SUBCMDS) };
-    if sub.is_null() {
+    let Some(sub) = resolve_subcommand(c"shirudo keys", typed, &SUBCMDS) else {
         return 2;
-    }
-    // SAFETY: the name of one of the items.
-    match unsafe { CStr::from_ptr(sub) }.to_bytes() {
+    };
+    match sub.to_bytes() {
         b"add" => keys_add(&args[1..]),
         b"revoke" => {
             if args.len() == 3 && is_help(word(2)) {
-                // SAFETY: the subcommand's help, of C strings.
-                unsafe { print_help(&REVOKE_HELP) };
+                print_help(&REVOKE_HELP);
                 return 0;
             }
             error(&[b"keys revoke: put revocation records in a signed config image, then run `shirudo image update`"]);

@@ -1401,8 +1401,7 @@ pub(super) fn run(args: &[&CStr]) -> c_int {
         return show::run(&args[1..]);
     }
     if args.get(1).map(|a| a.to_bytes()) != Some(b"append") {
-        // SAFETY: the command's help, of C strings.
-        unsafe { print_help(&APPEND_HELP) };
+        print_help(&APPEND_HELP);
         return if args.len() >= 2 && is_help(Some(args[1].to_bytes())) {
             0
         } else {

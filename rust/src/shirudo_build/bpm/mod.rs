@@ -134,8 +134,7 @@ pub(super) fn run(args: &[&CStr]) -> c_int {
     let sub = args.get(1).map(|a| a.to_bytes());
 
     if args.len() < 2 || crate::util::help::is_help(sub) {
-        // SAFETY: help of C strings.
-        unsafe { print_help(&OPERATOR_HELP) };
+        print_help(&OPERATOR_HELP);
         return if args.len() < 2 { EXIT_USAGE } else { 0 };
     }
     match sub.unwrap_or_default() {

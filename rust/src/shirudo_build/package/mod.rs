@@ -518,8 +518,7 @@ pub(super) fn upatch_cli(args: &[&CStr]) -> c_int {
     let mut sets: Vec<(CString, Vec<u8>)> = Vec::new();
 
     if args.get(1).map(|a| a.to_bytes()) != Some(b"set") {
-        // SAFETY: help of C strings.
-        unsafe { print_help(&SET_HELP) };
+        print_help(&SET_HELP);
         return EXIT_USAGE;
     }
     let mut p = OptParser::new(c"upatch set", &SET_OPTS, Some(&SET_HELP), args, 2);

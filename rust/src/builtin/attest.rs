@@ -1425,23 +1425,18 @@ pub(crate) fn cmd_attest(args: &[&CStr]) -> c_int {
         let arg = word.to_bytes();
 
         if is_help(Some(arg)) {
-            // SAFETY: the command's help, of C strings.
-            unsafe { print_help(&HELP) };
+            print_help(&HELP);
             return 0;
         }
         if is_list_cmds(Some(arg)) {
-            // SAFETY: items whose names are C strings.
-            unsafe { print_subcmd_list(&SUBCMDS) };
+            print_subcmd_list(&SUBCMDS);
             return 0;
         }
         if arg.first() != Some(&b'-') {
-            // SAFETY: a label, the caller's word and items with names.
-            let sub = unsafe { resolve_subcommand(c"attest".as_ptr(), word.as_ptr(), &SUBCMDS) };
-            if sub.is_null() {
+            let Some(sub) = resolve_subcommand(c"attest", word, &SUBCMDS) else {
                 return EXIT_USAGE;
-            }
-            // SAFETY: the name of one of the items.
-            return match unsafe { CStr::from_ptr(sub) }.to_bytes() {
+            };
+            return match sub.to_bytes() {
                 b"verify" => verify(args),
                 b"challenge" => challenge(args),
                 _ => predict(args),

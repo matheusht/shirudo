@@ -8,7 +8,7 @@
 //! Adding an entry updates the dispatch, `shirudo help` and bash
 //! completion, which pulls the list live through --list-cmds.
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
 
 use super::upatch::cmd_upatch;
 use super::{
@@ -216,9 +216,7 @@ fn run(args: &[&CStr]) -> c_int {
                 b"' is not a shirudo command.\nSee 'shirudo help'.\n",
             ]
             .concat());
-            let names: Vec<*const c_char> = COMMANDS.iter().map(|c| c.name.as_ptr()).collect();
-            // SAFETY: the word and the names, C strings.
-            unsafe { help_suggest(word.as_ptr(), &names) };
+            help_suggest(first, COMMANDS.iter().map(|c| c.name));
             return 1;
         }
         1 => &COMMANDS[matches[0]],

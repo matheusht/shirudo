@@ -411,8 +411,7 @@ pub(super) fn run(args: &[&CStr]) -> c_int {
         return build(args);
     }
     if args.len() < 2 || is_help(word) {
-        // SAFETY: help of C strings.
-        unsafe { print_help(&IMAGE_HELP) };
+        print_help(&IMAGE_HELP);
         return if args.len() < 2 { EXIT_USAGE } else { 0 };
     }
     match word.unwrap_or_default() {
