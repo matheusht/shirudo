@@ -372,13 +372,34 @@ impl Source {
                 &mut *set,
             )
         };
-        if ret == 0 && (set.len() == 0 || set.n_unvouched() != 0) {
-            ret = -EKEYREJECTED;
+        if ret != 0 {
+            let why = String::from_utf8_lossy(super::strerr(-ret));
+            return Err(refuse(
+                format!("the config image's keys cannot be read: {why}"),
+                b"trusted_set",
+                ret,
+            ));
         }
-        if ret == 0 {
-            ret = image_keys::check_set(&set);
+        if set.len() == 0 || set.n_unvouched() != 0 {
+            return Err(refuse(
+                format!(
+                    "the config image trusts {} keys, {} of them not vouched for by the node's certificate",
+                    set.len(),
+                    set.n_unvouched()
+                ),
+                b"trusted_set",
+                -EKEYREJECTED,
+            ));
         }
-        status(ret)?;
+        ret = image_keys::check_set(&set);
+        if ret != 0 {
+            let why = String::from_utf8_lossy(super::strerr(-ret));
+            return Err(refuse(
+                format!("the kernel's BPF keyring does not hold the config image's keys: {why}"),
+                b"trusted_set",
+                ret,
+            ));
+        }
         src.trusted = Some(set);
         Ok(src)
     }
@@ -858,7 +879,22 @@ fn sync(dry_run: bool, report: Option<&[u8]>) -> Result {
     }
     let mut src = Source::open(&cfg)?;
     let mut tag = Publication::new();
-    let tag_digest = src.fetch_checked(cstr(&cfg.reference), tag.get_mut())?;
+    let against = if src.trusted.is_some() {
+        "the config image's keys"
+    } else {
+        "the node's certificate"
+    };
+    let tag_digest = src
+        .fetch_checked(cstr(&cfg.reference), tag.get_mut())
+        .map_err(|err| {
+            let named = String::from_utf8_lossy(cstr(&cfg.reference));
+            let what = if err == -EKEYREJECTED {
+                format!("the publication {named} does not verify against {against}")
+            } else {
+                format!("the publication {named} cannot be fetched")
+            };
+            refuse(what, b"publication_fetch", err)
+        })?;
     let p = tag.get();
     let follows = publication_follows(p, sync.have_state.then_some(&sync.state), &tag_digest);
     if follows < 0 {
