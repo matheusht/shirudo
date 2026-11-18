@@ -74,4 +74,5 @@ pub(crate) mod upatch_pins;
 pub(crate) mod upatch_resolve;
 pub(crate) mod upatch_rodata;
 pub(crate) mod upatch_table;
+pub(crate) mod upatch_verify;
 pub(crate) mod xdp;
