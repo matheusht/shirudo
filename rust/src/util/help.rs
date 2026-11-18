@@ -12,6 +12,7 @@ use core::ffi::{c_char, c_int};
 
 use crate::ffi;
 use crate::sys::libc::{fprintf, fputc, fwrite, printf, stderr};
+use crate::util::options::{OptSpec, option_label};
 use crate::util::similar::{Suggestion, resolve, suggest};
 
 /// The most subcommands a command offers.
@@ -28,12 +29,65 @@ pub struct HelpItem {
     pub(crate) summary: *const c_char,
 }
 
-/// `struct help_section`.
+/// `struct help_section`: a section lists items, or the options of a
+/// command's option table.
 #[repr(C)]
 pub struct HelpSection {
     pub(crate) header: *const c_char,
     pub(crate) items: *const HelpItem,
     pub(crate) n_items: usize,
+    pub(crate) options: *const OptSpec,
+    pub(crate) n_options: usize,
+}
+
+impl HelpSection {
+    /// A section named `header` listing `items`, HELP_ITEMS().
+    pub(crate) const fn items(header: &'static core::ffi::CStr, items: &[HelpItem]) -> Self {
+        HelpSection {
+            header: header.as_ptr(),
+            items: items.as_ptr(),
+            n_items: items.len(),
+            options: core::ptr::null(),
+            n_options: 0,
+        }
+    }
+
+    /// A section named `header` listing the options of `options`,
+    /// HELP_OPTIONS().
+    pub(crate) const fn options(header: &'static core::ffi::CStr, options: &[OptSpec]) -> Self {
+        HelpSection {
+            header: header.as_ptr(),
+            items: core::ptr::null(),
+            n_items: 0,
+            options: options.as_ptr(),
+            n_options: options.len(),
+        }
+    }
+}
+
+/// A row of a section: the name in a column `w` wide, the summary
+/// wrapped after it.
+///
+/// # Safety
+///
+/// `summary` is a C string.
+unsafe fn print_row(name: &[u8], summary: *const c_char, w: usize) {
+    let f = err_stream();
+    let indent = 2 + w;
+    let avail = if indent < HELP_WIDTH {
+        HELP_WIDTH - indent
+    } else {
+        1
+    };
+    let mut row = b"  ".to_vec();
+
+    row.extend_from_slice(name);
+    row.resize(row.len().max(2 + w), b' ');
+    // SAFETY: the stream and the row's bytes, and the caller's C string.
+    unsafe {
+        fwrite(row.as_ptr().cast(), 1, row.len(), f);
+        wrap_print(ffi::c_str(summary), indent, avail);
+    }
 }
 
 /// `struct help`.
@@ -44,6 +98,51 @@ pub struct Help {
     pub(crate) sections: *const HelpSection,
     pub(crate) n_sections: usize,
     pub(crate) footer: *const c_char,
+}
+
+// SAFETY: help is tables of pointers to static C strings and arrays, read
+// only, as a command's statics hold it.
+unsafe impl Sync for Help {}
+// SAFETY: as above.
+unsafe impl Sync for HelpSection {}
+// SAFETY: as above.
+unsafe impl Sync for HelpItem {}
+
+impl Help {
+    /// A command's help: `usage`, `summary` and `footer` C strings or
+    /// none, around `sections`.
+    pub(crate) const fn new(
+        usage: &'static core::ffi::CStr,
+        summary: Option<&'static core::ffi::CStr>,
+        sections: &'static [HelpSection],
+        footer: Option<&'static core::ffi::CStr>,
+    ) -> Self {
+        Help {
+            usage: usage.as_ptr(),
+            summary: match summary {
+                Some(s) => s.as_ptr(),
+                None => core::ptr::null(),
+            },
+            sections: sections.as_ptr(),
+            n_sections: sections.len(),
+            footer: match footer {
+                Some(s) => s.as_ptr(),
+                None => core::ptr::null(),
+            },
+        }
+    }
+}
+
+impl HelpItem {
+    pub(crate) const fn new(
+        name: &'static core::ffi::CStr,
+        summary: &'static core::ffi::CStr,
+    ) -> Self {
+        HelpItem {
+            name: name.as_ptr(),
+            summary: summary.as_ptr(),
+        }
+    }
 }
 
 fn err_stream() -> *mut crate::sys::libc::File {
@@ -136,30 +235,28 @@ pub(crate) unsafe fn print_help(h: &Help) {
         }
         for s in ffi::slice(h.sections, h.n_sections) {
             let items = ffi::slice(s.items, s.n_items);
+            let options = ffi::slice(s.options, s.n_options);
 
-            if items.is_empty() {
+            if items.is_empty() && options.is_empty() {
                 continue;
             }
+            let labels: Vec<Vec<u8>> = options.iter().map(option_label).collect();
             // Per section, so an Options section reads as cleanly as a
             // Subcommands one.
             let w = items
                 .iter()
                 .map(|item| ffi::c_str(item.name).len())
+                .chain(labels.iter().map(Vec::len))
                 .max()
                 .unwrap_or(0)
                 + 2;
 
             fprintf(f, c"\n%s\n".as_ptr(), s.header);
             for item in items {
-                let indent = 2 + w;
-                let avail = if indent < HELP_WIDTH {
-                    HELP_WIDTH - indent
-                } else {
-                    1
-                };
-
-                fprintf(f, c"  %-*s".as_ptr(), w as c_int, item.name);
-                wrap_print(ffi::c_str(item.summary), indent, avail);
+                print_row(ffi::c_str(item.name), item.summary, w);
+            }
+            for (o, label) in options.iter().zip(&labels) {
+                print_row(label, o.summary, w);
             }
         }
         if !h.footer.is_null() && *h.footer != 0 {

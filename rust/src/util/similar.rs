@@ -8,7 +8,7 @@ use core::ffi::c_int;
 
 /// `SIMILAR_MAX_LEN`: a longer string matches nothing rather than costing
 /// a larger table.
-const MAX_LEN: usize = 64;
+pub(crate) const MAX_LEN: usize = 64;
 
 /// `struct suggestion`: a candidate and its distance from the input.
 #[repr(C)]

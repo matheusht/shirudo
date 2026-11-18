@@ -10,7 +10,7 @@
 mod lsm;
 mod restore;
 
-use core::ffi::{CStr, c_int};
+use core::ffi::{CStr, c_char, c_int};
 use core::{mem, ptr};
 use std::ffi::{CString, OsStr};
 use std::io::Write;
@@ -22,14 +22,14 @@ use crate::errno::{EEXIST, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT, ENOKEY, ENOT
 use crate::ffi;
 use crate::sys::identity::Identity;
 use crate::sys::libc::{
-    Statfs, Statvfs, fwrite, mount, statfs, statvfs, stderr, stdout, strerror, umount2,
+    Statfs, Statvfs, fwrite, mount, statfs, statvfs, stdout, strerror, umount2,
 };
 use crate::text::cstr;
 use crate::util::chain;
 use crate::util::eventlog::{
     EventlogInit, eventlog_adopt_pending, eventlog_boot_init, eventlog_path,
 };
-use crate::util::help::{Help, HelpItem, HelpSection, is_help, print_help};
+use crate::util::help::{Help, HelpSection};
 use crate::util::identity;
 use crate::util::image_runtime;
 use crate::util::initrd;
@@ -37,6 +37,7 @@ use crate::util::io::bpffs_mounted_at;
 use crate::util::json::JsonEmit;
 use crate::util::keyring::{self, keyring_bpf_serial};
 use crate::util::keys::{self, TrustedSet};
+use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::preflight::{PreflightResult, preflight_run};
 use crate::util::seal::{seal_label, seal_label_tree, seal_mkdir_p};
 
@@ -574,59 +575,54 @@ fn run(init: &mut Init) -> c_int {
     0
 }
 
-const fn item(name: &'static CStr, summary: &'static CStr) -> HelpItem {
-    HelpItem {
-        name: name.as_ptr(),
-        summary: summary.as_ptr(),
-    }
-}
+const INIT_CHECK_ONLY: c_int = 0;
+const INIT_JSON: c_int = 1;
 
-const OPTIONS: [HelpItem; 2] = [
-    item(
+static OPTS: [OptSpec; 2] = [
+    OptSpec::new(
         c"--check-only",
+        0,
+        0,
+        None,
         c"run the pre-flight only; never touch kernel state",
     ),
-    item(c"--json", c"with --check-only, print the checks as JSON"),
+    OptSpec::new(
+        c"--json",
+        0,
+        0,
+        None,
+        c"with --check-only, print the checks as JSON",
+    ),
 ];
-const USAGE: &CStr = c"shirudo init [--check-only [--json]]";
 
-fn help() {
-    let sections = [HelpSection {
-        header: c"options:".as_ptr(),
-        items: OPTIONS.as_ptr(),
-        n_items: OPTIONS.len(),
-    }];
-    let help = Help {
-        usage: USAGE.as_ptr(),
-        summary: c"Bootstrap enforcement on this target. Idempotent; safe to re-run.\nThe pinned link survives the process exit."
-            .as_ptr(),
-        sections: sections.as_ptr(),
-        n_sections: sections.len(),
-        footer: ptr::null(),
-    };
+static SECTIONS: [HelpSection; 1] = [HelpSection::options(c"options:", &OPTS)];
 
-    // SAFETY: the help, its constant strings and its section live.
-    unsafe { print_help(&help) };
-}
+static HELP: Help = Help::new(
+    c"shirudo init [--check-only [--json]]",
+    Some(
+        c"Bootstrap enforcement on this target. Idempotent; safe to re-run.\n\
+          The pinned link survives the process exit.",
+    ),
+    &SECTIONS,
+    None,
+);
 
-fn init(args: &[&[u8]]) -> c_int {
+/// The command on `args`, its name first, C strings.
+fn init(args: &[*const c_char]) -> c_int {
     let (mut check_only, mut json) = (false, false);
+    let mut p = OptParser::new(c"init", &OPTS, Some(&HELP), args, 1);
 
-    for &a in &args[1..] {
-        match a {
-            b"--check-only" => check_only = true,
-            b"--json" => json = true,
-            _ if is_help(Some(a)) => {
-                help();
-                return 0;
+    loop {
+        match p.next() {
+            OPT_END => break,
+            INIT_CHECK_ONLY => check_only = true,
+            INIT_JSON => json = true,
+            OPT_ARG => {
+                p.usage_arg(b"unexpected argument ");
+                return EXIT_USAGE;
             }
-            _ => {
-                error(&cat!("init: unknown option '", a, "'"));
-                let usage = cat!("usage: ", USAGE, "\n");
-                // SAFETY: the bytes, to the C library's stderr.
-                unsafe { fwrite(usage.as_ptr().cast(), 1, usage.len(), stderr) };
-                return 2;
-            }
+            OPT_DONE => return 0,
+            _ => return EXIT_USAGE,
         }
     }
     let mut init = Init {
@@ -640,8 +636,8 @@ fn init(args: &[&[u8]]) -> c_int {
         return 1;
     }
     if json && !check_only {
-        error(b"init: --json takes --check-only");
-        return 2;
+        p.usage(b"--json takes --check-only");
+        return EXIT_USAGE;
     }
     // SAFETY: an all-zero result is room for one.
     let mut res: Box<PreflightResult> = Box::new(unsafe { mem::zeroed() });
@@ -691,13 +687,6 @@ mod capi {
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn cmd_init(argc: c_int, argv: *const *const c_char) -> c_int {
         // SAFETY: the caller's arguments.
-        let raw = unsafe { super::words(argc, argv) };
-        // SAFETY: each a C string.
-        let args: Vec<&[u8]> = raw
-            .iter()
-            .map(|&a| unsafe { crate::ffi::c_str(a) })
-            .collect();
-
-        super::init(&args)
+        super::init(unsafe { super::words(argc, argv) })
     }
 }

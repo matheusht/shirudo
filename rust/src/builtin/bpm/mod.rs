@@ -326,6 +326,8 @@ fn show_help(usage: &CStr, summary: &CStr, items: &[HelpItem], footer: Option<&C
         header: c"subcommands:".as_ptr(),
         items: items.as_ptr(),
         n_items: items.len(),
+        options: core::ptr::null(),
+        n_options: 0,
     }];
     let help = Help {
         usage: usage.as_ptr(),

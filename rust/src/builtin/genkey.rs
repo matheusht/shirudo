@@ -20,17 +20,17 @@ use openssl::nid::Nid;
 use openssl::pkey::{PKey, PKeyRef, Private};
 use openssl::x509::{X509, X509Extension, X509NameBuilder, X509Ref};
 
-use super::word;
 use crate::errno::{EINVAL, EIO, ENAMETOOLONG, ENOENT, EPERM};
 use crate::ffi::{self, c_splice};
 use crate::sys::libc::{
     O_CLOEXEC, O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_RDONLY, O_WRONLY, PATH_MAX, Statx,
-    close, errno, fchmod, fprintf, geteuid, link, open, openat, rename, stderr, strerror, unlink,
+    close, errno, fchmod, geteuid, link, open, openat, rename, strerror, unlink,
 };
 use crate::util::crypto_openssl::{complain_stack, openssl_complain};
-use crate::util::help::{Help, HelpItem, HelpSection, is_help, print_help};
+use crate::util::help::{Help, HelpSection};
 use crate::util::identity;
 use crate::util::io::stat_fd;
+use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::paths::{key_paths, keys_dir_resolve, path_exists};
 use crate::util::seal::seal_mkdir_p;
 
@@ -435,40 +435,29 @@ unsafe fn replace_pair(
     0
 }
 
-fn usage() {
-    // SAFETY: the C library's stderr, the C's format and the usage.
-    unsafe { fprintf(stderr, c"usage: %s\n".as_ptr(), USAGE.as_ptr()) };
-}
+const GENKEY_FORCE: c_int = 0;
+const GENKEY_KEYS_DIR: c_int = 1;
 
-fn print_genkey_help() {
-    let options = [
-        HelpItem {
-            name: c"--force, -f".as_ptr(),
-            summary: c"overwrite an existing key/cert (refused otherwise)".as_ptr(),
-        },
-        HelpItem {
-            name: c"--keys-dir <dir>".as_ptr(),
-            summary: c"write signing_key.pem and cert.der under <dir> instead of the default"
-                .as_ptr(),
-        },
-    ];
-    let sections = [HelpSection {
-        header: c"options:".as_ptr(),
-        items: options.as_ptr(),
-        n_items: options.len(),
-    }];
-    let help = Help {
-        usage: USAGE.as_ptr(),
-        summary: SUMMARY.as_ptr(),
-        sections: sections.as_ptr(),
-        n_sections: sections.len(),
-        footer: FOOTER.as_ptr(),
-    };
+static OPTS: [OptSpec; 2] = [
+    OptSpec::new(
+        c"--force",
+        b'f',
+        0,
+        None,
+        c"overwrite an existing key/cert (refused otherwise)",
+    ),
+    OptSpec::new(
+        c"--keys-dir",
+        0,
+        0,
+        Some(c"<dir>"),
+        c"write signing_key.pem and cert.der under <dir> instead of the default",
+    ),
+];
 
-    // SAFETY: the help, its strings constants and its arrays the locals
-    // above.
-    unsafe { print_help(&help) };
-}
+static SECTIONS: [HelpSection; 1] = [HelpSection::options(c"options:", &OPTS)];
+
+static HELP: Help = Help::new(USAGE, Some(SUMMARY), &SECTIONS, Some(FOOTER));
 
 /// The new key and certificate written at `pkey_path` and `cert_path`:
 /// beside them first and then moved over the old pair with `force`, or
@@ -547,40 +536,20 @@ unsafe fn genkey(args: &[*const c_char]) -> c_int {
     let mut pkey_path = [0u8; PATH_MAX];
     let mut cert_path = [0u8; PATH_MAX];
     let mut force = false;
-    let mut i = 1;
+    let mut p = OptParser::new(c"genkey", &OPTS, Some(&HELP), args, 1);
 
-    while i < args.len() {
-        // SAFETY: the caller's word.
-        let arg = unsafe { word(args[i]) };
-
-        match arg {
-            Some(b"--force" | b"-f") => force = true,
-            Some(b"--keys-dir") if i + 1 < args.len() => {
-                i += 1;
-                keys_dir_arg = args[i];
+    loop {
+        match p.next() {
+            OPT_END => break,
+            GENKEY_FORCE => force = true,
+            GENKEY_KEYS_DIR => keys_dir_arg = p.value_ptr(),
+            OPT_DONE => return 0,
+            OPT_ARG => {
+                p.usage_arg(b"takes no argument, got ");
+                return EXIT_USAGE;
             }
-            Some(a) if a.starts_with(b"--keys-dir=") => {
-                // SAFETY: the word, past the 11 bytes of its prefix.
-                keys_dir_arg = unsafe { args[i].add(11) };
-            }
-            _ if is_help(arg) => {
-                print_genkey_help();
-                return 0;
-            }
-            _ => {
-                // SAFETY: the C's format and the caller's word.
-                unsafe {
-                    crate::log::log_c!(
-                        crate::log::err,
-                        c"genkey: unknown option '%s'".as_ptr(),
-                        args[i]
-                    )
-                };
-                usage();
-                return 2;
-            }
+            _ => return EXIT_USAGE,
         }
-        i += 1;
     }
 
     // A target never holds a private key, and its task has the authority

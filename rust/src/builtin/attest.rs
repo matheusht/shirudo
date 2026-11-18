@@ -308,6 +308,8 @@ fn attest_help() {
         header: header.as_ptr(),
         items: items.as_ptr(),
         n_items: items.len(),
+        options: core::ptr::null(),
+        n_options: 0,
     });
     let help = Help {
         usage: c"shirudo attest [--nonce=<hex>] [--pcrs=<list>] [--challenge=<path>] [--output=<path>]\n       \

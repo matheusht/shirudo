@@ -430,6 +430,8 @@ fn help() {
         header: c"options:".as_ptr(),
         items: OPTIONS.as_ptr(),
         n_items: OPTIONS.len(),
+        options: core::ptr::null(),
+        n_options: 0,
     }];
     let help = Help {
         usage: USAGE.as_ptr(),

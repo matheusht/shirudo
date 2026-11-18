@@ -4,52 +4,56 @@
 //! `shirudo version`: the release name and SHIRUDO_VERSION_ID.
 
 use core::ffi::{c_char, c_int};
-use core::ptr;
 
-use super::word;
 use crate::sys::libc::printf;
 use crate::sys::version::{
     shirudo_extraversion, shirudo_release_name, shirudo_version, shirudo_version_id,
 };
-use crate::util::help::{Help, HelpItem, HelpSection, is_help, print_help};
+use crate::util::help::{Help, HelpSection};
+use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 
-/// The command on `args`, its name first.
-///
-/// # Safety
-///
-/// Each of `args` is NULL or a C string.
-unsafe fn version(args: &[*const c_char]) -> c_int {
-    // SAFETY: the caller's word.
-    let arg = args.get(1).and_then(|&arg| unsafe { word(arg) });
+const VERSION_ID: c_int = 0;
 
-    if is_help(arg) {
-        let options = [HelpItem {
-            name: c"--version-id".as_ptr(),
-            summary: c"print only the raw SHIRUDO_VERSION_ID, one line".as_ptr(),
-        }];
-        let sections = [HelpSection {
-            header: c"options:".as_ptr(),
-            items: options.as_ptr(),
-            n_items: options.len(),
-        }];
-        let help = Help {
-            usage: c"shirudo version [--version-id]".as_ptr(),
-            summary: c"Print the release tag plus the architecture-stripped SHIRUDO_VERSION_ID\n\
-                       that targets compare against the operator's signed artifacts."
-                .as_ptr(),
-            sections: sections.as_ptr(),
-            n_sections: sections.len(),
-            footer: ptr::null(),
-        };
+static OPTS: [OptSpec; 1] = [OptSpec::new(
+    c"--version-id",
+    0,
+    0,
+    None,
+    c"print only the raw SHIRUDO_VERSION_ID, one line",
+)];
 
-        // SAFETY: the help, its strings literals and its arrays the
-        // locals above.
-        unsafe { print_help(&help) };
-        return 0;
+static SECTIONS: [HelpSection; 1] = [HelpSection::options(c"options:", &OPTS)];
+
+static HELP: Help = Help::new(
+    c"shirudo version [--version-id]",
+    Some(
+        c"Print the release tag plus the architecture-stripped SHIRUDO_VERSION_ID\n\
+          that targets compare against the operator's signed artifacts.",
+    ),
+    &SECTIONS,
+    None,
+);
+
+/// The command on `args`, its name first, C strings.
+fn version(args: &[*const c_char]) -> c_int {
+    let mut p = OptParser::new(c"version", &OPTS, Some(&HELP), args, 1);
+    let mut id_only = false;
+
+    loop {
+        match p.next() {
+            OPT_END => break,
+            VERSION_ID => id_only = true,
+            OPT_ARG => {
+                p.usage_arg(b"unexpected argument ");
+                return EXIT_USAGE;
+            }
+            OPT_DONE => return 0,
+            _ => return EXIT_USAGE,
+        }
     }
     // SAFETY: the C's formats, and the build's identity strings.
     unsafe {
-        if matches!(arg, Some(b"--version-id")) {
+        if id_only {
             printf(c"%s\n".as_ptr(), &raw const shirudo_version_id);
             return 0;
         }
@@ -77,6 +81,6 @@ mod capi {
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn cmd_version(argc: c_int, argv: *const *const c_char) -> c_int {
         // SAFETY: the caller passes the command line.
-        unsafe { super::version(words(argc, argv)) }
+        super::version(unsafe { words(argc, argv) })
     }
 }

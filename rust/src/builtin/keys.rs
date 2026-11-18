@@ -20,7 +20,7 @@ use openssl::hash::MessageDigest;
 use openssl::pkey::{HasPublic, PKey, PKeyRef, Private};
 use openssl::x509::{X509, X509NameRef};
 
-use super::{word, words};
+use super::words;
 use crate::errno::{EACCES, EINVAL, EIO, EKEYREJECTED, ENODEV, ENOENT, ENOKEY, ESTALE};
 use crate::ffi;
 use crate::heap::{libc_free, xfree};
@@ -56,6 +56,7 @@ use crate::util::keys::{
     KEYS_MAX, TrustedSet, keys_cert_der, keys_digest_der, keys_install, keys_is_revoked, keys_load,
     keys_read_der, keys_verify_vouch, members,
 };
+use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::paths::{key_paths, keys_dir_resolve, path_exists};
 use crate::util::upatch::{
     self, Upatch, upatch_close, upatch_open, upatch_select, upatch_signature,
@@ -610,126 +611,97 @@ fn keyring_absent(out: &mut Out, a: &Anchor, ret: i32, id_rc: c_int) {
     );
 }
 
-const fn item(name: &'static CStr, summary: &'static CStr) -> HelpItem {
-    HelpItem {
-        name: name.as_ptr(),
-        summary: summary.as_ptr(),
-    }
-}
-
-const SUBCMDS: [HelpItem; 3] = [
-    item(
+static SUBCMDS: [HelpItem; 3] = [
+    HelpItem::new(
         c"add",
         c"trust a certificate an enrolled key vouched for (target)",
     ),
-    item(
+    HelpItem::new(
         c"revoke",
         c"stop trusting a certificate now and for good (target)",
     ),
-    item(c"vouch", c"sign a vouch for a certificate (operator)"),
+    HelpItem::new(c"vouch", c"sign a vouch for a certificate (operator)"),
 ];
-const OPTIONS: [HelpItem; 2] = [
-    item(
-        c"--keys-dir <dir>",
+
+const KEYS_KEYS_DIR: c_int = 0;
+const KEYS_JSON: c_int = 1;
+
+static OPTS: [OptSpec; 2] = [
+    OptSpec::new(
+        c"--keys-dir",
+        0,
+        0,
+        Some(c"<dir>"),
         c"read signing_key.pem and cert.der from <dir>",
     ),
-    item(c"--json", c"print the key material as JSON"),
+    OptSpec::new(c"--json", 0, 0, None, c"print the key material as JSON"),
 ];
-const ADD_OPTIONS: [HelpItem; 2] = [
-    item(
-        c"--vouch <file>",
+
+static SECTIONS: [HelpSection; 2] = [
+    HelpSection::items(c"subcommands:", &SUBCMDS),
+    HelpSection::options(c"options:", &OPTS),
+];
+
+static HELP: Help = Help::new(
+    c"shirudo keys [--keys-dir <dir>] [--json]\n       \
+      shirudo keys add <cert.der> --vouch <file>\n       \
+      shirudo keys revoke\n       \
+      shirudo keys vouch <cert.der> [-o <file>]",
+    Some(
+        c"Inspect the shirudo key material this host holds: the on-disk cert and\n\
+          signing key (if present), the trusted set a target enrols, and the kernel\n\
+          keyring holding it (if init'd). Local-only on either side.",
+    ),
+    &SECTIONS,
+    Some(
+        c"Default paths:\n  /var/lib/shirudo/keys/cert.der\n  \
+          /var/lib/shirudo/keys/signing_key.pem\n\n\
+          Or set the SHIRUDO_KEYS_DIR environment variable.",
+    ),
+);
+
+const KEYS_ADD_VOUCH: c_int = 0;
+const KEYS_ADD_KEYS_DIR: c_int = 1;
+
+static ADD_OPTS: [OptSpec; 2] = [
+    OptSpec::new(
+        c"--vouch",
+        0,
+        0,
+        Some(c"<file>"),
         c"the vouch an enrolled key signed for the certificate",
     ),
-    item(
-        c"--keys-dir <dir>",
+    OptSpec::new(
+        c"--keys-dir",
+        0,
+        0,
+        Some(c"<dir>"),
         c"the keys directory (default /var/lib/shirudo/keys)",
     ),
 ];
-const VOUCH_OPTIONS: [HelpItem; 4] = [
-    item(
-        c"-o <file>",
-        c"where to write the vouch (default <cert.der>.vouch)",
-    ),
-    item(
-        c"--keys-dir <dir>",
-        c"read signing_key.pem and cert.der from <dir>",
-    ),
-    item(c"--key <pem>", c"the signing key (overrides --keys-dir)"),
-    item(
-        c"--cert <der>",
-        c"the signing certificate (overrides --keys-dir)",
-    ),
-];
-const USAGE: &CStr = c"shirudo keys [--keys-dir <dir>] [--json]\n       \
-shirudo keys add <cert.der> --vouch <file>\n       \
-shirudo keys revoke\n       \
-shirudo keys vouch <cert.der> [-o <file>]";
 
-fn show_help(
-    usage: &CStr,
-    summary: &CStr,
-    sections: &[(&CStr, &[HelpItem])],
-    footer: Option<&CStr>,
-) {
-    let sections: Vec<HelpSection> = sections
-        .iter()
-        .map(|(header, items)| HelpSection {
-            header: header.as_ptr(),
-            items: items.as_ptr(),
-            n_items: items.len(),
-        })
-        .collect();
-    let help = Help {
-        usage: usage.as_ptr(),
-        summary: summary.as_ptr(),
-        sections: if sections.is_empty() {
-            ptr::null()
-        } else {
-            sections.as_ptr()
-        },
-        n_sections: sections.len(),
-        footer: footer.map_or(ptr::null(), CStr::as_ptr),
-    };
+static ADD_SECTIONS: [HelpSection; 1] = [HelpSection::options(c"options:", &ADD_OPTS)];
 
-    // SAFETY: the help, its strings constants and its sections live.
-    unsafe { print_help(&help) };
-}
-
-fn keys_help() {
-    show_help(
-        USAGE,
-        c"Inspect the shirudo key material this host holds: the on-disk cert and\n\
-signing key (if present), the trusted set a target enrols, and the kernel\n\
-keyring holding it (if init'd). Local-only on either side.",
-        &[(c"subcommands:", &SUBCMDS), (c"options:", &OPTIONS)],
-        Some(
-            c"Default paths:\n  /var/lib/shirudo/keys/cert.der\n  \
-/var/lib/shirudo/keys/signing_key.pem\n\nOr set the SHIRUDO_KEYS_DIR environment variable.",
-        ),
-    );
-}
-
-fn add_help() {
-    show_help(
-        c"shirudo keys add <cert.der> --vouch <file> [--keys-dir <dir>]",
+static ADD_HELP: Help = Help::new(
+    c"shirudo keys add <cert.der> --vouch <file> [--keys-dir <dir>]",
+    Some(
         c"Add a certificate to the trusted set this target enrols at its next boot.\n\
-The vouch must verify under a certificate already in the set; regenerate\n\
-the initrd afterwards (shirudo-gen-initrd). Prints the fingerprint.",
-        &[(c"options:", &ADD_OPTIONS)],
-        None,
-    );
-}
+          The vouch must verify under a certificate already in the set; regenerate\n\
+          the initrd afterwards (shirudo-gen-initrd). Prints the fingerprint.",
+    ),
+    &ADD_SECTIONS,
+    None,
+);
 
-fn vouch_help() {
-    show_help(
-        c"shirudo keys vouch <cert.der> [-o <file>] [--keys-dir <dir>]",
-        c"Sign a vouch for another operator's certificate with this operator's key,\n\
-for `shirudo keys add --vouch` on the targets that enrol this key.\n\
-Prints the vouched certificate's fingerprint.",
-        &[(c"options:", &VOUCH_OPTIONS)],
-        None,
-    );
-}
+static REVOKE_HELP: Help = Help::new(
+    c"shirudo keys revoke",
+    Some(
+        c"Local revocation is disabled. Publish revocation records in a signed config \
+          image and activate it with image update.",
+    ),
+    &[],
+    None,
+);
 
 /// A trusted set, which takes some 66 KiB.
 fn new_set() -> Box<TrustedSet> {
@@ -831,40 +803,31 @@ fn check_voucher_live(set: &TrustedSet, voucher: &[u8; 32]) -> c_int {
     if ret != 0 { 0 } else { -ENOKEY }
 }
 
-fn keys_add(args: &[&[u8]]) -> c_int {
+fn keys_add(args: &[*const c_char]) -> c_int {
     let (mut keys_dir_arg, mut vouch_path, mut cert) = (None, None, None);
-    let mut a = 1;
+    let mut p = OptParser::new(c"keys add", &ADD_OPTS, Some(&ADD_HELP), args, 1);
 
-    while a < args.len() {
-        let arg = args[a];
-
-        if arg == b"--vouch" && a + 1 < args.len() {
-            a += 1;
-            vouch_path = Some(args[a]);
-        } else if let Some(v) = arg.strip_prefix(b"--vouch=") {
-            vouch_path = Some(v);
-        } else if arg == b"--keys-dir" && a + 1 < args.len() {
-            a += 1;
-            keys_dir_arg = Some(args[a]);
-        } else if let Some(d) = arg.strip_prefix(b"--keys-dir=") {
-            keys_dir_arg = Some(d);
-        } else if is_help(Some(arg)) {
-            add_help();
-            return 0;
-        } else if arg.first() == Some(&b'-') {
-            error(&[b"keys add: unknown option '", arg, b"'"]);
-            return 2;
-        } else if cert.is_none() {
-            cert = Some(arg);
-        } else {
-            error(&[b"keys add: unexpected argument '", arg, b"'"]);
-            return 2;
+    loop {
+        let opt = p.next();
+        let value = || p.value().map(CStr::to_bytes);
+        match opt {
+            OPT_END => break,
+            KEYS_ADD_VOUCH => vouch_path = value(),
+            KEYS_ADD_KEYS_DIR => keys_dir_arg = value(),
+            OPT_ARG => {
+                if cert.is_some() {
+                    p.usage_arg(b"unexpected argument ");
+                    return EXIT_USAGE;
+                }
+                cert = value();
+            }
+            OPT_DONE => return 0,
+            _ => return EXIT_USAGE,
         }
-        a += 1;
     }
     let (Some(cert), Some(vouch_path)) = (cert, vouch_path) else {
-        add_help();
-        return 2;
+        p.usage(b"takes <cert.der> and --vouch <file>");
+        return EXIT_USAGE;
     };
     if image_config::active() {
         error(&[b"target: add vouched BPF signers to the signed config selected for boot and reboot to enroll them"]);
@@ -1244,43 +1207,23 @@ pub(crate) fn revoke_image(der: &[u8], boot: bool) -> c_int {
     purge_signed_by(der).min(0)
 }
 
-fn keys_show(args: &[&[u8]]) -> c_int {
+fn keys_show(args: &[*const c_char]) -> c_int {
     let mut keys_dir_arg = None;
     let mut json = false;
-    let mut i = 1;
+    let mut p = OptParser::new(c"keys", &OPTS, Some(&HELP), args, 1);
 
-    while i < args.len() {
-        let a = args[i];
-
-        if a == b"--keys-dir" && i + 1 < args.len() {
-            i += 1;
-            keys_dir_arg = Some(args[i]);
-        } else if let Some(d) = a.strip_prefix(b"--keys-dir=") {
-            keys_dir_arg = Some(d);
-        } else if a == b"--json" {
-            json = true;
-        } else if is_help(Some(a)) {
-            keys_help();
-            return 0;
-        } else if is_list_cmds(Some(a)) {
-            // SAFETY: items whose names are C strings.
-            unsafe { print_subcmd_list(&SUBCMDS) };
-            return 0;
-        } else {
-            error(&[b"keys: unknown option '", a, b"'"]);
-            let usage = [b"usage: ", USAGE.to_bytes(), b"\n"].concat();
-            // SAFETY: the bytes, to the C library's stderr.
-            unsafe {
-                fwrite(
-                    usage.as_ptr().cast(),
-                    1,
-                    usage.len(),
-                    crate::sys::libc::stderr,
-                )
-            };
-            return 2;
+    loop {
+        match p.next() {
+            OPT_END => break,
+            KEYS_KEYS_DIR => keys_dir_arg = p.value().map(CStr::to_bytes),
+            KEYS_JSON => json = true,
+            OPT_ARG => {
+                p.usage_arg(b"unexpected argument ");
+                return EXIT_USAGE;
+            }
+            OPT_DONE => return 0,
+            _ => return EXIT_USAGE,
         }
-        i += 1;
     }
     let keys_dir_arg = keys_dir_arg.map(|d| message(&[d]));
     let keys_dir: &CStr = if image_config::active() {
@@ -1487,8 +1430,18 @@ unsafe fn keys(argc: c_int, argv: *const *const c_char) -> c_int {
     // SAFETY: each a C string.
     let args: Vec<&[u8]> = raw.iter().map(|&a| unsafe { ffi::c_str(a) }).collect();
 
-    if args.len() < 2 || args[1].first() == Some(&b'-') || is_help(Some(args[1])) {
-        return keys_show(&args);
+    if args.len() >= 2 && is_help(Some(args[1])) {
+        // SAFETY: the command's help, of C strings.
+        unsafe { print_help(&HELP) };
+        return 0;
+    }
+    if args.len() >= 2 && is_list_cmds(Some(args[1])) {
+        // SAFETY: items whose names are C strings.
+        unsafe { print_subcmd_list(&SUBCMDS) };
+        return 0;
+    }
+    if args.len() < 2 || args[1].first() == Some(&b'-') {
+        return keys_show(raw);
     }
     // SAFETY: a label, the caller's word and items with names.
     let sub = unsafe { resolve_subcommand(c"shirudo keys".as_ptr(), raw[1], &SUBCMDS) };
@@ -1497,26 +1450,17 @@ unsafe fn keys(argc: c_int, argv: *const *const c_char) -> c_int {
     }
     // SAFETY: the name of one of the items.
     match unsafe { CStr::from_ptr(sub) }.to_bytes() {
-        b"add" => keys_add(&args[1..]),
+        b"add" => keys_add(&raw[1..]),
         b"revoke" => {
             if args.len() == 3 && is_help(Some(args[2])) {
-                show_help(
-                    c"shirudo keys revoke",
-                    c"Local revocation is disabled. Publish revocation records in a signed config image and activate it with image update.",
-                    &[],
-                    None,
-                );
+                // SAFETY: the subcommand's help, of C strings.
+                unsafe { print_help(&REVOKE_HELP) };
                 return 0;
             }
             error(&[b"keys revoke: put revocation records in a signed config image, then run `shirudo image update`"]);
             1
         }
         _ => {
-            // SAFETY: the caller's second word, when there is one.
-            if args.len() >= 3 && is_help(unsafe { word(raw[2]) }) {
-                vouch_help();
-                return 0;
-            }
             let words = [c"keys".as_ptr(), c"vouch".as_ptr(), ptr::null()];
             // SAFETY: a label, the words up to their NULL, and the
             // caller's arguments after the subcommand.

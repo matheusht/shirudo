@@ -72,6 +72,8 @@ fn help(usage: &CStr, summary: &CStr, sections: &[(&CStr, &[HelpItem])], footer:
             header: header.as_ptr(),
             items: items.as_ptr(),
             n_items: items.len(),
+            options: core::ptr::null(),
+            n_options: 0,
         })
         .collect();
     let h = Help {

@@ -6,15 +6,14 @@
 
 use core::ffi::{CStr, c_char, c_int};
 use core::mem::MaybeUninit;
-use core::ptr;
 
-use super::word;
 use crate::errno::ENOENT;
 use crate::ffi::c_splice;
-use crate::sys::libc::{F_OK, access, env, fprintf, printf, stderr, strerror};
+use crate::sys::libc::{F_OK, access, env, printf, strerror};
 use crate::util::config::{CONF_PATH, Scrubbed, load};
-use crate::util::help::{Help, is_help, print_help};
+use crate::util::help::Help;
 use crate::util::image_config;
+use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser};
 
 const USAGE: &CStr = c"shirudo config";
 /// CONF_PATH, as text for the help and the line that splice it in.
@@ -33,6 +32,8 @@ const FOOTER: &CStr = c_splice!(
 );
 const FROM_CONF: &CStr = c_splice!("; from ", CONF);
 
+static HELP: Help = Help::new(USAGE, Some(SUMMARY), &[], Some(FOOTER));
+
 /// The command on `args`, its name first.
 ///
 /// # Safety
@@ -42,32 +43,15 @@ unsafe fn config(args: &[*const c_char]) -> c_int {
     let mut cfg = Scrubbed(MaybeUninit::uninit());
     let image_mode = image_config::active();
 
-    if let Some(&arg) = args.get(1) {
-        // SAFETY: the caller's word.
-        if is_help(unsafe { word(arg) }) {
-            let help = Help {
-                usage: USAGE.as_ptr(),
-                summary: SUMMARY.as_ptr(),
-                sections: ptr::null(),
-                n_sections: 0,
-                footer: FOOTER.as_ptr(),
-            };
-
-            // SAFETY: the help, its strings literals.
-            unsafe { print_help(&help) };
-            return 0;
+    let mut p = OptParser::new(c"config", &[], Some(&HELP), args, 1);
+    match p.next() {
+        OPT_END => {}
+        OPT_DONE => return 0,
+        OPT_ARG => {
+            p.usage_arg(b"unexpected argument ");
+            return EXIT_USAGE;
         }
-        // SAFETY: the C's formats, the caller's word, the usage and the
-        // C library's stderr.
-        unsafe {
-            crate::log::log_c!(
-                crate::log::err,
-                c"config: unknown option '%s'".as_ptr(),
-                arg
-            );
-            fprintf(stderr, c"usage: %s\n".as_ptr(), USAGE.as_ptr());
-        }
-        return 2;
+        _ => return EXIT_USAGE,
     }
 
     // SAFETY: a path, and a mode.
