@@ -28,7 +28,7 @@ mod version;
 ///
 /// When `argc` is above 0, `argv` holds `argc` words that stay valid for
 /// `'a`.
-unsafe fn words<'a>(argc: c_int, argv: *const *const c_char) -> &'a [*const c_char] {
+pub(crate) unsafe fn words<'a>(argc: c_int, argv: *const *const c_char) -> &'a [*const c_char] {
     // SAFETY: the caller passes the words.
     unsafe { ffi::slice(argv, usize::try_from(argc).unwrap_or(0)) }
 }

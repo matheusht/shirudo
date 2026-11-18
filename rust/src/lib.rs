@@ -13,6 +13,7 @@ mod ffi;
 mod heap;
 mod log;
 mod panic;
+mod quote_check;
 mod shirudo_build;
 mod skel;
 mod sys;

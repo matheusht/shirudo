@@ -336,9 +336,11 @@ Other make targets
    * - ``make quote-check``
      - Builds ``tools/quote-check/shirudo-quote-check``, the program a
        telemetry backend runs on keepalive quotes, as a static PIE in
-       either profile. The link needs the static archives of the C
-       library and of ``libcrypto`` with those
-       ``pkg-config --static --libs libcrypto`` names: on Ubuntu 26.04,
+       either profile, from its ``main()`` and the Rust library. The
+       link needs the static archives of the C library and of
+       ``libssl`` and ``libcrypto``, which the ``openssl`` crate
+       initialises together, with those
+       ``pkg-config --static --libs libssl libcrypto`` names: on Ubuntu 26.04,
        ``libzstd-dev`` and ``libjitterentropy3-dev`` beside
        ``libssl-dev`` and ``zlib1g-dev``. CI installs them with
        :src:`.github/scripts/install-static-libcrypto-deps.sh`, which
@@ -346,9 +348,10 @@ Other make targets
        ``libcrypto.a``, as Fedora does not, ``make quote-check`` and
        ``make install-operator`` first build a static OpenSSL into
        ``build/quote-check-openssl`` with :src:`Makefile.target-deps`,
-       which needs ``perl``, and compile the checker's objects against
-       its headers under ``build/quote-check/``; the link then needs
-       ``glibc-static``. ``QUOTE_CHECK_OPENSSL=<prefix>`` names another
+       which needs ``perl``, and link the checker against it, which
+       needs ``glibc-static``. The Rust library compiles against the
+       distribution's OpenSSL headers, so that OpenSSL is of the same
+       major version, 3. ``QUOTE_CHECK_OPENSSL=<prefix>`` names another
        static OpenSSL. ``shirudo`` and ``shirudo-build`` still link the
        distribution's OpenSSL. ``make distclean`` removes that build. A
        ``SANITIZE=`` build links the checker against the shared
@@ -423,9 +426,12 @@ Project layout
        image signing, ``keys vouch``, ``bpm build``, ``push``,
        ``tree append``, ``tree show`` and ``config update``.
    * - :src:`tools/quote-check/`
-     - ``shirudo-quote-check``, a program of its own that checks
-       keepalive quotes with the TPM parsers of :src:`rust/src/util/tpm_wire/`.
-       No other binary links it.
+     - The ``main()`` of ``shirudo-quote-check``, a program of its own
+       that checks keepalive quotes with the TPM parsers of
+       :src:`rust/src/util/tpm_wire/`; its rows are
+       :src:`rust/src/quote_check.rs`, and the header the unit suite and
+       the fuzz target include is :src:`tools/quote-check/row.h`. No
+       other binary links it.
    * - :src:`tools/gen-image/`
      - ``shirudo-gen-image``, ``shirudo-gen-runtime`` and
        ``shirudo-gen-verity``, which make the runtime and config images,

@@ -303,10 +303,9 @@ BUILD_SRCS := \
     tools/shirudo-build/bpm-show.c \
     util/elf_target_func.c
 
-# The backend quote checker links separately from shirudo.
-QUOTE_CHECK_SRCS := \
-    tools/quote-check/quote-check.c \
-    tools/quote-check/row.c
+# shirudo-quote-check is a backend's program: it checks keepalive quotes
+# with the TPM parsers of the Rust library, rust/src/quote_check.rs, from
+# a main() of its own, and is never linked into shirudo.
 
 # ----- derived names ----------------------------------------------
 
@@ -315,7 +314,6 @@ BPF_LSKELS   := bpf/bpf2.lskel bpf/seal.lskel
 BPF_SKEL_RS  := $(BPF_LSKELS:.lskel=.skel.rs)
 BPF_EMBEDDED := $(BPF_LSKELS) $(BPF_SKEL_RS) bpf/unload.bpf.o
 BUILD_OBJS   := $(foreach s,$(BUILD_SRCS),$(call obj,$(s:.c=.o)))
-QUOTE_CHECK_OBJS := $(foreach s,$(QUOTE_CHECK_SRCS),$(call obj,$(s:.c=.o)))
 
 # main() of each binary and the build identity: objects rustc builds
 # with no std, apart from the Rust library, which the unit, fuzz and
@@ -324,6 +322,7 @@ QUOTE_CHECK_OBJS := $(foreach s,$(QUOTE_CHECK_SRCS),$(call obj,$(s:.c=.o)))
 MAIN_DIR       := build/main
 MAIN_OBJ       := $(MAIN_DIR)/shirudo.o
 BUILD_MAIN_OBJ := $(MAIN_DIR)/shirudo-build.o
+QUOTE_CHECK_MAIN_OBJ := $(MAIN_DIR)/shirudo-quote-check.o
 VERSION_RS     := $(MAIN_DIR)/version_id.rs
 VERSION_OBJ    := $(MAIN_DIR)/version_id.o
 
@@ -331,7 +330,7 @@ VERSION_OBJ    := $(MAIN_DIR)/version_id.o
 # changing a header would leave dependent .o files stale -- e.g. a struct
 # whose size grew in a header but whose .c was not re-touched, producing
 # an ABI mismatch and memory corruption at runtime.
-DEP_OBJS := $(UTIL_OBJS) $(BUILD_OBJS) $(QUOTE_CHECK_OBJS)
+DEP_OBJS := $(UTIL_OBJS) $(BUILD_OBJS)
 DEPS     := $(DEP_OBJS:.o=.d)
 
 # ----- top-level goals --------------------------------------------
@@ -547,8 +546,9 @@ RUSTC_OBJ = $(RUSTC) --edition 2024 --crate-type lib --emit obj -C panic=abort \
 
 $(MAIN_OBJ): shirudo.rs
 $(BUILD_MAIN_OBJ): tools/shirudo-build/shirudo-build.rs
+$(QUOTE_CHECK_MAIN_OBJ): tools/quote-check/quote-check.rs
 $(VERSION_OBJ): $(VERSION_RS)
-$(MAIN_OBJ) $(BUILD_MAIN_OBJ) $(VERSION_OBJ):
+$(MAIN_OBJ) $(BUILD_MAIN_OBJ) $(QUOTE_CHECK_MAIN_OBJ) $(VERSION_OBJ):
 	@printf '  RUSTC   $@\n'
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(RUSTC_OBJ) --crate-name $(subst -,_,$(basename $(notdir $@))) -o $@ $<
@@ -594,46 +594,40 @@ tools/shirudo-build/shirudo-build: $(BUILD_MAIN_OBJ) $(BUILD_OBJS) \
 # a function inside a database container for one, so it is a static PIE
 # whatever the profile. The sanitizer runtimes do not link statically.
 PKG_CONFIG ?= pkg-config
-QUOTE_CHECK_UTIL_SRCS :=  \
-                           util/log.c \
-                         util/malloc.c util/string.c util/options.c
 
 # A distribution without a static libcrypto, Fedora for one, gets the
-# prefix of a static OpenSSL here. The checker's objects then compile
-# against its headers, apart from those of shirudo, whose OpenSSL may be
-# another major version.
+# prefix of a static OpenSSL here, which the checker links. The Rust
+# library compiles against the system's OpenSSL headers, so the two are
+# of one major version, OpenSSL 3.
 QUOTE_CHECK_OPENSSL ?=
 ifneq ($(SANITIZE),)
 override QUOTE_CHECK_OPENSSL :=
 endif
 ifeq ($(QUOTE_CHECK_OPENSSL),)
-QUOTE_CHECK_LINK_OBJS := $(QUOTE_CHECK_OBJS) $(QUOTE_CHECK_UTIL_SRCS:.c=.o)
 QUOTE_CHECK_PKG_CONFIG := $(PKG_CONFIG)
 else
-QUOTE_CHECK_LINK_OBJS := $(addprefix build/quote-check/, \
-	$(QUOTE_CHECK_SRCS:.c=.o) $(QUOTE_CHECK_UTIL_SRCS:.c=.o))
 QUOTE_CHECK_PKG_CONFIG := PKG_CONFIG_PATH= \
 	PKG_CONFIG_LIBDIR=$(QUOTE_CHECK_OPENSSL)/lib/pkgconfig $(PKG_CONFIG)
--include $(QUOTE_CHECK_LINK_OBJS:.o=.d)
 endif
 
+# The openssl crate initialises libssl with libcrypto, so the checker
+# links both, of which it keeps little more than libcrypto.
 ifeq ($(SANITIZE),)
 QUOTE_CHECK_LDFLAGS := $(HARDEN_STATIC_PIE_LDFLAGS) -static-pie -static-libgcc
-QUOTE_CHECK_LIBS := $(shell $(QUOTE_CHECK_PKG_CONFIG) --static --libs libcrypto 2>/dev/null)
+QUOTE_CHECK_LIBS := $(shell $(QUOTE_CHECK_PKG_CONFIG) --static --libs libssl libcrypto 2>/dev/null)
 else
 QUOTE_CHECK_LDFLAGS := $(HARDEN_LDFLAGS)
-QUOTE_CHECK_LIBS := $(LIBCRYPTO_LIBS)
+QUOTE_CHECK_LIBS := $(LIBSSL_LIBS) $(LIBCRYPTO_LIBS)
 endif
 
-build/quote-check/%.o: %.c Makefile.shirudo $(CONFIG_MK_DEP)
-	@printf '  CC      $@\n'
-	$(Q)mkdir -p $(dir $@)
-	$(Q)$(CC) -I$(QUOTE_CHECK_OPENSSL)/include $(CFLAGS) -MMD -MP -c $< -o $@
-
-tools/quote-check/shirudo-quote-check: $(QUOTE_CHECK_LINK_OBJS) $(RUST_LIB)
+# The link keeps of the Rust library what main() reaches, libcrypto's
+# calls among it, and drops the rest with its references to the
+# libraries shirudo links.
+tools/quote-check/shirudo-quote-check: $(QUOTE_CHECK_MAIN_OBJ) $(RUST_LIB) \
+                                       Makefile.shirudo $(CONFIG_MK_DEP)
 	@printf '  LD      $@\n'
-	$(Q)$(LD) $(CFLAGS) $(QUOTE_CHECK_LDFLAGS) $(LDFLAGS) -o $@ $^ \
-	    $(QUOTE_CHECK_LIBS) $(RUST_TEST_LDLIBS)
+	$(Q)$(LD) $(CFLAGS) $(QUOTE_CHECK_LDFLAGS) $(LDFLAGS) -o $@ \
+	    $(QUOTE_CHECK_MAIN_OBJ) $(RUST_LIB) $(QUOTE_CHECK_LIBS) $(RUST_LDLIBS)
 
 # ----- install ----------------------------------------------------
 
@@ -1134,11 +1128,6 @@ $(UNIT_LIB): $(UNIT_UTIL_OBJS) $(VERSION_OBJ)
 	$(Q)rm -f $@
 	$(Q)$(AR) rcs $@ $^
 
-# The quote checker's rows are no util module: its suite links the
-# object the program is built from.
-build/unit/quote_check: UNIT_OBJS := tools/quote-check/row.o
-build/unit/quote_check: tools/quote-check/row.o
-
 # The same for the builder's jar check.
 build/unit/jar: UNIT_OBJS := tools/shirudo-build/jar.o
 build/unit/jar: tools/shirudo-build/jar.o
@@ -1172,7 +1161,7 @@ unit-tests: $(UNIT_TESTS)
 # compiler would. sparse predefines no __FLT_EVAL_METHOD__, which
 # glibc's <math.h> tests, so -Wundef is the compiler's to check.
 SPARSE_TYPES_H ?= /usr/include/linux/types.h
-SPARSE_SRCS    := $(UTIL_SRCS) $(BUILD_SRCS) $(QUOTE_CHECK_SRCS)
+SPARSE_SRCS    := $(UTIL_SRCS) $(BUILD_SRCS)
 
 .PHONY: sparse
 sparse:
@@ -1328,8 +1317,7 @@ $(FUZZ_OUT)/fuzz-tree-state: testing/fuzz/fuzz-tree-state.c $(FUZZ_BASE) \
                               $(FUZZ_TREE_STATE)
 $(FUZZ_OUT)/fuzz-kconfig: testing/fuzz/fuzz-kconfig.c $(FUZZ_BASE) \
                            $(FUZZ_TREE_STATE)
-$(FUZZ_OUT)/fuzz-quote-check: testing/fuzz/fuzz-quote-check.c $(FUZZ_BASE) \
-                               tools/quote-check/row.c \
+$(FUZZ_OUT)/fuzz-quote-check: testing/fuzz/fuzz-quote-check.c $(FUZZ_BASE)
 
 $(FUZZ_OUT)/fuzz-upatch-info: testing/fuzz/fuzz-upatch-info.c $(FUZZ_BASE) \
                               testing/fuzz/output.c  \
@@ -1415,8 +1403,8 @@ clean:
 	$(Q)rm -f shirudo shirudo-target tools/shirudo-build/shirudo-build $(TEST_HELPERS)
 	$(Q)rm -f tools/quote-check/shirudo-quote-check
 	$(Q)rm -f $(MAIN_OBJ) $(UTIL_OBJS) $(BUILD_MAIN_OBJ) \
-	          $(BUILD_OBJS) $(QUOTE_CHECK_OBJS) $(VERSION_OBJ) $(VERSION_RS)
-	$(Q)rm -rf build/target build/unit build/quote-check build/fuzz-afl \
+	          $(BUILD_OBJS) $(QUOTE_CHECK_MAIN_OBJ) $(VERSION_OBJ) $(VERSION_RS)
+	$(Q)rm -rf build/target build/unit build/fuzz-afl \
 	    build/fuzz-afl-cmplog $(RUST_TARGET) $(RUST_FUZZ_TARGET)
 	$(Q)rm -f $(DEPS) testing/helper/*.d
 	$(Q)rm -f $(BPF_OBJS) $(BPF_LSKELS) $(BPF_SKEL_RS) $(BPF_LSKEL_TOOL) $(VMLINUX_H) \

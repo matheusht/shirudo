@@ -18,7 +18,7 @@ use crate::errno::{E2BIG, EINVAL, EPROTONOSUPPORT};
 /// A TPMT_PUBLIC of a SHA-256-named P-256 or RSA-2048 key, its symmetric
 /// protector absent or AES-128-CFB, its scheme absent or ECDSA with
 /// SHA-256.
-pub(super) fn public_parse(buf: &[u8], out: &mut TpmPublic) -> c_int {
+pub(crate) fn public_parse(buf: &[u8], out: &mut TpmPublic) -> c_int {
     errno(public_fields(&mut Reader::new(buf), out))
 }
 
@@ -197,7 +197,7 @@ fn name_into(r: &mut Reader<'_>, name: &mut [u8; NAME_LEN], len: &mut usize) -> 
 
 /// A TPMS_ATTEST of TPM2_Quote, over one SHA-256 bank, or of
 /// TPM2_NV_Certify. Its extra data and NV contents point into `buf`.
-pub(super) fn attest_parse(buf: &[u8], out: &mut TpmAttest) -> c_int {
+pub(crate) fn attest_parse(buf: &[u8], out: &mut TpmAttest) -> c_int {
     errno(attest_fields(&mut Reader::new(buf), out))
 }
 

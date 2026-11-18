@@ -15,7 +15,7 @@ pub(crate) use capi::{
     shirudo_tpm_ek_policy, tpm_attest_parse, tpm_credential_protect, tpm_ecc_public_parse,
     tpm_kdfe, tpm_nv_name, tpm_object_name, tpm_public_parse, tpm_register_policy,
 };
-pub(crate) use parse::public_marshal;
+pub(crate) use parse::{attest_parse, public_marshal, public_parse};
 pub(crate) use policy::{
     nv_extend_cphash, object_name, policy_nv_written, policy_or, register_policy_final,
     writer_auth_hash, writer_public,
@@ -37,13 +37,13 @@ pub(crate) const ID_OBJECT_LEN: usize = 2 + 32 + 2 + CREDENTIAL_LEN;
 
 pub(crate) const ALG_RSA: u16 = 0x0001;
 const ALG_AES: u16 = 0x0006;
-const ALG_SHA256: u16 = 0x000B;
+pub(crate) const ALG_SHA256: u16 = 0x000B;
 pub(crate) const ALG_ECC: u16 = 0x0023;
-const ALG_ECDSA: u16 = 0x0018;
+pub(crate) const ALG_ECDSA: u16 = 0x0018;
 const ALG_RSASSA: u16 = 0x0014;
 const ALG_NULL: u16 = 0x0010;
 const ALG_CFB: u16 = 0x0043;
-const ECC_NIST_P256: u16 = 0x0003;
+pub(crate) const ECC_NIST_P256: u16 = 0x0003;
 pub(crate) const ST_ATTEST_NV: u16 = 0x8014;
 pub(crate) const ST_ATTEST_QUOTE: u16 = 0x8018;
 const GENERATED: u32 = 0xFF54_4347;
