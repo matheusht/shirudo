@@ -30,7 +30,8 @@ pub(crate) const MAX_ENDPOINT: usize = 512;
 const MAX_MEDIA: usize = 192;
 pub(crate) const MAX_DIGEST: usize = 128;
 pub(crate) const MAX_ENTRIES: usize = 512;
-const MAX_HTTP_BODY: usize = 256 * 1024 * 1024;
+/// The largest response read into memory, an upatch artifact.
+const MAX_HTTP_BODY: usize = 16 * 1024 * 1024;
 pub(crate) const MAX_PACKAGE_BYTES: u64 = 256 * 1024 * 1024;
 pub(crate) const MAX_PACKAGE_ENTRIES: u32 = 4096;
 pub(crate) const MANIFEST_MEDIA: &CStr = c"application/vnd.oci.image.manifest.v1+json";

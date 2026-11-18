@@ -200,14 +200,27 @@ pub(super) unsafe extern "C" fn header(
     n
 }
 
-/// A registry that stops answering must not hold a timer's unit forever;
-/// a slow transfer that still moves is left alone.
-fn deadlines(handle: *mut Curl) {
+/// The deadline of a transfer: a minute, and the time `room` bytes, the
+/// most it may carry, take at 128 KiB a second.
+fn transfer_seconds(room: u64) -> c_long {
+    const BASE_S: u64 = 60;
+    const RATE_MIN: u64 = 128 * 1024;
+
+    c_long::try_from(BASE_S + room / RATE_MIN).unwrap_or(c_long::MAX)
+}
+
+/// A registry that stops answering, or answers a few bytes at a time,
+/// must not hold a timer's unit, and with it the config operation lock
+/// every other command waits for, longer than the most a transfer may
+/// carry takes at a floor rate: `room` bytes, in a minute and at 128 KiB
+/// a second.
+fn deadlines(handle: *mut Curl, room: u64) {
     // SAFETY: a live handle and long options.
     unsafe {
         curl::set_long(handle, curl::CURLOPT_CONNECTTIMEOUT, 30);
         curl::set_long(handle, curl::CURLOPT_LOW_SPEED_LIMIT, 1);
         curl::set_long(handle, curl::CURLOPT_LOW_SPEED_TIME, 60);
+        curl::set_long(handle, curl::CURLOPT_TIMEOUT, transfer_seconds(room));
     }
 }
 
@@ -295,6 +308,11 @@ fn curl_once_headers(
         return -ENOMEM;
     }
     let file_ptr = file.map(|f| f as *mut FileSink);
+    // The package's declared size for a download to disk, the in-memory
+    // cap otherwise, and the request body for an upload.
+    // SAFETY: the caller's sink, which outlives the transfer.
+    let room = file_ptr.map_or(MAX_HTTP_BODY as u64, |f| unsafe { (*f).room })
+        + req.body.map_or(0, |b| b.len() as u64);
     let r_ptr = ptr::from_mut(r);
     // SAFETY: a live handle; every pointer set, the URL, method, header
     // list, error buffer, body, response and sink, outlives the transfer,
@@ -308,7 +326,7 @@ fn curl_once_headers(
         curl::set_ptr(handle, curl::CURLOPT_HTTPHEADER, *headers);
         curl::set_ptr(handle, curl::CURLOPT_ERRORBUFFER, errbuf.as_mut_ptr());
         curl::set_long(handle, curl::CURLOPT_NOSIGNAL, 1);
-        deadlines(handle);
+        deadlines(handle, room);
         // OCI registries commonly redirect blob GETs to a signed CDN URL.
         // Follow only for blobs, never for manifest or upload calls.
         curl::set_long(handle, curl::CURLOPT_FOLLOWLOCATION, c_long::from(follow));
@@ -527,7 +545,8 @@ fn token_exchange(
         curl::set_ptr(handle, curl::CURLOPT_PROTOCOLS_STR, protocols.as_ptr());
         curl::set_long(handle, curl::CURLOPT_HTTPGET, 1);
         curl::set_ptr(handle, curl::CURLOPT_HTTPHEADER, *headers);
-        deadlines(handle);
+        curl::set_long(handle, curl::CURLOPT_NOSIGNAL, 1);
+        deadlines(handle, MAX_HTTP_BODY as u64);
         curl::set_callback(handle, curl::CURLOPT_WRITEFUNCTION, write_memory);
         curl::set_ptr(handle, curl::CURLOPT_WRITEDATA, r_ptr);
         curl::set_long(handle, curl::CURLOPT_SSL_VERIFYPEER, 1);

@@ -41,7 +41,6 @@ const PUBLIC_KEY_MEDIA: &CStr = c"application/pkix-cert";
 const IMAGE_MANIFEST: &[u8] = b"application/vnd.oci.image.manifest.v1+json";
 /// BPM_MAX_ENTRIES: the most packages an index lists.
 const MAX_ENTRIES: usize = 512;
-const MAX_HTTP_BODY: usize = 256 * 1024 * 1024;
 const PATH_MAX: usize = 4096;
 
 /// A failure of `bpm <action>`, reported: always exit 1.
@@ -359,7 +358,7 @@ fn push_package(
     if !meta.is_file() {
         return Err(-EINVAL);
     }
-    let archive_body = archive::read_file(p, MAX_HTTP_BODY)?;
+    let archive_body = archive::read_file(p, crate::util::bpm_oci::MAX_PACKAGE_BYTES as usize)?;
     let info = Info::load(package)?;
     let mut c = Client::new();
     let repo = c.parse_push_repo(raw_repo)?;

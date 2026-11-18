@@ -53,6 +53,7 @@ pub const CURLOPT_SSL_VERIFYPEER: c_int = 64;
 pub const CURLOPT_MAXREDIRS: c_int = 68;
 pub const CURLOPT_FORBID_REUSE: c_int = 75;
 pub const CURLOPT_CONNECTTIMEOUT: c_int = 78;
+pub const CURLOPT_TIMEOUT: c_int = 13;
 pub const CURLOPT_HTTPGET: c_int = 80;
 pub const CURLOPT_SSL_VERIFYHOST: c_int = 81;
 pub const CURLOPT_NOSIGNAL: c_int = 99;
