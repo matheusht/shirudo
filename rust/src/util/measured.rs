@@ -305,7 +305,7 @@ unsafe fn set_add(
 /// upatch_name_from_bpffs() of util/paths.h: the upatch name the pin
 /// name `name` spells, each `~d` a dot again, into `out` with its NUL;
 /// -EINVAL for another `~`, -ENAMETOOLONG for a name `out` cannot hold.
-fn name_from_bpffs(out: &mut [u8], name: &[u8]) -> c_int {
+pub(crate) fn name_from_bpffs(out: &mut [u8], name: &[u8]) -> c_int {
     let (mut i, mut j) = (0, 0);
 
     if out.is_empty() {

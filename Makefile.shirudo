@@ -266,7 +266,7 @@ UTIL_SRCS := \
      \
      \
      \
-    util/upatch_pins.c \
+     \
     util/upatch_verify.c \
 
 
@@ -993,7 +993,6 @@ testing/helper/test-signed-load: testing/helper/test-signed-load.c
 	    -o $@ $^ -lcrypto
 
 testing/helper/test-otel-map: testing/helper/test-otel-map.c \
-                        util/upatch_pins.o \
                          util/string.o util/log.o \
                         util/paths.o \
                          util/malloc.o $(LIBBPF_A)  \
@@ -1015,7 +1014,7 @@ testing/helper/test-upatch-prog-metadata: testing/helper/test-upatch-prog-metada
 		$(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
 testing/helper/test-upatch-serializer-pages: testing/helper/test-upatch-serializer-pages.c \
-                                        util/upatch_pins.o  \
+                                          \
                                         \
                                        util/string.o \
                                        util/malloc.o  util/paths.o \
@@ -1284,7 +1283,7 @@ $(FUZZ_OUT)/fuzz-elf: testing/fuzz/fuzz-elf.c $(FUZZ_BASE) $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-elf: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-elf: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS)
 $(FUZZ_OUT)/fuzz-serializer: testing/fuzz/fuzz-serializer.c $(FUZZ_BASE) \
-                               util/upatch_pins.c \
+                                \
                                $(FUZZ_SEAL)  util/paths.c \
                               $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-serializer: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
@@ -1335,7 +1334,7 @@ $(FUZZ_OUT)/fuzz-upatch-info: testing/fuzz/fuzz-upatch-info.c $(FUZZ_BASE) \
                               util/similar.c \
                                \
                                 \
-                               util/upatch_pins.c \
+                                \
                                \
                               util/upatch_verify.c $(VERSION_OBJ) \
                                $(FUZZ_SEAL) $(LIBBPF_A)
@@ -1351,7 +1350,7 @@ $(FUZZ_OUT)/fuzz-bpm-info: testing/fuzz/fuzz-bpm-info.c $(FUZZ_BASE) \
                            util/kconfig.c \
                                                      util/paths.c \
                            util/similar.c \
-                           util/upatch_pins.c \
+                            \
                             $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-bpm-info: FUZZ_CFLAGS += $(TSS2_CFLAGS) $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-bpm-info: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) $(LIBELF_LIBS)

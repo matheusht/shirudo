@@ -533,6 +533,7 @@ unsafe extern "C" {
         addrlen: u32,
     ) -> isize;
     pub fn recvmsg(fd: c_int, msg: *mut Msghdr, flags: c_int) -> isize;
+    pub fn if_indextoname(ifindex: u32, name: *mut c_char) -> *mut c_char;
     fn __errno_location() -> *mut c_int;
 }
 

@@ -13,12 +13,15 @@ use std::os::unix::fs::MetadataExt;
 
 use crate::bpf::btf::Btf;
 use crate::errno::{EINVAL, ENAMETOOLONG, ENOENT};
-use crate::sys::libc::{close, errno, getxattr};
+use crate::sys::libc::{close, errno, if_indextoname};
 use crate::text::{strscpy, strsprintf};
 use crate::util::bpf_info::{Info, LINK_INFO_SIZE, PROG_INFO_SIZE};
 use crate::util::bpf_sys::{bpf_obj_get, bpf_prog_get_fd_by_id, prog_type_name};
 use crate::util::timefmt::iso8601;
 use crate::util::upatch::{NAME_MAX, pin_name};
+use crate::util::upatch_pins::{
+    PAYLOAD_HASH_LEN, Pins, each_link, pin_payload, xdp_prog_open, xdp_prog_pin,
+};
 
 /// BPFFS_UPATCHES_DIR and XATTR_PAYLOAD of util/paths.h.
 pub(crate) const BPFFS_UPATCHES_DIR: &str = "/run/shirudo/bpffs/upatches";
@@ -36,12 +39,23 @@ const LINK_UPROBE_COUNT: usize = 52;
 const LINK_NETFILTER_PF: usize = 16;
 const LINK_NETFILTER_HOOKNUM: usize = 20;
 const LINK_NETFILTER_PRIORITY: usize = 24;
+const LINK_UPROBE_FLAGS: usize = 56;
+const LINK_XDP_IFINDEX: usize = 16;
+const LINK_PERF_EVENT_TYPE: usize = 16;
+const LINK_PERF_UPROBE_FILE_NAME: usize = 24;
+const LINK_PERF_UPROBE_NAME_LEN: usize = 32;
+const LINK_PERF_UPROBE_OFFSET: usize = 36;
 const PROG_TYPE: usize = 0;
 const PROG_ATTACH_BTF_ID: usize = 224;
 
 const BPF_LINK_TYPE_TRACING: u32 = 2;
 const BPF_LINK_TYPE_NETFILTER: u32 = 10;
 const BPF_LINK_TYPE_UPROBE_MULTI: u32 = 12;
+const BPF_LINK_TYPE_XDP: u32 = 6;
+const BPF_LINK_TYPE_PERF_EVENT: u32 = 7;
+const BPF_PERF_EVENT_UPROBE: u32 = 1;
+const BPF_PERF_EVENT_URETPROBE: u32 = 2;
+const BPF_F_UPROBE_MULTI_RETURN: u32 = 1;
 const BPF_PROG_TYPE_TRACING: u32 = 26;
 const BPF_PROG_TYPE_LSM: u32 = 29;
 const BPF_PROG_TYPE_NETFILTER: u32 = 32;
@@ -130,10 +144,15 @@ fn uprobe_multi(link: c_int, first: &Info<LINK_INFO_SIZE>, out: &mut [u8]) -> c_
     let Some(end) = path.iter().position(|&c| c == 0) else {
         return -EINVAL;
     };
+    let kind: &[u8] = if first.u32_at(LINK_UPROBE_FLAGS) & BPF_F_UPROBE_MULTI_RETURN != 0 {
+        b"uretprobe.multi/"
+    } else {
+        b"uprobe.multi/"
+    };
     strsprintf(
         out,
         &[
-            b"uprobe.multi/",
+            kind,
             &path[..end],
             b" (",
             count.to_string().as_bytes(),
@@ -143,12 +162,129 @@ fn uprobe_multi(link: c_int, first: &Info<LINK_INFO_SIZE>, out: &mut [u8]) -> c_
     .map_or_else(|e| e, |_| 0)
 }
 
+/// Calls `cb` with each link of upatch `name`, its index, its pin and what
+/// the kernel says of it; a link whose pin cannot be opened or read ends
+/// the walk with its -errno.
+pub(crate) fn each_link_info(
+    name: &[u8],
+    cb: &mut dyn FnMut(u32, &CStr, &Info<LINK_INFO_SIZE>) -> c_int,
+) -> c_int {
+    each_link(name, &mut |index, pin| {
+        // SAFETY: a C string.
+        let fd = unsafe { bpf_obj_get(pin.as_ptr()) };
+        if fd < 0 {
+            return -errno();
+        }
+        let mut info = Info::<LINK_INFO_SIZE>::new();
+        let ret = info.read(fd).err().unwrap_or(0);
+        // SAFETY: the link opened above.
+        unsafe { close(fd) };
+        if ret != 0 { ret } else { cb(index, pin, &info) }
+    })
+}
+
+/// The program id of upatch `name`: its first link's, or with no link an
+/// XDP program pin's.
+pub(crate) fn first_prog_id(name: &[u8]) -> Result<u32, c_int> {
+    let fd = open_first_link(name);
+    if fd >= 0 {
+        let mut linfo = Info::<LINK_INFO_SIZE>::new();
+        let ret = linfo.read(fd);
+        // SAFETY: the link opened above.
+        unsafe { close(fd) };
+        ret?;
+        let id = linfo.u32_at(LINK_PROG_ID);
+        return if id != 0 { Ok(id) } else { Err(-EINVAL) };
+    }
+    if fd != -ENOENT {
+        return Err(fd);
+    }
+    let pins = Pins::read(name)?;
+    if pins.nr_xdp_progs == 0 {
+        return Err(-ENOENT);
+    }
+    let (_, id) = xdp_prog_open(name, pins.first_xdp_prog)?;
+    if id != 0 { Ok(id) } else { Err(-EINVAL) }
+}
+
+/// Where an XDP upatch runs: the device of its lowest live link, and how
+/// many more; the kernel clears a link's ifindex when its device goes.
+fn xdp_location(name: &[u8], out: &mut [u8]) -> c_int {
+    let (mut lowest, mut live, mut device) = (0u32, 0u32, Vec::new());
+    let ret = each_link_info(name, &mut |index, _, info| {
+        let ifindex = info.u32_at(LINK_XDP_IFINDEX);
+        if info.u32_at(LINK_TYPE) != BPF_LINK_TYPE_XDP || ifindex == 0 {
+            return 0;
+        }
+        if live == 0 || index < lowest {
+            lowest = index;
+            let mut buf = [0u8; 16];
+            // SAFETY: an ifindex and room for a name.
+            let named = unsafe { if_indextoname(ifindex, buf.as_mut_ptr().cast()) };
+            device = if named.is_null() {
+                format!("ifindex:{ifindex}").into_bytes()
+            } else {
+                crate::text::cstr(&buf).to_vec()
+            };
+        }
+        live += 1;
+        0
+    });
+    if ret != 0 {
+        return ret;
+    }
+    let text = match live {
+        0 => b"xdp (waiting for a device)".to_vec(),
+        1 => [&b"xdp/"[..], &device].concat(),
+        n => format!("xdp/{} (+{})", String::from_utf8_lossy(&device), n - 1).into_bytes(),
+    };
+    strsprintf(out, &[&text]).map_or_else(|e| e, |_| 0)
+}
+
+fn link_is_uprobe(linfo: &Info<LINK_INFO_SIZE>) -> bool {
+    linfo.u32_at(LINK_TYPE) == BPF_LINK_TYPE_PERF_EVENT
+        && matches!(
+            linfo.u32_at(LINK_PERF_EVENT_TYPE),
+            BPF_PERF_EVENT_UPROBE | BPF_PERF_EVENT_URETPROBE
+        )
+}
+
+/// A uprobe or uretprobe link's location: its binary and offset.
+fn uprobe_location(link: c_int, out: &mut [u8]) -> c_int {
+    let mut path = vec![0u8; PATH_MAX];
+    let mut linfo = Info::<LINK_INFO_SIZE>::new();
+    linfo.set(
+        LINK_PERF_UPROBE_FILE_NAME,
+        &(path.as_mut_ptr() as u64).to_ne_bytes(),
+    );
+    linfo.set(LINK_PERF_UPROBE_NAME_LEN, &(PATH_MAX as u32).to_ne_bytes());
+    if let Err(err) = linfo.read(link) {
+        return err;
+    }
+    let Some(end) = path.iter().position(|&c| c == 0) else {
+        return -EINVAL;
+    };
+    if !link_is_uprobe(&linfo) {
+        return -EINVAL;
+    }
+    let kind: &[u8] = if linfo.u32_at(LINK_PERF_EVENT_TYPE) == BPF_PERF_EVENT_URETPROBE {
+        b"uretprobe/"
+    } else {
+        b"uprobe/"
+    };
+    let offset = format!("+0x{:x}", linfo.u32_at(LINK_PERF_UPROBE_OFFSET));
+    strsprintf(out, &[kind, &path[..end], offset.as_bytes()]).map_or_else(|e| e, |_| 0)
+}
+
 /// Where upatch `name` attaches, as a C string into `out`: the SEC()-style
 /// hook, its attach target named from `vbtf`, the vmlinux BTF, when there
 /// is one. 0, or -errno and as the C left it.
 pub(crate) fn resolve_location(vbtf: Option<&Btf>, name: &[u8], out: &mut [u8]) -> c_int {
     if let Some(first) = out.first_mut() {
         *first = 0;
+    }
+    if Pins::read(name).is_ok_and(|p| p.nr_xdp_progs != 0) {
+        return xdp_location(name, out);
     }
     let link = open_first_link(name);
     if link < 0 {
@@ -165,6 +301,12 @@ pub(crate) fn resolve_location(vbtf: Option<&Btf>, name: &[u8], out: &mut [u8]) 
     let link_type = linfo.u32_at(LINK_TYPE);
     if link_type == BPF_LINK_TYPE_UPROBE_MULTI {
         let ret = uprobe_multi(link, &linfo, out);
+        // SAFETY: the link opened above.
+        unsafe { close(link) };
+        return ret;
+    }
+    if link_is_uprobe(&linfo) {
+        let ret = uprobe_location(link, out);
         // SAFETY: the link opened above.
         unsafe { close(link) };
         return ret;
@@ -217,12 +359,17 @@ pub(crate) fn resolve_location(vbtf: Option<&Btf>, name: &[u8], out: &mut [u8]) 
 }
 
 /// When upatch `name` was loaded, its pin directory's change time, into
-/// `out`; empty when unknown.
+/// `out`; empty when unknown. Later XDP links change the directory's
+/// ctime, so an XDP upatch's is its first program pin's.
 pub(crate) fn loaded_at(name: &[u8], out: &mut [u8]) {
     if let Some(first) = out.first_mut() {
         *first = 0;
     }
-    let Ok(dir) = pin_path(name, &[]) else {
+    let dir = match Pins::read(name) {
+        Ok(p) if p.nr_xdp_progs != 0 => xdp_prog_pin(name, p.first_xdp_prog),
+        _ => pin_path(name, &[]),
+    };
+    let Ok(dir) = dir else {
         return;
     };
     if let Ok(st) = fs::metadata(OsStr::from_bytes(dir.as_bytes())) {
@@ -236,37 +383,62 @@ pub(crate) fn payload_sha256(name: &[u8], out: &mut [u8]) {
     if let Some(first) = out.first_mut() {
         *first = 0;
     }
-    if out.len() < 65 {
+    if out.len() < 2 * PAYLOAD_HASH_LEN + 1 {
         return;
     }
-    let Ok(dir) = pin_path(name, &[]) else {
+    let Ok(raw) = pin_payload(name) else {
         return;
     };
-    let mut raw = [0u8; 32];
-    // SAFETY: two C strings and room for the digest.
-    let n = unsafe {
-        getxattr(
-            dir.as_ptr(),
-            XATTR_PAYLOAD.as_ptr(),
-            raw.as_mut_ptr().cast(),
-            raw.len(),
-        )
-    };
-    if n != 32 {
-        return;
-    }
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    for (i, b) in raw.iter().enumerate() {
-        out[2 * i] = HEX[usize::from(b >> 4)];
-        out[2 * i + 1] = HEX[usize::from(b & 0xf)];
-    }
-    out[64] = 0;
+    let hex = crate::util::hex::encode(&raw);
+    out[..hex.len()].copy_from_slice(&hex);
+    out[hex.len()] = 0;
 }
 
 mod capi {
-    use core::ffi::{CStr, c_char, c_int};
+    use core::ffi::{CStr, c_char, c_int, c_void};
 
     use crate::errno::ENAMETOOLONG;
+
+    /// As upatch_each_link(), with what the kernel says of each link.
+    ///
+    /// # Safety
+    ///
+    /// `name` is a C string and `cb` takes the index, the pin, the link's
+    /// `struct bpf_link_info` and `ctx`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn upatch_each_link_info(
+        name: *const c_char,
+        cb: unsafe extern "C" fn(u32, *const c_char, *const c_void, *mut c_void) -> c_int,
+        ctx: *mut c_void,
+    ) -> c_int {
+        // SAFETY: the caller's C string.
+        let name = unsafe { CStr::from_ptr(name) }.to_bytes();
+        super::each_link_info(name, &mut |index, pin, info| {
+            // SAFETY: the caller's callback and context, with the link's
+            // info, which outlives the call.
+            unsafe { cb(index, pin.as_ptr(), info.bytes().as_ptr().cast(), ctx) }
+        })
+    }
+
+    /// From the first link, or from an XDP program pin when it has none.
+    ///
+    /// # Safety
+    ///
+    /// `name` is a C string and `out` room for an id.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn upatch_first_prog_id(name: *const c_char, out: *mut u32) -> c_int {
+        // SAFETY: the caller's C string and room.
+        unsafe {
+            *out = 0;
+            match super::first_prog_id(CStr::from_ptr(name).to_bytes()) {
+                Ok(id) => {
+                    *out = id;
+                    0
+                }
+                Err(err) => err,
+            }
+        }
+    }
 
     /// upatch_pin_path(): the pin directory of upatch `name` and below it
     /// each component of `parts`, an array a NULL ends or NULL for none,
