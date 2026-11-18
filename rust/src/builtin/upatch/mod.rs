@@ -16,7 +16,6 @@ mod reconcile;
 use core::ffi::{CStr, c_char, c_int};
 use std::ffi::CString;
 
-use crate::heap::xfree;
 use crate::sys::libc::{fwrite, stderr, stdout};
 use crate::sys::upatch::MapSummary;
 use crate::util::help::{
@@ -169,18 +168,16 @@ fn hex(bytes: &[u8]) -> Vec<u8> {
 /// The document `e` built, printed with its newline, or the failure to
 /// encode it reported for `cmd`: 0 or 1.
 fn print_json(e: JsonEmit, cmd: &[u8]) -> c_int {
-    let (buf, cap, len) = e.parts();
-    let ret = if e.err() != 0 {
-        err(&[cmd, b": json encode failed: ", strerr(-e.err()), b"\n"].concat());
-        1
-    } else {
-        // SAFETY: the len bytes the emitter wrote.
-        out(&[unsafe { crate::ffi::slice(buf.cast::<u8>(), len) }, b"\n"].concat());
-        0
-    };
-    // SAFETY: the buffer the emitter grew, handed over and freed once.
-    unsafe { xfree(buf.cast(), cap) };
-    ret
+    match e.finish() {
+        Ok(doc) => {
+            out(&[&doc[..], b"\n"].concat());
+            0
+        }
+        Err(e) => {
+            err(&[cmd, b": json encode failed: ", strerr(-e), b"\n"].concat());
+            1
+        }
+    }
 }
 
 /// `shirudo upatch`, from `upatch` on.

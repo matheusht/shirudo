@@ -944,7 +944,7 @@ pub(crate) unsafe fn operation_digest(op: &TreeOperation) -> Result<[u8; 72], c_
 pub(crate) unsafe fn emit_publication(
     p: &TreePublication,
     mut extra: Option<Extra<'_>>,
-) -> Result<(*mut c_char, usize, usize), c_int> {
+) -> Result<Vec<u8>, c_int> {
     // SAFETY: the caller's publication.
     let ops = unsafe { p.operations() };
     // One past what tree_parse() takes, so that a document past it is
@@ -987,14 +987,10 @@ pub(crate) unsafe fn emit_publication(
     if ret == 0 && e.written() > MAX_BYTES {
         ret = -E2BIG;
     }
-    let (body, cap, len) = e.parts();
     if ret != 0 {
-        // SAFETY: the emitter's buffer, which the xmalloc family gave,
-        // or NULL.
-        unsafe { xfree(body.cast(), cap) };
         return Err(ret);
     }
-    Ok((body, cap, len))
+    e.finish()
 }
 
 fn nibble(c: u8) -> Option<u8> {

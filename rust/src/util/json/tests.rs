@@ -4,7 +4,6 @@
 use super::parse::{Visit, walk};
 use super::*;
 use crate::errno::{E2BIG, EEXIST, EILSEQ, EINVAL, ENOENT, ENOSPC};
-use crate::heap::xfree;
 use crate::text::{cstr, strscpy};
 use core::ffi::{CStr, c_char, c_int, c_void};
 use core::ptr;
@@ -453,27 +452,12 @@ fn fixed(cap: usize, emit: impl FnOnce(&mut JsonEmit)) -> (c_int, Vec<u8>) {
     (e.err(), buf[..n].to_vec())
 }
 
-/// The text a growing emitter of at most `max` bytes wrote, and its
-/// error, its buffer freed.
+/// The error of a growing emitter of at most `max` bytes, the text it
+/// wrote and the bytes it allocated.
 fn growing(max: usize, emit: impl FnOnce(&mut JsonEmit)) -> (c_int, Vec<u8>, usize) {
     let mut e = JsonEmit::growing(max);
     emit(&mut e);
-    let (buf, cap, len) = e.parts();
-    let text = if buf.is_null() {
-        Vec::new()
-    } else {
-        // SAFETY: the emitter's buffer, its len bytes and, after a
-        // success, the terminator after them.
-        unsafe {
-            if e.err() == 0 {
-                assert_eq!(*buf.add(len), 0);
-            }
-            crate::ffi::slice(buf.cast::<u8>(), len).to_vec()
-        }
-    };
-    // SAFETY: the buffer the emitter grew, freed once.
-    unsafe { xfree(buf.cast(), cap) };
-    (e.err(), text, cap)
+    (e.err(), e.output().to_vec(), e.allocated())
 }
 
 fn emit_string(val: &[u8]) -> (c_int, Vec<u8>) {

@@ -143,11 +143,9 @@ fn print(manifest_digest: &[u8], document: &[u8]) -> c_int {
     e.kv_string(b"manifest_digest", manifest_digest);
     e.kv_raw(b"document", document);
     e.obj_close();
-    let (buf, cap, len) = e.parts();
-    let ret = match e.err() {
+    match e.err() {
         0 => {
-            // SAFETY: the len bytes the emitter wrote.
-            let out = unsafe { crate::ffi::slice(buf.cast::<u8>(), len) };
+            let out = e.output();
             let mut stdout = std::io::stdout().lock();
             stdout
                 .write_all(out)
@@ -156,10 +154,7 @@ fn print(manifest_digest: &[u8], document: &[u8]) -> c_int {
                 .map_or_else(|e| -e.raw_os_error().unwrap_or(EIO), |()| 0)
         }
         err => err,
-    };
-    // SAFETY: the emitter's buffer, from the xmalloc family, or NULL.
-    unsafe { crate::heap::xfree(buf.cast(), cap) };
-    ret
+    }
 }
 
 /// Back from `tag` to the segment at base seq 0, each sealed segment

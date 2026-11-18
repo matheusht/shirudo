@@ -1204,24 +1204,13 @@ unsafe fn print_rodata_json(u: &Upatch, path: *const c_char, view: &View) -> c_i
     if ret == 0 && e.err() != 0 {
         ret = e.err();
     }
-    let (buf, cap, len) = e.parts();
-    // SAFETY: the len bytes the emitter wrote into its buffer, and a
-    // newline, onto stdout; then the buffer freed once.
-    unsafe {
-        if ret == 0 {
-            ret = write_complete(STDOUT_FILENO, buf.cast(), len);
-        }
-        if ret == 0 {
-            ret = write_complete(STDOUT_FILENO, c"\n".as_ptr().cast(), 1);
-        }
-        if e.err() == -E2BIG {
-            crate::log::log_c!(
-                crate::log::err,
-                c"BTF JSON output exceeds %u bytes".as_ptr(),
-                MAX_BYTES as u32,
-            );
-        }
-        xfree(buf.cast(), cap);
+    if ret == 0 {
+        let out = [e.output(), b"\n"].concat();
+        // SAFETY: the document's bytes and its newline.
+        ret = unsafe { write_complete(STDOUT_FILENO, out.as_ptr().cast(), out.len()) };
+    }
+    if e.err() == -E2BIG {
+        crate::log::err(format!("BTF JSON output exceeds {MAX_BYTES} bytes").as_bytes());
     }
     ret
 }

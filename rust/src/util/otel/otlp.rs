@@ -7,15 +7,12 @@
 use core::ffi::{CStr, c_int};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{Buffer, Decoded, hex_lower, is_c_space, name_or_empty};
-use crate::errno::{E2BIG, EBADMSG, EINVAL, ENODATA, ENOMEM};
+use super::{hex_lower, is_c_space, name_or_empty};
+use crate::errno::{E2BIG, EBADMSG, EINVAL, ENODATA};
 use crate::sys::libc::gethostname;
 use crate::sys::upatch_maps::MapView;
 use crate::text::cstr;
-use crate::util::decode::{
-    upatch_decode_map_file_json, upatch_decode_map_file_otel, upatch_decode_map_json,
-    upatch_decode_map_otel,
-};
+use crate::util::decode::decode_map;
 use crate::util::json::JsonEmit;
 use crate::util::map_format;
 
@@ -295,19 +292,8 @@ fn log_map_data(e: &mut JsonEmit, v: &MapView) {
 
 /// What the map's decoder makes of it for a log or for metrics, from the
 /// upatch or the artifact at `path`.
-fn decode(path: Option<&CStr>, v: &MapView, otel: bool) -> Result<Decoded, c_int> {
-    let (mut out, mut len) = (core::ptr::null_mut(), 0usize);
-    // SAFETY: a C string or none, the view and rooms for the output.
-    let ret = unsafe {
-        match (path, otel) {
-            (Some(p), true) => upatch_decode_map_file_otel(p.as_ptr(), v, &mut out, &mut len),
-            (None, true) => upatch_decode_map_otel(v, &mut out, &mut len),
-            (Some(p), false) => upatch_decode_map_file_json(p.as_ptr(), v, &mut out, &mut len),
-            (None, false) => upatch_decode_map_json(v, &mut out, &mut len),
-        }
-    };
-    let decoded = Decoded { ptr: out, len };
-    if ret != 0 { Err(ret) } else { Ok(decoded) }
+fn decode(path: Option<&CStr>, v: &MapView, otel: bool) -> Result<Vec<u8>, c_int> {
+    decode_map(v, path, otel, JSON_MAX)
 }
 
 /// A map as one log record: what its decoder makes of it, at most
@@ -317,9 +303,9 @@ pub(super) fn log_payload(
     path: Option<&CStr>,
     v: &MapView,
     record_max: usize,
-) -> Result<Buffer, c_int> {
-    let mut buf = Buffer::alloc(JSON_MAX).ok_or(-ENOMEM)?;
-    let mut e = JsonEmit::fixed(buf.room());
+) -> Result<Vec<u8>, c_int> {
+    let mut buf = vec![0u8; JSON_MAX];
+    let mut e = JsonEmit::fixed(&mut buf);
 
     log_open(
         &mut e,
@@ -329,8 +315,8 @@ pub(super) fn log_payload(
         b"shirudo.bpf.map.snapshot",
     );
     match decode(path, v, true) {
-        Ok(d) if record_max != 0 && d.len > record_max => return Err(-E2BIG),
-        Ok(d) => e.kv_raw(b"body", d.bytes()),
+        Ok(d) if record_max != 0 && d.len() > record_max => return Err(-E2BIG),
+        Ok(d) => e.kv_raw(b"body", &d),
         Err(err) if err == -ENODATA => {
             e.obj_open_key(b"body");
             e.obj_open_key(b"kvlistValue");
@@ -349,15 +335,16 @@ pub(super) fn log_payload(
     if e.err() != 0 {
         return Err(e.err());
     }
-    buf.len = e.written();
+    let n = e.written();
+    buf.truncate(n);
     Ok(buf)
 }
 
 /// A map as the metrics its decoder makes of it, which must be a JSON
 /// array.
-pub(super) fn metric_payload(path: Option<&CStr>, v: &MapView) -> Result<Buffer, c_int> {
+pub(super) fn metric_payload(path: Option<&CStr>, v: &MapView) -> Result<Vec<u8>, c_int> {
     let decoded = decode(path, v, false)?;
-    let mut metrics = decoded.bytes();
+    let mut metrics = &decoded[..];
     while let Some((&c, rest)) = metrics.split_first() {
         if !is_c_space(c) {
             break;
@@ -367,8 +354,8 @@ pub(super) fn metric_payload(path: Option<&CStr>, v: &MapView) -> Result<Buffer,
     if metrics.first() != Some(&b'[') {
         return Err(-EINVAL);
     }
-    let mut buf = Buffer::alloc(JSON_MAX).ok_or(-ENOMEM)?;
-    let mut e = JsonEmit::fixed(buf.room());
+    let mut buf = vec![0u8; JSON_MAX];
+    let mut e = JsonEmit::fixed(&mut buf);
     otlp_open(
         &mut e,
         b"resourceMetrics",
@@ -380,7 +367,8 @@ pub(super) fn metric_payload(path: Option<&CStr>, v: &MapView) -> Result<Buffer,
     if e.err() != 0 {
         return Err(e.err());
     }
-    buf.len = e.written();
+    let n = e.written();
+    buf.truncate(n);
     Ok(buf)
 }
 
@@ -399,7 +387,7 @@ pub(super) struct StringRecord<'a> {
 /// The body as a string, so that no collector can re-encode it and the
 /// bytes a signature covers arrive as they were signed. JSON cannot
 /// carry a NUL or malformed UTF-8 unchanged: either is -EILSEQ.
-pub(super) fn string_log_payload(r: &StringRecord<'_>) -> Result<Buffer, c_int> {
+pub(super) fn string_log_payload(r: &StringRecord<'_>) -> Result<Vec<u8>, c_int> {
     let mut e = JsonEmit::growing(JSON_MAX);
 
     log_open(
@@ -416,11 +404,7 @@ pub(super) fn string_log_payload(r: &StringRecord<'_>) -> Result<Buffer, c_int> 
     kv_string(&mut e, r.attr_key, r.attr_value);
     e.arr_close();
     log_close(&mut e);
-    let buf = Buffer::from_emitter(&e);
-    if e.err() != 0 {
-        return Err(e.err());
-    }
-    Ok(buf)
+    e.finish()
 }
 
 /// The log that points at a map's snapshot in S3.
@@ -428,13 +412,13 @@ pub(super) fn s3_reference(
     v: &MapView,
     snapshot: &super::s3::Snapshot,
     uri: &[u8],
-) -> Result<Buffer, c_int> {
+) -> Result<Vec<u8>, c_int> {
     let description = [&b"BPF map snapshot stored in S3: "[..], uri].concat();
     if description.len() >= super::s3::URL_MAX + 64 {
         return Err(-E2BIG);
     }
-    let mut buf = Buffer::alloc(REFERENCE_MAX).ok_or(-ENOMEM)?;
-    let mut e = JsonEmit::fixed(buf.room());
+    let mut buf = vec![0u8; REFERENCE_MAX];
+    let mut e = JsonEmit::fixed(&mut buf);
 
     log_open(
         &mut e,
@@ -483,6 +467,7 @@ pub(super) fn s3_reference(
     if e.depth() != 0 {
         return Err(-EBADMSG);
     }
-    buf.len = e.written();
+    let n = e.written();
+    buf.truncate(n);
     Ok(buf)
 }

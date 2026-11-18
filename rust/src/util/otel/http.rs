@@ -915,7 +915,7 @@ impl Transport {
             otlp::metric_payload(path, v)
         };
         match payload {
-            Ok(p) => self.post(p.bytes()),
+            Ok(p) => self.post(&p),
             Err(err) => err,
         }
     }
@@ -961,7 +961,7 @@ pub(super) fn send_log_string(opts: Option<&OtelOpts>, r: &otlp::StringRecord<'_
         Err(err) => return err,
     };
     match Transport::open(LOG, opts.and_then(OtelOpts::endpoint), opts, None) {
-        Ok(t) => t.post(payload.bytes()),
+        Ok(t) => t.post(&payload),
         Err(err) => err,
     }
 }

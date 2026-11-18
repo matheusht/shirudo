@@ -17,10 +17,8 @@ use crate::bpf::btf::{
     KIND_VOLATILE,
 };
 use crate::errno::{E2BIG, EINVAL, ENODATA, EOPNOTSUPP};
-use crate::heap::{xfree, xmalloc};
 use crate::sys::libc::{fwrite, stderr};
 use crate::sys::upatch_maps::MapView;
-use crate::util::json::JsonEmit;
 use crate::util::map_format;
 
 /// `enum otel_signal`, the values of SHIRUDO_UPATCH_DECODER_EXPORT_*.
@@ -113,80 +111,6 @@ fn hex_lower(bytes: &[u8]) -> Vec<u8> {
 fn eprint(text: &[u8]) {
     // SAFETY: the bytes, to the C library's stderr.
     unsafe { fwrite(text.as_ptr().cast(), 1, text.len(), stderr) };
-}
-
-/// A document in an xmalloc() buffer of `cap` bytes, `len` of them
-/// written, freed when it goes unless handed to C.
-struct Buffer {
-    ptr: *mut u8,
-    cap: usize,
-    len: usize,
-}
-
-impl Buffer {
-    fn alloc(cap: usize) -> Option<Self> {
-        // SAFETY: an allocation of cap bytes.
-        let ptr = unsafe { xmalloc(cap) }.cast::<u8>();
-        (!ptr.is_null()).then_some(Buffer { ptr, cap, len: 0 })
-    }
-
-    /// All the room the buffer has, for an emitter to fill.
-    fn room(&mut self) -> &mut [u8] {
-        // SAFETY: the cap bytes xmalloc() gave the buffer, zeroed.
-        unsafe { core::slice::from_raw_parts_mut(self.ptr, self.cap) }
-    }
-
-    /// The buffer a growing emitter made.
-    fn from_emitter(e: &JsonEmit) -> Self {
-        let (ptr, cap, len) = e.parts();
-        Buffer {
-            ptr: ptr.cast(),
-            cap,
-            len,
-        }
-    }
-
-    fn bytes(&self) -> &[u8] {
-        if self.ptr.is_null() {
-            return &[];
-        }
-        // SAFETY: the len bytes written.
-        unsafe { crate::ffi::slice(self.ptr, self.len) }
-    }
-}
-
-impl Drop for Buffer {
-    fn drop(&mut self) {
-        if !self.ptr.is_null() {
-            // SAFETY: the allocation, freed once with its size.
-            unsafe { xfree(self.ptr.cast(), self.cap) };
-        }
-    }
-}
-
-/// What a decoder returned: `len` bytes and a NUL, freed when it goes.
-struct Decoded {
-    ptr: *mut c_char,
-    len: usize,
-}
-
-impl Decoded {
-    fn bytes(&self) -> &[u8] {
-        if self.ptr.is_null() {
-            return &[];
-        }
-        // SAFETY: the decoder's len bytes.
-        unsafe { crate::ffi::slice(self.ptr.cast::<u8>(), self.len) }
-    }
-}
-
-impl Drop for Decoded {
-    fn drop(&mut self) {
-        if !self.ptr.is_null() {
-            // SAFETY: the decoder's allocation, freed once with its size.
-            unsafe { xfree(self.ptr.cast(), self.len + 1) };
-        }
-    }
 }
 
 /// The value's BTF type with its typedefs and modifiers followed.
@@ -304,12 +228,11 @@ pub(crate) fn status_severity(status: &[u8]) -> (c_int, &'static CStr) {
 /// makes of `v`, for the otel map test helper.
 #[cfg(feature = "test-helpers")]
 pub(crate) fn payload_file(path: &CStr, v: &MapView, metric: bool) -> Result<Vec<u8>, c_int> {
-    let buf = if metric {
-        otlp::metric_payload(Some(path), v)?
+    if metric {
+        otlp::metric_payload(Some(path), v)
     } else {
-        otlp::log_payload(Some(path), v, 0)?
-    };
-    Ok(buf.bytes().to_vec())
+        otlp::log_payload(Some(path), v, 0)
+    }
 }
 
 /// A log record of one string sent, as the keepalive sends its body, for

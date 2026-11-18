@@ -16,7 +16,7 @@ use super::http::{
     Response, Slist, Transport, attempt_error, curl_error, loopback_host, response_header,
     response_write, retry_wait, retryable_curl, retryable_http, url_parts,
 };
-use super::{Decoded, LOG, MapView, OtelOpts, eprint, otlp};
+use super::{LOG, MapView, OtelOpts, eprint, otlp};
 use crate::errno::{
     E2BIG, EACCES, EINVAL, EIO, ENAMETOOLONG, ENOMEM, EOPNOTSUPP, EOVERFLOW, EPERM, EPROTONOSUPPORT,
 };
@@ -29,7 +29,7 @@ use crate::sys::curl::{
 use crate::util::crypto_openssl::{
     Sha256Ctx, base64_encode, sha256_final, sha256_free, sha256_init, sha256_update,
 };
-use crate::util::decode::{upatch_decode_map_file_json_limit, upatch_decode_map_json_limit};
+use crate::util::decode::decode_map;
 use crate::util::gzip::GzWrite;
 use crate::util::tls_openssl::tls_curl_policy;
 
@@ -175,26 +175,9 @@ impl Writer {
 /// The canonical value the signed decoder returns, gzipped: S3 stores
 /// exactly that.
 fn snapshot(decoder_path: Option<&CStr>, v: &MapView) -> Result<Snapshot, c_int> {
-    let (mut out, mut len) = (core::ptr::null_mut(), 0usize);
-    // SAFETY: a C string or none, the view and rooms for the output.
-    let ret = unsafe {
-        match decoder_path {
-            Some(p) => upatch_decode_map_file_json_limit(
-                p.as_ptr(),
-                v,
-                DECODER_JSON_MAX,
-                &mut out,
-                &mut len,
-            ),
-            None => upatch_decode_map_json_limit(v, DECODER_JSON_MAX, &mut out, &mut len),
-        }
-    };
-    let decoded = Decoded { ptr: out, len };
-    if ret != 0 {
-        return Err(ret);
-    }
+    let decoded = decode_map(v, decoder_path, false, DECODER_JSON_MAX)?;
     let mut w = Writer::new(temp_file()?)?;
-    w.json(decoded.bytes())?;
+    w.json(&decoded)?;
     drop(decoded);
     w.finish()
 }
@@ -620,7 +603,7 @@ impl S3 {
             Err(err) => return err,
         };
         match &self.otel {
-            Some(t) => t.post(reference.bytes()),
+            Some(t) => t.post(&reference),
             None => -EINVAL,
         }
     }

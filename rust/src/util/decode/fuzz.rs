@@ -13,7 +13,6 @@ use core::ffi::c_char;
 use std::sync::OnceLock;
 
 use crate::fuzzing::fuzz_target;
-use crate::heap::xfree;
 use crate::sys::upatch_maps::{MapEntry, MapView, SerialPage};
 use crate::util::json::MAX_BYTES;
 use crate::util::serializer::SERIAL_CHUNK_PAYLOAD;
@@ -120,10 +119,7 @@ fuzz_target!(
         v.n_entries = n as u32;
         v.entries = entries.as_mut_ptr();
         for otel in [false, true] {
-            if let Ok(out) = super::run(d, &v, otel, MAX_BYTES) {
-                // SAFETY: the output and the size it was allocated with.
-                unsafe { xfree(out.ptr.cast(), out.len + 1) };
-            }
+            let _ = super::run(d, &v, otel, MAX_BYTES);
         }
     },
     init

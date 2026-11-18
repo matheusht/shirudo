@@ -11,7 +11,7 @@
 //! strings.
 
 use core::cell::Cell;
-use core::ffi::{CStr, c_char, c_int, c_void};
+use core::ffi::{CStr, c_int, c_void};
 use core::ptr;
 use std::ffi::CString;
 
@@ -44,7 +44,7 @@ const INSN_LIMIT: c_int = 1_000_000;
 const HOOK_COUNT: c_int = 10_000;
 const MEMORY_LIMIT: usize = 32 * 1024 * 1024;
 const JSON_MAX_DEPTH: c_int = 32;
-const JSON_MAX: usize = 8 * 1024 * 1024;
+pub(crate) const JSON_MAX: usize = 8 * 1024 * 1024;
 const SLOT_MT: &CStr = c"shirudo.slot";
 /// SERIAL_CHUNK_PAYLOAD of bpf/lib/serializer.h.
 const CHUNK_PAYLOAD: usize = 4032;
@@ -1175,13 +1175,6 @@ unsafe fn install_host_api(l: *mut LuaState) {
     }
 }
 
-/// A decoder's output, `len` bytes and a NUL in an allocation for
-/// `xfree(out, len + 1)`.
-pub(crate) struct Output {
-    pub(crate) ptr: *mut c_char,
-    pub(crate) len: usize,
-}
-
 /// Two states: one that owns LuaJIT's own allocator, and the decoder's
 /// over it, closed in that order when they go. Restoring the native
 /// allocator before close would let finalizers bypass the limit and the
@@ -1207,7 +1200,7 @@ impl Drop for States {
 
 /// Runs the decoder on the view: the JSON, or the AnyValue with `otel`,
 /// of what it returns, at most `max` bytes.
-pub(crate) fn run(d: &DecoderView, v: &MapView, otel: bool, max: usize) -> Result<Output, c_int> {
+pub(crate) fn run(d: &DecoderView, v: &MapView, otel: bool, max: usize) -> Result<Vec<u8>, c_int> {
     let mut memory = Memory {
         inner: None,
         inner_ud: ptr::null_mut(),
@@ -1292,14 +1285,12 @@ pub(crate) fn run(d: &DecoderView, v: &MapView, otel: bool, max: usize) -> Resul
             }
         }
     };
-    let (buf, cap, len) = e.parts();
-    if ret != 0 || e.err() != 0 {
-        // SAFETY: the emitter's buffer, or NULL.
-        unsafe { crate::heap::xfree(buf.cast(), cap) };
-        return Err(if ret != 0 { ret } else { e.err() });
+    if ret != 0 {
+        return Err(ret);
     }
+    let out = e.finish();
     drop(states);
-    Ok(Output { ptr: buf, len })
+    out
 }
 
 /// Whether the decoder is a Lua one of API 1 on map input, exporting a
@@ -1387,7 +1378,7 @@ fn decode_open(
     v: &MapView,
     otel: bool,
     max: usize,
-) -> Result<Output, c_int> {
+) -> Result<Vec<u8>, c_int> {
     if !upatch::name_valid(Some(cstr(&v.upatch))) {
         return Err(-EINVAL);
     }
@@ -1406,9 +1397,28 @@ fn archive_path(v: &MapView) -> Result<CString, c_int> {
     CString::new(path).map_err(|_| -EINVAL)
 }
 
+/// What the decoder makes of the view `v`, at most `max` bytes of it:
+/// the signed one in its upatch's archive, or the artifact's at
+/// `artifact`; as JSON, or with `otel` as an OTLP AnyValue. -ENODATA
+/// without a decoder for the map, or -errno.
+pub(crate) fn decode_map(
+    v: &MapView,
+    artifact: Option<&CStr>,
+    otel: bool,
+    max: usize,
+) -> Result<Vec<u8>, c_int> {
+    if max == 0 {
+        return Err(-EINVAL);
+    }
+    match artifact {
+        None => decode_open(&archive_path(v)?, true, v, otel, max),
+        Some(path) => decode_open(path, false, v, otel, max),
+    }
+}
+
 /// What the decoder in the upatch's archive makes of the map, as JSON.
-pub(crate) fn map_json(v: &MapView) -> Result<Output, c_int> {
-    decode_open(&archive_path(v)?, true, v, false, JSON_MAX)
+pub(crate) fn map_json(v: &MapView) -> Result<Vec<u8>, c_int> {
+    decode_map(v, None, false, JSON_MAX)
 }
 
 /// The signal the map's decoder exports, from the upatch's archive.
@@ -1428,173 +1438,3 @@ pub(crate) fn signal(v: &MapView) -> Result<u32, c_int> {
 mod fuzz;
 #[cfg(test)]
 mod tests;
-
-mod capi {
-    use core::ffi::{CStr, c_char, c_int};
-
-    use super::Output;
-    use crate::errno::EINVAL;
-    use crate::sys::upatch_maps::MapView;
-
-    const JSON_MAX: usize = super::JSON_MAX;
-
-    /// The result into the caller's rooms: empty, then the output.
-    ///
-    /// # Safety
-    ///
-    /// `out` and `out_len` are rooms.
-    unsafe fn hand(r: Result<Output, c_int>, out: *mut *mut c_char, out_len: *mut usize) -> c_int {
-        match r {
-            Ok(o) => {
-                // SAFETY: the caller's rooms.
-                unsafe {
-                    *out = o.ptr;
-                    *out_len = o.len;
-                }
-                0
-            }
-            Err(err) => err,
-        }
-    }
-
-    /// The archive's decoder, or the artifact's at `path`, on the view.
-    ///
-    /// # Safety
-    ///
-    /// `path` is a C string or NULL, `v` a view or NULL, `out` and
-    /// `out_len` rooms or NULL.
-    unsafe fn decode(
-        path: *const c_char,
-        v: *const MapView,
-        otel: bool,
-        max: usize,
-        out: *mut *mut c_char,
-        out_len: *mut usize,
-    ) -> c_int {
-        // SAFETY: the caller's view.
-        let Some(v) = (unsafe { v.as_ref() }) else {
-            return -EINVAL;
-        };
-        if out.is_null() || out_len.is_null() {
-            return -EINVAL;
-        }
-        // SAFETY: the caller's rooms, emptied first.
-        unsafe {
-            *out = core::ptr::null_mut();
-            *out_len = 0;
-        }
-        let r = if path.is_null() {
-            match super::archive_path(v) {
-                Ok(p) => super::decode_open(&p, true, v, otel, max),
-                Err(err) => Err(err),
-            }
-        } else {
-            // SAFETY: the caller's C string.
-            super::decode_open(unsafe { CStr::from_ptr(path) }, false, v, otel, max)
-        };
-        // SAFETY: the caller's rooms.
-        unsafe { hand(r, out, out_len) }
-    }
-
-    /// What the map's signed decoder in its upatch's archive makes of
-    /// it, as JSON: the buffer for xfree(out, *out_len + 1), -ENODATA
-    /// without a decoder for the map, or -errno.
-    ///
-    /// # Safety
-    ///
-    /// `v` is a view or NULL; `out` and `out_len` rooms or NULL.
-    pub unsafe extern "C" fn upatch_decode_map_json(
-        v: *const MapView,
-        out: *mut *mut c_char,
-        out_len: *mut usize,
-    ) -> c_int {
-        // SAFETY: the caller's arguments.
-        unsafe { decode(core::ptr::null(), v, false, JSON_MAX, out, out_len) }
-    }
-
-    /// As upatch_decode_map_json(), at most `max_bytes` of it.
-    ///
-    /// # Safety
-    ///
-    /// As upatch_decode_map_json().
-    pub unsafe extern "C" fn upatch_decode_map_json_limit(
-        v: *const MapView,
-        max_bytes: usize,
-        out: *mut *mut c_char,
-        out_len: *mut usize,
-    ) -> c_int {
-        if max_bytes == 0 {
-            return -EINVAL;
-        }
-        // SAFETY: the caller's arguments.
-        unsafe { decode(core::ptr::null(), v, false, max_bytes, out, out_len) }
-    }
-
-    /// As upatch_decode_map_json(), as an OTLP AnyValue.
-    ///
-    /// # Safety
-    ///
-    /// As upatch_decode_map_json().
-    pub unsafe extern "C" fn upatch_decode_map_otel(
-        v: *const MapView,
-        out: *mut *mut c_char,
-        out_len: *mut usize,
-    ) -> c_int {
-        // SAFETY: the caller's arguments.
-        unsafe { decode(core::ptr::null(), v, true, JSON_MAX, out, out_len) }
-    }
-
-    /// As upatch_decode_map_json(), with the decoder of the artifact at
-    /// `path`.
-    ///
-    /// # Safety
-    ///
-    /// `path` is a C string or NULL; otherwise as upatch_decode_map_json().
-    pub unsafe extern "C" fn upatch_decode_map_file_json(
-        path: *const c_char,
-        v: *const MapView,
-        out: *mut *mut c_char,
-        out_len: *mut usize,
-    ) -> c_int {
-        // SAFETY: the caller's arguments.
-        unsafe { upatch_decode_map_file_json_limit(path, v, JSON_MAX, out, out_len) }
-    }
-
-    /// # Safety
-    ///
-    /// As upatch_decode_map_file_json().
-    pub unsafe extern "C" fn upatch_decode_map_file_json_limit(
-        path: *const c_char,
-        v: *const MapView,
-        max_bytes: usize,
-        out: *mut *mut c_char,
-        out_len: *mut usize,
-    ) -> c_int {
-        if max_bytes == 0 || path.is_null() {
-            return -EINVAL;
-        }
-        // SAFETY: the caller's arguments.
-        unsafe { decode(path, v, false, max_bytes, out, out_len) }
-    }
-
-    /// # Safety
-    ///
-    /// As upatch_decode_map_file_json().
-    pub unsafe extern "C" fn upatch_decode_map_file_otel(
-        path: *const c_char,
-        v: *const MapView,
-        out: *mut *mut c_char,
-        out_len: *mut usize,
-    ) -> c_int {
-        if path.is_null() {
-            return -EINVAL;
-        }
-        // SAFETY: the caller's arguments.
-        unsafe { decode(path, v, true, JSON_MAX, out, out_len) }
-    }
-}
-
-pub(crate) use capi::{
-    upatch_decode_map_file_json, upatch_decode_map_file_json_limit, upatch_decode_map_file_otel,
-    upatch_decode_map_json, upatch_decode_map_json_limit, upatch_decode_map_otel,
-};

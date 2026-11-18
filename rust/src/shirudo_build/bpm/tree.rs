@@ -1293,15 +1293,10 @@ impl Append<'_> {
         let extra: Extra<'_> = &mut emit_fixes;
         // SAFETY: the publication, its operations and their pairs.
         let emitted = unsafe { emit_publication(self.publication.get(), Some(extra)) };
-        let (body, cap, len) = match emitted {
-            Ok(b) => b,
+        self.payload = match emitted {
+            Ok(doc) => doc,
             Err(e) => return e,
         };
-        // SAFETY: the len bytes emitted, copied, then the buffer freed.
-        unsafe {
-            self.payload = crate::ffi::slice(body.cast::<u8>(), len).to_vec();
-            crate::heap::xfree(body.cast(), cap);
-        }
         match sign_detached(&self.payload, (self.key(), self.cert())) {
             Ok(sig) => {
                 self.sig = sig;

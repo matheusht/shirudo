@@ -13,10 +13,9 @@
 use core::ffi::{CStr, c_char, c_int, c_void};
 
 use super::{err, helper_main, out_bytes};
-use crate::heap::xfree;
 use crate::sys::luajit::{LuaState, lua_close, luaL_newstate};
 use crate::sys::upatch_maps::MapView;
-use crate::util::decode::{upatch_decode_map_file_json, upatch_decode_map_file_otel};
+use crate::util::decode::{JSON_MAX, decode_map};
 
 helper_main!(shirudo_helper_test_upatch_decode, run);
 
@@ -90,22 +89,11 @@ fn run(args: &[&CStr]) -> c_int {
     view.upatch[..5].copy_from_slice(b"t3002");
     view.name[..9].copy_from_slice(b"t0005_map");
 
-    let decode = if how == b"otel" {
-        upatch_decode_map_file_otel
-    } else {
-        upatch_decode_map_file_json
-    };
-    let (mut out, mut len): (*mut c_char, usize) = (core::ptr::null_mut(), 0);
-    // SAFETY: a C string, the view, and rooms for the output.
-    let ret = unsafe { decode(file.as_ptr(), &*view, &mut out, &mut len) };
-    if ret != 0 {
-        err(&format!("decode: {ret}\n"));
-        return 1;
-    }
-    // SAFETY: the output's len bytes, written, then its allocation freed.
-    unsafe {
-        let written = out_bytes(crate::ffi::slice(out.cast(), len));
-        xfree(out.cast(), len + 1);
-        c_int::from(!written)
+    match decode_map(&view, Some(file), how == b"otel", JSON_MAX) {
+        Ok(out) => c_int::from(!out_bytes(&out)),
+        Err(ret) => {
+            err(&format!("decode: {ret}\n"));
+            1
+        }
     }
 }

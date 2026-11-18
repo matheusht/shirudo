@@ -16,7 +16,6 @@ use std::os::unix::fs::FileExt;
 
 use super::{JSON_MAX, Summaries, log_err, log_warn, strerr, type_name};
 use crate::errno::{EINVAL, EIO, ENODATA};
-use crate::heap::xfree;
 use crate::sys::libc::{
     LOCK_UN, O_APPEND, O_CREAT, O_RDWR, STDOUT_FILENO, close, errno, ferror, flock, stdout,
 };
@@ -341,17 +340,12 @@ fn emit_failed(path: Option<&CStr>, e: c_int) {
 /// ends: 0 or -errno.
 fn append_json(path: Option<&CStr>, v: &MapView) -> c_int {
     match decode::map_json(v) {
-        Ok(o) => {
-            // SAFETY: the decoder's output, its len bytes.
-            let json = unsafe { crate::ffi::slice(o.ptr.cast::<u8>(), o.len) };
+        Ok(json) => {
             let end = json
                 .iter()
                 .rposition(|&c| c != b'\n' && c != b'\r')
                 .map_or(0, |i| i + 1);
-            let ret = emit_record(path, &json[..end]);
-            // SAFETY: the output and its NUL, freed once.
-            unsafe { xfree(o.ptr.cast(), o.len + 1) };
-            ret
+            emit_record(path, &json[..end])
         }
         Err(e) => e,
     }
@@ -359,13 +353,7 @@ fn append_json(path: Option<&CStr>, v: &MapView) -> c_int {
 
 /// Map `map` of upatch `upatch` read and exported as `a` asks, printed
 /// in detail when `detail`: 0 or 1.
-fn export(
-    upatch: *const c_char,
-    map: *const c_char,
-    a: &Args,
-    opts: &OtelOpts,
-    detail: bool,
-) -> c_int {
+fn export(upatch: &CStr, map: &CStr, a: &Args, opts: &OtelOpts, detail: bool) -> c_int {
     let cap = if a.show_full || a.json || a.otel {
         0
     } else {
@@ -373,11 +361,8 @@ fn export(
     };
     // SAFETY: an all-zero view is an empty one.
     let mut v: Box<MapView> = Box::new(unsafe { core::mem::zeroed() });
-    // SAFETY: the caller's C strings.
-    let (u, m) = unsafe { (crate::ffi::c_str(upatch), crate::ffi::c_str(map)) };
+    let (u, m) = (upatch.to_bytes(), map.to_bytes());
     let r = map_read::read(u, m, cap, if a.peek { MAP_READ_PEEK } else { 0 }, &mut v);
-    // SAFETY: the caller's C strings.
-    let (u, m) = unsafe { (crate::ffi::c_str(upatch), crate::ffi::c_str(map)) };
     let mut ret = 0;
 
     if r != 0 {
@@ -438,22 +423,14 @@ fn summary(a: &Args, maps: &Summaries) -> c_int {
     }
     e.arr_close();
     e.obj_close();
-    let (buf, cap, len) = e.parts();
-    let ret = if e.err() != 0 {
-        1
-    } else {
-        // SAFETY: the len bytes the emitter wrote.
-        let r = emit_record(a.json_path, unsafe {
-            crate::ffi::slice(buf.cast::<u8>(), len)
-        });
-        if r != 0 {
-            emit_failed(a.json_path, r);
-        }
-        c_int::from(r != 0)
-    };
-    // SAFETY: the buffer the emitter grew, freed once.
-    unsafe { xfree(buf.cast(), cap) };
-    ret
+    if e.err() != 0 {
+        return 1;
+    }
+    let r = emit_record(a.json_path, e.output());
+    if r != 0 {
+        emit_failed(a.json_path, r);
+    }
+    c_int::from(r != 0)
 }
 
 /// `upatch map`, from `map` on.
@@ -534,20 +511,20 @@ pub(super) fn run(args: &[*const c_char]) -> c_int {
         }
     }
     if let (Some(u), Some(m)) = (a.upatch, a.map) {
-        return export(u.as_ptr(), m.as_ptr(), &a, &opts, detail);
+        return export(u, m, &a, &opts, detail);
     }
     let maps = Summaries::of(a.upatch);
     if a.all {
         let mut ret = 0;
         for m in maps.as_slice() {
-            if export(
-                m.upatch.as_ptr().cast(),
-                m.name.as_ptr().cast(),
-                &a,
-                &opts,
-                detail,
-            ) != 0
-            {
+            let (Ok(u), Ok(name)) = (
+                CStr::from_bytes_until_nul(&m.upatch),
+                CStr::from_bytes_until_nul(&m.name),
+            ) else {
+                ret = 1;
+                continue;
+            };
+            if export(u, name, &a, &opts, detail) != 0 {
                 ret = 1;
             }
         }

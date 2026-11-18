@@ -2,8 +2,6 @@
 // Copyright (c) 2026 Authors of shirudo
 
 use super::*;
-use crate::ffi;
-use crate::heap::xfree;
 use crate::testutil::{TempDir, serial};
 use crate::util::upatch::{
     DECODER_MAGIC, HEADER_SIZE, MAGIC, SECTION_DECODERS, SIGNED_TRAILER_MAGIC, TYPE_BPF,
@@ -86,22 +84,7 @@ fn decoded(source: &str) -> Result<Vec<u8>, c_int> {
     view.serialized = true;
     view.max_entries = 1;
     view.type_name = Some(c"array");
-    let (mut out, mut out_len) = (ptr::null_mut(), 0);
-    // SAFETY: a C string, the view, and room for the output.
-    let ret = unsafe {
-        capi::upatch_decode_map_file_json(dir.cpath("u").as_ptr(), &view, &mut out, &mut out_len)
-    };
-
-    if ret != 0 {
-        assert!(out.is_null());
-        assert_eq!(out_len, 0);
-        return Err(ret);
-    }
-    // SAFETY: the output and its length, freed once.
-    let json = unsafe { ffi::slice(out.cast::<u8>(), out_len) }.to_vec();
-    // SAFETY: the output decode() allocated.
-    unsafe { xfree(out.cast(), out_len + 1) };
-    Ok(json)
+    decode_map(&view, Some(&dir.cpath("u")), false, JSON_MAX)
 }
 
 #[test]

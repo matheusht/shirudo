@@ -3,7 +3,6 @@
 
 use super::*;
 use crate::errno::{E2BIG, EINVAL, EIO, EKEYREJECTED, ERANGE};
-use crate::heap::xfree;
 use crate::util::chain::history_step;
 
 const DIGEST: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -110,12 +109,7 @@ impl Pub {
     /// The document emit_publication() writes, with `extra`.
     fn emit(&self, extra: Option<Extra<'_>>) -> Result<Vec<u8>, c_int> {
         // SAFETY: a publication whose operations are as its counts say.
-        let (body, cap, len) = unsafe { emit_publication(&self.0, extra) }?;
-        // SAFETY: the document's bytes, then its buffer, freed once.
-        let doc = unsafe { crate::ffi::slice(body.cast::<u8>(), len) }.to_vec();
-        // SAFETY: as above.
-        unsafe { xfree(body.cast(), cap) };
-        Ok(doc)
+        unsafe { emit_publication(&self.0, extra) }
     }
 
     fn parse(doc: &[u8]) -> Result<Self, c_int> {

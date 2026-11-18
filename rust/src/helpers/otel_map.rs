@@ -20,7 +20,7 @@
 //!
 //! make links it with testing/helper/version.rs for the version "test-1".
 
-use core::ffi::{CStr, c_char, c_int, c_void};
+use core::ffi::{CStr, c_int, c_void};
 use std::ffi::{CString, OsStr};
 use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
@@ -29,9 +29,8 @@ use super::{helper_main, out, out_bytes};
 use crate::bpf::btf::Btf;
 use crate::btf_builder::BtfBuilder;
 use crate::errno::{E2BIG, EACCES, EINVAL, EOPNOTSUPP, EOVERFLOW, EPERM};
-use crate::heap::xfree;
 use crate::sys::upatch_maps::{MapEntry, MapView, SerialPage};
-use crate::util::decode::upatch_decode_map_file_otel;
+use crate::util::decode::{JSON_MAX, decode_map};
 use crate::util::json::JsonEmit;
 use crate::util::map_render::emit_json_fields;
 use crate::util::otel::{
@@ -373,16 +372,14 @@ fn print_record_size() -> c_int {
         Ok(d) => d,
         Err(_) => return 1,
     };
-    let (mut decoded, mut len): (*mut c_char, usize) = (core::ptr::null_mut(), 0);
-    // SAFETY: a C string, the view and rooms for the output, freed after.
-    unsafe {
-        let ret = upatch_decode_map_file_otel(d.0.as_ptr(), &f.view, &mut decoded, &mut len);
-        if ret == 0 {
-            out(&format!("{len}\n"));
+    let ret = match decode_map(&f.view, Some(&d.0), true, JSON_MAX) {
+        Ok(decoded) => {
+            out(&format!("{}\n", decoded.len()));
+            0
         }
-        xfree(decoded.cast(), len + 1);
-        exit(ret)
-    }
+        Err(ret) => ret,
+    };
+    exit(ret)
 }
 
 fn send_auto(base: &CStr, is_signed: bool) -> c_int {

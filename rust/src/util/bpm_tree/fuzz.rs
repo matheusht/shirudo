@@ -14,7 +14,6 @@ use super::{
     segment_precedes,
 };
 use crate::fuzzing::fuzz_target;
-use crate::heap::xfree;
 use crate::text::cstr;
 use crate::util::json::JsonEmit;
 
@@ -61,11 +60,10 @@ fn emit_fixes(e: &mut JsonEmit, index: usize, p: &TreePublication) -> c_int {
 
 fn read_back(p: &TreePublication, extra: Option<Extra<'_>>) {
     // SAFETY: a parsed publication.
-    let Ok((body, cap, len)) = (unsafe { emit_publication(p, extra) }) else {
+    let Ok(doc) = (unsafe { emit_publication(p, extra) }) else {
         return;
     };
-    // SAFETY: the document emitted, `len` bytes at `body`.
-    let again = parsed(unsafe { core::slice::from_raw_parts(body.cast::<u8>(), len) });
+    let again = parsed(&doc);
     let Some(again) = again else {
         abort();
     };
@@ -86,8 +84,6 @@ fn read_back(p: &TreePublication, extra: Option<Extra<'_>>) {
             abort();
         }
     }
-    // SAFETY: the emitter's buffer, of its capacity, freed once.
-    unsafe { xfree(body.cast(), cap) };
 }
 
 fn verify_names_its_failure(p: &TreePublication) {
