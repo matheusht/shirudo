@@ -14,64 +14,142 @@ use std::io::Write;
 use std::os::fd::{FromRawFd, IntoRawFd};
 use std::os::unix::fs::FileExt;
 
-use super::{JSON_MAX, Opt, Summaries, err, help, item, log_err, log_warn, opt, strerr, type_name};
+use super::{JSON_MAX, Summaries, log_err, log_warn, strerr, type_name};
 use crate::errno::{EINVAL, EIO, ENODATA};
 use crate::heap::xfree;
 use crate::sys::libc::{
     LOCK_UN, O_APPEND, O_CREAT, O_RDWR, STDOUT_FILENO, close, errno, ferror, flock, stdout,
 };
 use crate::sys::upatch_maps::{MAP_ENTRIES_DEFAULT, MAP_READ_PEEK, MapView};
-use crate::text::{cstr, parse_u64};
+use crate::text::cstr;
 use crate::util::config::{self, Scrubbed};
 use crate::util::decode;
-use crate::util::help::{HelpItem, is_help};
+use crate::util::help::{Help, HelpSection};
 use crate::util::io::{lock_exclusive, write_complete};
 use crate::util::json::JsonEmit;
 use crate::util::map_read;
 use crate::util::map_render;
+use crate::util::options::{
+    EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OPT_OPTIONAL, OptParser, OptSpec,
+};
 use crate::util::otel::{self, OtelOpts};
 use crate::util::seal::seal_output_open;
 use crate::util::upatch::name_valid;
 
-const OPTIONS: [HelpItem; 10] = [
-    item(c"--all", c"export every map from every loaded upatch"),
-    item(c"--json[=<path>]", c"print JSON or append it to path"),
-    item(c"--show-full", c"lift the per-map 256-entry truncation cap"),
-    item(
+const MAP_ALL: c_int = 0;
+const MAP_JSON: c_int = 1;
+const MAP_SHOW_FULL: c_int = 2;
+const MAP_PEEK: c_int = 3;
+const MAP_OTEL: c_int = 4;
+const MAP_OTEL_ENDPOINT: c_int = 5;
+const MAP_TENANT_ID: c_int = 6;
+const MAP_OTEL_INSECURE: c_int = 7;
+const MAP_OTEL_RETRIES: c_int = 8;
+const MAP_S3_URI: c_int = 9;
+
+static MAP_OPTS: [OptSpec; 10] = [
+    OptSpec::new(
+        c"--all",
+        0,
+        0,
+        None,
+        c"export every map from every loaded upatch",
+    ),
+    OptSpec::new(
+        c"--json",
+        0,
+        OPT_OPTIONAL,
+        Some(c"<path>"),
+        c"print JSON or append it to path",
+    ),
+    OptSpec::new(
+        c"--show-full",
+        0,
+        0,
+        None,
+        c"lift the per-map 256-entry truncation cap",
+    ),
+    OptSpec::new(
         c"--peek",
+        0,
+        0,
+        None,
         c"read serializer-backed maps without draining them",
     ),
-    item(
+    OptSpec::new(
         c"--otel",
+        0,
+        0,
+        None,
         c"export maps through signed decoders or automatic classification",
     ),
-    item(
-        c"--otel-endpoint=<url>",
+    OptSpec::new(
+        c"--otel-endpoint",
+        0,
+        0,
+        Some(c"<url>"),
         c"OTLP base URL (signal path is appended)",
     ),
-    item(c"--tenant-id=<id>", c"add X-Tenant-ID to OTLP requests"),
-    item(
+    OptSpec::new(
+        c"--tenant-id",
+        0,
+        0,
+        Some(c"<id>"),
+        c"add X-Tenant-ID to OTLP requests",
+    ),
+    OptSpec::new(
         c"--otel-insecure",
+        0,
+        0,
+        None,
         c"allow cleartext remote OTLP or disable HTTPS verification",
     ),
-    item(
-        c"--otel-retries=<0-10>",
+    OptSpec::new(
+        c"--otel-retries",
+        0,
+        0,
+        Some(c"<0-10>"),
         c"OTLP retries after the first attempt (default: 3)",
     ),
-    item(
-        c"--s3-uri=<uri>",
+    OptSpec::new(
+        c"--s3-uri",
+        0,
+        0,
+        Some(c"<uri>"),
         c"S3 overflow destination for OTLP payloads",
     ),
 ];
 
-fn usage() {
-    help(
-        c"shirudo upatch map [--all] [<upatch>] [<map>] [--json[=<path>]] [--show-full] [--peek]\n                          [--otel] [--otel-endpoint=<url>]\n                          [--otel-insecure] [--otel-retries=<0-10>] [--s3-uri=<uri>]",
-        c"Read the contents of a pinned upatch map from the\ntarget kernel. With no positional args, list every pinned\nmap across every loaded upatch. With <upatch>, list maps\nfor that upatch only. With <upatch> <map>, dump the map's\ncontents, BTF type-aware where the build embedded `-g`. If the upatch\npins a serializer for the map, run it and print the serialized\npages. With --all, export detailed contents for every loaded map\nusing command-line or map_export.* configuration.",
-        &[(c"options:", &OPTIONS)],
-        Some(c"Examples:\n  shirudo upatch map\n  shirudo upatch map --all\n  shirudo upatch map kernel-obs exec --json\n  shirudo upatch map cve-2026-31431-counter\n  shirudo upatch map cve-2026-31431-counter blocked_af_alg\n  shirudo upatch map cve-2026-31431-counter blocked_af_alg \\\n    --json=/var/log/shirudo/maps.ndjson\n  shirudo upatch map cve-2026-31431-counter blocked_af_alg --otel\n  shirudo upatch map foo values --otel \\\n    --otel-endpoint=https://collector:4318\n  shirudo upatch map cve-2026-31431-counter big_hash --show-full"),
-    );
-}
+static MAP_SECTIONS: [HelpSection; 1] = [HelpSection::options(c"options:", &MAP_OPTS)];
+
+static MAP_HELP: Help = Help::new(
+    c"shirudo upatch map [--all] [<upatch>] [<map>] [--json[=<path>]] [--show-full] [--peek]\n                          \
+      [--otel] [--otel-endpoint=<url>]\n                          \
+      [--otel-insecure] [--otel-retries=<0-10>] [--s3-uri=<uri>]",
+    Some(
+        c"Read the contents of a pinned upatch map from the\n\
+          target kernel. With no positional args, list every pinned\n\
+          map across every loaded upatch. With <upatch>, list maps\n\
+          for that upatch only. With <upatch> <map>, dump the map's\n\
+          contents, BTF type-aware where the build embedded `-g`. If the upatch\n\
+          pins a serializer for the map, run it and print the serialized\n\
+          pages. With --all, export detailed contents for every loaded map\n\
+          using command-line or map_export.* configuration.",
+    ),
+    &MAP_SECTIONS,
+    Some(
+        c"Examples:\n  shirudo upatch map\n  shirudo upatch map --all\n  \
+          shirudo upatch map kernel-obs exec --json\n  \
+          shirudo upatch map cve-2026-31431-counter\n  \
+          shirudo upatch map cve-2026-31431-counter blocked_af_alg\n  \
+          shirudo upatch map cve-2026-31431-counter blocked_af_alg \\\n    \
+          --json=/var/log/shirudo/maps.ndjson\n  \
+          shirudo upatch map cve-2026-31431-counter blocked_af_alg --otel\n  \
+          shirudo upatch map foo values --otel \\\n    \
+          --otel-endpoint=https://collector:4318\n  \
+          shirudo upatch map cve-2026-31431-counter big_hash --show-full",
+    ),
+);
 
 /// What the command line asks for, and the configuration fills in.
 #[derive(Default)]
@@ -99,97 +177,51 @@ fn tenant_id_valid(id: &[u8]) -> bool {
             .all(|&c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
 }
 
-/// Fails the command line with `msg`: exit 2.
-fn bad(msg: &[u8]) -> Result<Args<'static>, c_int> {
-    err(&[b"upatch map: ", msg, b"\n"].concat());
-    Err(2)
-}
-
 /// The command line, or how the command exits without running.
-fn parse<'a>(args: &[&'a CStr]) -> Result<Args<'a>, c_int> {
+fn parse<'a>(p: &mut OptParser<'a>) -> Result<Args<'a>, c_int> {
     let mut o = Args::default();
-    let mut i = 1;
 
-    while i < args.len() {
-        let a = args[i].to_bytes();
-        if is_help(Some(a)) {
-            usage();
-            return Err(0);
+    loop {
+        let opt = p.next();
+        let value = p.value();
+        match opt {
+            OPT_END => break,
+            MAP_ALL => o.all = true,
+            MAP_JSON => {
+                o.json = true;
+                o.json_path = value;
+            }
+            MAP_SHOW_FULL => o.show_full = true,
+            MAP_PEEK => o.peek = true,
+            MAP_OTEL => o.otel = true,
+            MAP_OTEL_ENDPOINT => o.endpoint = value,
+            MAP_TENANT_ID => {
+                if !value.is_some_and(|v| tenant_id_valid(v.to_bytes())) {
+                    p.usage(b"--tenant-id takes 1..128 characters using A-Z, a-z, 0-9, '.', '_', or '-'");
+                    return Err(EXIT_USAGE);
+                }
+                o.tenant_id = value;
+            }
+            MAP_OTEL_INSECURE => o.insecure = Some(true),
+            MAP_OTEL_RETRIES => match p.number(0, 10) {
+                Ok(n) => o.retries = Some(n as u32),
+                Err(_) => return Err(EXIT_USAGE),
+            },
+            MAP_S3_URI => o.s3_uri = value,
+            OPT_ARG => {
+                if o.map.is_some() {
+                    p.usage_arg(b"unexpected argument ");
+                    return Err(EXIT_USAGE);
+                }
+                if o.upatch.is_some() {
+                    o.map = value;
+                } else {
+                    o.upatch = value;
+                }
+            }
+            OPT_DONE => return Err(0),
+            _ => return Err(EXIT_USAGE),
         }
-        if a == b"--all" {
-            if o.all {
-                return bad(b"duplicate --all");
-            }
-            o.all = true;
-        } else if let Some(path) = a.strip_prefix(b"--json=") {
-            if o.json || path.is_empty() {
-                return bad(b"invalid or duplicate --json");
-            }
-            o.json = true;
-            o.json_path = CStr::from_bytes_with_nul(&args[i].to_bytes_with_nul()[7..]).ok();
-        } else if a == b"--json" {
-            if o.json {
-                return bad(b"duplicate --json");
-            }
-            o.json = true;
-        } else if a == b"--show-full" {
-            o.show_full = true;
-        } else if a == b"--peek" {
-            o.peek = true;
-        } else if a == b"--otel" {
-            if o.otel {
-                return bad(b"duplicate --otel");
-            }
-            o.otel = true;
-        } else if a == b"--otel-insecure" {
-            if o.insecure.is_some() {
-                return bad(b"duplicate --otel-insecure");
-            }
-            o.insecure = Some(true);
-        } else if let Some((name, v)) = [
-            &b"--otel-endpoint"[..],
-            b"--tenant-id",
-            b"--otel-retries",
-            b"--s3-uri",
-        ]
-        .iter()
-        .find_map(|&n| match opt(n, args, &mut i) {
-            Opt::No => None,
-            r => Some((n, r)),
-        }) {
-            let Opt::Value(v) = v else {
-                return bad(&[a, b" takes a value"].concat());
-            };
-            let vb = v.to_bytes();
-            match name {
-                b"--otel-endpoint" if o.endpoint.is_none() && !vb.is_empty() => {
-                    o.endpoint = Some(v)
-                }
-                b"--tenant-id" if o.tenant_id.is_none() && tenant_id_valid(vb) => {
-                    o.tenant_id = Some(v)
-                }
-                b"--tenant-id" => {
-                    return bad(b"invalid or duplicate --tenant-id; expected 1..128 characters using A-Z, a-z, 0-9, '.', '_', or '-'");
-                }
-                b"--otel-retries" if o.retries.is_none() && !vb.is_empty() => {
-                    match parse_u64(vb, 10) {
-                        Ok(r) => o.retries = Some(r as u32),
-                        Err(_) => return bad(b"--otel-retries must be 0..10"),
-                    }
-                }
-                b"--s3-uri" if o.s3_uri.is_none() && !vb.is_empty() => o.s3_uri = Some(v),
-                _ => return bad(&[b"invalid or duplicate ", name].concat()),
-            }
-        } else if a.first() == Some(&b'-') {
-            return bad(&[b"unknown option '", a, b"'"].concat());
-        } else if o.upatch.is_none() {
-            o.upatch = Some(args[i]);
-        } else if o.map.is_none() {
-            o.map = Some(args[i]);
-        } else {
-            return bad(&[b"unexpected argument '", a, b"'"].concat());
-        }
-        i += 1;
     }
     Ok(o)
 }
@@ -425,9 +457,10 @@ fn summary(a: &Args, maps: &Summaries) -> c_int {
 }
 
 /// `upatch map`, from `map` on.
-pub(super) fn run(args: &[&CStr]) -> c_int {
+pub(super) fn run(args: &[*const c_char]) -> c_int {
     let mut cfg = Scrubbed(MaybeUninit::zeroed());
-    let mut a = match parse(args) {
+    let mut p = OptParser::new(c"upatch map", &MAP_OPTS, Some(&MAP_HELP), args, 1);
+    let mut a = match parse(&mut p) {
         Ok(a) => a,
         Err(code) => return code,
     };
@@ -482,22 +515,22 @@ pub(super) fn run(args: &[&CStr]) -> c_int {
         || a.retries.is_some()
         || a.s3_uri.is_some();
     if otlp_options && !a.otel {
-        err(b"upatch map: OTLP options require --otel\n");
-        return 2;
+        p.usage(b"OTLP options require --otel");
+        return EXIT_USAGE;
     }
     if a.all && (a.upatch.is_some() || a.map.is_some()) {
-        err(b"upatch map: --all does not accept positional arguments\n");
-        return 2;
+        p.usage(b"--all does not accept positional arguments");
+        return EXIT_USAGE;
     }
     if a.otel && !a.all && (a.upatch.is_none() || a.map.is_none()) {
-        err(b"upatch map: --otel requires <upatch> and <map>\n");
-        return 2;
+        p.usage(b"--otel requires <upatch> and <map>");
+        return EXIT_USAGE;
     }
     let detail = !a.json && !a.otel;
     if let Some(u) = a.upatch {
         if !name_valid(Some(u.to_bytes())) {
-            log_err(&[b"upatch map: invalid upatch name '", u.to_bytes(), b"'"].concat());
-            return 2;
+            p.usage(&[b"invalid upatch name '", u.to_bytes(), b"'"].concat());
+            return EXIT_USAGE;
         }
     }
     if let (Some(u), Some(m)) = (a.upatch, a.map) {

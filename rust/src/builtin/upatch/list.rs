@@ -6,29 +6,21 @@
 //! Drift either way is the point: an archived upatch not loaded, or a
 //! loaded one that will not survive a reboot.
 
-use core::ffi::c_int;
+use core::ffi::{c_char, c_int};
 use std::ffi::CString;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 
-use super::{JSON_MAX, err, help, hex, out, pad, print_json};
+use super::{JSON_MAX, hex, out, pad, print_json};
 use crate::sys::libc::close;
-use crate::util::help::is_help;
+use crate::util::help::{Help, HelpSection};
 use crate::util::json::JsonEmit;
+use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::upatch::{self, NAME_MAX, Opened, name_from_pin, pin_name};
 use crate::util::upatch_resolve::open_first_link;
 
 pub(super) const UPATCHES_DIR: &str = "/var/lib/shirudo/upatches";
 pub(super) use crate::util::upatch_resolve::BPFFS_UPATCHES_DIR;
-
-fn usage() {
-    help(
-        c"shirudo upatch list [--json]",
-        c"List the upatches archived under /var/lib/shirudo/upatches,\nwhich init restores at boot, with whether each is loaded now,\nand any upatch loaded without an archive.",
-        &[],
-        Some(c"Examples:\n  shirudo upatch list\n  shirudo upatch list --json | jq"),
-    );
-}
 
 /// The names in `dir` that `keep` keeps, sorted bytewise as alphasort()
 /// sorts them in the C locale; none when it cannot be read.
@@ -108,22 +100,46 @@ fn row(cols: [&[u8]; 4], last: &[u8]) -> Vec<u8> {
     .concat()
 }
 
+const LIST_JSON: c_int = 0;
+
+static LIST_OPTS: [OptSpec; 1] = [OptSpec::new(
+    c"--json",
+    0,
+    0,
+    None,
+    c"print one JSON object",
+)];
+
+static LIST_SECTIONS: [HelpSection; 1] = [HelpSection::options(c"options:", &LIST_OPTS)];
+
+static LIST_HELP: Help = Help::new(
+    c"shirudo upatch list [--json]",
+    Some(
+        c"List the upatches archived under /var/lib/shirudo/upatches,\n\
+          which init restores at boot, with whether each is loaded now,\n\
+          and any upatch loaded without an archive.",
+    ),
+    &LIST_SECTIONS,
+    Some(c"Examples:\n  shirudo upatch list\n  shirudo upatch list --json | jq"),
+);
+
 /// `upatch list`, from `list` on.
-pub(super) fn run(args: &[&[u8]]) -> c_int {
+pub(super) fn run(args: &[*const c_char]) -> c_int {
+    let mut p = OptParser::new(c"upatch list", &LIST_OPTS, Some(&LIST_HELP), args, 1);
     let mut json = false;
 
-    for &a in &args[1..] {
-        if a == b"--json" {
-            json = true;
-        } else if is_help(Some(a)) {
-            usage();
-            return 0;
-        } else {
-            err(&[b"upatch list: unknown option '", a, b"'\n"].concat());
-            return 2;
+    loop {
+        match p.next() {
+            OPT_END => break,
+            LIST_JSON => json = true,
+            OPT_ARG => {
+                p.usage_arg(b"unexpected argument ");
+                return EXIT_USAGE;
+            }
+            OPT_DONE => return 0,
+            _ => return EXIT_USAGE,
         }
     }
-
     let files = names(UPATCHES_DIR, |n| n.ends_with(b".upatch"));
     let pins = names(BPFFS_UPATCHES_DIR, |n| n != b"." && n != b"..");
     // The loaded upatches with no archive to survive a reboot.

@@ -23,7 +23,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 
 use super::list::{BPFFS_UPATCHES_DIR, UPATCHES_DIR};
-use super::{Opt, help, hex, log_audit, log_err, log_info, log_warn, opt, strerr};
+use super::{hex, log_audit, log_err, log_info, log_warn, strerr};
 use crate::errno::{
     EACCES, EBADMSG, EINVAL, ENAMETOOLONG, ENODEV, ENOENT, ENOSPC, EOPNOTSUPP, EPERM, ESTALE,
 };
@@ -40,7 +40,7 @@ use crate::util::eventlog::{
     eventlog_append, eventlog_lock, eventlog_path, eventlog_record_open, eventlog_unlock,
     eventlog_would_exceed,
 };
-use crate::util::help::is_help;
+use crate::util::help::{Help, HelpSection};
 use crate::util::hex::hex_decode;
 use crate::util::io::read_file;
 use crate::util::json::JsonEmit;
@@ -49,6 +49,7 @@ use crate::util::measured::{
     MeasuredSet, measured_set_boot, measured_set_free, measured_unmeasured_archives,
     measured_unmeasured_pins,
 };
+use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::report::{OpReport, report_emit, report_free};
 use crate::util::seal::{seal_mkdir_p, seal_open_read, seal_write_file};
 use crate::util::upatch::{self, NAME_MAX, Opened, Upatch, name_valid, pin_name, upatch_signature};
@@ -63,24 +64,6 @@ const UPATCH_FILE_MAX: usize = 16 * 1024 * 1024;
 const DIGEST_LEN: usize = 32;
 const KERNEL_ABI_DETAIL_MAX: usize = 256;
 
-fn load_usage() {
-    help(
-        c"shirudo upatch load [--expect-chain=<hex>] [--expect-version-id=<hex>]\n                       [--no-precheck] [--no-version-check] [--report=<path>]\n                       <file.upatch>",
-        c"Load a signed LOAD .upatch into the target kernel: verify the\nsignature, run the loader, pin the resulting link, and extend this\nboot's TPM measurement register. Target-only.",
-        &[],
-        Some(c"Examples:\n  shirudo upatch load cve-2026-31431.upatch\n  shirudo upatch load --expect-chain=$(...) foo.upatch\n  shirudo upatch load --report=- foo.upatch | jq"),
-    );
-}
-
-fn unload_usage() {
-    help(
-        c"shirudo upatch unload [--expect-chain=<hex>] [--expect-version-id=<hex>]\n                       [--no-precheck] [--no-version-check] [--report=<path>]\n                       <unload-directive.upatch>",
-        c"Apply a signed UNLOAD directive: detach the named upatch,\nremove its pin, and extend the TPM measurement register (unloads\nmove the register forward, never roll it back). Target-only.",
-        &[],
-        Some(c"Examples:\n  shirudo upatch unload cve-2026-31431.unload.upatch\n  shirudo upatch unload --report=- foo.unload.upatch | jq"),
-    );
-}
-
 /// What a load or an unload is asked to do.
 #[derive(Default)]
 struct OpArgs<'a> {
@@ -94,49 +77,132 @@ struct OpArgs<'a> {
     loaded_is_done: bool,
 }
 
-/// The command line of `verb`, or how the command exits without
-/// running.
-fn parse<'a>(args: &[&'a CStr], verb: &[u8], usage: fn()) -> Result<OpArgs<'a>, c_int> {
-    let mut o = OpArgs::default();
-    let bad = |msg: &[u8]| {
-        super::err(&[b"upatch ", verb, b": ", msg, b"\n"].concat());
-        Err(2)
-    };
+const OP_EXPECT_CHAIN: c_int = 0;
+const OP_EXPECT_VERSION_ID: c_int = 1;
+const OP_NO_PRECHECK: c_int = 2;
+const OP_NO_VERSION_CHECK: c_int = 3;
+const OP_REPORT: c_int = 4;
 
-    if args[1..].iter().any(|a| is_help(Some(a.to_bytes()))) {
-        usage();
-        return Err(0);
-    }
-    let mut i = 1;
-    while i < args.len() {
-        let a = args[i].to_bytes();
-        let valued = [&b"--expect-chain"[..], b"--expect-version-id", b"--report"]
-            .iter()
-            .find_map(|&n| match opt(n, args, &mut i) {
-                Opt::No => None,
-                r => Some((n, r)),
-            });
-        match valued {
-            Some((_, Opt::Missing)) => return bad(&[a, b" takes a value"].concat()),
-            Some((b"--expect-chain", Opt::Value(v))) => o.expect_chain = Some(v),
-            Some((b"--expect-version-id", Opt::Value(v))) => o.expect_version_id = Some(v),
-            Some((_, Opt::Value(v))) => o.report = Some(v),
-            _ if a == b"--no-version-check" => o.no_version_check = true,
-            _ if a == b"--no-precheck" => o.no_precheck = true,
-            _ if a.first() == Some(&b'-') => return bad(&[b"unknown option '", a, b"'"].concat()),
-            _ if o.file.is_none() => o.file = Some(args[i]),
-            _ => return bad(&[b"unexpected argument '", a, b"'"].concat()),
+static OP_OPTS: [OptSpec; 5] = [
+    OptSpec::new(
+        c"--expect-chain",
+        0,
+        0,
+        Some(c"<hex>"),
+        c"refuse unless the register holds this value before",
+    ),
+    OptSpec::new(
+        c"--expect-version-id",
+        0,
+        0,
+        Some(c"<hex>"),
+        c"refuse unless this binary's SHIRUDO_VERSION_ID is this",
+    ),
+    OptSpec::new(
+        c"--no-precheck",
+        0,
+        0,
+        None,
+        c"skip the pre-flight checks, --expect-chain included",
+    ),
+    OptSpec::new(
+        c"--no-version-check",
+        0,
+        0,
+        None,
+        c"skip the --expect-version-id comparison",
+    ),
+    OptSpec::new(
+        c"--report",
+        0,
+        0,
+        Some(c"<path>"),
+        c"write the JSON report there, - for standard output",
+    ),
+];
+
+static OP_SECTIONS: [HelpSection; 1] = [HelpSection::options(c"options:", &OP_OPTS)];
+
+static LOAD_HELP: Help = Help::new(
+    c"shirudo upatch load [--expect-chain=<hex>] [--expect-version-id=<hex>]\n                       \
+      [--no-precheck] [--no-version-check] [--report=<path>]\n                       \
+      <file.upatch>",
+    Some(
+        c"Load a signed LOAD .upatch into the target kernel: verify the\n\
+          signature, run the loader, pin the resulting link, and extend this\n\
+          boot's TPM measurement register. Target-only.",
+    ),
+    &OP_SECTIONS,
+    Some(
+        c"Examples:\n  shirudo upatch load cve-2026-31431.upatch\n  \
+          shirudo upatch load --expect-chain=$(...) foo.upatch\n  \
+          shirudo upatch load --report=- foo.upatch | jq",
+    ),
+);
+
+static UNLOAD_HELP: Help = Help::new(
+    c"shirudo upatch unload [--expect-chain=<hex>] [--expect-version-id=<hex>]\n                       \
+      [--no-precheck] [--no-version-check] [--report=<path>]\n                       \
+      <unload-directive.upatch>",
+    Some(
+        c"Apply a signed UNLOAD directive: detach the named upatch,\n\
+          remove its pin, and extend the TPM measurement register (unloads\n\
+          move the register forward, never roll it back). Target-only.",
+    ),
+    &OP_SECTIONS,
+    Some(
+        c"Examples:\n  shirudo upatch unload cve-2026-31431.unload.upatch\n  \
+          shirudo upatch unload --report=- foo.unload.upatch | jq",
+    ),
+);
+
+/// The options and the file of a load or an unload, or how the command
+/// exits without running: 0 after help.
+fn parse<'a>(args: &'a [*const c_char], unload: bool) -> Result<OpArgs<'a>, c_int> {
+    let (command, help) = if unload {
+        (c"upatch unload", &UNLOAD_HELP)
+    } else {
+        (c"upatch load", &LOAD_HELP)
+    };
+    let mut p = OptParser::new(command, &OP_OPTS, Some(help), args, 1);
+    let mut o = OpArgs::default();
+
+    loop {
+        let opt = p.next();
+        let value = p.value();
+        match opt {
+            OPT_END => break,
+            OP_EXPECT_CHAIN => {
+                if value.and_then(decode_chain).is_none() {
+                    p.usage(
+                        format!(
+                            "--expect-chain must be {} hexadecimal characters",
+                            2 * DIGEST_LEN
+                        )
+                        .as_bytes(),
+                    );
+                    return Err(EXIT_USAGE);
+                }
+                o.expect_chain = value;
+            }
+            OP_EXPECT_VERSION_ID => o.expect_version_id = value,
+            OP_NO_PRECHECK => o.no_precheck = true,
+            OP_NO_VERSION_CHECK => o.no_version_check = true,
+            OP_REPORT => o.report = value,
+            OPT_ARG => {
+                if o.file.is_some() {
+                    p.usage_arg(b"unexpected argument ");
+                    return Err(EXIT_USAGE);
+                }
+                o.file = value;
+            }
+            OPT_DONE => return Err(0),
+            _ => return Err(EXIT_USAGE),
         }
-        i += 1;
     }
     if o.file.is_none() {
-        usage();
-        return Err(2);
-    }
-    if let Some(c) = o.expect_chain {
-        if decode_chain(c).is_none() {
-            return bad(b"--expect-chain must be 64 hexadecimal characters");
-        }
+        p.usage(b"takes the .upatch file");
+        return Err(EXIT_USAGE);
     }
     Ok(o)
 }
@@ -1094,16 +1160,16 @@ fn load_steps(a: &OpArgs, file: &CStr, rep: &mut OpReport, name_out: &mut CStrin
 }
 
 /// `upatch load`, from `load` on.
-pub(super) fn run_load(args: &[&CStr]) -> c_int {
-    match parse(args, b"load", load_usage) {
+pub(super) fn run_load(args: &[*const c_char]) -> c_int {
+    match parse(args, false) {
         Ok(a) => load(&a),
         Err(code) => code,
     }
 }
 
 /// `upatch unload`, from `unload` on.
-pub(super) fn run_unload(args: &[&CStr]) -> c_int {
-    let a = match parse(args, b"unload", unload_usage) {
+pub(super) fn run_unload(args: &[*const c_char]) -> c_int {
+    let a = match parse(args, true) {
         Ok(a) => a,
         Err(code) => return code,
     };
@@ -1396,7 +1462,7 @@ pub(crate) fn install(path: &CStr) -> c_int {
 
 /// A removal from a package: the unload directive at `path`.
 pub(crate) fn remove(path: &CStr) -> c_int {
-    run_unload(&[c"unload", c"--no-precheck", path])
+    run_unload(&[c"unload".as_ptr(), c"--no-precheck".as_ptr(), path.as_ptr()])
 }
 
 /// Detaches, unpins and unarchives upatch `name` without a directive,

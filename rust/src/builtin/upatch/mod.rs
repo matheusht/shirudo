@@ -30,66 +30,44 @@ const JSON_MAX: usize = 8 * 1024 * 1024;
 
 pub(crate) use ops::{install, purge, remove};
 
-const fn item(name: &'static CStr, summary: &'static CStr) -> HelpItem {
-    HelpItem {
-        name: name.as_ptr(),
-        summary: summary.as_ptr(),
-    }
-}
-
-const SUBCMDS: [HelpItem; 6] = [
-    item(
+static SUBCMDS: [HelpItem; 6] = [
+    HelpItem::new(
         c"load",
         c"load a signed .upatch into the target kernel (target-only)",
     ),
-    item(
+    HelpItem::new(
         c"unload",
         c"apply a signed UNLOAD directive (forward chain extension)",
     ),
-    item(
+    HelpItem::new(
         c"list",
         c"list the archived and the loaded upatches on this host",
     ),
-    item(
+    HelpItem::new(
         c"info",
         c"describe a .upatch file (any host; offline, no kernel state)",
     ),
-    item(
+    HelpItem::new(
         c"get",
         c"dump source of a loaded upatch from the target kernel (BTF line_info)",
     ),
-    item(
+    HelpItem::new(
         c"map",
         c"read pinned map contents (target-only; BTF type-aware)",
     ),
 ];
 
-/// Help of a subcommand: its usage, summary, sections and examples.
-fn help(usage: &CStr, summary: &CStr, sections: &[(&CStr, &[HelpItem])], footer: Option<&CStr>) {
-    let sections: Vec<HelpSection> = sections
-        .iter()
-        .map(|(header, items)| HelpSection {
-            header: header.as_ptr(),
-            items: items.as_ptr(),
-            n_items: items.len(),
-            options: core::ptr::null(),
-            n_options: 0,
-        })
-        .collect();
-    let h = Help {
-        usage: usage.as_ptr(),
-        summary: summary.as_ptr(),
-        sections: if sections.is_empty() {
-            core::ptr::null()
-        } else {
-            sections.as_ptr()
-        },
-        n_sections: sections.len(),
-        footer: footer.map_or(core::ptr::null(), CStr::as_ptr),
-    };
-    // SAFETY: the help, its strings and sections live through the call.
-    unsafe { print_help(&h) };
-}
+static UPATCH_SECTIONS: [HelpSection; 1] = [HelpSection::items(c"subcommands:", &SUBCMDS)];
+
+static UPATCH_HELP: Help = Help::new(
+    c"shirudo upatch <subcommand> [<args>...]",
+    Some(
+        c"Manage signed BPF programs (.upatch). load/unload are target-only;\n\
+          list/info/get are read-only and run on either side.",
+    ),
+    &UPATCH_SECTIONS,
+    None,
+);
 
 /// Text to the C library's stdout, where the C subcommands write.
 fn out(text: &[u8]) {
@@ -130,30 +108,6 @@ fn log_info(text: &[u8]) {
 
 fn log_audit(text: &[u8]) {
     log(crate::log::audit, text);
-}
-
-/// A valued option: its value after an equals sign or as the next
-/// argument, which it steps past.
-enum Opt<'a> {
-    No,
-    Value(&'a CStr),
-    Missing,
-}
-
-fn opt<'a>(name: &[u8], args: &[&'a CStr], i: &mut usize) -> Opt<'a> {
-    let a = args[*i].to_bytes_with_nul();
-    let Some(rest) = a.strip_prefix(name) else {
-        return Opt::No;
-    };
-    match rest {
-        [b'=', value @ ..] => CStr::from_bytes_with_nul(value).map_or(Opt::No, Opt::Value),
-        [0] if *i + 1 >= args.len() => Opt::Missing,
-        [0] => {
-            *i += 1;
-            Opt::Value(args[*i])
-        }
-        _ => Opt::No,
-    }
 }
 
 /// The maps the loaded upatches pin: upatch `upatch`'s, or every
@@ -217,15 +171,6 @@ fn print_json(e: JsonEmit, cmd: &[u8]) -> c_int {
     ret
 }
 
-fn upatch_help() {
-    help(
-        c"shirudo upatch <subcommand> [<args>...]",
-        c"Manage signed BPF programs (.upatch). load/unload are target-only;\nlist/info/get are read-only and run on either side.",
-        &[(c"subcommands:", &SUBCMDS)],
-        None,
-    );
-}
-
 /// `shirudo upatch`, from `upatch` on.
 fn run(args: &[*const c_char]) -> c_int {
     let word = |i: usize| -> Option<&[u8]> {
@@ -233,7 +178,8 @@ fn run(args: &[*const c_char]) -> c_int {
         args.get(i).map(|&a| unsafe { crate::ffi::c_str(a) })
     };
     if args.len() < 2 || is_help(word(1)) {
-        upatch_help();
+        // SAFETY: help of C strings.
+        unsafe { print_help(&UPATCH_HELP) };
         return if args.len() < 2 { 2 } else { 0 };
     }
     if is_list_cmds(word(1)) {
@@ -247,21 +193,14 @@ fn run(args: &[*const c_char]) -> c_int {
         return 2;
     }
     let rest = &args[1..];
-    // SAFETY: the caller's C strings.
-    let cargs: Vec<&CStr> = rest.iter().map(|&a| unsafe { CStr::from_ptr(a) }).collect();
     // SAFETY: the subcommand's name, a C string.
-    let words: Vec<&[u8]> = rest
-        .iter()
-        .map(|&a| unsafe { crate::ffi::c_str(a) })
-        .collect();
-    // SAFETY: as above.
     match unsafe { CStr::from_ptr(canonical) }.to_bytes() {
-        b"info" => info::run(&words),
-        b"list" => list::run(&words),
-        b"get" => get::run(&words),
-        b"load" => ops::run_load(&cargs),
-        b"unload" => ops::run_unload(&cargs),
-        b"map" => map::run(&cargs),
+        b"info" => info::run(rest),
+        b"list" => list::run(rest),
+        b"get" => get::run(rest),
+        b"load" => ops::run_load(rest),
+        b"unload" => ops::run_unload(rest),
+        b"map" => map::run(rest),
         _ => 2,
     }
 }

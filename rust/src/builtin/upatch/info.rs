@@ -6,28 +6,20 @@
 //! is checked, so the names it shows are as the file has them: made
 //! printable, and in JSON lossy UTF-8.
 
-use core::ffi::c_int;
+use core::ffi::{CStr, c_char, c_int};
 use std::ffi::CString;
 
-use super::{JSON_MAX, err, help, hex, log_err, out, print_json, strerr};
+use super::{JSON_MAX, hex, log_err, out, print_json, strerr};
 use crate::text::{cstr, sanitize};
-use crate::util::help::is_help;
+use crate::util::help::{Help, HelpSection};
 use crate::util::json::JsonEmit;
+use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::upatch::{self, DecoderView, NAME_MAX, Opened, Upatch};
 /// UPATCH_DECODER_LANG_LUA, _INPUT_MAP_V1, _EXPORT_LOG and _METRIC.
 const LANG_LUA: u32 = 1;
 const INPUT_MAP_V1: u32 = 1;
 const EXPORT_LOG: u32 = 1;
 const EXPORT_METRIC: u32 = 2;
-
-fn usage() {
-    help(
-        c"shirudo upatch info [--json] <file.upatch>",
-        c"Describe a .upatch file: header, signature, payload digest,\nattach metadata and signed decoders. Offline: no kernel state\nread, runs on any host. For the program as actually loaded\n(authoritative, via kernel BTF line_info) use `shirudo upatch get`.",
-        &[],
-        Some(c"Examples:\n  shirudo upatch info cve-2026-31431.upatch\n  shirudo upatch info --json /var/lib/shirudo/upatches/foo.upatch"),
-    );
-}
 
 fn language(l: u32) -> &'static [u8] {
     if l == LANG_LUA { b"lua" } else { b"unknown" }
@@ -256,30 +248,56 @@ fn text(u: &Upatch, path: &[u8], name: &mut [u8; NAME_MAX + 1]) {
     out(&t);
 }
 
-/// `upatch info`, from `info` on.
-pub(super) fn run(args: &[&[u8]]) -> c_int {
-    let mut json_out = false;
-    let mut path: Option<&[u8]> = None;
+const INFO_JSON: c_int = 0;
 
-    for &a in &args[1..] {
-        if a == b"--json" {
-            json_out = true;
-        } else if is_help(Some(a)) {
-            usage();
-            return 0;
-        } else if a.first() == Some(&b'-') {
-            err(&[b"upatch info: unknown option '", a, b"'\n"].concat());
-            return 2;
-        } else if path.is_none() {
-            path = Some(a);
-        } else {
-            err(&[b"upatch info: unexpected argument '", a, b"'\n"].concat());
-            return 2;
+static INFO_OPTS: [OptSpec; 1] = [OptSpec::new(
+    c"--json",
+    0,
+    0,
+    None,
+    c"print one JSON object",
+)];
+
+static INFO_SECTIONS: [HelpSection; 1] = [HelpSection::options(c"options:", &INFO_OPTS)];
+
+static INFO_HELP: Help = Help::new(
+    c"shirudo upatch info [--json] <file.upatch>",
+    Some(
+        c"Describe a .upatch file: header, signature, payload digest,\n\
+          attach metadata and signed decoders. Offline: no kernel state\n\
+          read, runs on any host. For the program as actually loaded\n\
+          (authoritative, via kernel BTF line_info) use `shirudo upatch get`.",
+    ),
+    &INFO_SECTIONS,
+    Some(
+        c"Examples:\n  shirudo upatch info cve-2026-31431.upatch\n  \
+          shirudo upatch info --json /var/lib/shirudo/upatches/foo.upatch",
+    ),
+);
+
+/// `upatch info`, from `info` on.
+pub(super) fn run(args: &[*const c_char]) -> c_int {
+    let mut p = OptParser::new(c"upatch info", &INFO_OPTS, Some(&INFO_HELP), args, 1);
+    let (mut json_out, mut path) = (false, None);
+
+    loop {
+        match p.next() {
+            OPT_END => break,
+            INFO_JSON => json_out = true,
+            OPT_ARG => {
+                if path.is_some() {
+                    p.usage_arg(b"unexpected argument ");
+                    return EXIT_USAGE;
+                }
+                path = p.value();
+            }
+            OPT_DONE => return 0,
+            _ => return EXIT_USAGE,
         }
     }
-    let Some(path) = path else {
-        usage();
-        return 2;
+    let Some(path) = path.map(CStr::to_bytes) else {
+        p.usage(b"takes <file.upatch>");
+        return EXIT_USAGE;
     };
     let u = match Opened::open(&CString::new(path).unwrap_or_default()) {
         Ok(u) => u,

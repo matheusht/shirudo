@@ -6,10 +6,10 @@
 //! gives it, and every map it pins with their contents. It reads only
 //! what the LSM allows: bpf() info and lookups, xattrs and stat.
 
-use core::ffi::{CStr, c_int, c_long};
+use core::ffi::{CStr, c_char, c_int, c_long};
 use std::ffi::CString;
 
-use super::{JSON_MAX, Summaries, err, help, item, log_err, out, print_json, strerr, type_name};
+use super::{JSON_MAX, Summaries, log_err, out, print_json, strerr, type_name};
 use crate::bpf::btf::Btf;
 use crate::sys::libc::close;
 use crate::sys::upatch::MapSummary;
@@ -17,11 +17,12 @@ use crate::sys::upatch_maps::{MAP_ENTRIES_DEFAULT, MAP_READ_PEEK, MapView};
 use crate::text::cstr;
 use crate::util::bpf_info::{Info, LINK_INFO_SIZE, PROG_INFO_SIZE};
 use crate::util::bpf_sys::bpf_prog_get_fd_by_id;
-use crate::util::help::{HelpItem, is_help};
+use crate::util::help::{Help, HelpSection};
 use crate::util::json::JsonEmit;
 use crate::util::kernel_btf;
 use crate::util::map_read;
 use crate::util::map_render;
+use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::timefmt::format_duration;
 use crate::util::upatch::name_valid;
 use crate::util::upatch_resolve::{loaded_at, open_first_link, payload_sha256, resolve_location};
@@ -38,20 +39,6 @@ const PROG_LINE_INFO: usize = 152;
 const PROG_LINE_INFO_REC_SIZE: usize = 172;
 /// `struct bpf_line_info`: insn_off, file_name_off, line_off, line_col.
 const LINE_INFO_SIZE: usize = 16;
-
-const OPTIONS: [HelpItem; 2] = [
-    item(c"--json", c"machine-readable JSON output"),
-    item(c"--show-full", c"lift the per-map 256-entry truncation cap"),
-];
-
-fn usage() {
-    help(
-        c"shirudo upatch get <name> [--json] [--show-full]",
-        c"Describe a loaded upatch from the target kernel:\n  - the SEC()-style attach hook (e.g. fexit/tcp_v4_connect),\n  - the prog source via BTF line_info installed by the\n    signed loader (authoritative, but sparse),\n  - every pinned map: BTF key/value type definitions plus\n    the live key/value contents.\nRead-only; uses only LSM-allowed bpf() ops, xattr and stat.",
-        &[(c"options:", &OPTIONS)],
-        Some(c"Examples:\n  shirudo upatch get cve-2026-31431\n  shirudo upatch get cve-2026-31431 --json | jq"),
-    );
-}
 
 /// A source line of the program.
 struct Line {
@@ -307,37 +294,69 @@ fn json(name: &CStr, l: &Loaded, maps: &[MapSummary], cap: u32) -> c_int {
     print_json(e, b"upatch get")
 }
 
+const GET_JSON: c_int = 0;
+const GET_SHOW_FULL: c_int = 1;
+
+static GET_OPTS: [OptSpec; 2] = [
+    OptSpec::new(c"--json", 0, 0, None, c"machine-readable JSON output"),
+    OptSpec::new(
+        c"--show-full",
+        0,
+        0,
+        None,
+        c"lift the per-map 256-entry truncation cap",
+    ),
+];
+
+static GET_SECTIONS: [HelpSection; 1] = [HelpSection::options(c"options:", &GET_OPTS)];
+
+static GET_HELP: Help = Help::new(
+    c"shirudo upatch get <name> [--json] [--show-full]",
+    Some(
+        c"Describe a loaded upatch from the target kernel:\n  \
+          - the SEC()-style attach hook (e.g. fexit/tcp_v4_connect),\n  \
+          - the prog source via BTF line_info installed by the\n    \
+          signed loader (authoritative, but sparse),\n  \
+          - every pinned map: BTF key/value type definitions plus\n    \
+          the live key/value contents.\n\
+          Read-only; uses only LSM-allowed bpf() ops, xattr and stat.",
+    ),
+    &GET_SECTIONS,
+    Some(
+        c"Examples:\n  shirudo upatch get cve-2026-31431\n  \
+          shirudo upatch get cve-2026-31431 --json | jq",
+    ),
+);
+
 /// `upatch get`, from `get` on.
-pub(super) fn run(args: &[&[u8]]) -> c_int {
+pub(super) fn run(args: &[*const c_char]) -> c_int {
+    let mut p = OptParser::new(c"upatch get", &GET_OPTS, Some(&GET_HELP), args, 1);
     let (mut json_out, mut show_full) = (false, false);
     let mut want: Option<&[u8]> = None;
 
-    for &a in &args[1..] {
-        if is_help(Some(a)) {
-            usage();
-            return 0;
-        }
-        if a == b"--json" {
-            json_out = true;
-        } else if a == b"--show-full" {
-            show_full = true;
-        } else if a.first() == Some(&b'-') {
-            err(&[b"upatch get: unknown option '", a, b"'\n"].concat());
-            return 2;
-        } else if want.is_none() {
-            want = Some(a);
-        } else {
-            err(&[b"upatch get: unexpected argument '", a, b"'\n"].concat());
-            return 2;
+    loop {
+        match p.next() {
+            OPT_END => break,
+            GET_JSON => json_out = true,
+            GET_SHOW_FULL => show_full = true,
+            OPT_ARG => {
+                if want.is_some() {
+                    p.usage_arg(b"unexpected argument ");
+                    return EXIT_USAGE;
+                }
+                want = p.value().map(CStr::to_bytes);
+            }
+            OPT_DONE => return 0,
+            _ => return EXIT_USAGE,
         }
     }
     let Some(want) = want else {
-        usage();
-        return 2;
+        p.usage(b"takes the name of a loaded upatch");
+        return EXIT_USAGE;
     };
     if !name_valid(Some(want)) {
-        log_err(&[b"upatch get: invalid name '", want, b"'"].concat());
-        return 2;
+        p.usage(&[b"invalid name '", want, b"'"].concat());
+        return EXIT_USAGE;
     }
     let Ok(name) = CString::new(want) else {
         return 2;
