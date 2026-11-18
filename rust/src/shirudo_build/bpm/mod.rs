@@ -11,6 +11,7 @@ mod beefile;
 mod build;
 mod config_update;
 mod publish;
+mod show;
 mod tree;
 
 use core::ffi::{CStr, c_int};

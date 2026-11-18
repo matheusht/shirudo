@@ -10,6 +10,7 @@ mod capi;
 mod client;
 mod http;
 mod manifest;
+pub(crate) use manifest::emit_descriptor;
 mod refs;
 
 use core::ffi::{CStr, c_char, c_long};
@@ -115,6 +116,16 @@ impl HttpResponse {
 }
 
 impl Descriptor {
+    /// A blob's descriptor: its media type, digest and size.
+    pub(crate) fn of(media: &[u8], digest: &[u8], size: i64) -> Self {
+        let mut d = Descriptor::new();
+
+        copy_string(&mut d.media, media);
+        copy_string(&mut d.digest, digest);
+        d.size = size;
+        d
+    }
+
     pub(crate) const fn new() -> Self {
         Descriptor {
             media: [0; MAX_MEDIA],

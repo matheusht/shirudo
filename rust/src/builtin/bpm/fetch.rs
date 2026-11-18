@@ -381,6 +381,7 @@ pub(super) fn tree_publication(
         &repository,
         cstr(&cfg.reference),
         initrd::cert_path(),
+        None,
         out,
         manifest_digest,
     ))

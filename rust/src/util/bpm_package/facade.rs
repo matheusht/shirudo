@@ -135,11 +135,42 @@ pub(crate) fn index_parse(body: &[u8]) -> Result<Vec<IndexEntry>> {
 /// The tree publication at `reference` of `repository`, verified against
 /// the certificate at `cert_path`, into `out`, with the digest of its
 /// manifest into `manifest_digest`.
+/// The checked bytes of the tree publication at `repository:reference`,
+/// against `trusted`, or the certificate at `cert_path` without one, and
+/// its manifest's digest.
+pub(crate) fn fetch_document(
+    client: &mut Client,
+    repository: &[u8],
+    reference: &[u8],
+    cert_path: Option<&CStr>,
+    trusted: Option<&crate::util::keys::TrustedSet>,
+) -> core::result::Result<(Vec<u8>, Vec<u8>), c_int> {
+    let mut payload = crate::util::bpm_oci::BpmBuffer::new();
+    let mut digest = [0u8; 128];
+    let ret = publication::fetch_document(
+        client.as_mut(),
+        repository,
+        reference,
+        cert_path.map_or(core::ptr::null(), CStr::as_ptr),
+        trusted,
+        &mut payload,
+        &mut digest,
+    );
+    if ret != 0 {
+        return Err(ret);
+    }
+    // SAFETY: the payload's len bytes, copied before it is freed.
+    let document = unsafe { crate::ffi::slice(payload.data, payload.len) }.to_vec();
+    crate::util::bpm_oci::buffer_free(&mut payload);
+    Ok((document, crate::text::cstr(&digest).to_vec()))
+}
+
 pub(crate) fn fetch_publication(
     client: &mut Client,
     repository: &[u8],
     reference: &[u8],
     cert_path: &CStr,
+    trusted: Option<&crate::util::keys::TrustedSet>,
     out: &mut TreePublication,
     manifest_digest: &mut [u8],
 ) -> c_int {
@@ -148,7 +179,7 @@ pub(crate) fn fetch_publication(
         repository,
         reference,
         cert_path.as_ptr(),
-        core::ptr::null(),
+        trusted,
         out,
         manifest_digest,
     )

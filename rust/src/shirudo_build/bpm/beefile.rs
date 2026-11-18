@@ -32,6 +32,76 @@ const TYPE_CAP: usize = 16;
 const POLICY_ID_CAP: usize = 64;
 const SYMBOL_CAP: usize = 128;
 const TREE_ID_CAP: usize = upatch::NAME_MAX;
+/// `BPM_BUILD_MAX_FIXES`: the IDs one tree entry fixes at most.
+pub(super) const MAX_FIXES: usize = 16;
+
+/// An ID a tree entry fixes: one or more of [A-Za-z0-9._:-].
+pub(super) fn fix_id_ok(id: &[u8]) -> bool {
+    !id.is_empty()
+        && id
+            .iter()
+            .all(|&c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b':' | b'-'))
+}
+
+/// The `fixes` of an [upatches.tree]: 1 to MAX_FIXES IDs, each once,
+/// sorted so that equal Beefiles publish equally.
+fn parse_fixes(value: &[u8], fixes: &mut Vec<Vec<u8>>) -> c_int {
+    let fail = |msg: String, err: c_int| {
+        crate::log::err(msg.as_bytes());
+        err
+    };
+
+    if !fixes.is_empty() {
+        return fail(
+            "Beefile: fixes is given twice in one [upatches.tree]".into(),
+            -EINVAL,
+        );
+    }
+    let mut ids = match parse_string_array(value, MAX_FIXES) {
+        Ok(ids) => ids,
+        Err(err) if err == -E2BIG => {
+            return fail(
+                format!("Beefile: fixes holds more than {MAX_FIXES} IDs"),
+                err,
+            );
+        }
+        Err(err) => {
+            return fail(
+                format!(
+                    "Beefile: fixes is not an array of 1 to {MAX_FIXES} strings of at most {} bytes",
+                    STRING_MAX - 1
+                ),
+                err,
+            );
+        }
+    };
+    for (i, id) in ids.iter().enumerate() {
+        if id.is_empty() {
+            return fail("Beefile: fixes holds an empty ID".into(), -EINVAL);
+        }
+        if !fix_id_ok(id) {
+            return fail(
+                format!(
+                    "Beefile: ID {} of fixes has a character outside [A-Za-z0-9._:-]",
+                    i + 1
+                ),
+                -EINVAL,
+            );
+        }
+    }
+    ids.sort();
+    if let Some(w) = ids.windows(2).find(|w| w[0] == w[1]) {
+        return fail(
+            format!(
+                "Beefile: fixes holds {} twice",
+                String::from_utf8_lossy(&w[1])
+            ),
+            -EINVAL,
+        );
+    }
+    *fixes = ids;
+    0
+}
 
 pub(super) struct Policy {
     pub(super) id: Vec<u8>,
@@ -74,6 +144,9 @@ pub(super) struct Tree {
     pub(super) id: Vec<u8>,
     pub(super) load_artifact: Vec<u8>,
     pub(super) unload_artifact: Vec<u8>,
+    /// What the operation fixes, sorted: IDs the publisher carries
+    /// forward and no node reads.
+    pub(super) fixes: Vec<Vec<u8>>,
     pub(super) selector: Option<Selector>,
 }
 
@@ -588,6 +661,7 @@ fn assignment(
                         b"id" => set(&mut t.id, value, TREE_ID_CAP),
                         b"load_artifact" => set(&mut t.load_artifact, value, PATH_MAX),
                         b"unload_artifact" => set(&mut t.unload_artifact, value, PATH_MAX),
+                        b"fixes" => parse_fixes(value, &mut t.fixes),
                         _ => 0,
                     }
                 }

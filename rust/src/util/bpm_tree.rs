@@ -1269,8 +1269,8 @@ impl Drop for Publication {
 }
 
 pub(crate) use capi::{
-    tree_emit_publication, tree_operation_digest, tree_parse, tree_publication_append,
-    tree_publication_free, tree_selector_copy, tree_selector_free, tree_selector_kv_add,
+    tree_parse, tree_publication_append, tree_selector_copy, tree_selector_free,
+    tree_selector_kv_add,
 };
 
 mod capi {

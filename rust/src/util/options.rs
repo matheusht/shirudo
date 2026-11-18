@@ -96,7 +96,6 @@ pub struct OptName {
 unsafe impl Sync for OptName {}
 
 impl OptName {
-    #[allow(dead_code)]
     pub(crate) const fn new(name: &'static CStr, value: c_int) -> Self {
         OptName {
             name: name.as_ptr(),

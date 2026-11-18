@@ -476,7 +476,9 @@ unsafe fn bpm(argc: c_int, argv: *const *const c_char) -> c_int {
             if n < 3 { 2 } else { 0 }
         }
         // SAFETY: the caller's arguments, at least three.
-        b"tree" if arg(2) == Some(b"append") => unsafe { exec_operator(sub, argc, argv) },
+        b"tree" if matches!(arg(2), Some(b"append" | b"show")) => unsafe {
+            exec_operator(sub, argc, argv)
+        },
         b"tree" if arg(2) != Some(b"sync") => {
             eprint(TREE_USAGE);
             2

@@ -11,6 +11,7 @@ pub(crate) mod bpm_package;
 pub(crate) mod bpm_source_config;
 pub(crate) mod bpm_state;
 pub(crate) mod bpm_tree;
+pub(crate) mod bpm_tree_overlap;
 pub(crate) mod bpm_tree_state;
 pub(crate) mod chain;
 pub(crate) mod conditions;

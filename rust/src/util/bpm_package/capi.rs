@@ -330,11 +330,13 @@ pub unsafe extern "C" fn bpm_tree_manifest(
     let sig = unsafe { &*sig };
     // SAFETY: the caller passes cap output bytes.
     let out = unsafe { ffi::bytes_mut(out.cast(), cap) };
-    match publication::tree_manifest(payload, sig, out) {
-        Ok(n) => {
-            *len = n;
+    match publication::tree_manifest(payload, sig) {
+        Ok(body) if body.len() <= out.len() => {
+            out[..body.len()].copy_from_slice(&body);
+            *len = body.len();
             0
         }
+        Ok(_) => -crate::errno::E2BIG,
         Err(err) => err,
     }
 }
@@ -350,7 +352,7 @@ pub unsafe extern "C" fn bpm_tree_fetch_document(
     repository: *const c_char,
     reference: *const c_char,
     cert_path: *const c_char,
-    trusted: *const c_void,
+    trusted: *const crate::util::keys::TrustedSet,
     payload: *mut BpmBuffer,
     manifest_digest: *mut c_char,
     digest_sz: usize,
@@ -362,7 +364,7 @@ pub unsafe extern "C" fn bpm_tree_fetch_document(
             ffi::c_str(repository),
             ffi::c_str(reference),
             cert_path,
-            trusted,
+            trusted.as_ref(),
             &mut *payload,
             ffi::bytes_mut(manifest_digest.cast(), digest_sz),
         )
@@ -372,15 +374,16 @@ pub unsafe extern "C" fn bpm_tree_fetch_document(
 /// # Safety
 ///
 /// `c` is a client, `repository` and `reference` are C strings,
-/// `cert_path` NULL or one, `publication` a publication to fill and
-/// `manifest_digest` has room for `digest_sz`.
+/// `cert_path` NULL or one, `trusted` NULL or a trusted set,
+/// `publication` a publication to fill and `manifest_digest` has room
+/// for `digest_sz`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bpm_tree_fetch_publication(
     c: *mut OciClient,
     repository: *const c_char,
     reference: *const c_char,
     cert_path: *const c_char,
-    trusted: *const c_void,
+    trusted: *const crate::util::keys::TrustedSet,
     publication: *mut TreePublication,
     manifest_digest: *mut c_char,
     digest_sz: usize,
@@ -393,7 +396,7 @@ pub unsafe extern "C" fn bpm_tree_fetch_publication(
             ffi::c_str(repository),
             ffi::c_str(reference),
             cert_path,
-            trusted,
+            trusted.as_ref(),
             publication,
             ffi::bytes_mut(manifest_digest.cast(), digest_sz),
         )

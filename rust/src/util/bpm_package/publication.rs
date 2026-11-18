@@ -7,30 +7,20 @@
 use core::ffi::{CStr, c_char, c_int, c_void};
 use core::ptr;
 
-use crate::errno::{E2BIG, EBADMSG, EINVAL, ENAMETOOLONG, ENOMEM};
+use crate::errno::{EBADMSG, EINVAL, ENAMETOOLONG, ENOMEM};
 use crate::ffi;
 use crate::heap::{xcalloc, xfree};
 use crate::sys::libc::PATH_MAX;
 use crate::text::{contains, cstr, strsprintf};
 use crate::util::bpm_oci::{
     BpmBuffer, Descriptor, EMPTY_CONFIG_MEDIA, MANIFEST_MEDIA, MAX_ENTRIES, OciClient,
-    TREE_ARTIFACT, TREE_MEDIA, TREE_SIG_MEDIA, buffer_free, descriptor, emit_descriptor,
-    get_memory, get_signed, parse_manifest, sha256_hex, url,
+    TREE_ARTIFACT, TREE_MEDIA, TREE_SIG_MEDIA, buffer_free, emit_descriptor, get_memory,
+    get_signed, parse_manifest, sha256_hex, url,
 };
 use crate::util::bpm_tree::{TreePublication, tree_parse};
 use crate::util::crypto_openssl::{Cert, cert_free, cert_read_fd, cert_read_file, verify_detached};
-use crate::util::json::emit_fixed;
-
-unsafe extern "C" {
-    fn keys_verify_signature(
-        set: *const c_void,
-        payload: *const u8,
-        payload_len: usize,
-        sig: *const u8,
-        sig_len: usize,
-        signer: *mut u8,
-    ) -> c_int;
-}
+use crate::util::json::JsonEmit;
+use crate::util::keys::{TrustedSet, verify_signature};
 
 /// A signed payload: the bytes and the signature as the caller holds
 /// them, NULL pointers included, which `verify_detached()` refuses.
@@ -69,10 +59,59 @@ pub(super) fn verify_cms_fd(s: &Signed, cert_fd: c_int) -> c_int {
     verify_with(s, |cert| unsafe { cert_read_fd(cert_fd, cert) })
 }
 
+/// `BPM_TREE_MANIFEST_CAP`: room for the manifest of a publication.
+pub(crate) const TREE_MANIFEST_CAP: usize = 8192;
+
+/// The manifest of a tree publication whose payload and signature are
+/// the layers `payload` and `sig`, as bpm tree append writes it.
+pub(crate) fn tree_manifest(payload: &Descriptor, sig: &Descriptor) -> Result<Vec<u8>, c_int> {
+    let mut hex = [0u8; 65];
+    let mut out = vec![0u8; TREE_MANIFEST_CAP];
+
+    if sha256_hex(b"{}".as_ptr(), 2, &mut hex) != 0 {
+        return Err(-EINVAL);
+    }
+    let config = Descriptor::of(EMPTY_CONFIG_MEDIA, &[b"sha256:", cstr(&hex)].concat(), 2);
+    let mut e = JsonEmit::fixed(out.as_mut_ptr().cast(), out.len());
+    e.obj_open();
+    e.kv_int(b"schemaVersion", 2);
+    e.kv_string(b"mediaType", MANIFEST_MEDIA.to_bytes());
+    e.kv_string(b"artifactType", TREE_ARTIFACT);
+    emit_descriptor(&mut e, Some(b"config"), &config, None);
+    e.arr_open(b"layers");
+    emit_descriptor(&mut e, None, payload, None);
+    emit_descriptor(&mut e, None, sig, None);
+    e.arr_close();
+    e.obj_close();
+    if e.err() != 0 {
+        return Err(e.err());
+    }
+    out.truncate(e.written());
+    Ok(out)
+}
+
+/// A registry may serve the signed layers under a manifest of its own
+/// making: the manifest digest a node records and a successor names as
+/// its parent would then be of bytes no signature covers, and a node
+/// that recorded one form refuses the other for good. Only the form the
+/// publisher writes is taken: -EBADMSG for another.
+fn tree_manifest_canonical(manifest: &[u8], layers: &[Descriptor]) -> c_int {
+    let [payload, sig] = layers else {
+        return -EBADMSG;
+    };
+    if payload.media() != TREE_MEDIA || sig.media() != TREE_SIG_MEDIA {
+        return -EBADMSG;
+    }
+    match tree_manifest(payload, sig) {
+        Ok(want) if want == manifest => 0,
+        Ok(_) => -EBADMSG,
+        Err(err) => err,
+    }
+}
+
 /// What a tree fetch holds until it ends.
 struct Fetch {
     manifest: BpmBuffer,
-    payload: BpmBuffer,
     sig: BpmBuffer,
     layers: *mut Descriptor,
 }
@@ -82,63 +121,46 @@ impl Drop for Fetch {
         // SAFETY: NULL, or the MAX_ENTRIES descriptors xcalloc() gave.
         unsafe { xfree(self.layers.cast(), MAX_ENTRIES * size_of::<Descriptor>()) };
         buffer_free(&mut self.manifest);
-        buffer_free(&mut self.payload);
         buffer_free(&mut self.sig);
     }
 }
 
-/// The exact manifest written by the tree publisher.
-pub(super) fn tree_manifest(
-    payload: &Descriptor,
-    sig: &Descriptor,
-    out: &mut [u8],
-) -> Result<usize, c_int> {
-    let mut hex = [0u8; 65];
-    if sha256_hex(b"{}".as_ptr(), 2, &mut hex) != 0 {
-        return Err(-EINVAL);
-    }
-    let mut digest = [0u8; 72];
-    digest[..7].copy_from_slice(b"sha256:");
-    digest[7..].copy_from_slice(&hex);
-    let config = descriptor(EMPTY_CONFIG_MEDIA, cstr(&digest), 2).ok_or(-E2BIG)?;
-
-    emit_fixed(out, |e| {
-        e.obj_open();
-        e.kv_int(b"schemaVersion", 2);
-        e.kv_string(b"mediaType", MANIFEST_MEDIA.to_bytes());
-        e.kv_string(b"artifactType", TREE_ARTIFACT);
-        emit_descriptor(e, Some(b"config"), &config, None);
-        e.arr_open(b"layers");
-        emit_descriptor(e, None, payload, None);
-        emit_descriptor(e, None, sig, None);
-        e.arr_close();
-        e.obj_close();
-    })
-}
-
-/// Only the manifest form written by Shirudo may name this signed tree.
-fn canonical_manifest(manifest: &[u8], layers: &[Descriptor]) -> c_int {
-    if layers.len() != 2
-        || layers[0].media_bytes() != TREE_MEDIA
-        || layers[1].media_bytes() != TREE_SIG_MEDIA
-    {
-        return -EBADMSG;
-    }
-    let mut expected = [0u8; 8192];
-    match tree_manifest(&layers[0], &layers[1], &mut expected) {
-        Ok(len) if manifest == &expected[..len] => 0,
-        Ok(_) => -EBADMSG,
-        Err(err) => err,
-    }
-}
-
-/// Fetch the checked tree payload and leave its bytes with the caller.
-pub(super) fn fetch_document(
+/// The signed tree publication at `repository:reference`, a tag or a
+/// manifest digest, its manifest exactly [`tree_manifest`] of its two
+/// layers, every layer checked against its descriptor and the payload
+/// against `trusted`, or `cert_path` without one: its bytes into
+/// `payload`, freed on an error, and the manifest's digest. -ENOENT when
+/// the reference does not exist yet.
+pub(crate) fn fetch_document(
     c: &mut OciClient,
     repository: &[u8],
     reference: &[u8],
     cert_path: *const c_char,
-    trusted: *const c_void,
+    trusted: Option<&TrustedSet>,
+    payload: &mut BpmBuffer,
+    manifest_digest: &mut [u8],
+) -> c_int {
+    let ret = fetch_checked(
+        c,
+        repository,
+        reference,
+        cert_path,
+        trusted,
+        payload,
+        manifest_digest,
+    );
+    if ret != 0 {
+        buffer_free(payload);
+    }
+    ret
+}
+
+fn fetch_checked(
+    c: &mut OciClient,
+    repository: &[u8],
+    reference: &[u8],
+    cert_path: *const c_char,
+    trusted: Option<&TrustedSet>,
     payload: &mut BpmBuffer,
     manifest_digest: &mut [u8],
 ) -> c_int {
@@ -161,7 +183,6 @@ pub(super) fn fetch_document(
     };
     let mut f = Fetch {
         manifest: BpmBuffer::new(),
-        payload: BpmBuffer::new(),
         sig: BpmBuffer::new(),
         layers: ptr::null_mut(),
     };
@@ -203,7 +224,7 @@ pub(super) fn fetch_document(
     }
     // SAFETY: parse_manifest wrote n descriptors at layers.
     let layers = unsafe { ffi::slice(f.layers, n) };
-    let ret = canonical_manifest(manifest, layers);
+    let ret = tree_manifest_canonical(manifest, layers);
     if ret != 0 {
         return ret;
     }
@@ -213,48 +234,41 @@ pub(super) fn fetch_document(
         layers,
         TREE_MEDIA,
         TREE_SIG_MEDIA,
-        &mut f.payload,
+        payload,
         &mut f.sig,
     );
     if ret != 0 {
         return ret;
     }
-    let ret = if trusted.is_null() {
-        let signed = Signed {
-            payload: f.payload.data,
-            payload_len: f.payload.len,
-            sig: f.sig.data,
-            sig_len: f.sig.len,
-        };
-        verify_cms(&signed, cert_path)
-    } else {
-        // SAFETY: trusted names the caller's set, and downloaded bytes
-        // remain live through verification.
-        unsafe {
-            keys_verify_signature(
-                trusted,
-                f.payload.data,
-                f.payload.len,
-                f.sig.data,
-                f.sig.len,
-                ptr::null_mut(),
+    match trusted {
+        // SAFETY: the payload's and the signature's len bytes.
+        Some(set) => unsafe {
+            verify_signature(
+                set,
+                ffi::slice(payload.data, payload.len),
+                ffi::slice(f.sig.data, f.sig.len),
+                None,
             )
-        }
-    };
-    if ret != 0 {
-        return ret;
+        },
+        None => verify_cms(
+            &Signed {
+                payload: payload.data,
+                payload_len: payload.len,
+                sig: f.sig.data,
+                sig_len: f.sig.len,
+            },
+            cert_path,
+        ),
     }
-    *payload = core::mem::replace(&mut f.payload, BpmBuffer::new());
-    0
 }
 
-/// Fetch the checked document and parse it as a tree publication.
-pub(super) fn fetch_publication(
+/// [`fetch_document`], parsed into `publication`.
+pub(crate) fn fetch_publication(
     c: &mut OciClient,
     repository: &[u8],
     reference: &[u8],
     cert_path: *const c_char,
-    trusted: *const c_void,
+    trusted: Option<&TrustedSet>,
     publication: *mut TreePublication,
     manifest_digest: &mut [u8],
 ) -> c_int {
@@ -271,7 +285,7 @@ pub(super) fn fetch_publication(
     if ret != 0 {
         return ret;
     }
-    // SAFETY: the checked payload's len bytes and the caller's publication.
+    // SAFETY: the payload's len bytes, and the caller's publication.
     let ret = unsafe { tree_parse(payload.data.cast(), payload.len, publication) };
     buffer_free(&mut payload);
     ret

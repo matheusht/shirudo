@@ -628,8 +628,9 @@ impl TrustedSet {
 }
 
 pub(crate) use capi::{
-    keys_cert_der, keys_digest_der, keys_install, keys_is_revoked, keys_load, keys_load_image_root,
-    keys_read_der, keys_read_der_fd, keys_set_digest, keys_verify_vouch, keys_vouch_payload,
+    keys_cert_der, keys_digest_der, keys_install, keys_is_revoked, keys_load, keys_load_image_at,
+    keys_load_image_root, keys_read_der, keys_read_der_fd, keys_set_digest, keys_verify_vouch,
+    keys_vouch_payload,
 };
 
 /// The members of a set.
