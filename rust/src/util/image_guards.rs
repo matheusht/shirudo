@@ -8,7 +8,7 @@
 //! guard is still pinned, attached as an LSM hook to its own function of
 //! the kernel's vmlinux, and shares the maps init made.
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
 
 use crate::bpf::btf::{Btf, KIND_FUNC};
 use crate::errno::{EBUSY, ENAMETOOLONG, ENOENT, EPROTO};
@@ -27,20 +27,15 @@ use crate::util::lskel::MapDef;
 /// `struct image_guard`: a program and where its link is pinned.
 #[repr(C)]
 pub(crate) struct ImageGuard {
-    pub(crate) prog: *const c_char,
-    pub(crate) pin: *const c_char,
+    pub(crate) prog: &'static CStr,
+    pub(crate) pin: &'static CStr,
 }
 
 /// A map the guards share, as bpf2 defines it, and where it is pinned.
 pub(crate) struct GuardMap {
     pub(crate) def: MapDef,
-    pub(crate) pin: *const c_char,
+    pub(crate) pin: &'static CStr,
 }
-
-// SAFETY: both point at static C strings, which nothing writes.
-unsafe impl Sync for ImageGuard {}
-// SAFETY: the pin points at a static C string, which nothing writes.
-unsafe impl Sync for GuardMap {}
 
 pub(crate) const SEAL_HOOK_COUNT: usize = 29;
 pub(crate) const IMAGE_SEAL_HOOK_COUNT: usize = 2;
@@ -64,17 +59,11 @@ pub(crate) const GUARD_ROOTS: usize = 3;
 pub(crate) const GUARD_MAP_COUNT: usize = 8;
 
 const fn guard_map(def: MapDef, pin: &'static CStr) -> GuardMap {
-    GuardMap {
-        def,
-        pin: pin.as_ptr(),
-    }
+    GuardMap { def, pin }
 }
 
 const fn guard(prog: &'static CStr, pin: &'static CStr) -> ImageGuard {
-    ImageGuard {
-        prog: prog.as_ptr(),
-        pin: pin.as_ptr(),
-    }
+    ImageGuard { prog, pin }
 }
 
 pub(crate) static GATE_GUARDS: [ImageGuard; GATE_HOOK_COUNT] = [
@@ -366,7 +355,7 @@ pub(crate) fn config_root_begin(root: &[u8; 32], guard: &mut ConfigRootGuard) ->
         return mode;
     }
     // SAFETY: a C string.
-    guard.map_fd = unsafe { bpf_obj_get(GUARD_MAPS[GUARD_ROOTS].pin) };
+    guard.map_fd = unsafe { bpf_obj_get(GUARD_MAPS[GUARD_ROOTS].pin.as_ptr()) };
     if guard.map_fd < 0 {
         return -errno();
     }
@@ -503,9 +492,8 @@ const BPF_PROG_TYPE_LSM: u32 = 29;
 
 /// strncmp() of a kernel object's name and an expected one, over the
 /// BPF_OBJ_NAME_LEN - 1 bytes the kernel keeps: whether they agree.
-fn name_is(name: &[u8], expected: *const c_char) -> bool {
-    // SAFETY: a static C string of the tables.
-    let expected = unsafe { crate::ffi::c_str(expected) };
+fn name_is(name: &[u8], expected: &CStr) -> bool {
+    let expected = expected.to_bytes();
     let n = OBJ_NAME_LEN - 1;
     let a = cstr(&name[..n]);
     let b = &expected[..expected.len().min(n)];
@@ -522,7 +510,7 @@ fn guard_map_ids() -> Result<[u32; GUARD_MAP_COUNT], c_int> {
     let mut ids = [0u32; GUARD_MAP_COUNT];
     for (id, expected) in ids.iter_mut().zip(&GUARD_MAPS) {
         // SAFETY: a static C string.
-        let fd = unsafe { bpf_obj_get(expected.pin) };
+        let fd = unsafe { bpf_obj_get(expected.pin.as_ptr()) };
         if fd < 0 {
             return Err(-errno());
         }
@@ -539,7 +527,7 @@ fn guard_map_ids() -> Result<[u32; GUARD_MAP_COUNT], c_int> {
                     && info.u32_at(MAP_MAX_ENTRIES) == def.max_entries
                     && info.u32_at(MAP_FLAGS) == def.flags
                     && name[OBJ_NAME_LEN - 1] == 0
-                    && name_is(name, def.name.as_ptr());
+                    && name_is(name, def.name);
                 if ok { 0 } else { -EPROTO }
             }
         };
@@ -581,7 +569,7 @@ fn guard_program_maps(map_ids: &[u32], expected: &[u32; GUARD_MAP_COUNT]) -> c_i
         let mismatch = GUARD_MAPS
             .iter()
             .zip(expected)
-            .any(|(m, &want)| name_is(name, m.def.name.as_ptr()) && info.u32_at(MAP_ID) != want);
+            .any(|(m, &want)| name_is(name, m.def.name) && info.u32_at(MAP_ID) != want);
         if mismatch {
             return -EPROTO;
         }
@@ -621,7 +609,7 @@ struct Kernel {
 /// the maps `maps` names: 0, -EPROTO, or -errno.
 fn guard_link(guard: &ImageGuard, maps: &[u32; GUARD_MAP_COUNT], kernel: &mut Kernel) -> c_int {
     // SAFETY: a static C string.
-    let fd = unsafe { bpf_obj_get(guard.pin) };
+    let fd = unsafe { bpf_obj_get(guard.pin.as_ptr()) };
     if fd < 0 {
         return -errno();
     }
@@ -682,7 +670,7 @@ fn guard_link(guard: &ImageGuard, maps: &[u32; GUARD_MAP_COUNT], kernel: &mut Ke
         return -EPROTO;
     }
     // SAFETY: a static C string of the tables.
-    let prog_name = unsafe { crate::ffi::c_str(guard.prog) };
+    let prog_name = guard.prog.to_bytes();
     let hook = prog_name
         .strip_prefix(b"shirudo_lsm_")
         .unwrap_or(&prog_name[13.min(prog_name.len())..]);

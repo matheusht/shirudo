@@ -12,13 +12,12 @@
 //! programs, which rust/src/skel.rs gives types; the seal's takes the
 //! maps it shares with bpf2 from bpf2.
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
 use core::ptr;
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::{NV_INDEX, SIG_KEYRING_BPF, cat, error, info, last_err, strerr};
 use crate::errno::{E2BIG, EACCES, EKEYREJECTED, ENOENT, ENOKEY};
-use crate::ffi;
 use crate::skel::bpf2::{self, MountRecord, TaskAuthority};
 use crate::skel::seal;
 use crate::sys::identity::Identity;
@@ -62,14 +61,9 @@ const IDENTITY_KEYS_MAX: usize = 16;
 /// `TASK_BOOTSTRAP`: the authority of the task bringing enforcement up.
 const TASK_BOOTSTRAP: u8 = 2;
 
-fn exists(path: *const c_char) -> bool {
+fn exists(path: &CStr) -> bool {
     // SAFETY: a C string.
-    unsafe { access(path, 0) == 0 }
-}
-
-fn text(p: *const c_char) -> &'static [u8] {
-    // SAFETY: a static C string of the guard tables or the blob.
-    unsafe { ffi::c_str(p) }
+    unsafe { access(path.as_ptr(), 0) == 0 }
 }
 
 fn gate(guard: usize) -> &'static ImageGuard {
@@ -86,22 +80,21 @@ fn load_failed(name: &[u8], (step, err): Failed) -> c_int {
 /// its pin keeps.
 struct Link {
     _fd: OwnedFd,
-    pin: *const c_char,
+    pin: &'static CStr,
 }
 
 impl Link {
     /// Removes the pin, so that the link goes with its descriptor.
     fn unpin(&self) {
         // SAFETY: a C string.
-        unsafe { unlink(self.pin) };
+        unsafe { unlink(self.pin.as_ptr()) };
     }
 }
 
 /// Attaches the LSM program `prog` and pins its link at `path`.
-fn attach_pin(prog: &Prog<'_>, path: *const c_char) -> Result<Link, c_int> {
+fn attach_pin(prog: &Prog<'_>, path: &'static CStr) -> Result<Link, c_int> {
     let link = prog.attach_lsm()?;
-    // SAFETY: a static C string of the guard tables.
-    pin(link.as_raw_fd(), unsafe { CStr::from_ptr(path) })?;
+    pin(link.as_raw_fd(), path)?;
     Ok(Link {
         _fd: link,
         pin: path,
@@ -111,14 +104,14 @@ fn attach_pin(prog: &Prog<'_>, path: *const c_char) -> Result<Link, c_int> {
 /// Attaches the `guards` of `obj` in order, their links into `links`.
 fn attach_group(obj: &Skeleton, guards: &[ImageGuard], links: &mut Vec<Link>) -> c_int {
     for g in guards {
-        let Some(p) = obj.prog(text(g.prog)) else {
-            error(&cat!("program ", text(g.prog), " missing"));
+        let Some(p) = obj.prog(g.prog.to_bytes()) else {
+            error(&cat!("program ", g.prog.to_bytes(), " missing"));
             return -ENOENT;
         };
         match attach_pin(&p, g.pin) {
             Ok(l) => links.push(l),
             Err(ret) => {
-                error(&cat!("attach ", text(g.prog), ": ", strerr(-ret)));
+                error(&cat!("attach ", g.prog.to_bytes(), ": ", strerr(-ret)));
                 return ret;
             }
         }
@@ -236,7 +229,7 @@ fn freeze_task_maps(obj: &Skeleton) -> c_int {
                 return Err(err);
             }
             // SAFETY: a static C string of the table.
-            pin(fd, unsafe { CStr::from_ptr(m.pin) })
+            pin(fd, m.pin)
         })
     });
     // SAFETY: the pidfd opened above.
@@ -464,7 +457,7 @@ impl Attached {
         }
         let mut progs = Vec::new();
         for g in 0..GATE_HOOK_COUNT {
-            let Some(p) = obj.prog(text(gate(g).prog)) else {
+            let Some(p) = obj.prog(gate(g).prog.to_bytes()) else {
                 error(b"expected programs missing in bpf2 object");
                 return -ENOENT;
             };
@@ -568,12 +561,16 @@ pub(super) fn attach() -> c_int {
         if err != 0
             || id.nv_writer_public[0] & 0x80 == 0
             || id.nv_index != NV_INDEX
-            || !exists(TPM_COMMAND_LINK_PIN.as_ptr())
+            || !exists(TPM_COMMAND_LINK_PIN)
         {
             error(b"init: TPM NV index guard missing or changed; reboot with the updated initrd");
             return if err != 0 { err } else { -EACCES };
         }
-        info(&cat!("bpf2 already attached (", text(bpf_gate), " exists)"));
+        info(&cat!(
+            "bpf2 already attached (",
+            bpf_gate.to_bytes(),
+            " exists)"
+        ));
         return 0;
     }
     // A failed attempt removes its own pins, a crash does not. Once the
@@ -581,7 +578,7 @@ pub(super) fn attach() -> c_int {
     // before it gets here, so map pins are all a crash can have left.
     for m in &GUARD_MAPS {
         // SAFETY: a static C string of the table.
-        let pin = unsafe { CStr::from_ptr(m.pin) };
+        let pin = m.pin;
         // SAFETY: a C string.
         if unsafe { unlink(pin.as_ptr()) } != 0 {
             let err = last_err();
