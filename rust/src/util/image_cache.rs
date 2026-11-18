@@ -57,19 +57,16 @@ struct Download {
     written: u64,
 }
 
-/// The `size * count` bytes at `data` written to the download's file:
-/// all of them, or 0 with why into `err`.
-fn download_write(data: *const c_char, size: usize, count: usize, d: &mut Download) -> usize {
-    let Some(bytes) = size.checked_mul(count) else {
-        d.err = -EFBIG;
-        return 0;
-    };
+/// `data` written to the download's file: all of it, or 0 with why into
+/// `err`.
+fn download_write(data: &[u8], d: &mut Download) -> usize {
+    let bytes = data.len();
     if bytes as u64 > d.limit - d.written {
         d.err = -EFBIG;
         return 0;
     }
-    // SAFETY: the bytes curl or the copy hands over.
-    let ret = unsafe { write_complete(d.fd, data.cast(), bytes) };
+    // SAFETY: the download's fd, and the bytes.
+    let ret = unsafe { write_complete(d.fd, data.as_ptr().cast(), bytes) };
     if ret != 0 {
         d.err = ret;
         return 0;
@@ -91,7 +88,13 @@ unsafe extern "C" fn curl_write(
 ) -> usize {
     // SAFETY: the download handed to curl, which nothing else touches
     // during the transfer.
-    download_write(data, size, count, unsafe { &mut *ctx.cast::<Download>() })
+    let d = unsafe { &mut *ctx.cast::<Download>() };
+    let Some(bytes) = size.checked_mul(count) else {
+        d.err = -EFBIG;
+        return 0;
+    };
+    // SAFETY: the bytes curl hands over.
+    download_write(unsafe { crate::ffi::slice(data.cast::<u8>(), bytes) }, d)
 }
 
 /// The file at the HTTPS URL `source` into the download.
@@ -170,7 +173,7 @@ unsafe fn copy_local(source: *const c_char, d: &mut Download) -> c_int {
                 ret = -errno();
                 break;
             }
-            if download_write(buffer.as_ptr().cast(), 1, n as usize, d) != n as usize {
+            if download_write(&buffer[..n as usize], d) != n as usize {
                 ret = d.err;
                 break;
             }

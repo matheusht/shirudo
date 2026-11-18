@@ -9,6 +9,7 @@
 use core::ffi::{c_char, c_int, c_long, c_void};
 use std::os::fd::{FromRawFd, OwnedFd};
 
+use crate::errno::E2BIG;
 use crate::sys::libc::{close, errno, fcntl, set_errno, syscall};
 
 #[cfg(target_arch = "x86_64")]
@@ -254,13 +255,14 @@ pub(crate) fn bpf_map_freeze(fd: c_int) -> c_int {
     ret(Attr::new().u32(0, fd as u32).run(BPF_MAP_FREEZE))
 }
 
-/// One BPF_PROG_TEST_RUN of `prog_fd` over `ctx`: its return value, or
-/// -errno.
-pub(crate) fn prog_test_run(prog_fd: c_int, ctx: *mut c_void, ctx_size: u32) -> Result<u32, c_int> {
+/// One BPF_PROG_TEST_RUN of `prog_fd` over `ctx`, which the program
+/// reads and the kernel writes back: its return value, or -errno.
+pub(crate) fn prog_test_run(prog_fd: c_int, ctx: &mut [u8]) -> Result<u32, c_int> {
+    let ctx_size = u32::try_from(ctx.len()).map_err(|_| -E2BIG)?;
     let mut attr = Attr::new()
         .u32(0, prog_fd as u32)
         .u32(40, ctx_size)
-        .ptr(48, ctx);
+        .ptr(48, ctx.as_mut_ptr());
     attr.call(BPF_PROG_TEST_RUN).map_err(|e| -e)?;
     Ok(attr.u32_at(4))
 }

@@ -459,11 +459,12 @@ fn read_serialized(upatch: &[u8], map: &[u8], flags: u32, out: &mut MapView) -> 
             cursor,
             invocation_id,
         };
-        let retval = match prog_test_run(
-            prog,
-            (&raw mut ctx).cast(),
-            size_of::<SerializeCtx>() as u32,
-        ) {
+        // SAFETY: the context's bytes, a structure of integers the program
+        // reads and the kernel writes back whole.
+        let ctx_bytes = unsafe {
+            core::slice::from_raw_parts_mut((&raw mut ctx).cast::<u8>(), size_of::<SerializeCtx>())
+        };
+        let retval = match prog_test_run(prog, ctx_bytes) {
             Ok(r) => r,
             Err(e) => return e,
         };

@@ -1077,8 +1077,8 @@ fn attach_and_pin(cx: &Ctx, name: &[u8], specs: &[ProgSpec]) -> Result<(), Attac
         }
         if let Some(fd) = test {
             // A zero context is the load-time arena initialization call.
-            let mut init = [0u64; 2];
-            let ret = match prog_test_run(fd, init.as_mut_ptr().cast(), 16) {
+            let mut init = [0u8; 16];
+            let ret = match prog_test_run(fd, &mut init) {
                 Ok(r) if (r as i32) < 0 => r as i32,
                 Ok(_) => 0,
                 Err(e) => e,
@@ -1773,8 +1773,7 @@ pub(crate) fn apply(
         policy = Some(fds);
     }
 
-    let size = cx.buf.len() as u32;
-    let retval = match prog_test_run(prog.as_raw_fd(), cx.buf.as_mut_ptr().cast(), size) {
+    let retval = match prog_test_run(prog.as_raw_fd(), &mut cx.buf) {
         Ok(r) => r as i32,
         Err(e) => {
             log_err(&[&b"BPF_PROG_TEST_RUN: "[..], strerr(-e)].concat());

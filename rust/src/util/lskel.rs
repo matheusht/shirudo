@@ -212,8 +212,7 @@ pub(crate) fn run(
         cx.set_map_fd(i as u32, dup);
         dups.push(dup);
     }
-    let size = cx.buf.len() as u32;
-    let retval = prog_test_run(prog.as_raw_fd(), cx.buf.as_mut_ptr().cast(), size);
+    let retval = prog_test_run(prog.as_raw_fd(), &mut cx.buf);
     let failed = match retval {
         Ok(r) if (r as i32) >= 0 => None,
         Ok(r) => Some(("loader", r as i32)),

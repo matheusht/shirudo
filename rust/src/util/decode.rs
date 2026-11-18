@@ -1063,7 +1063,11 @@ fn log_err(text: &[u8]) {
 /// The error on top of the state, under `what`. The message is the
 /// decoder's and may carry what a map recorded, so it is cut to 255 bytes
 /// and its control characters replaced.
-fn report(l: *mut LuaState, what: &str) {
+///
+/// # Safety
+///
+/// `l` is a live state with the error on top of its stack.
+unsafe fn report(l: *mut LuaState, what: &str) {
     // SAFETY: the state, with the error on top; a number is not shown.
     let message = unsafe {
         (lua_type(l, -1) == LUA_TSTRING)

@@ -140,16 +140,16 @@ pub(crate) fn x509_from_der_bio(der: &[u8]) -> Result<X509, ErrorStack> {
 
 /// The certificate at `path`, PEM or DER, from a file only root may
 /// write: -EINVAL for one that does not parse, or -errno.
-fn read_x509(path: *const c_char) -> Result<X509, c_int> {
-    // SAFETY: the caller's C string and flags without a mode.
-    let fd = unsafe { open(path, O_RDONLY | O_CLOEXEC) };
+fn read_x509(path: &CStr) -> Result<X509, c_int> {
+    // SAFETY: a C string and flags without a mode.
+    let fd = unsafe { open(path.as_ptr(), O_RDONLY | O_CLOEXEC) };
     if fd < 0 {
         return Err(-errno());
     }
     // SAFETY: the fd open() gave, owned from here.
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
     // SAFETY: the fd, the caller's path, and not a secret.
-    let ret = unsafe { check_trusted(fd.as_raw_fd(), path, false) };
+    let ret = unsafe { check_trusted(fd.as_raw_fd(), path.as_ptr(), false) };
     if ret != 0 {
         return Err(ret);
     }
@@ -428,7 +428,8 @@ pub(crate) unsafe fn cert_read_file(path: *const c_char, cert: *mut Cert) -> c_i
     let cert = unsafe { &mut *cert };
 
     cert.imp = ptr::null_mut();
-    match read_x509(path) {
+    // SAFETY: the caller's C string.
+    match read_x509(unsafe { CStr::from_ptr(path) }) {
         Ok(x509) => {
             cert.hold(x509);
             0
