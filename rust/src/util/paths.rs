@@ -19,6 +19,13 @@ const KEYS_DIR_ENV: &CStr = c"SHIRUDO_KEYS_DIR";
 const SIGNING_KEY_FILE: &CStr = c"signing_key.pem";
 const CERT_FILE: &CStr = c"cert.der";
 
+/// POLICY_PIN and SOCKET_POLICY_PIN of util/paths.h, the task and socket
+/// policy maps the upatch loader pins, and XATTR_POLICY, the label an
+/// executable carries its policy bits in.
+pub(crate) const POLICY_PIN: &CStr = c"/run/shirudo/bpffs/task_policy";
+pub(crate) const SOCKET_POLICY_PIN: &CStr = c"/run/shirudo/bpffs/socket_policy";
+pub(crate) const XATTR_POLICY: &CStr = c"security.bpf.shirudo.policy";
+
 /// `file` under `dir`, a slash between unless `dir` ends in one, into
 /// `out` and terminated: -EINVAL for an empty one, -ENAMETOOLONG when it
 /// does not fit, with `out` left empty.

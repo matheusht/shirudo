@@ -13,6 +13,7 @@
 //! this process. The pins then carry the payload's digest, which unload
 //! and every undo compare with the records.
 
+use crate::util::paths::{POLICY_PIN, SOCKET_POLICY_PIN, XATTR_POLICY};
 use core::ffi::{CStr, c_int, c_long};
 use std::ffi::{CString, OsStr};
 use std::fs::{self, DirBuilder, File, OpenOptions};
@@ -54,10 +55,6 @@ use crate::util::upatch_pins::{LINK_PIN_PREFIX, xdp_prog_pin};
 use crate::util::upatch_resolve::{BPFFS_UPATCHES_DIR, XATTR_PAYLOAD, pin_path};
 use crate::util::xdp::{self, XdpDevice};
 
-/// POLICY_PIN, SOCKET_POLICY_PIN and XATTR_POLICY of util/paths.h.
-const POLICY_PIN: &CStr = c"/run/shirudo/bpffs/task_policy";
-const SOCKET_POLICY_PIN: &CStr = c"/run/shirudo/bpffs/socket_policy";
-const XATTR_POLICY: &CStr = c"security.bpf.shirudo.policy";
 /// SIG_KEYRING_BPF: the kind of keyring init froze for signed loads.
 const SIG_KEYRING_BPF: u32 = 5;
 const POLICY_NAME_MAX: usize = 64;

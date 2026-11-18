@@ -767,11 +767,10 @@ $(HELPER_MAIN_DIR)/%.o: testing/helper/main.rs.in
 VERITY_TEST_HELPERS := build/verity-tests/shirudo-policy-probe
 
 build/verity-tests/shirudo-policy-probe: \
-		testing/helper/policy-probe.c util/identity.h util/paths.h
-	@printf '  CC      $@\n'
+		$(HELPER_MAIN_DIR)/shirudo-policy-probe.o $(RUST_HELPER_LIB)
+	@printf '  LD      $@\n'
 	$(Q)mkdir -p $(dir $@)
-	$(Q)$(CC) -O2 $(DEBUG_CFLAGS) -std=gnu11 $(WARNINGS) \
-	    -Iinclude -D_GNU_SOURCE -static -o $@ $<
+	$(Q)$(CC) -static -o $@ $^ $(RUST_TEST_LDLIBS)
 
 
 ifeq ($(PROFILE),target)

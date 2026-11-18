@@ -35,6 +35,7 @@ mod nv_cphash;
 mod nv_writer;
 mod otel_map;
 mod perf_attach;
+mod policy_probe;
 mod register;
 mod register_cli;
 mod seal;
