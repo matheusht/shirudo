@@ -482,7 +482,7 @@ test_expect_success 'test-vm imports the host-built payload' '
 	make -s -C .. -f testing/Makefile \
 		--eval "bundle-inputs: ; @echo \$(TEST_VM_BUNDLE_INPUTS)" \
 		bundle-inputs >"$WORK/bundle-inputs.out" &&
-	grep -q "/util/upatch\.c" "$WORK/bundle-inputs.out" &&
+	grep -q "/rust/src/util/upatch\.rs" "$WORK/bundle-inputs.out" &&
 	! grep -q "/util/version_id\.c" "$WORK/bundle-inputs.out" &&
 	grep -q "flock 9" ../testing/Makefile &&
 	grep -q "bundle_dir.lock" ../testing/Makefile &&
