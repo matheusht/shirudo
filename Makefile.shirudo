@@ -770,7 +770,7 @@ build/verity-tests/shirudo-policy-probe: \
 		$(HELPER_MAIN_DIR)/shirudo-policy-probe.o $(RUST_HELPER_LIB)
 	@printf '  LD      $@\n'
 	$(Q)mkdir -p $(dir $@)
-	$(Q)$(CC) -static -o $@ $^ $(RUST_TEST_LDLIBS)
+	$(Q)$(CC) -static -Wl,--strip-debug -o $@ $^ $(RUST_TEST_LDLIBS)
 
 
 ifeq ($(PROFILE),target)
