@@ -297,6 +297,9 @@ pub fn sanitize(s: &mut [u8], lines: bool) {
 /// The helpers of `include/shirudo/string.h` for C, and for Rust that
 /// walks C strings, but the formatters, which as C-variadic functions
 /// stay in util/string.c.
+#[cfg(test)]
+mod tests;
+
 pub(crate) mod capi {
     use core::ffi::{CStr, c_char, c_int};
 
