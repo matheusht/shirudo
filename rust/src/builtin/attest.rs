@@ -31,6 +31,7 @@ use crate::util::help::{
     Help, HelpItem, HelpSection, is_help, is_list_cmds, print_help, print_subcmd_list,
     resolve_subcommand,
 };
+use crate::util::hex;
 use crate::util::image_runtime;
 use crate::util::io::read_file;
 use crate::util::json::{JsonEmit, MAX_BYTES};
@@ -421,42 +422,6 @@ fn strerr(err: c_int) -> &'static [u8] {
     unsafe { ffi::c_str(strerror(err)) }
 }
 
-fn hex(bytes: &[u8]) -> Vec<u8> {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-
-    bytes
-        .iter()
-        .flat_map(|b| [HEX[usize::from(b >> 4)], HEX[usize::from(b & 0xf)]])
-        .collect()
-}
-
-/// The `out.len()` bytes exactly twice as many hex digits of either case
-/// spell, as hex_decode() takes them.
-fn unhex(text: &[u8], out: &mut [u8]) -> bool {
-    let digit = |c: u8| char::from(c).to_digit(16);
-
-    if text.len() != 2 * out.len() {
-        return false;
-    }
-    for (b, pair) in out.iter_mut().zip(text.chunks_exact(2)) {
-        match (digit(pair[0]), digit(pair[1])) {
-            (Some(hi), Some(lo)) => *b = (hi << 4 | lo) as u8,
-            _ => return false,
-        }
-    }
-    true
-}
-
-/// An even run of at most `2 * out.len()` hex digits: how many bytes,
-/// as hex_decode_max() takes it.
-fn unhex_max(text: &[u8], out: &mut [u8]) -> Option<usize> {
-    if text.len() % 2 != 0 || text.len() / 2 > out.len() {
-        return None;
-    }
-    let n = text.len() / 2;
-    unhex(text, &mut out[..n]).then_some(n)
-}
-
 /// The value of the option or argument `p` last returned, empty for a
 /// flag.
 fn value<'a>(p: &OptParser<'a>) -> &'a [u8] {
@@ -471,8 +436,8 @@ fn usage(p: &OptParser<'_>, message: impl AsRef<[u8]>) -> c_int {
 
 /// The nonce of `v`: hex of 1 to NONCE_MAX bytes.
 fn nonce_of(p: &OptParser<'_>, v: &[u8], nonce: &mut [u8; NONCE_MAX]) -> Result<usize, c_int> {
-    match unhex_max(v, nonce) {
-        Some(n) if n > 0 => Ok(n),
+    match hex::decode_max(v, nonce) {
+        Ok(n) if n > 0 => Ok(n),
         _ => Err(usage(
             p,
             format!("--nonce must be hex of up to {NONCE_MAX} bytes"),
@@ -482,7 +447,7 @@ fn nonce_of(p: &OptParser<'_>, v: &[u8], nonce: &mut [u8; NONCE_MAX]) -> Result<
 
 /// A key name of `v`, of the option `what`: 2 * NAME_LEN hex digits.
 fn name_of(p: &OptParser<'_>, what: &str, v: &[u8], out: &mut [u8; NAME_LEN]) -> Result<(), c_int> {
-    if unhex(v, out) {
+    if hex::decode(v, out).is_ok() {
         return Ok(());
     }
     Err(usage(
@@ -492,7 +457,7 @@ fn name_of(p: &OptParser<'_>, what: &str, v: &[u8], out: &mut [u8; NAME_LEN]) ->
 }
 
 fn parse_hex32(what: &[u8], text: &[u8], out: &mut [u8; 32]) -> Result<(), c_int> {
-    if unhex(text, out) {
+    if hex::decode(text, out).is_ok() {
         return Ok(());
     }
     error(&[b"attest: ", what, b" must be 64 hex characters"]);
@@ -571,7 +536,10 @@ impl Members {
             attest_parse_name_digest(s.as_ptr(), name.as_mut_ptr().cast(), payload.as_mut_ptr())
         };
         if ret == 0 {
-            ret = self.add(&message(&[cstr(&name)]), &message(&[&hex(&payload)]));
+            ret = self.add(
+                &message(&[cstr(&name)]),
+                &message(&[&hex::encode(&payload)]),
+            );
         }
         if ret != 0 {
             let why: &[u8] = if ret == -EEXIST {
@@ -786,7 +754,7 @@ fn predict(args: &[&CStr]) -> c_int {
                 events.push(v);
             }
             PREDICT_WRITER_PUBLIC => {
-                if !unhex(v, &mut writer_public) {
+                if hex::decode(v, &mut writer_public).is_err() {
                     return Err(usage(&p, "invalid RSA-3072 --writer-public"));
                 }
                 have_writer = true;
@@ -852,14 +820,14 @@ fn predict(args: &[&CStr]) -> c_int {
         error(&[b"attest predict: cannot hash the init event"]);
         return EXIT_USAGE;
     }
-    out.kv(b"set_digest", &hex(&set_digest));
-    out.kv(b"init_event", &hex(&init));
+    out.kv(b"set_digest", &hex::encode(&set_digest));
+    out.kv(b"init_event", &hex::encode(&init));
     // SAFETY: the chain and the event.
     if unsafe { chain_fold(chain.as_mut_ptr(), init.as_ptr()) } != 0 {
         error(&[b"attest predict: cannot hash the register at boot"]);
         return EXIT_USAGE;
     }
-    out.kv(b"register_at_boot", &hex(&chain));
+    out.kv(b"register_at_boot", &hex::encode(&chain));
     for ev in &events {
         if apply_event(ev, &mut chain).is_err() {
             error(&[b"attest predict: bad --event '", ev, b"'"]);
@@ -867,7 +835,7 @@ fn predict(args: &[&CStr]) -> c_int {
         }
     }
     if !events.is_empty() {
-        out.kv(b"register_after_events", &hex(&chain));
+        out.kv(b"register_after_events", &hex::encode(&chain));
     }
     if have_bind[0] && have_bind[1] {
         let (mut written, mut initial, mut policy) = ([0u8; 32], [0u8; 32], [0u8; 32]);
@@ -909,7 +877,7 @@ fn predict(args: &[&CStr]) -> c_int {
             error(&[b"attest predict: cannot compute the register name"]);
             return 1;
         }
-        out.kv(b"register_name", &hex(&name));
+        out.kv(b"register_name", &hex::encode(&name));
         // SAFETY: the name and room for the anchor.
         if unsafe { chain_anchor(name.as_ptr(), anchor.as_mut_ptr().cast(), anchor.len()) } != 0 {
             error(&[b"attest predict: the anchor does not fit"]);
@@ -929,7 +897,7 @@ fn predict(args: &[&CStr]) -> c_int {
         }
         out.kv(
             format!("pcr{CHAIN_PCR}_after_anchor").as_bytes(),
-            &hex(&bind[0]),
+            &hex::encode(&bind[0]),
         );
     } else if have_bind[0] || have_bind[1] || have_writer {
         error(&[format!(
@@ -1279,7 +1247,7 @@ fn challenge_into(args: &[&CStr], credential: &mut [u8; CREDENTIAL_LEN]) -> Resu
                 b"challenge: ",
                 out_path,
                 b"\ncredential: ",
-                &hex(&credential[..]),
+                &hex::encode(&credential[..]),
                 b"\n",
             ]
             .concat(),

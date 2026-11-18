@@ -45,6 +45,18 @@ pub(crate) fn decode(hex: &[u8], out: &mut [u8]) -> Result<(), c_int> {
     Ok(())
 }
 
+/// The bytes an even run of at most twice as many digits as `out` has
+/// bytes spells, into the start of `out`: how many, or -EINVAL.
+pub(crate) fn decode_max(hex: &[u8], out: &mut [u8]) -> Result<usize, c_int> {
+    let n = hex.len() / 2;
+    let Some(room) = out.get_mut(..n).filter(|_| hex.len() % 2 == 0) else {
+        return Err(-EINVAL);
+    };
+
+    decode(hex, room)?;
+    Ok(n)
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -101,22 +113,19 @@ mod capi {
         len: *mut usize,
     ) -> c_int {
         // SAFETY: the caller's string, read no further than one digit
-        // past the most it may hold.
-        let n = unsafe { strnlen(hex, cap.saturating_mul(2).saturating_add(1)) };
-        if n % 2 != 0 || n / 2 > cap {
-            return -EINVAL;
-        }
-        // SAFETY: the string's digits, and the caller's room.
+        // past the most it may hold, and the caller's room.
         let (digits, room) = unsafe {
+            let n = strnlen(hex, cap.saturating_mul(2).saturating_add(1));
+
             (
                 crate::ffi::slice(hex.cast::<u8>(), n),
-                core::slice::from_raw_parts_mut(out, n / 2),
+                crate::ffi::bytes_mut(out, cap),
             )
         };
-        match super::decode(digits, room) {
-            Ok(()) => {
+        match super::decode_max(digits, room) {
+            Ok(n) => {
                 // SAFETY: the caller's room for the count.
-                unsafe { *len = n / 2 };
+                unsafe { *len = n };
                 0
             }
             Err(e) => e,

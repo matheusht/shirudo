@@ -72,6 +72,20 @@ fn decode_max_takes_an_even_count_up_to_cap() {
 }
 
 #[test]
+fn decode_max_of_a_slice_fills_the_start() {
+    let mut out = [0u8; 3];
+
+    assert_eq!(decode_max(b"", &mut out), Ok(0));
+    assert_eq!(decode_max(b"aB", &mut out), Ok(1));
+    assert_eq!(out[0], 0xab);
+    assert_eq!(decode_max(b"00ff10", &mut out), Ok(3));
+    assert_eq!(out, [0x00, 0xff, 0x10]);
+    for bad in [&b"abc"[..], b"00ff1022", b"0g"] {
+        assert_eq!(decode_max(bad, &mut out), Err(-EINVAL), "{bad:?}");
+    }
+}
+
+#[test]
 fn sha256_digest_is_prefix_and_64_digits() {
     let mut out = [0u8; 32];
 
