@@ -23,7 +23,7 @@ use crate::text::cstr;
 use crate::text::name_has_suffix;
 use crate::util::help::{Help, print_help};
 use crate::util::options::EXIT_USAGE;
-use crate::util::paths::keys_dir_resolve;
+use crate::util::paths::keys_dir;
 
 pub(crate) use build::upatch_name;
 
@@ -87,8 +87,7 @@ fn path(p: &[u8]) -> &OsStr {
 fn resolve_keys_dir(arg: Option<&CStr>) -> Option<Vec<u8>> {
     let arg = match arg.map(CStr::to_bytes).filter(|a| !a.is_empty()) {
         Some(a) => a.to_vec(),
-        // SAFETY: NULL for the environment or the default, a C string.
-        None => unsafe { crate::ffi::c_str(keys_dir_resolve(core::ptr::null())) }.to_vec(),
+        None => keys_dir(None).to_bytes().to_vec(),
     };
     let out = match arg.strip_prefix(b"~") {
         Some(rest) if rest.is_empty() || rest[0] == b'/' => {

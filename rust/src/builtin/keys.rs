@@ -57,7 +57,7 @@ use crate::util::keys::{
     keys_read_der, keys_verify_vouch, members,
 };
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
-use crate::util::paths::{key_paths, keys_dir_resolve, path_exists};
+use crate::util::paths::{key_files, keys_dir, path_exists};
 use crate::util::upatch::{
     self, Upatch, upatch_close, upatch_open, upatch_select, upatch_signature,
 };
@@ -308,8 +308,7 @@ fn dump_cert(out: &mut Out, cert: &X509, path: &CStr, spki: &[u8; 32]) {
 /// The signing key beside the certificate, if any: whether it is the
 /// certificate's. Err for one that cannot be read or is not.
 fn dump_signing_key(out: &mut Out, pkey_path: &CStr, spki: &[u8; 32]) -> Result<(), ()> {
-    // SAFETY: a C string.
-    if !unsafe { path_exists(pkey_path.as_ptr()) } {
+    if !path_exists(pkey_path) {
         if let Some(e) = out {
             e.obj_open_key(b"signing_key");
             e.kv_string(b"path", pkey_path.to_bytes());
@@ -834,12 +833,7 @@ fn keys_add(args: &[*const c_char]) -> c_int {
         return 1;
     }
     let keys_dir_arg = keys_dir_arg.map(|d| message(&[d]));
-    // SAFETY: NULL or a C string; the result is a C string.
-    let keys_dir = unsafe {
-        CStr::from_ptr(keys_dir_resolve(
-            keys_dir_arg.as_ref().map_or(ptr::null(), |d| d.as_ptr()),
-        ))
-    };
+    let keys_dir = keys_dir(keys_dir_arg.as_deref());
     let revoked = [keys_dir.to_bytes(), b"/revoked"].concat();
     if revoked.len() >= PATH_MAX {
         error(&[b"keys add: keys directory path too long"]);
@@ -1229,35 +1223,20 @@ fn keys_show(args: &[*const c_char]) -> c_int {
     let keys_dir: &CStr = if image_config::active() {
         RUNTIME_KEYS_DIR
     } else {
-        // SAFETY: NULL or a C string; the result is a C string.
-        unsafe {
-            CStr::from_ptr(keys_dir_resolve(
-                keys_dir_arg.as_ref().map_or(ptr::null(), |d| d.as_ptr()),
-            ))
+        keys_dir(keys_dir_arg.as_deref())
+    };
+    let (pkey_path, cert_path) = match key_files(keys_dir.to_bytes()) {
+        Ok(paths) => paths,
+        Err(ret) => {
+            error(&[
+                b"keys: invalid keys dir ",
+                keys_dir.to_bytes(),
+                b": ",
+                strerr(-ret),
+            ]);
+            return 2;
         }
     };
-    let (mut pkey_path, mut cert_path) = ([0u8; PATH_MAX], [0u8; PATH_MAX]);
-    // SAFETY: a C string and the room for both paths.
-    let ret = unsafe {
-        key_paths(
-            keys_dir.as_ptr(),
-            pkey_path.as_mut_ptr().cast(),
-            PATH_MAX,
-            cert_path.as_mut_ptr().cast(),
-            PATH_MAX,
-        )
-    };
-    if ret != 0 {
-        error(&[
-            b"keys: invalid keys dir ",
-            keys_dir.to_bytes(),
-            b": ",
-            strerr(-ret),
-        ]);
-        return 2;
-    }
-    let pkey_path = message(&[cstr(&pkey_path)]);
-    let cert_path = message(&[cstr(&cert_path)]);
     // Both roles can coexist on one host, so report whatever is present:
     // the on-disk cert and signing key, then the kernel keyrings once
     // `shirudo init` has filled them.
@@ -1270,8 +1249,7 @@ fn keys_show(args: &[*const c_char]) -> c_int {
         e.obj_open();
         e.kv_int(b"schema", 1);
     }
-    // SAFETY: a C string.
-    if unsafe { path_exists(cert_path.as_ptr()) } {
+    if path_exists(&cert_path) {
         if dump_disk_material(&mut out, &cert_path, &pkey_path) != 0 {
             ret = 1;
         }

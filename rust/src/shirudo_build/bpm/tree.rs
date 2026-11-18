@@ -24,7 +24,7 @@ use super::{error, print};
 use crate::errno::{
     E2BIG, EACCES, EBUSY, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT, ENOMEM, EOVERFLOW,
 };
-use crate::shirudo_build::{check_keys, key_path};
+use crate::shirudo_build::check_keys;
 use crate::sys::curl::{CURL_GLOBAL_DEFAULT, curl_global_cleanup, curl_global_init};
 use crate::text::cstr;
 use crate::util::bpm_oci::{
@@ -42,7 +42,7 @@ use crate::util::help::{Help, HelpSection, is_help, print_help};
 use crate::util::hex::{self, sha256_digest_encode};
 use crate::util::json::{JsonArray, JsonEmit, JsonField, parse_schema};
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptName, OptParser, OptSpec};
-use crate::util::paths::keys_dir_resolve;
+use crate::util::paths::{key_file, keys_dir};
 use crate::util::upatch::{self, ProgSpec, specs_free, specs_parse, specs_xdp_classes};
 
 const TREE_MEDIA: &CStr = c"application/vnd.shirudo.upatch.tree.v1+json";
@@ -834,17 +834,15 @@ impl Append<'_> {
 
     fn signing_keys(&mut self) -> c_int {
         if self.key.is_none() || self.cert.is_none() {
-            // SAFETY: NULL or a C string.
-            let dir =
-                unsafe { keys_dir_resolve(self.keys_dir_arg.map_or(ptr::null(), CStr::as_ptr)) };
+            let dir = keys_dir(self.keys_dir_arg).to_bytes();
             if self.key.is_none() {
-                match key_path(dir, c"signing_key.pem") {
+                match key_file(dir, c"signing_key.pem") {
                     Ok(k) => self.key = Some(k),
                     Err(_) => return -EINVAL,
                 }
             }
             if self.cert.is_none() {
-                match key_path(dir, c"cert.der") {
+                match key_file(dir, c"cert.der") {
                     Ok(c) => self.cert = Some(c),
                     Err(_) => return -EINVAL,
                 }

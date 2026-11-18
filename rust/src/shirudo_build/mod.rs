@@ -16,7 +16,6 @@ mod skeleton;
 mod vouch;
 
 use core::ffi::{CStr, c_char, c_int};
-use core::ptr;
 use std::ffi::CString;
 
 use crate::errno::{EIO, ENAMETOOLONG, EPERM};
@@ -28,7 +27,7 @@ use crate::util::harden::{harden_self, harden_stdio};
 use crate::util::help::{Help, HelpSection};
 use crate::util::hex::hex_decode;
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
-use crate::util::paths::{format_key_path, key_paths, keys_dir_resolve};
+use crate::util::paths::{key_file, key_files, keys_dir};
 use crate::util::upatch::{Upatch, upatch_close, upatch_open};
 
 const SIGNING_KEY_PATH: &CStr = c"/var/lib/shirudo/keys/signing_key.pem";
@@ -282,27 +281,13 @@ impl Default for KeyFiles {
 }
 
 impl KeyFiles {
-    /// The key and certificate under the directory `dir`, as key_paths()
+    /// The key and certificate under the directory `dir`, as key_files()
     /// spells them.
     fn under(dir: &[u8]) -> Result<Self, c_int> {
-        let d = CString::new(dir.to_vec()).map_err(|_| -crate::errno::EINVAL)?;
-        let (mut pkey, mut cert) = ([0u8; PATH_MAX], [0u8; PATH_MAX]);
-        // SAFETY: a C string and the rooms for the two paths.
-        let ret = unsafe {
-            key_paths(
-                d.as_ptr(),
-                pkey.as_mut_ptr().cast(),
-                pkey.len(),
-                cert.as_mut_ptr().cast(),
-                cert.len(),
-            )
-        };
-        if ret != 0 {
-            return Err(ret);
-        }
+        let (pkey, cert) = key_files(dir)?;
         Ok(KeyFiles {
-            pkey: CString::new(cstr(&pkey).to_vec()).unwrap_or_default(),
-            cert: CString::new(cstr(&cert).to_vec()).unwrap_or_default(),
+            pkey,
+            cert,
             pkey_named: false,
             cert_named: false,
         })
@@ -318,59 +303,31 @@ impl KeyFiles {
         self.cert_named = true;
     }
 
-    /// The keys directory: `dir`, else SHIRUDO_KEYS_DIR, else the
-    /// default; NULL for none.
-    fn dir(dir: Option<&CStr>) -> *const c_char {
-        // SAFETY: NULL or a C string.
-        unsafe { keys_dir_resolve(dir.map_or(ptr::null(), CStr::as_ptr)) }
-    }
-
     /// The key and the certificate under the keys directory, those not
     /// named; the directory and the error when one does not fit.
     fn resolve(&mut self, dir: Option<&CStr>) -> Result<(), (Vec<u8>, c_int)> {
-        let dir = Self::dir(dir);
+        let dir = keys_dir(dir).to_bytes();
+        let fail = |e| (dir.to_vec(), e);
 
-        if dir.is_null() {
-            return Ok(());
-        }
-        // SAFETY: the directory, a C string.
-        let name = || unsafe { ffi::c_str(dir) }.to_vec();
         if !self.pkey_named {
-            self.pkey = key_path(dir, SIGNING_KEY_FILE).map_err(|e| (name(), e))?;
+            self.pkey = key_file(dir, SIGNING_KEY_FILE).map_err(fail)?;
         }
         if !self.cert_named {
-            self.cert = key_path(dir, CERT_FILE).map_err(|e| (name(), e))?;
+            self.cert = key_file(dir, CERT_FILE).map_err(fail)?;
         }
         Ok(())
     }
 
     /// As resolve(), but both must fit under the directory, named or
-    /// not, as key_paths() has them.
+    /// not, as key_files() has them.
     fn resolve_both(&mut self, dir: Option<&CStr>) -> Result<(), c_int> {
-        let dir = Self::dir(dir);
-        let (mut pkey, mut cert) = ([0u8; PATH_MAX], [0u8; PATH_MAX]);
+        let (pkey, cert) = key_files(keys_dir(dir).to_bytes())?;
 
-        if dir.is_null() {
-            return Ok(());
-        }
-        // SAFETY: a C string and the rooms for the two paths.
-        let ret = unsafe {
-            key_paths(
-                dir,
-                pkey.as_mut_ptr().cast(),
-                pkey.len(),
-                cert.as_mut_ptr().cast(),
-                cert.len(),
-            )
-        };
-        if ret != 0 {
-            return Err(ret);
-        }
         if !self.pkey_named {
-            self.pkey = CString::new(cstr(&pkey).to_vec()).unwrap_or_default();
+            self.pkey = pkey;
         }
         if !self.cert_named {
-            self.cert = CString::new(cstr(&cert).to_vec()).unwrap_or_default();
+            self.cert = cert;
         }
         Ok(())
     }
@@ -630,17 +587,6 @@ fn load(o: &Opts, input: &CStr, pkey: &CStr, cert: &CStr) -> c_int {
         );
     }
     if ret != 0 { 1 } else { 0 }
-}
-
-/// The key or certificate under the keys directory, unless named.
-fn key_path(dir: *const c_char, file: &CStr) -> Result<CString, c_int> {
-    let mut buf = [0u8; PATH_MAX];
-
-    // SAFETY: room for the path, and C strings.
-    match unsafe { format_key_path(buf.as_mut_ptr().cast(), buf.len(), dir, file.as_ptr()) } {
-        0 => Ok(CString::new(cstr(&buf).to_vec()).unwrap_or_default()),
-        err => Err(err),
-    }
 }
 
 /// # Safety

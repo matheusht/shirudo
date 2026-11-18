@@ -14,7 +14,7 @@ use super::build::cstring;
 use super::config_update::Info;
 use super::{archive, error, print, strerr};
 use crate::errno::{E2BIG, EEXIST, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT};
-use crate::shirudo_build::{check_keys, key_path};
+use crate::shirudo_build::check_keys;
 use crate::sys::curl::{CURL_GLOBAL_DEFAULT, curl_global_cleanup, curl_global_init};
 use crate::util::bpm_oci::{
     Client, Descriptor, MANIFEST_MEDIA, bpm_oci_emit_descriptor, bpm_oci_push_blob,
@@ -24,6 +24,7 @@ use crate::util::bpm_package::{IndexEntry, index_parse, verify_cms};
 use crate::util::help::{Help, HelpSection};
 use crate::util::json::JsonEmit;
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
+use crate::util::paths::key_file;
 use crate::util::timefmt::iso8601;
 
 /// Room for a manifest.
@@ -568,10 +569,10 @@ pub(super) fn run(args: &[&CStr]) -> c_int {
     if let Some(dir) = keys_dir {
         let cert = index_cert
             .is_none()
-            .then(|| key_path(dir.as_ptr(), c"cert.der"));
+            .then(|| key_file(dir.to_bytes(), c"cert.der"));
         let key = index_key
             .is_none()
-            .then(|| key_path(dir.as_ptr(), c"signing_key.pem"));
+            .then(|| key_file(dir.to_bytes(), c"signing_key.pem"));
         if matches!(cert, Some(Err(_))) || matches!(key, Some(Err(_))) {
             return fail("push", -EINVAL);
         }

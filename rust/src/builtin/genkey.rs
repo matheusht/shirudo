@@ -21,7 +21,7 @@ use openssl::pkey::{PKey, PKeyRef, Private};
 use openssl::x509::{X509, X509Extension, X509NameBuilder, X509Ref};
 
 use crate::errno::{EINVAL, EIO, ENAMETOOLONG, ENOENT, EPERM};
-use crate::ffi::{self, c_splice};
+use crate::ffi::c_splice;
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     O_CLOEXEC, O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_RDONLY, O_WRONLY, PATH_MAX, Statx,
@@ -32,7 +32,7 @@ use crate::util::help::{Help, HelpSection};
 use crate::util::identity;
 use crate::util::io::stat_fd;
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
-use crate::util::paths::{key_paths, keys_dir_resolve, path_exists};
+use crate::util::paths::{key_files, keys_dir, path_exists};
 use crate::util::seal::seal_mkdir_p;
 
 const CERT_CN: &str = "shirudo";
@@ -64,22 +64,21 @@ const FOOTER: &CStr = c_splice!(
     " environment variable\noverrides the default directory.",
 );
 
-fn ensure_keys_dir(keys_dir: *const c_char) -> c_int {
-    // SAFETY: the caller's C string.
-    if unsafe { ffi::c_str(keys_dir) } == b"/" {
+fn ensure_keys_dir(keys_dir: &CStr) -> c_int {
+    if keys_dir.to_bytes() == b"/" {
         // SAFETY: a message without arguments.
         unsafe { crate::log::log_c!(crate::log::err, c"keys dir cannot be /".as_ptr()) };
         return -EINVAL;
     }
-    // SAFETY: the caller's C string, and a mode.
-    let ret = unsafe { seal_mkdir_p(keys_dir, 0o700) };
+    // SAFETY: a C string, and a mode.
+    let ret = unsafe { seal_mkdir_p(keys_dir.as_ptr(), 0o700) };
     if ret != 0 {
         // SAFETY: the C's format, the path and the error's text.
         unsafe {
             crate::log::log_c!(
                 crate::log::err,
                 c"mkdir %s: %s".as_ptr(),
-                keys_dir,
+                keys_dir.as_ptr(),
                 strerror(-ret)
             )
         };
@@ -536,9 +535,7 @@ unsafe fn write_pair(
 ///
 /// Each of `args` is a C string.
 unsafe fn genkey(args: &[*const c_char]) -> c_int {
-    let mut keys_dir_arg: *const c_char = ptr::null();
-    let mut pkey_path = [0u8; PATH_MAX];
-    let mut cert_path = [0u8; PATH_MAX];
+    let mut keys_dir_arg = None;
     let mut force = false;
     let mut p = OptParser::new(c"genkey", &OPTS, Some(&HELP), args, 1);
 
@@ -546,7 +543,7 @@ unsafe fn genkey(args: &[*const c_char]) -> c_int {
         match p.next() {
             OPT_END => break,
             GENKEY_FORCE => force = true,
-            GENKEY_KEYS_DIR => keys_dir_arg = p.value_ptr(),
+            GENKEY_KEYS_DIR => keys_dir_arg = p.value(),
             OPT_DONE => return 0,
             OPT_ARG => {
                 p.usage_arg(b"takes no argument, got ");
@@ -571,31 +568,27 @@ unsafe fn genkey(args: &[*const c_char]) -> c_int {
         return 1;
     }
 
-    // SAFETY: NULL or the caller's word.
-    let keys_dir = unsafe { keys_dir_resolve(keys_dir_arg) };
-    let (pp, cp) = (
-        pkey_path.as_mut_ptr().cast::<c_char>(),
-        cert_path.as_mut_ptr().cast::<c_char>(),
-    );
-    // SAFETY: the directory, a C string, and rooms of PATH_MAX bytes.
-    let ret = unsafe { key_paths(keys_dir, pp, PATH_MAX, cp, PATH_MAX) };
-    if ret != 0 {
-        // SAFETY: the C's format, the directory and the error's text.
-        unsafe {
-            crate::log::log_c!(
-                crate::log::err,
-                c"genkey: invalid keys dir %s: %s".as_ptr(),
-                keys_dir,
-                strerror(-ret),
-            )
-        };
-        return 1;
-    }
+    let keys_dir = keys_dir(keys_dir_arg);
+    let (pkey_path, cert_path) = match key_files(keys_dir.to_bytes()) {
+        Ok(paths) => paths,
+        Err(ret) => {
+            // SAFETY: the C's format, the directory and the error's text.
+            unsafe {
+                crate::log::log_c!(
+                    crate::log::err,
+                    c"genkey: invalid keys dir %s: %s".as_ptr(),
+                    keys_dir.as_ptr(),
+                    strerror(-ret),
+                )
+            };
+            return 1;
+        }
+    };
+    let (pp, cp) = (pkey_path.as_ptr(), cert_path.as_ptr());
     if ensure_keys_dir(keys_dir) != 0 {
         return 1;
     }
-    // SAFETY: the directory's C string.
-    let dir = unsafe { ffi::c_str(keys_dir) };
+    let dir = keys_dir.to_bytes();
     if euid() != 0 && dir == KEYS_DIR.to_bytes() {
         let ret = check_user_keys_dir(dir);
 
@@ -623,8 +616,7 @@ unsafe fn genkey(args: &[*const c_char]) -> c_int {
         }
     }
 
-    // SAFETY: the paths key_paths() filled.
-    if !force && unsafe { path_exists(pp) || path_exists(cp) } {
+    if !force && (path_exists(&pkey_path) || path_exists(&cert_path)) {
         // SAFETY: the C's format and the paths.
         unsafe {
             crate::log::log_c!(
@@ -665,7 +657,7 @@ unsafe fn genkey(args: &[*const c_char]) -> c_int {
                 crate::log::audit,
                 c"genkey: created shirudo %s signing material at %s".as_ptr(),
                 GENKEY_ALG.as_ptr(),
-                keys_dir,
+                keys_dir.as_ptr(),
             );
             ret = 0;
         }

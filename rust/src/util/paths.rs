@@ -3,21 +3,24 @@
 
 //! The paths of the signing keys: the keys directory a command names, the
 //! environment's, or the default, and the key and certificate under it.
-//! Exported under the names `util/paths.h` gives them; upatch_pin_path()
-//! is in upatch_resolve.rs.
+//! upatch_pin_path() is in upatch_resolve.rs.
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
+use std::ffi::{CString, OsStr};
+use std::os::unix::ffi::OsStrExt;
 
 use crate::errno::{EINVAL, ENAMETOOLONG};
-use crate::sys::libc::getenv;
-use crate::text::strsprintf;
+use crate::sys::libc::env;
 
-/// KEYS_DIR, KEYS_DIR_ENV, SIGNING_KEY_FILE and CERT_FILE of
-/// util/paths.h.
+/// The default keys directory, the variable that overrides it, and the
+/// two files in one.
 const KEYS_DIR: &CStr = c"/var/lib/shirudo/keys";
 const KEYS_DIR_ENV: &CStr = c"SHIRUDO_KEYS_DIR";
 const SIGNING_KEY_FILE: &CStr = c"signing_key.pem";
 const CERT_FILE: &CStr = c"cert.der";
+
+/// The longest path the kernel takes, its NUL included.
+const PATH_MAX: usize = 4096;
 
 /// POLICY_PIN and SOCKET_POLICY_PIN of util/paths.h, the task and socket
 /// policy maps the upatch loader pins, and XATTR_POLICY, the label an
@@ -26,99 +29,36 @@ pub(crate) const POLICY_PIN: &CStr = c"/run/shirudo/bpffs/task_policy";
 pub(crate) const SOCKET_POLICY_PIN: &CStr = c"/run/shirudo/bpffs/socket_policy";
 pub(crate) const XATTR_POLICY: &CStr = c"security.bpf.shirudo.policy";
 
-/// `file` under `dir`, a slash between unless `dir` ends in one, into
-/// `out` and terminated: -EINVAL for an empty one, -ENAMETOOLONG when it
-/// does not fit, with `out` left empty.
-fn key_path(out: &mut [u8], dir: &[u8], file: &[u8]) -> Result<(), c_int> {
-    if out.is_empty() || dir.is_empty() || file.is_empty() {
+/// The keys directory: `arg`, else $SHIRUDO_KEYS_DIR, else the default.
+pub(crate) fn keys_dir(arg: Option<&CStr>) -> &CStr {
+    arg.or_else(|| env(KEYS_DIR_ENV)).unwrap_or(KEYS_DIR)
+}
+
+/// `file` under `dir`, a slash between unless `dir` ends in one:
+/// -EINVAL for an empty directory or one with a NUL, -ENAMETOOLONG when
+/// the path and its NUL pass PATH_MAX.
+pub(crate) fn key_file(dir: &[u8], file: &CStr) -> Result<CString, c_int> {
+    if dir.is_empty() {
         return Err(-EINVAL);
     }
     let sep: &[u8] = if dir.ends_with(b"/") { b"" } else { b"/" };
-    strsprintf(out, &[dir, sep, file])
-        .map(|_| ())
-        .map_err(|_| -ENAMETOOLONG)
-}
-
-/// keys_dir_resolve(): `arg`, else $SHIRUDO_KEYS_DIR, else KEYS_DIR.
-///
-/// # Safety
-///
-/// `arg` is NULL or a C string, which the result may be.
-pub unsafe extern "C" fn keys_dir_resolve(arg: *const c_char) -> *const c_char {
-    if !arg.is_null() {
-        return arg;
+    let path = [dir, sep, file.to_bytes()].concat();
+    if path.len() >= PATH_MAX {
+        return Err(-ENAMETOOLONG);
     }
-    // SAFETY: a C string; the environment's string or NULL.
-    let env = unsafe { getenv(KEYS_DIR_ENV.as_ptr()) };
-    if env.is_null() {
-        KEYS_DIR.as_ptr()
-    } else {
-        env
-    }
+    CString::new(path).map_err(|_| -EINVAL)
 }
 
-/// format_key_path(): `file` under `dir`, KEYS_DIR for NULL, into the
-/// `out_sz` bytes at `out`: 0, -EINVAL or -ENAMETOOLONG.
-///
-/// # Safety
-///
-/// `out` is NULL or room for `out_sz` bytes, and `dir` and `file` are
-/// NULL or C strings.
-pub unsafe extern "C" fn format_key_path(
-    out: *mut c_char,
-    out_sz: usize,
-    dir: *const c_char,
-    file: *const c_char,
-) -> c_int {
-    if out.is_null() || file.is_null() {
-        return -EINVAL;
-    }
-    let dir = if dir.is_null() {
-        KEYS_DIR.as_ptr()
-    } else {
-        dir
-    };
-    // SAFETY: the caller's room and C strings.
-    let (out, dir, file) = unsafe {
-        (
-            core::slice::from_raw_parts_mut(out.cast::<u8>(), out_sz),
-            CStr::from_ptr(dir).to_bytes(),
-            CStr::from_ptr(file).to_bytes(),
-        )
-    };
-    key_path(out, dir, file).map_or_else(|e| e, |()| 0)
+/// The signing key and the certificate under `dir`, as [`key_file`]
+/// spells them.
+pub(crate) fn key_files(dir: &[u8]) -> Result<(CString, CString), c_int> {
+    Ok((key_file(dir, SIGNING_KEY_FILE)?, key_file(dir, CERT_FILE)?))
 }
 
-/// key_paths(): the signing key and the certificate under `dir`, into
-/// rooms of `pkey_sz` and `cert_sz` bytes: 0, -EINVAL or -ENAMETOOLONG.
-///
-/// # Safety
-///
-/// As format_key_path(), for both paths.
-pub unsafe extern "C" fn key_paths(
-    dir: *const c_char,
-    pkey: *mut c_char,
-    pkey_sz: usize,
-    cert: *mut c_char,
-    cert_sz: usize,
-) -> c_int {
-    // SAFETY: the caller's rooms and C strings.
-    match unsafe { format_key_path(pkey, pkey_sz, dir, SIGNING_KEY_FILE.as_ptr()) } {
-        // SAFETY: as above.
-        0 => unsafe { format_key_path(cert, cert_sz, dir, CERT_FILE.as_ptr()) },
-        err => err,
-    }
+/// Whether stat() finds `path`.
+pub(crate) fn path_exists(path: &CStr) -> bool {
+    std::fs::metadata(OsStr::from_bytes(path.to_bytes())).is_ok()
 }
 
-/// path_exists(): whether stat() finds `path`.
-///
-/// # Safety
-///
-/// `path` is a C string.
-pub unsafe extern "C" fn path_exists(path: *const c_char) -> bool {
-    use std::os::unix::ffi::OsStrExt;
-
-    // SAFETY: the caller's C string.
-    let path = unsafe { CStr::from_ptr(path) };
-    std::fs::metadata(std::ffi::OsStr::from_bytes(path.to_bytes())).is_ok()
-}
+#[cfg(test)]
+mod tests;

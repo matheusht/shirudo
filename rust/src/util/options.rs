@@ -170,13 +170,8 @@ impl<'a> OptParser<'a> {
         unsafe { ffi::c_str(self.command) }
     }
 
-    /// The value of the option or argument last returned, NULL for an
+    /// The value of the option or argument last returned, None for an
     /// option that takes none or an optional one given without.
-    pub(crate) fn value_ptr(&self) -> *const c_char {
-        self.value
-    }
-
-    /// As [`Self::value_ptr`], as a C string.
     pub(crate) fn value(&self) -> Option<&'a CStr> {
         // SAFETY: the value points into an argument, a C string, or is
         // NULL.

@@ -171,14 +171,6 @@ _Static_assert(NV_INDEX == 0x01818E00u,
 /* Site config. */
 #define CONF_PATH		"/etc/shirudo/shirudo.conf"
 
-/* In rust/src/util/paths.rs, as is path_exists(). */
-int format_key_path(char *out, size_t out_sz,
-		    const char *keys_dir, const char *file);
-int key_paths(const char *keys_dir,
-	      char *pkey_path, size_t pkey_sz,
-	      char *cert_path, size_t cert_sz);
-const char *keys_dir_resolve(const char *keys_dir_arg);
-
 /*
  * bpffs reserves dots in path components, which upatch names may
  * carry, so a dot becomes ~d; ~ is not a valid name character, so no
