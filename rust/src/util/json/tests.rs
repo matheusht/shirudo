@@ -274,18 +274,17 @@ fn parse_nested(text: &str) -> (c_int, Nested) {
     let ret = unsafe {
         let mut sink = JsonArray::new(nested_on_elem, xp.cast());
         let mut meta_sub = [JsonField::string(c"tag", (&raw mut (*xp).tag).cast(), 8)];
+        // The parse writes the fields through these pointers, so the
+        // callback reads them through the same ones.
+        let meta_ptr = meta_sub.as_mut_ptr();
         let mut item_sub = [
             JsonField::string(c"id", (&raw mut (*xp).id).cast(), 8),
-            JsonField::object(c"meta", meta_sub.as_mut_ptr(), meta_sub.len()),
+            JsonField::object(c"meta", meta_ptr, 1),
         ];
-        let mut f = [JsonField::array(
-            c"items",
-            &mut sink,
-            item_sub.as_mut_ptr(),
-            item_sub.len(),
-        )];
-        (*xp).meta = &raw const item_sub[1];
-        (*xp).tag_field = &raw const meta_sub[0];
+        let item_ptr = item_sub.as_mut_ptr();
+        let mut f = [JsonField::array(c"items", &mut sink, item_ptr, 2)];
+        (*xp).meta = item_ptr.add(1).cast_const();
+        (*xp).tag_field = meta_ptr.cast_const();
         parse_schema(text.as_bytes(), f.as_mut_ptr(), f.len())
     };
     (ret, x)
@@ -777,13 +776,16 @@ fn parse_members(text: &str) -> (c_int, Members) {
             value_sub.as_mut_ptr(),
             value_sub.len(),
         )];
+        // The parse writes the slot through this pointer, so the callback
+        // reads it through the same one.
+        let member_ptr = member_sub.as_mut_ptr();
         let mut f = [JsonField::map(
             c"map",
             &mut map,
-            member_sub.as_mut_ptr(),
+            member_ptr,
             member_sub.len(),
         )];
-        (*mp).slot = &raw const member_sub[0];
+        (*mp).slot = member_ptr.cast_const();
         match parse_schema(text.as_bytes(), f.as_mut_ptr(), f.len()) {
             0 if !f[0].seen() => -ENOENT,
             ret => ret,
