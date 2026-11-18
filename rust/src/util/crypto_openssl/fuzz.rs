@@ -13,7 +13,7 @@ use super::{
     verify_detached,
 };
 use crate::fuzzing::fuzz_target;
-use crate::util::keys::keys_digest_der;
+use crate::util::keys::digest_der;
 
 fuzz_target!(shirudo_fuzz_cms, shirudo_fuzz_cms_init, |data| {
     let [l0, l1, rest @ ..] = data else {
@@ -23,9 +23,7 @@ fuzz_target!(shirudo_fuzz_cms, shirudo_fuzz_cms_init, |data| {
     let Some((der, sig)) = rest.split_at_checked(der_len) else {
         return;
     };
-    let (mut sha, mut fp) = ([0u8; 32], [0u8; 32]);
-    // SAFETY: the certificate's bytes, and rooms for its digests.
-    unsafe { keys_digest_der(der.as_ptr(), der.len(), sha.as_mut_ptr(), fp.as_mut_ptr()) };
+    let _ = digest_der(der);
     let mut cert = Cert::new();
     // SAFETY: the certificate's bytes, the signature's, and the
     // certificate read, freed once.

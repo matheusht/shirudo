@@ -17,7 +17,7 @@ use crate::errno::{EINVAL, EIO, EKEYREJECTED};
 use crate::sys::libc::close;
 use crate::util::crypto_openssl::{Cert, cert_free, cert_key_algorithm, cert_read_der};
 use crate::util::help::{Help, HelpSection};
-use crate::util::keys::{keys_digest_der, keys_read_der, keys_vouch_payload};
+use crate::util::keys::{digest_der, keys_read_der, vouch_payload};
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 
 /// The room a vouch's CMS signature gets.
@@ -102,15 +102,9 @@ fn read_der(path: &CStr) -> Result<Bytes, c_int> {
     }
 }
 
-/// The certificate's SHA-256 and the fingerprint of its key.
-fn digests(der: &[u8]) -> Result<[u8; 32], c_int> {
-    let (mut sha, mut fp) = ([0u8; 32], [0u8; 32]);
-
-    // SAFETY: the DER and room for the two digests.
-    match unsafe { keys_digest_der(der.as_ptr(), der.len(), sha.as_mut_ptr(), fp.as_mut_ptr()) } {
-        0 => Ok(fp),
-        err => Err(err),
-    }
+/// The fingerprint of the certificate's key.
+fn fingerprint(der: &[u8]) -> Result<[u8; 32], c_int> {
+    digest_der(der).map(|d| d.fingerprint)
 }
 
 fn vouch(input: &CStr, output: &CStr, keys: &KeyFiles) -> c_int {
@@ -121,7 +115,7 @@ fn vouch(input: &CStr, output: &CStr, keys: &KeyFiles) -> c_int {
             return err;
         }
     };
-    let Ok(fp) = digests(der.bytes()) else {
+    let Ok(fp) = fingerprint(der.bytes()) else {
         error(&[b"keys vouch: ", input.to_bytes(), b" is not a certificate"].concat());
         return 1;
     };
@@ -144,7 +138,7 @@ fn vouch(input: &CStr, output: &CStr, keys: &KeyFiles) -> c_int {
             return err;
         }
     };
-    let Ok(own_fp) = digests(own.bytes()) else {
+    let Ok(own_fp) = fingerprint(own.bytes()) else {
         error(
             &[
                 b"keys vouch: ",
@@ -166,21 +160,17 @@ fn vouch(input: &CStr, output: &CStr, keys: &KeyFiles) -> c_int {
         );
         return -EINVAL;
     }
-    let (mut payload, mut payload_len) = (ptr::null_mut(), 0);
-    // SAFETY: the DER and room for the payload and its length.
-    let ret = unsafe { keys_vouch_payload(der.0, der.1, &mut payload, &mut payload_len) };
-    if ret != 0 {
-        return ret;
-    }
-    let payload = Bytes(payload, payload_len);
-    let signature =
-        match super::sign::cms_sign(payload.bytes(), &[], SIG_MAX, &keys.pkey, &keys.cert) {
-            Ok((signature, _)) => signature,
-            Err(ret) => {
-                error(&[b"keys vouch: sign: ", strerr(-ret)].concat());
-                return ret;
-            }
-        };
+    let payload = match vouch_payload(der.bytes()) {
+        Ok(payload) => payload,
+        Err(ret) => return ret,
+    };
+    let signature = match super::sign::cms_sign(&payload, &[], SIG_MAX, &keys.pkey, &keys.cert) {
+        Ok((signature, _)) => signature,
+        Err(ret) => {
+            error(&[b"keys vouch: sign: ", strerr(-ret)].concat());
+            return ret;
+        }
+    };
     let ret = write_file(output, &signature);
     if ret != 0 {
         error(

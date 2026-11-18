@@ -20,7 +20,7 @@ use crate::util::image_config;
 use crate::util::io::stat_fd;
 use crate::util::keyring;
 use crate::util::keys::{
-    TrustedSet, keys_cert_der, keys_digest_der, keys_load_image_root, keys_read_der_fd, members,
+    TrustedSet, cert_der, digest_der, keys_load_image_root, keys_read_der_fd, members,
 };
 
 /// KEYS_DER_MAX: the largest certificate a key file holds.
@@ -126,20 +126,7 @@ fn revoked_cert(dir: c_int, name: &CStr, dev: (u32, u32)) -> Result<Vec<u8>, c_i
     let bytes = unsafe { crate::ffi::slice(der, size) }.to_vec();
     // SAFETY: the allocation, freed once.
     unsafe { xfree(der.cast(), size) };
-    let (mut digest, mut fingerprint) = ([0u8; 32], [0u8; 32]);
-    // SAFETY: the certificate and rooms for its two digests.
-    let ret = unsafe {
-        keys_digest_der(
-            bytes.as_ptr(),
-            bytes.len(),
-            digest.as_mut_ptr(),
-            fingerprint.as_mut_ptr(),
-        )
-    };
-    if ret != 0 {
-        return Err(ret);
-    }
-    if fingerprint != expected {
+    if digest_der(&bytes)?.fingerprint != expected {
         return Err(-EKEYREJECTED);
     }
     Ok(bytes)
@@ -251,14 +238,11 @@ pub(crate) fn validate_set(primary: &CStr, root_fd: c_int, set: &mut TrustedSet)
 /// signers the kernel already holds.
 pub(crate) fn check_set_with(set: &TrustedSet, mut holds: impl FnMut(&[u8]) -> c_int) -> c_int {
     for cert in members(set) {
-        let (mut der, mut size) = (core::ptr::null(), 0usize);
-        // SAFETY: a certificate of the set and rooms for its bytes.
-        let ret = unsafe { keys_cert_der(cert, &mut der, &mut size) };
-        if ret != 0 {
-            return ret;
-        }
-        // SAFETY: the size bytes the set holds.
-        let ret = holds(unsafe { crate::ffi::slice(der, size) });
+        let der = match cert_der(cert) {
+            Ok(der) => der,
+            Err(ret) => return ret,
+        };
+        let ret = holds(der);
         if ret != 1 {
             return if ret < 0 { ret } else { -ENOKEY };
         }

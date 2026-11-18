@@ -20,9 +20,7 @@ use super::{err, helper_main, out};
 use crate::errno::{EFBIG, EINVAL, EIO};
 use crate::util::crypto_openssl::{Cert, cert_free, cert_read_file, cms_signed_by};
 use crate::util::hex::encode;
-use crate::util::keys::{
-    TrustedSet, cert_path, keys_load_image_at, keys_set_digest, members, verify_signature,
-};
+use crate::util::keys::{TrustedSet, cert_path, keys_load_image_at, members, verify_signature};
 use crate::util::upatch::{Opened, upatch_signature};
 
 helper_main!(shirudo_helper_test_keys, run);
@@ -68,10 +66,8 @@ fn verified(
 ) -> Result<(), c_int> {
     let payload = read(payload, 1024 * 1024)?;
     let signature = read(signature, 65536)?;
-    match verify_signature(set, &payload, &signature, Some(signer)) {
-        0 => Ok(()),
-        err => Err(err),
-    }
+    *signer = verify_signature(set, &payload, &signature)?;
+    Ok(())
 }
 
 fn verify(dir: &CStr, payload: &CStr, signature: &CStr) -> c_int {
@@ -189,9 +185,7 @@ fn run(args: &[&CStr]) -> c_int {
             0
         }
         b"digest" => {
-            let mut digest = [0u8; 32];
-            // SAFETY: the set and room for its digest.
-            unsafe { keys_set_digest(&*set, &mut digest) };
+            let digest = set.digest().unwrap_or([0; 32]);
             out(&format!("{}\n", hex(&digest)));
             0
         }

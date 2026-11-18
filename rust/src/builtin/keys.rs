@@ -49,8 +49,8 @@ use crate::util::io::check_trusted;
 use crate::util::json::JsonEmit;
 use crate::util::keyring;
 use crate::util::keys::{
-    KEYS_MAX, TrustedSet, keys_digest_der, keys_install, keys_is_revoked, keys_load, keys_read_der,
-    keys_verify_vouch, members,
+    KEYS_MAX, TrustedSet, digest_der, keys_install, keys_is_revoked, keys_load, keys_read_der,
+    members, verify_vouch,
 };
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::paths::{key_files, keys_dir, path_exists};
@@ -822,12 +822,11 @@ fn keys_add(args: &[&CStr]) -> c_int {
             return 1;
         }
     };
-    let (mut sha256, mut fp) = ([0u8; 32], [0u8; 32]);
-    // SAFETY: the bytes and room for the two digests.
-    if unsafe { keys_digest_der(der.0, der.1, sha256.as_mut_ptr(), fp.as_mut_ptr()) } != 0 {
+    let Ok(digests) = digest_der(der.bytes()) else {
         error(&[b"keys add: ", cert, b" is not a certificate"]);
         return 1;
-    }
+    };
+    let fp = digests.fingerprint;
     if check_cert_algorithm(der.bytes(), cert) != 0 {
         return 1;
     }
@@ -858,9 +857,7 @@ fn keys_add(args: &[&CStr]) -> c_int {
             return 1;
         }
     };
-    let mut by = [0u8; 32];
-    // SAFETY: the set, the two byte runs and room for the voucher.
-    if unsafe { keys_verify_vouch(&*set, der.0, der.1, sig.0, sig.1, by.as_mut_ptr()) } != 0 {
+    let Ok(by) = verify_vouch(&set, der.bytes(), sig.bytes()) else {
         let n = set.len();
         error(&[
             b"keys add: ",
@@ -873,7 +870,7 @@ fn keys_add(args: &[&CStr]) -> c_int {
             if n == 1 { b"" } else { b"s" },
         ]);
         return 1;
-    }
+    };
     let by_hex = hex(&by);
     if keys_dir == KEYS_DIR {
         let ret = check_voucher_live(&set, &by);
@@ -1152,20 +1149,11 @@ pub(crate) fn revoke_image(der: &[u8], boot: bool) -> c_int {
             return ret;
         }
         if !boot {
-            let (mut sha256, mut fp) = ([0u8; 32], [0u8; 32]);
-            // SAFETY: the bytes and room for the two digests.
-            let ret = unsafe {
-                keys_digest_der(
-                    der.as_ptr(),
-                    der.len(),
-                    sha256.as_mut_ptr(),
-                    fp.as_mut_ptr(),
-                )
+            let digests = match digest_der(der) {
+                Ok(d) => d,
+                Err(ret) => return ret,
             };
-            if ret != 0 {
-                return ret;
-            }
-            let ret = measure_revoke(&sha256, &hex(&fp));
+            let ret = measure_revoke(&digests.sha256, &hex(&digests.fingerprint));
             if ret != 0 {
                 return ret;
             }

@@ -17,7 +17,7 @@ use crate::sys::libc::{
 };
 use crate::text::{cstr, decimal, strscpy, strsprintf};
 use crate::util::config::{self, Scrubbed};
-use crate::util::crypto_openssl::{Cert, cert_free, cert_key_algorithm};
+use crate::util::crypto_openssl::key_algorithm;
 use crate::util::initrd;
 use crate::util::kernel_abi;
 use crate::util::keys::{self, TrustedSet};
@@ -288,6 +288,9 @@ fn preflight_keys(set: &mut MaybeUninit<TrustedSet>) -> c_int {
     }
 }
 
+/// The room for the name of a key's algorithm, its NUL included.
+const ALGORITHM_NAME_ROOM: usize = 64;
+
 /// shirudo's trust anchor is ML-DSA-87 alone: a classical certificate on
 /// disk is refused before any kernel state is touched, so a fleet cannot
 /// drift back to RSA by provisioning the wrong cert.der.
@@ -303,34 +306,22 @@ fn check_cert_algorithm(r: &mut PreflightResult) {
     let set = unsafe { set.assume_init_ref() };
 
     for c in keys::members(set) {
-        let mut cert = Cert::new();
         let path = keys::cert_path(c);
-
-        // SAFETY: room for a certificate.
-        if unsafe { keys::cert_read(c, &mut cert) } != 0 {
+        let Ok(x509) = keys::cert_x509(c) else {
             r.fail(i, &[path, b": cannot parse"]);
             return;
-        }
-        let mut name = [0u8; 64];
-        // SAFETY: the certificate, room for its algorithm's name, and
-        // then the certificate freed once.
-        let ret = unsafe {
-            let ret = cert_key_algorithm(&cert, name.as_mut_ptr().cast(), name.len());
-
-            cert_free(&mut cert);
-            ret
         };
-        if ret != 0 {
+        let Ok(name) = key_algorithm(&x509, ALGORITHM_NAME_ROOM) else {
             r.fail(i, &[path, b": cannot determine public-key algorithm"]);
             return;
-        }
-        if cstr(&name) != b"ML-DSA-87" {
+        };
+        if name.to_bytes() != b"ML-DSA-87" {
             r.fail(
                 i,
                 &[
                     path,
                     b" is ",
-                    cstr(&name),
+                    name.to_bytes(),
                     b"; shirudo accepts only ML-DSA-87 certificates (re-key with shirudo genkey)",
                 ],
             );

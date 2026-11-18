@@ -34,7 +34,7 @@ use crate::util::help::{
 use crate::util::image_runtime;
 use crate::util::io::read_file;
 use crate::util::json::{JsonEmit, MAX_BYTES};
-use crate::util::keys::{KEYS_MAX, keys_anchor_digest};
+use crate::util::keys::{self, KEYS_MAX};
 use crate::util::measured::{measured_set_add, measured_upatch_of};
 use crate::util::options::{
     EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OPT_REPEAT, OptParser, OptSpec,
@@ -720,10 +720,7 @@ impl Predicted<'_> {
 /// The SHA-256 of the certificates a target enrols, as the init event
 /// counts them.
 fn anchor_digest(certs: &[[u8; 32]]) -> Option<[u8; 32]> {
-    let mut out = [0u8; 32];
-
-    // SAFETY: the digests and room for one.
-    (unsafe { keys_anchor_digest(certs.as_ptr(), certs.len(), &mut out) } == 0).then_some(out)
+    keys::anchor_digest(certs).ok()
 }
 
 /// `<n>=<hex>` of a PCR, n its number below 24, as

@@ -263,9 +263,10 @@ fn fetch_checked(
                 set,
                 ffi::slice(payload.data, payload.len),
                 ffi::slice(f.sig.data, f.sig.len),
-                None,
             )
-        },
+        }
+        .err()
+        .unwrap_or(0),
         None => match cert_path {
             Some(cert_path) => verify_cms(
                 &Signed {

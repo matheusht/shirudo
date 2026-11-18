@@ -24,7 +24,7 @@ use crate::util::eventlog::{
 };
 use crate::util::hex::hex_decode;
 use crate::util::json::JsonEmit;
-use crate::util::keys::{self, keys_set_digest};
+use crate::util::keys;
 use crate::util::measured::{
     MeasuredSet, measured_holds, measured_set_free, measured_set_log, measured_upatch_of,
 };
@@ -401,12 +401,13 @@ pub(super) fn bind_register(init: &Init, set: &mut [MeasuredUpatch]) -> c_int {
         error(b"chain: no certificate enrolled");
         return -ENOENT;
     }
-    // SAFETY: the set and room for its digest.
-    let ret = unsafe { keys_set_digest(&*init.enrolled, &mut d.cert) };
-    if ret != 0 {
-        error(&cat!("chain: cannot hash the enrolled set: ", strerr(-ret)));
-        return ret;
-    }
+    d.cert = match init.enrolled.digest() {
+        Ok(digest) => digest,
+        Err(ret) => {
+            error(&cat!("chain: cannot hash the enrolled set: ", strerr(-ret)));
+            return ret;
+        }
+    };
     // init_event = SHA256("shirudo-init\0" || cert_sha256 || set_digest
     //                     || tree_root), the formula the operator's
     // predictor shares (`shirudo attest predict`).

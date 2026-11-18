@@ -44,7 +44,7 @@ use crate::util::io::{bpffs_mounted_at, read_file};
 use crate::util::json::{JsonEmit, JsonField, MAX_BYTES, parse_schema};
 use crate::util::kernel_btf;
 use crate::util::keyring;
-use crate::util::keys::{self, TrustedSet, keys_digest_der, keys_read_der};
+use crate::util::keys::{self, TrustedSet, keys_read_der};
 use crate::util::map_read;
 use crate::util::measured::{
     MeasuredSet, measured_set_boot, measured_set_free, measured_unmeasured_archives,
@@ -681,14 +681,15 @@ impl KeyringView {
             // SAFETY: the certificate path, a C string, and room for the DER.
             rc = unsafe { keys_read_der(path.as_ptr().cast(), &mut der, &mut len) };
             if rc == 0 {
-                // SAFETY: the DER read and room for the two digests.
-                rc = unsafe {
-                    keys_digest_der(der, len, c.sha256.as_mut_ptr(), c.fingerprint.as_mut_ptr())
-                };
-            }
-            if rc == 0 {
                 // SAFETY: the len bytes read.
-                k.add(c, unsafe { ffi::slice(der, len) });
+                let bytes = unsafe { ffi::slice(der, len) };
+                match keys::digest_der(bytes) {
+                    Ok(d) => {
+                        (c.sha256, c.fingerprint) = (d.sha256, d.fingerprint);
+                        k.add(c, bytes);
+                    }
+                    Err(err) => rc = err,
+                }
             }
             // SAFETY: keys_read_der()'s buffer of len bytes, or NULL.
             unsafe { xfree(der.cast(), len) };

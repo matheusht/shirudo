@@ -6,9 +6,11 @@
 //! less those revoked, read from a directory or through a config image's
 //! descriptor.
 
-use core::cell::UnsafeCell;
 use core::ffi::{CStr, c_char, c_int};
 use core::ptr;
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
+use openssl::x509::X509;
 
 use crate::errno::{
     E2BIG, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT, ENOKEY, ENOMEM, EPERM, text,
@@ -23,10 +25,8 @@ use crate::sys::libc::{
 };
 use crate::text::capi::name_has_suffix;
 use crate::text::{cstr, strscpy, strsprintf};
-use crate::util::crypto_openssl::{
-    Cert, cert_free, cert_pubkey_digest, cert_read_der, sha256_buffer, verify_detached,
-};
-use crate::util::hex::hex_encode;
+use crate::util::crypto_openssl::{self, pubkey_digest, verify_detached_x509, x509_from_der};
+use crate::util::hex::encode;
 use crate::util::image_config;
 use crate::util::io::{check_trusted, open_beneath, read_fd};
 use crate::util::seal::{seal_mkdir_p, seal_write_file};
@@ -84,45 +84,32 @@ const _: () = assert!(size_of::<TrustedSet>() == 67112);
 const _: () = assert!(size_of::<Candidate>() == 4440);
 
 /// A certificate a set took, by its digest.
-struct DerEntry {
+struct Kept {
     sha256: [u8; 32],
-    der: *mut u8,
-    len: usize,
+    der: &'static [u8],
 }
+
+/// The most certificates the store keeps.
+const KEPT_MAX: usize = 8 * KEYS_MAX;
 
 /// The DER of every certificate a set took. Whoever needs the bytes
 /// later, to enrol, to look in the keyring or to check a vouch, takes
 /// them from here: a path reopened then may name other bytes, and a
-/// member read from a config image has no path at all.
-struct DerStore {
-    entries: UnsafeCell<[DerEntry; 8 * KEYS_MAX]>,
-    stored: UnsafeCell<usize>,
-}
-
-// SAFETY: the loads run on the main thread, as the C's statics did.
-unsafe impl Sync for DerStore {}
-
-static DER_STORE: DerStore = DerStore {
-    entries: UnsafeCell::new(
-        [const {
-            DerEntry {
-                sha256: [0; 32],
-                der: ptr::null_mut(),
-                len: 0,
-            }
-        }; 8 * KEYS_MAX],
-    ),
-    stored: UnsafeCell::new(0),
-};
+/// member read from a config image has no path at all. A copy kept
+/// lives as long as the process.
+static KEPT: Mutex<Vec<Kept>> = Mutex::new(Vec::new());
 
 /// The certificates kept so far.
-fn kept() -> &'static [DerEntry] {
-    // SAFETY: the store, which only der_keep() changes, on this thread.
-    unsafe {
-        let entries: &[DerEntry; 8 * KEYS_MAX] = &*DER_STORE.entries.get();
+fn kept() -> MutexGuard<'static, Vec<Kept>> {
+    KEPT.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
-        &entries[..*DER_STORE.stored.get()]
-    }
+/// An empty vector with room for `len` bytes, or -ENOMEM.
+fn room_for(len: usize) -> Result<Vec<u8>, c_int> {
+    let mut v = Vec::new();
+
+    v.try_reserve_exact(len).map_err(|_| -ENOMEM)?;
+    Ok(v)
 }
 
 /// The certificate open at `fd`, whole, into an allocation xfree()
@@ -272,93 +259,61 @@ unsafe fn read_der(path: *const c_char, out: &mut *mut u8, out_sz: &mut usize) -
     0
 }
 
-/// The SHA-256 of a certificate's DER and of its public key: 0, or what
-/// reading or hashing it failed with.
-///
-/// # Safety
-///
-/// `der` holds `der_sz` bytes, and `sha256` and `fingerprint` are room
-/// for 32 bytes each.
-unsafe fn digest_der(
-    der: *const u8,
-    der_sz: usize,
-    sha256: *mut u8,
-    fingerprint: *mut u8,
-) -> c_int {
-    // SAFETY: the caller's bytes and room.
-    let ret = unsafe { sha256_buffer(der.cast(), der_sz, sha256) };
-
-    if ret != 0 {
-        return ret;
-    }
-    let mut cert = Cert::new();
-    // SAFETY: the caller's bytes, into the certificate here.
-    let ret = unsafe { cert_read_der(der, der_sz, &mut cert) };
-
-    if ret != 0 {
-        return ret;
-    }
-    // SAFETY: the certificate, and the caller's room; then the
-    // certificate freed once.
-    unsafe {
-        let ret = cert_pubkey_digest(&cert, fingerprint);
-
-        cert_free(&mut cert);
-        ret
-    }
+/// The SHA-256 of a certificate's DER, and its fingerprint: the SHA-256
+/// of its public key.
+#[derive(Clone, Copy)]
+pub(crate) struct CertDigests {
+    pub(crate) sha256: [u8; 32],
+    pub(crate) fingerprint: [u8; 32],
 }
 
-/// A copy of the certificate with digest `sha256` kept for the set, once:
-/// 0, -E2BIG with the store full, or -ENOMEM.
-fn der_keep(sha256: &[u8; 32], der: &[u8]) -> c_int {
-    if kept().iter().any(|e| e.sha256 == *sha256) {
-        return 0;
-    }
-    // SAFETY: the store, which only this changes, on this thread.
-    let (entries, stored) =
-        unsafe { (&mut *DER_STORE.entries.get(), &mut *DER_STORE.stored.get()) };
+/// The digests of the certificate `der`: what hashing failed with, or
+/// -EINVAL for bytes that are not a certificate.
+pub(crate) fn digest_der(der: &[u8]) -> Result<CertDigests, c_int> {
+    let sha256 = crypto_openssl::sha256(der)?;
+    let x509 = x509_from_der(der)?;
 
-    if *stored >= entries.len() {
-        return -E2BIG;
-    }
-    let e = &mut entries[*stored];
-    // SAFETY: a size.
-    let copy = unsafe { xmalloc(der.len()) }.cast::<u8>();
-
-    if copy.is_null() {
-        return -ENOMEM;
-    }
-    // SAFETY: the allocation of der.len() bytes.
-    unsafe { ptr::copy_nonoverlapping(der.as_ptr(), copy, der.len()) };
-    e.der = copy;
-    e.sha256 = *sha256;
-    e.len = der.len();
-    *stored += 1;
-    0
+    Ok(CertDigests {
+        sha256,
+        fingerprint: pubkey_digest(&x509)?,
+    })
 }
 
-/// The kept bytes of the certificate `c`: 0, or -ENOKEY for one no set
-/// took.
+/// A copy of the certificate with digest `sha256` kept for the life of
+/// the process, once: -E2BIG with the store full, or -ENOMEM.
+fn der_keep(sha256: &[u8; 32], der: &[u8]) -> Result<(), c_int> {
+    let mut kept = kept();
+
+    if kept.iter().any(|k| k.sha256 == *sha256) {
+        return Ok(());
+    }
+    if kept.len() >= KEPT_MAX {
+        return Err(-E2BIG);
+    }
+    kept.try_reserve(1).map_err(|_| -ENOMEM)?;
+    let mut copy = room_for(der.len())?;
+
+    copy.extend_from_slice(der);
+    kept.push(Kept {
+        sha256: *sha256,
+        der: copy.leak(),
+    });
+    Ok(())
+}
+
+/// The kept bytes of the certificate `c`: -ENOKEY for one no set took.
 pub(crate) fn cert_der(c: &TrustedCert) -> Result<&'static [u8], c_int> {
     kept()
         .iter()
-        .find(|e| e.sha256 == c.sha256)
-        // SAFETY: the bytes the store keeps for the process.
-        .map(|e| unsafe { core::slice::from_raw_parts(e.der, e.len) })
+        .find(|k| k.sha256 == c.sha256)
+        .map(|k| k.der)
         .ok_or(-ENOKEY)
 }
 
-/// The certificate `c` read from its kept bytes: 0 or -errno.
-///
-/// # Safety
-///
-/// `cert` is room for a certificate.
-pub(crate) unsafe fn cert_read(c: &TrustedCert, cert: *mut Cert) -> c_int {
-    match cert_der(c) {
-        // SAFETY: the kept bytes, into the caller's certificate.
-        Ok(der) => unsafe { cert_read_der(der.as_ptr(), der.len(), cert) },
-        Err(e) => e,
-    }
+/// The certificate `c`, read from its kept bytes: -ENOKEY for one no
+/// set took, or -EINVAL.
+pub(crate) fn cert_x509(c: &TrustedCert) -> Result<X509, c_int> {
+    x509_from_der(cert_der(c)?)
 }
 
 /// The certificate at `path`, its digests, and its bytes kept for the
@@ -366,63 +321,50 @@ pub(crate) unsafe fn cert_read(c: &TrustedCert, cert: *mut Cert) -> c_int {
 ///
 /// # Safety
 ///
-/// `path` is a C string, and `sha256` and `fingerprint` room for 32
-/// bytes each.
-unsafe fn take_file(
-    path: *const c_char,
-    sha256: &mut [u8; 32],
-    fingerprint: &mut [u8; 32],
-) -> c_int {
-    let mut der: *mut u8 = ptr::null_mut();
-    let mut der_sz = 0usize;
-    // SAFETY: the caller's C string.
-    let mut ret = unsafe { read_der(path, &mut der, &mut der_sz) };
-
-    if ret != 0 {
-        return ret;
-    }
-    // SAFETY: the der_sz bytes read, and the caller's room.
-    ret = unsafe { digest_der(der, der_sz, sha256.as_mut_ptr(), fingerprint.as_mut_ptr()) };
-    if ret == 0 {
-        // SAFETY: the der_sz bytes read.
-        ret = der_keep(sha256, unsafe { ffi::slice(der, der_sz) });
-    }
-    // SAFETY: read_der()'s allocation of der_sz bytes, freed once.
-    unsafe { xfree(der.cast(), der_sz) };
-    ret
-}
-
-/// The digests of the certificate at `path`, kept nowhere.
-///
-/// # Safety
-///
-/// `path` is a C string, and `sha256` and `fingerprint` room for 32
-/// bytes each.
-unsafe fn digest_file(path: *const c_char, sha256: *mut u8, fingerprint: *mut u8) -> c_int {
+/// `path` is a C string.
+unsafe fn take_file(path: *const c_char) -> Result<CertDigests, c_int> {
     let mut der: *mut u8 = ptr::null_mut();
     let mut der_sz = 0usize;
     // SAFETY: the caller's C string.
     let ret = unsafe { read_der(path, &mut der, &mut der_sz) };
 
     if ret != 0 {
-        return ret;
+        return Err(ret);
     }
-    // SAFETY: the der_sz bytes read, the caller's room, and then the
-    // allocation, freed once.
-    unsafe {
-        let ret = digest_der(der, der_sz, sha256, fingerprint);
-
-        xfree(der.cast(), der_sz);
-        ret
-    }
+    // SAFETY: the der_sz bytes read.
+    let bytes = unsafe { ffi::slice(der, der_sz) };
+    let taken = digest_der(bytes).and_then(|d| der_keep(&d.sha256, bytes).map(|()| d));
+    // SAFETY: read_der()'s allocation of der_sz bytes, freed once.
+    unsafe { xfree(der.cast(), der_sz) };
+    taken
 }
 
-/// The hex digits of a fingerprint.
+/// The digests of the certificate at `path`, kept nowhere.
+///
+/// # Safety
+///
+/// `path` is a C string.
+unsafe fn digest_file(path: *const c_char) -> Result<CertDigests, c_int> {
+    let mut der: *mut u8 = ptr::null_mut();
+    let mut der_sz = 0usize;
+    // SAFETY: the caller's C string.
+    let ret = unsafe { read_der(path, &mut der, &mut der_sz) };
+
+    if ret != 0 {
+        return Err(ret);
+    }
+    // SAFETY: the der_sz bytes read.
+    let digests = digest_der(unsafe { ffi::slice(der, der_sz) });
+    // SAFETY: read_der()'s allocation of der_sz bytes, freed once.
+    unsafe { xfree(der.cast(), der_sz) };
+    digests
+}
+
+/// The hex digits of a fingerprint, and a NUL.
 fn fingerprint_hex(fingerprint: &[u8; 32]) -> [u8; 65] {
     let mut hex = [0u8; 65];
 
-    // SAFETY: 32 bytes, and room for their hex digits and a NUL.
-    unsafe { hex_encode(fingerprint.as_ptr(), 32, hex.as_mut_ptr().cast()) };
+    hex[..64].copy_from_slice(&encode(fingerprint));
     hex
 }
 
@@ -473,116 +415,39 @@ fn is_revoked_at(revoked_fd: c_int, fingerprint: &[u8; 32]) -> bool {
     unsafe { faccessat(revoked_fd, name.as_ptr().cast(), F_OK, 0) == 0 }
 }
 
-/// The payload a vouch for a certificate signs: KEYS_VOUCH_PREFIX, its
-/// NUL, and the certificate's DER, in an allocation xfree() takes.
-///
-/// # Safety
-///
-/// `der` holds `der_sz` bytes.
-unsafe fn vouch_payload(
-    der: *const u8,
-    der_sz: usize,
-    out: &mut *mut u8,
-    out_sz: &mut usize,
-) -> c_int {
-    // size_add(): saturated, for xmalloc() to refuse.
-    let n = VOUCH_PREFIX.len().saturating_add(der_sz);
-    // SAFETY: a size.
-    let buf = unsafe { xmalloc(n) }.cast::<u8>();
+/// The payload a vouch for the certificate `der` signs: VOUCH_PREFIX,
+/// its NUL included, and then the DER. -ENOMEM.
+pub(crate) fn vouch_payload(der: &[u8]) -> Result<Vec<u8>, c_int> {
+    let len = VOUCH_PREFIX.len().checked_add(der.len()).ok_or(-ENOMEM)?;
+    let mut payload = room_for(len)?;
 
-    if buf.is_null() {
-        return -ENOMEM;
-    }
-    // SAFETY: the n bytes allocated, the prefix and then the caller's
-    // der_sz bytes.
-    unsafe {
-        ptr::copy_nonoverlapping(VOUCH_PREFIX.as_ptr(), buf, VOUCH_PREFIX.len());
-        ptr::copy_nonoverlapping(der, buf.add(VOUCH_PREFIX.len()), der_sz);
-    }
-    *out = buf;
-    *out_sz = n;
-    0
+    payload.extend_from_slice(VOUCH_PREFIX);
+    payload.extend_from_slice(der);
+    Ok(payload)
 }
 
-/// Whether a member of the set signed the vouch `sig` for the certificate
-/// `der`: 0 with the member's fingerprint in `voucher`, -EKEYREJECTED for
-/// none, or -errno.
-///
-/// # Safety
-///
-/// `der` and `sig` hold `der_sz` and `sig_sz` bytes, and `voucher` is
-/// room for 32.
-unsafe fn verify_vouch(
-    set: &TrustedSet,
-    der: *const u8,
-    der_sz: usize,
-    sig: *const u8,
-    sig_sz: usize,
-    voucher: *mut u8,
-) -> c_int {
-    let mut payload: *mut u8 = ptr::null_mut();
-    let mut payload_sz = 0usize;
-    // SAFETY: the caller's bytes.
-    let ret = unsafe { vouch_payload(der, der_sz, &mut payload, &mut payload_sz) };
-
-    if ret != 0 {
-        return ret;
-    }
-    // SAFETY: the payload, and the caller's signature and room.
-    let ret = unsafe {
-        verify_signature(
-            set,
-            crate::ffi::slice(payload, payload_sz),
-            crate::ffi::slice(sig, sig_sz),
-            voucher
-                .as_mut()
-                .map(|v| &mut *ptr::from_mut(v).cast::<[u8; 32]>()),
-        )
-    };
-    // SAFETY: the payload's allocation, freed once.
-    unsafe { xfree(payload.cast(), payload_sz) };
-    ret
+/// The fingerprint of the member of `set` that signed the vouch `sig`
+/// for the certificate `der`: -EKEYREJECTED for none, or -errno.
+pub(crate) fn verify_vouch(set: &TrustedSet, der: &[u8], sig: &[u8]) -> Result<[u8; 32], c_int> {
+    verify_signature(set, &vouch_payload(der)?, sig)
 }
 
-/// Whether a member of `set` signed `payload` with the detached CMS
-/// signature `sig`: 0 with the member's fingerprint in `signer`,
-/// -EKEYREJECTED when none did, or the error of a member that does not
-/// read.
+/// The fingerprint of the member of `set` that signed `payload` with the
+/// detached CMS signature `sig`: -EKEYREJECTED when none did, or the
+/// error of a member that does not read.
 pub(crate) fn verify_signature(
     set: &TrustedSet,
     payload: &[u8],
     sig: &[u8],
-    signer: Option<&mut [u8; 32]>,
-) -> c_int {
-    for c in &set.certs[..set.n.min(KEYS_MAX)] {
-        let mut cert = Cert::new();
+) -> Result<[u8; 32], c_int> {
+    for c in members(set) {
+        let x509 = cert_x509(c)?;
 
-        // SAFETY: room for a certificate.
-        let ret = unsafe { cert_read(c, &mut cert) };
-        if ret != 0 {
-            return ret;
-        }
-        // SAFETY: the payload, the signature and the certificate, freed
-        // once.
-        let ret = unsafe {
-            let ret = verify_detached(
-                payload.as_ptr(),
-                payload.len(),
-                sig.as_ptr(),
-                sig.len(),
-                &cert,
-            );
-            cert_free(&mut cert);
-            ret
-        };
-        if ret == 0 {
-            if let Some(signer) = signer {
-                *signer = c.fingerprint;
-            }
-            return 0;
+        if verify_detached_x509(payload, sig, &x509) == 0 {
+            return Ok(c.fingerprint);
         }
     }
-    -EKEYREJECTED
+    Err(-EKEYREJECTED)
 }
 
 impl TrustedCert {
@@ -614,15 +479,11 @@ impl TrustedCert {
         }
         c.path[..p.len()].copy_from_slice(p);
         c.primary = true;
-        // SAFETY: the C string just copied and rooms for its digests.
-        let ret = unsafe {
-            capi::keys_digest_file(
-                c.path.as_ptr().cast(),
-                c.sha256.as_mut_ptr(),
-                c.fingerprint.as_mut_ptr(),
-            )
-        };
-        if ret != 0 { Err(ret) } else { Ok(c) }
+        // SAFETY: the C string just copied.
+        let digests = unsafe { digest_file(c.path.as_ptr().cast()) }?;
+        c.sha256 = digests.sha256;
+        c.fingerprint = digests.fingerprint;
+        Ok(c)
     }
 }
 
@@ -645,12 +506,22 @@ impl TrustedSet {
     pub(crate) fn n_unvouched(&self) -> usize {
         self.n_unvouched
     }
+
+    /// The digest the init event covers: [`anchor_digest`] of the
+    /// members' SHA-256.
+    pub(crate) fn digest(&self) -> Result<[u8; 32], c_int> {
+        if self.n > KEYS_MAX {
+            return Err(-EINVAL);
+        }
+        let sha256: Vec<[u8; 32]> = members(self).iter().map(|c| c.sha256).collect();
+
+        anchor_digest(&sha256)
+    }
 }
 
 pub(crate) use capi::{
-    keys_cert_der, keys_digest_der, keys_install, keys_is_revoked, keys_load, keys_load_image_at,
-    keys_load_image_root, keys_read_der, keys_read_der_fd, keys_set_digest, keys_verify_vouch,
-    keys_vouch_payload,
+    keys_install, keys_is_revoked, keys_load, keys_load_image_at, keys_load_image_root,
+    keys_read_der, keys_read_der_fd,
 };
 
 /// The members of a set.
@@ -683,12 +554,10 @@ fn set_add(
     if set.n >= KEYS_MAX {
         return -E2BIG;
     }
-    if let Some(der) = der {
-        let ret = der_keep(sha256, der);
-
-        if ret != 0 {
-            return ret;
-        }
+    if let Some(der) = der
+        && let Err(err) = der_keep(sha256, der)
+    {
+        return err;
     }
     let c = &mut set.certs[set.n];
 
@@ -796,7 +665,6 @@ unsafe fn admit_vouched(set: &mut TrustedSet, cand: &mut [Candidate]) -> c_int {
             let mut vouch = [0u8; PATH_MAX];
             let mut sig: *mut u8 = ptr::null_mut();
             let mut sig_sz = 0usize;
-            let mut voucher = [0u8; 32];
 
             if c.done {
                 continue;
@@ -826,18 +694,14 @@ unsafe fn admit_vouched(set: &mut TrustedSet, cand: &mut [Candidate]) -> c_int {
             if read != 0 {
                 continue;
             }
-            // SAFETY: the candidate's DER, the vouch read, and room for the
-            // voucher; then the vouch's allocation, freed as the C freed
-            // it.
-            let ret = unsafe {
-                let ret = verify_vouch(set, c.der, c.der_sz, sig, sig_sz, voucher.as_mut_ptr());
-
-                xfree(sig.cast(), sig_sz);
-                ret
-            };
-            if ret != 0 {
+            // SAFETY: the candidate's DER and the vouch read.
+            let verified =
+                unsafe { verify_vouch(set, ffi::slice(c.der, c.der_sz), ffi::slice(sig, sig_sz)) };
+            // SAFETY: the vouch's allocation, freed as the C freed it.
+            unsafe { xfree(sig.cast(), sig_sz) };
+            let Ok(voucher) = verified else {
                 continue;
-            }
+            };
             // SAFETY: the candidate's DER.
             let der = unsafe { ffi::slice(c.der, c.der_sz) };
             let ret = set_add(
@@ -929,20 +793,16 @@ unsafe fn scan_trusted(
         if ret != 0 {
             break;
         }
-        // SAFETY: the DER read, and the candidate's room for its digests.
-        ret = unsafe {
-            digest_der(
-                c.der,
-                c.der_sz,
-                c.sha256.as_mut_ptr(),
-                c.fingerprint.as_mut_ptr(),
-            )
-        };
-        if ret != 0 {
-            // SAFETY: read_der()'s allocation, freed once.
-            unsafe { xfree(c.der.cast(), c.der_sz) };
-            c.der = ptr::null_mut();
-            break;
+        // SAFETY: the DER read.
+        match digest_der(unsafe { ffi::slice(c.der, c.der_sz) }) {
+            Ok(d) => (c.sha256, c.fingerprint) = (d.sha256, d.fingerprint),
+            Err(err) => {
+                ret = err;
+                // SAFETY: read_der()'s allocation, freed once.
+                unsafe { xfree(c.der.cast(), c.der_sz) };
+                c.der = ptr::null_mut();
+                break;
+            }
         }
         // SAFETY: the caller's C string.
         if unsafe { is_revoked(revoked_dir, &c.fingerprint) } {
@@ -1029,20 +889,16 @@ unsafe fn scan_trusted_at(
         if ret != 0 {
             break;
         }
-        // SAFETY: the DER read, and the candidate's room for its digests.
-        ret = unsafe {
-            digest_der(
-                c.der,
-                c.der_sz,
-                c.sha256.as_mut_ptr(),
-                c.fingerprint.as_mut_ptr(),
-            )
-        };
-        if ret != 0 {
-            // SAFETY: read_fd()'s allocation, freed as the C freed it.
-            unsafe { xfree(c.der.cast(), c.der_sz) };
-            c.der = ptr::null_mut();
-            break;
+        // SAFETY: the DER read.
+        match digest_der(unsafe { ffi::slice(c.der, c.der_sz) }) {
+            Ok(d) => (c.sha256, c.fingerprint) = (d.sha256, d.fingerprint),
+            Err(err) => {
+                ret = err;
+                // SAFETY: read_fd()'s allocation, freed as the C freed it.
+                unsafe { xfree(c.der.cast(), c.der_sz) };
+                c.der = ptr::null_mut();
+                break;
+            }
         }
         *n_cand += 1;
     }
@@ -1088,8 +944,6 @@ unsafe fn load_set(
         &mut *set
     };
     let mut revoked = [0u8; PATH_MAX];
-    let mut sha256 = [0u8; 32];
-    let mut fingerprint = [0u8; 32];
     let revoked_dir = if revoked_dir.is_null() {
         if strsprintf(&mut revoked, &[keys_dir, b"/revoked"]).is_err() {
             return -ENAMETOOLONG;
@@ -1099,19 +953,18 @@ unsafe fn load_set(
         revoked_dir
     };
     // SAFETY: the caller's C string.
-    let ret = unsafe { take_file(primary, &mut sha256, &mut fingerprint) };
-
-    if ret != 0 {
-        return ret;
-    }
+    let digests = match unsafe { take_file(primary) } {
+        Ok(d) => d,
+        Err(err) => return err,
+    };
     // SAFETY: a C string either way.
-    if !unsafe { is_revoked(revoked_dir, &fingerprint) } {
+    if !unsafe { is_revoked(revoked_dir, &digests.fingerprint) } {
         // SAFETY: the caller's C string.
         let ret = set_add(
             set,
             unsafe { ffi::c_str(primary) },
-            &sha256,
-            &fingerprint,
+            &digests.sha256,
+            &digests.fingerprint,
             None,
             None,
         );
@@ -1169,21 +1022,18 @@ unsafe fn load_set_at(
         set.write_bytes(0, 1);
         &mut *set
     };
-    let mut sha256 = [0u8; 32];
-    let mut fingerprint = [0u8; 32];
     let mut trusted_fd = -1;
     // SAFETY: the caller's C string.
-    let ret = unsafe { take_file(primary, &mut sha256, &mut fingerprint) };
-
-    if ret != 0 {
-        return ret;
-    }
+    let digests = match unsafe { take_file(primary) } {
+        Ok(d) => d,
+        Err(err) => return err,
+    };
     // SAFETY: the caller's C string.
     let ret = set_add(
         set,
         unsafe { ffi::c_str(primary) },
-        &sha256,
-        &fingerprint,
+        &digests.sha256,
+        &digests.fingerprint,
         None,
         None,
     );
@@ -1326,29 +1176,19 @@ pub(crate) unsafe fn load(
 }
 
 /// The digest of a set of anchors: the one, or the SHA-256 of all of
-/// them sorted. 0, -EINVAL for none or more than a set holds, or what
-/// hashing failed with, `out` zeroed.
-fn anchor_digest(sha256: &[[u8; 32]], out: &mut [u8; 32]) -> c_int {
-    if sha256.len() == 1 {
-        *out = sha256[0];
-        return 0;
+/// them sorted. -EINVAL for none or more than a set holds, or what
+/// hashing failed with.
+pub(crate) fn anchor_digest(sha256: &[[u8; 32]]) -> Result<[u8; 32], c_int> {
+    if let [one] = sha256 {
+        return Ok(*one);
     }
-    *out = [0; 32];
     if sha256.is_empty() || sha256.len() > KEYS_MAX {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
-    let mut sorted = [[0u8; 32]; KEYS_MAX];
-    let sorted = &mut sorted[..sha256.len()];
+    let mut sorted = sha256.to_vec();
 
-    sorted.copy_from_slice(sha256);
     sorted.sort_unstable();
-    // SAFETY: the sorted digests, and room for 32 bytes.
-    let ret = unsafe { sha256_buffer(sorted.as_ptr().cast(), sorted.len() * 32, out.as_mut_ptr()) };
-
-    if ret != 0 {
-        *out = [0; 32];
-    }
-    ret
+    crypto_openssl::sha256(sorted.as_flattened())
 }
 
 /// A certificate installed under `<keys_dir>/trusted` with its vouch, the
@@ -1368,16 +1208,13 @@ unsafe fn install(
     out: *mut u8,
     cap: usize,
 ) -> c_int {
-    let mut sha256 = [0u8; 32];
-    let mut fingerprint = [0u8; 32];
     let mut vouch = [0u8; PATH_MAX];
     let mut dir = [0u8; PATH_MAX];
-    // SAFETY: the caller's bytes, and room for the digests.
-    let ret = unsafe { digest_der(der, der_sz, sha256.as_mut_ptr(), fingerprint.as_mut_ptr()) };
-
-    if ret != 0 {
-        return ret;
-    }
+    // SAFETY: the caller's bytes.
+    let fingerprint = match digest_der(unsafe { ffi::slice(der, der_sz) }) {
+        Ok(d) => d.fingerprint,
+        Err(err) => return err,
+    };
     // SAFETY: the caller's C string.
     if strsprintf(&mut dir, &[unsafe { ffi::c_str(keys_dir) }, b"/trusted"]).is_err() {
         return -ENAMETOOLONG;
@@ -1416,13 +1253,10 @@ unsafe fn install(
     }
 }
 
-pub(crate) use capi::keys_anchor_digest;
-
 mod capi {
     use core::ffi::{c_char, c_int};
 
-    use super::{TrustedCert, TrustedSet};
-    use crate::ffi;
+    use super::TrustedSet;
 
     /// # Safety
     ///
@@ -1466,89 +1300,6 @@ mod capi {
 
     /// # Safety
     ///
-    /// `set` is a trust set and `fingerprint` holds 32 bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn keys_member(
-        set: *const TrustedSet,
-        fingerprint: *const [u8; 32],
-    ) -> *const TrustedCert {
-        // SAFETY: the caller passes the set and fingerprint.
-        let (set, fingerprint) = unsafe { (&*set, &*fingerprint) };
-        for cert in &set.certs[..set.n.min(super::KEYS_MAX)] {
-            if cert.fingerprint == *fingerprint {
-                return cert;
-            }
-        }
-        core::ptr::null()
-    }
-
-    /// # Safety
-    ///
-    /// `set` is a trust set, payload and sig hold their lengths of bytes,
-    /// and `signer` is NULL or room for 32 bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn keys_verify_signature(
-        set: *const TrustedSet,
-        payload: *const u8,
-        payload_sz: usize,
-        sig: *const u8,
-        sig_sz: usize,
-        signer: *mut u8,
-    ) -> c_int {
-        // SAFETY: the caller passes a trust set.
-        let set = unsafe { &*set };
-        for member in &set.certs[..set.n.min(super::KEYS_MAX)] {
-            let mut cert = Cert::new();
-            // SAFETY: this member is in the set and cert has room.
-            let ret = unsafe { super::cert_read(member, &mut cert) };
-            if ret != 0 {
-                return ret;
-            }
-            // SAFETY: the caller passes the payload and signature, and
-            // the certificate was read above and is released once.
-            let ret = unsafe {
-                let ret = super::verify_detached(payload, payload_sz, sig, sig_sz, &cert);
-                super::cert_free(&mut cert);
-                ret
-            };
-            if ret == 0 {
-                if !signer.is_null() {
-                    // SAFETY: the caller gave room for a fingerprint.
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(member.fingerprint.as_ptr(), signer, 32)
-                    };
-                }
-                return 0;
-            }
-        }
-        -crate::errno::EKEYREJECTED
-    }
-
-    /// # Safety
-    ///
-    /// `c` is a certificate of a set, and `der` and `len` room for the
-    /// kept bytes and their length.
-    pub unsafe extern "C" fn keys_cert_der(
-        c: *const TrustedCert,
-        der: *mut *const u8,
-        len: *mut usize,
-    ) -> c_int {
-        // SAFETY: the caller passes a certificate.
-        match super::cert_der(unsafe { &*c }) {
-            Ok(bytes) => {
-                // SAFETY: the caller's room.
-                unsafe {
-                    *der = bytes.as_ptr();
-                    *len = bytes.len();
-                }
-                0
-            }
-            Err(e) => e,
-        }
-    }
-
-    /// # Safety
-    ///
     /// `path` is a C string, and `out` and `out_sz` room for the bytes
     /// and their length.
     pub unsafe extern "C" fn keys_read_der(
@@ -1575,77 +1326,6 @@ mod capi {
 
     /// # Safety
     ///
-    /// `der` holds `der_sz` bytes, and `sha256` and `fingerprint` are room
-    /// for 32 bytes each.
-    pub unsafe extern "C" fn keys_digest_der(
-        der: *const u8,
-        der_sz: usize,
-        sha256: *mut u8,
-        fingerprint: *mut u8,
-    ) -> c_int {
-        // SAFETY: the caller passes the bytes and room.
-        unsafe { super::digest_der(der, der_sz, sha256, fingerprint) }
-    }
-
-    /// # Safety
-    ///
-    /// `path` is a C string, and `sha256` and `fingerprint` room for 32
-    /// bytes each.
-    pub unsafe extern "C" fn keys_digest_file(
-        path: *const c_char,
-        sha256: *mut u8,
-        fingerprint: *mut u8,
-    ) -> c_int {
-        // SAFETY: the caller passes a C string and room.
-        unsafe { super::digest_file(path, sha256, fingerprint) }
-    }
-
-    /// # Safety
-    ///
-    /// `sha256` holds `n` digests, and `out` is room for 32 bytes.
-    pub unsafe extern "C" fn keys_anchor_digest(
-        sha256: *const [u8; 32],
-        n: usize,
-        out: *mut [u8; 32],
-    ) -> c_int {
-        if n == 1 {
-            // SAFETY: the caller's one digest and room.
-            unsafe { *out = *sha256 };
-            return 0;
-        }
-        // SAFETY: the caller's room; a count past what a set holds is
-        // refused before its digests are read.
-        let out = unsafe { &mut *out };
-
-        if n > super::KEYS_MAX {
-            *out = [0; 32];
-            return -crate::errno::EINVAL;
-        }
-        // SAFETY: the caller's n digests.
-        super::anchor_digest(unsafe { ffi::slice(sha256, n) }, out)
-    }
-
-    /// # Safety
-    ///
-    /// `set` is a set, and `out` room for 32 bytes.
-    pub unsafe extern "C" fn keys_set_digest(set: *const TrustedSet, out: *mut [u8; 32]) -> c_int {
-        // SAFETY: the caller passes a set and room.
-        let (set, out) = unsafe { (&*set, &mut *out) };
-        let mut sha = [[0u8; 32]; super::KEYS_MAX];
-        let n = set.n.min(super::KEYS_MAX);
-
-        for (d, c) in sha.iter_mut().zip(&set.certs[..n]) {
-            *d = c.sha256;
-        }
-        if set.n > super::KEYS_MAX {
-            *out = [0; 32];
-            return -crate::errno::EINVAL;
-        }
-        super::anchor_digest(&sha[..n], out)
-    }
-
-    /// # Safety
-    ///
     /// `revoked_dir` is NULL or a C string, and `fingerprint` 32 bytes.
     pub unsafe extern "C" fn keys_is_revoked(
         revoked_dir: *const c_char,
@@ -1653,36 +1333,6 @@ mod capi {
     ) -> bool {
         // SAFETY: the caller passes a C string and 32 bytes.
         unsafe { super::is_revoked(revoked_dir, &*fingerprint) }
-    }
-
-    /// # Safety
-    ///
-    /// `der` holds `der_sz` bytes, and `out` and `out_sz` are room for
-    /// the payload and its length.
-    pub unsafe extern "C" fn keys_vouch_payload(
-        der: *const u8,
-        der_sz: usize,
-        out: *mut *mut u8,
-        out_sz: *mut usize,
-    ) -> c_int {
-        // SAFETY: the caller passes the bytes and room.
-        unsafe { super::vouch_payload(der, der_sz, &mut *out, &mut *out_sz) }
-    }
-
-    /// # Safety
-    ///
-    /// `set` is a trust set, `der` and `sig` hold `der_sz` and `sig_sz`
-    /// bytes, and `voucher` has room for 32.
-    pub unsafe extern "C" fn keys_verify_vouch(
-        set: *const TrustedSet,
-        der: *const u8,
-        der_sz: usize,
-        sig: *const u8,
-        sig_sz: usize,
-        voucher: *mut u8,
-    ) -> c_int {
-        // SAFETY: the caller passes a set, the bytes and room.
-        unsafe { super::verify_vouch(&*set, der, der_sz, sig, sig_sz, voucher) }
     }
 
     /// # Safety
@@ -1702,3 +1352,6 @@ mod capi {
         unsafe { super::install(keys_dir, der, der_sz, sig, sig_sz, out.cast(), cap) }
     }
 }
+
+#[cfg(test)]
+mod tests;
