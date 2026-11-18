@@ -8,7 +8,6 @@
 //! .rodata, and their unload directives bound anew.
 
 use core::ffi::{CStr, c_int};
-use core::ptr;
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -19,9 +18,7 @@ use crate::errno::{EACCES, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT, ENOT
 use crate::heap::xfree;
 use crate::shirudo_build::{KeyFiles, check_keys, package};
 use crate::util::bpm_oci::{Client, MANIFEST_MEDIA, digest_matches, manifest_layers, sha256_hex};
-use crate::util::bpm_package::{
-    PackageInfo, bpm_pkg_load_info, bpm_pkg_read_member, semver_compare,
-};
+use crate::util::bpm_package::{PackageInfo, load_info, read_member_in, semver_compare};
 use crate::util::help::{Help, HelpSection};
 use crate::util::options::{
     EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OPT_REPEAT, OptParser, OptSpec,
@@ -38,8 +35,7 @@ impl Info {
     pub(super) fn load(package: &CStr) -> Result<Self, c_int> {
         // SAFETY: an all-zero info is an empty one.
         let mut info = Info(unsafe { core::mem::zeroed() });
-        // SAFETY: a C string and the info to fill.
-        match unsafe { bpm_pkg_load_info(package.as_ptr(), &mut info.0) } {
+        match load_info(package, &mut info.0) {
             0 => Ok(info),
             err => Err(err),
         }
@@ -65,19 +61,10 @@ impl Drop for Info {
 
 /// Member `member` of the package, at most `max` bytes.
 pub(super) fn read_member(package: &CStr, member: &[u8], max: usize) -> Result<Vec<u8>, c_int> {
-    let (mut body, mut len): (*mut u8, usize) = (ptr::null_mut(), 0);
     let m = cstring(member);
-    // SAFETY: C strings and room for the body and its length.
-    let ret =
-        unsafe { bpm_pkg_read_member(package.as_ptr(), m.as_ptr(), &mut body, &mut len, max) };
-    if ret != 0 {
-        return Err(ret);
-    }
-    // SAFETY: the member's len bytes.
-    let out = unsafe { crate::ffi::slice(body, len) }.to_vec();
-    // SAFETY: the member's buffer of len + 1 bytes.
-    unsafe { xfree(body.cast(), len + 1) };
-    Ok(out)
+    Ok(read_member_in(package, m.as_bytes(), None, None, max)?
+        .bytes()
+        .to_vec())
 }
 
 /// Member `member` of the package, written to `output`, which must not

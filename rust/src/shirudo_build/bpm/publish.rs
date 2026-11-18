@@ -8,7 +8,6 @@
 //! OCI writing `bpm tree append` shares.
 
 use core::ffi::{CStr, c_int};
-use core::ptr;
 
 use super::build::cstring;
 use super::config_update::Info;
@@ -16,8 +15,7 @@ use super::{archive, error, print, strerr};
 use crate::errno::{E2BIG, EEXIST, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT};
 use crate::shirudo_build::check_keys;
 use crate::util::bpm_oci::{
-    Client, Descriptor, MANIFEST_MEDIA, bpm_oci_emit_descriptor, bpm_oci_push_blob,
-    bpm_oci_put_manifest, digest_matches, manifest_layers, sha256_hex,
+    self as oci, Client, Descriptor, MANIFEST_MEDIA, digest_matches, manifest_layers, sha256_hex,
 };
 use crate::util::bpm_package::{IndexEntry, index_parse, verify_cms};
 use crate::util::help::{Help, HelpSection};
@@ -70,17 +68,7 @@ pub(super) fn push_blob(
 ) -> Result<Descriptor, c_int> {
     let r = cstring(repo);
     let mut d = Descriptor::new();
-    // SAFETY: the client, C strings, the body and room for its descriptor.
-    match unsafe {
-        bpm_oci_push_blob(
-            c.as_mut(),
-            r.as_ptr(),
-            body.as_ptr().cast(),
-            body.len(),
-            media.as_ptr(),
-            &mut d,
-        )
-    } {
+    match oci::push_blob(c.as_mut(), r.as_bytes(), body, media.to_bytes(), &mut d) {
         0 => Ok(d),
         err => Err(err),
     }
@@ -95,18 +83,7 @@ pub(super) fn put_manifest(
 ) -> Result<Vec<u8>, c_int> {
     let (r, re) = (cstring(repo), cstring(reference));
     let mut digest = [0u8; 72];
-    // SAFETY: the client, C strings, the body and room for its digest.
-    let ret = unsafe {
-        bpm_oci_put_manifest(
-            c.as_mut(),
-            r.as_ptr(),
-            re.as_ptr(),
-            body.as_ptr(),
-            body.len(),
-            digest.as_mut_ptr().cast(),
-            digest.len(),
-        )
-    };
+    let ret = oci::put_manifest(c.as_mut(), r.as_bytes(), re.as_bytes(), body, &mut digest);
     if ret != 0 {
         return Err(ret);
     }
@@ -120,15 +97,7 @@ pub(super) fn emit_descriptor(
     d: &Descriptor,
     title: Option<&CStr>,
 ) {
-    // SAFETY: the emitter, C strings or NULL, and the descriptor.
-    unsafe {
-        bpm_oci_emit_descriptor(
-            e,
-            key.map_or(ptr::null(), CStr::as_ptr),
-            d,
-            title.map_or(ptr::null(), CStr::as_ptr),
-        )
-    };
+    oci::emit_descriptor(e, key.map(CStr::to_bytes), d, title.map(CStr::to_bytes));
 }
 
 /// A manifest of `artifact`, its config and its layers, as JSON.

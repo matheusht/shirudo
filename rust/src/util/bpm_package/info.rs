@@ -45,7 +45,7 @@ fn read_x509_memory(body: &[u8]) -> Option<X509> {
 
 /// The name, version and signer of the `.bee` at `archive` into `info`,
 /// with the certificate that signed it.
-pub(super) fn load_info(archive: &CStr, info: &mut PackageInfo) -> c_int {
+pub(crate) fn load_info(archive: &CStr, info: &mut PackageInfo) -> c_int {
     let mut environment: *mut u8 = ptr::null_mut();
     let mut environment_len = 0;
     let ret = read_member_in(

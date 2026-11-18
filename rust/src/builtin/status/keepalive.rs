@@ -5,7 +5,7 @@
 //! as one point of the tree and of the loaded set, which --keepalive
 //! prints and --otel quotes and sends.
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 
@@ -23,7 +23,7 @@ use crate::util::keepalive::{
 };
 use crate::util::keepalive_quote;
 use crate::util::measured::name_from_bpffs;
-use crate::util::otel::{OtelOpts, otel_send_log_string, status_otel_severity};
+use crate::util::otel::{OtelOpts, send_log_string, status_severity};
 use crate::util::sysinfo::{self, Sysinfo};
 use crate::util::upatch_resolve::{BPFFS_UPATCHES_DIR, payload_sha256};
 
@@ -259,23 +259,17 @@ fn send(opts: &OtelOpts, verdict: &CStr, body: &[u8]) -> c_int {
         }
     };
     let quote = std::ffi::CString::new(quote).unwrap_or_default();
-    let mut text: *const c_char = core::ptr::null();
-    // SAFETY: the verdict, a C string, and room for the severity's text.
-    let number = unsafe { status_otel_severity(verdict.as_ptr(), &mut text) };
-    // SAFETY: the options, C strings and the body's bytes.
-    let ret = unsafe {
-        otel_send_log_string(
-            opts,
-            c"shirudo.keepalive".as_ptr(),
-            c"shirudo.keepalive".as_ptr(),
-            number,
-            text,
-            body.as_ptr().cast(),
-            body.len(),
-            c"shirudo.quote".as_ptr(),
-            quote.as_ptr(),
-        )
-    };
+    let (number, text) = status_severity(verdict.to_bytes());
+    let ret = send_log_string(
+        Some(opts),
+        b"shirudo.keepalive",
+        b"shirudo.keepalive",
+        number,
+        text.to_bytes(),
+        body,
+        b"shirudo.quote",
+        quote.as_bytes(),
+    );
     if ret != 0 {
         log_err(&[b"status: send the keepalive: ", strerr(-ret)].concat());
     }

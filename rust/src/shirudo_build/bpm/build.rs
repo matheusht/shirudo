@@ -556,8 +556,7 @@ pub(super) fn record_payload(
 /// `--version`: a SemVer 2.0.0 version, which the target orders as the
 /// operator means it.
 pub(super) fn version_ok(v: &CStr) -> bool {
-    // SAFETY: a C string.
-    v.to_bytes().len() < 128 && unsafe { crate::util::bpm_package::bpm_semver_valid(v.as_ptr()) }
+    v.to_bytes().len() < 128 && crate::util::bpm_package::semver_valid(v.to_bytes())
 }
 
 /// The SPKI SHA-256 of the certificate at `cert_path`, in hex.

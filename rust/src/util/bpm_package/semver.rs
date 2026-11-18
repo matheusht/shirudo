@@ -123,7 +123,7 @@ fn prerelease_compare(mut a: &[u8], mut b: &[u8]) -> Ordering {
 }
 
 /// Whether `s` is a SemVer 2.0.0 version.
-pub(super) fn valid(s: &[u8]) -> bool {
+pub(crate) fn valid(s: &[u8]) -> bool {
     parse(s).is_some()
 }
 

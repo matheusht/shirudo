@@ -813,7 +813,7 @@ fn descriptor(out: &mut Descriptor, media: &[u8], digest: &[u8], size: usize) {
 }
 
 /// A blob uploaded unless the registry has it, and its descriptor.
-pub(super) fn push_blob(
+pub(crate) fn push_blob(
     c: &mut OciClient,
     repository: &[u8],
     body: &[u8],
@@ -915,7 +915,7 @@ fn push_blob_with(
 }
 
 /// A manifest put under `reference`, and its digest.
-pub(super) fn put_manifest(
+pub(crate) fn put_manifest(
     c: &mut OciClient,
     repository: &[u8],
     reference: &[u8],

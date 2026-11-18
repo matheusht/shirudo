@@ -235,9 +235,10 @@ pub(crate) fn payload_file(path: &CStr, v: &MapView, metric: bool) -> Result<Vec
     }
 }
 
-/// A log record of one string sent, as the keepalive sends its body, for
-/// the otel map test helper.
-#[cfg(feature = "test-helpers")]
+/// Sends `body` as the string body of one OTLP log with the one string
+/// attribute `attr_key`, as the keepalive sends its body: the receiver
+/// decodes the very bytes passed in. A body with a NUL or malformed
+/// UTF-8 is -EILSEQ, and nothing is sent. 0 or -errno.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn send_log_string(
     opts: Option<&OtelOpts>,
@@ -270,92 +271,3 @@ pub(crate) fn retry_after(value: &[u8], now: i64) -> Result<u64, c_int> {
 
 #[cfg(shirudo_fuzz)]
 mod fuzz;
-mod capi {
-    use core::ffi::{CStr, c_char, c_int};
-
-    use super::{OtelOpts, http, otlp};
-
-    /// # Safety
-    ///
-    /// `p` is NULL or options that outlive `'a`.
-    unsafe fn opts<'a>(p: *const OtelOpts) -> Option<&'a OtelOpts> {
-        // SAFETY: the caller's options, or NULL.
-        unsafe { p.as_ref() }
-    }
-
-    /// # Safety
-    ///
-    /// `p` is NULL or a C string that outlives `'a`.
-    unsafe fn path<'a>(p: *const c_char) -> Option<&'a CStr> {
-        // SAFETY: the caller's C string or NULL.
-        unsafe { super::opt_cstr(p) }
-    }
-
-    /// Sends the `body_len` bytes at `body` as the string body of one
-    /// OTLP log with the one string attribute `attr_key`: the receiver
-    /// decodes the very bytes passed in. A body with a NUL or malformed
-    /// UTF-8 is -EILSEQ, and nothing is sent. 0 or -errno.
-    ///
-    /// # Safety
-    ///
-    /// `opts` is options or NULL; the strings are C strings, and `body`
-    /// holds `body_len` bytes.
-    pub unsafe extern "C" fn otel_send_log_string(
-        opts: *const OtelOpts,
-        scope_name: *const c_char,
-        event_name: *const c_char,
-        severity_number: c_int,
-        severity_text: *const c_char,
-        body: *const c_char,
-        body_len: usize,
-        attr_key: *const c_char,
-        attr_value: *const c_char,
-    ) -> c_int {
-        // SAFETY: the caller's C strings, or NULL, which outlive the call.
-        let names = unsafe {
-            (
-                path(scope_name),
-                path(event_name),
-                path(severity_text),
-                path(attr_key),
-                path(attr_value),
-            )
-        };
-        let (Some(scope), Some(event), Some(text), Some(key), Some(value)) = names else {
-            return -crate::errno::EINVAL;
-        };
-        if body.is_null() {
-            return -crate::errno::EINVAL;
-        }
-        let record = otlp::StringRecord {
-            scope_name: scope.to_bytes(),
-            event_name: event.to_bytes(),
-            severity_number,
-            severity_text: text.to_bytes(),
-            // SAFETY: the caller's body_len bytes.
-            body: unsafe { crate::ffi::slice(body.cast(), body_len) },
-            attr_key: key.to_bytes(),
-            attr_value: value.to_bytes(),
-        };
-        // SAFETY: the caller's options, or NULL.
-        http::send_log_string(unsafe { self::opts(opts) }, &record)
-    }
-
-    /// The OTLP severity of a status verdict, its text into `text`.
-    ///
-    /// # Safety
-    ///
-    /// `status` is a C string and `text` room for a pointer.
-    pub unsafe extern "C" fn status_otel_severity(
-        status: *const c_char,
-        text: *mut *const c_char,
-    ) -> c_int {
-        // SAFETY: the caller's C string.
-        let (n, t) = super::status_severity(unsafe { CStr::from_ptr(status) }.to_bytes());
-        // SAFETY: the caller's room.
-        unsafe { *text = t.as_ptr() };
-        n
-    }
-}
-
-pub(crate) use capi::{otel_send_log_string, status_otel_severity};
