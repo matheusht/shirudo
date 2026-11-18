@@ -984,12 +984,16 @@ testing/helper/test-signed-load: $(HELPER_MAIN_DIR)/test-signed-load.o $(RUST_HE
 	@printf '  LD      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(RUST_TEST_LDLIBS)
 
-testing/helper/test-otel-map: testing/helper/test-otel-map.c \
-                         util/string.o util/log.o \
-                        util/paths.o \
-                         util/malloc.o $(LIBBPF_A)  \
-                        $(RUST_LIB)
-	@printf '  CC      $@\n'
+# The version test-otel-map reports, which the OTLP tests expect, in
+# place of shirudo's own.
+$(HELPER_MAIN_DIR)/version.o: testing/helper/version.rs
+	@printf '  RUSTC   $@\n'
+	$(Q)mkdir -p $(dir $@)
+	$(Q)$(RUSTC_OBJ) --crate-name helper_version -o $@ $<
+
+testing/helper/test-otel-map: $(HELPER_MAIN_DIR)/test-otel-map.o \
+		$(HELPER_MAIN_DIR)/version.o $(RUST_HELPER_LIB)
+	@printf '  LD      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
 testing/helper/test-upatch-map-types: $(HELPER_MAIN_DIR)/test-upatch-map-types.o \

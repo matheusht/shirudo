@@ -28,10 +28,10 @@ pub(crate) const LOG: c_int = 1;
 pub(crate) const METRIC: c_int = 2;
 
 /// `enum otel_mode`.
-const AUTO: c_int = 0;
-const FORCE_LOG: c_int = 1;
-const FORCE_METRIC: c_int = 2;
-const S3: c_int = 3;
+pub(crate) const AUTO: c_int = 0;
+pub(crate) const FORCE_LOG: c_int = 1;
+pub(crate) const FORCE_METRIC: c_int = 2;
+pub(crate) const S3: c_int = 3;
 
 /// The deepest a BTF type's typedefs and modifiers are followed.
 const MAX_TYPE_UNWRAP: usize = 32;
@@ -222,7 +222,7 @@ fn metric_type(v: &MapView) -> Result<(bool, u32), c_int> {
 /// The signal a map exports as without a decoder: a metric only for an
 /// unsigned per-CPU integer, which sums across CPUs, else a log; and
 /// why.
-fn classify(v: &MapView) -> (c_int, String) {
+pub(crate) fn classify(v: &MapView) -> (c_int, String) {
     if v.serialized {
         return (LOG, "map uses a serializer".into());
     }
@@ -241,7 +241,7 @@ fn classify(v: &MapView) -> (c_int, String) {
 
 /// Exports the map as `mode` says, through the decoder at `decoder_path`
 /// or the upatch's.
-fn send_file(
+pub(crate) fn send_file(
     decoder_path: Option<&CStr>,
     v: &MapView,
     mode: c_int,
@@ -286,12 +286,57 @@ pub(crate) fn send_decoded(v: &MapView, signal: c_int, opts: Option<&OtelOpts>) 
 }
 
 /// The OTLP severity of a status verdict, and its text.
-fn status_severity(status: &[u8]) -> (c_int, &'static CStr) {
+pub(crate) fn status_severity(status: &[u8]) -> (c_int, &'static CStr) {
     match status {
         b"ok" => (9, c"INFO"),
         b"degraded" | b"init-pending" | b"reboot-pending" => (13, c"WARN"),
         _ => (17, c"ERROR"),
     }
+}
+
+/// The log or metric payload the decoder of the artifact at `path`
+/// makes of `v`, for the otel map test helper.
+#[cfg(feature = "test-helpers")]
+pub(crate) fn payload_file(path: &CStr, v: &MapView, metric: bool) -> Result<Vec<u8>, c_int> {
+    let buf = if metric {
+        otlp::metric_payload(Some(path), v)?
+    } else {
+        otlp::log_payload(Some(path), v, 0)?
+    };
+    Ok(buf.bytes().to_vec())
+}
+
+/// A log record of one string sent, as the keepalive sends its body, for
+/// the otel map test helper.
+#[cfg(feature = "test-helpers")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn send_log_string(
+    opts: Option<&OtelOpts>,
+    scope_name: &[u8],
+    event_name: &[u8],
+    severity_number: c_int,
+    severity_text: &[u8],
+    body: &[u8],
+    attr_key: &[u8],
+    attr_value: &[u8],
+) -> c_int {
+    let record = otlp::StringRecord {
+        scope_name,
+        event_name,
+        severity_number,
+        severity_text,
+        body,
+        attr_key,
+        attr_value,
+    };
+    http::send_log_string(opts, &record)
+}
+
+/// The seconds a Retry-After value asks for at `now`, for the otel map
+/// test helper.
+#[cfg(feature = "test-helpers")]
+pub(crate) fn retry_after(value: &[u8], now: i64) -> Result<u64, c_int> {
+    http::retry_after(value, now)
 }
 
 mod capi {

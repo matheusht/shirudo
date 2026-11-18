@@ -33,6 +33,7 @@ mod keys;
 mod mode_objects;
 mod nv_cphash;
 mod nv_writer;
+mod otel_map;
 mod perf_attach;
 mod register;
 mod register_cli;
