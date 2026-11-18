@@ -529,9 +529,8 @@ fn staged(
         if ret != 0 {
             return ret;
         }
-        let ret = package::verify_package(&cstring(&load), &keys.cert);
-        if ret != 0 {
-            return ret;
+        if let Err(err) = package::verify_package(&cstring(&load), &keys.cert) {
+            return err;
         }
         let expected = match build::upatch_name(&spec.upatches[i].source) {
             Ok(n) => n,
@@ -553,14 +552,13 @@ fn staged(
         u.load_path = load;
         u.unload_path = unload.clone();
         let digest = build::digest_of(&u.payload_sha256);
-        let ret = package::unload(
+        if let Err(err) = package::unload(
             &cstring(&u.name),
             &digest,
             &cstring(&unload),
             (&keys.pkey, &keys.cert),
-        );
-        if ret != 0 {
-            return ret;
+        ) {
+            return err;
         }
     }
     archive::write(

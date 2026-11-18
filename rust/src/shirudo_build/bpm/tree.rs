@@ -248,13 +248,8 @@ impl Drop for Later {
 
 /// The classes of a load upatch, none for one without an XDP program.
 fn upatch_xdp_classes(body: &[u8]) -> Result<u32, c_int> {
-    // SAFETY: an all-zero container is a closed one.
-    let mut u: upatch::Upatch = unsafe { core::mem::zeroed() };
-    // SAFETY: the bytes and the container to fill.
-    match unsafe { upatch::upatch_open_memory(body.as_ptr().cast(), body.len(), &mut u) } {
-        0 => {}
-        err => return Err(err),
-    }
+    let parsed = super::super::package::MemoryUpatch::open(body)?;
+    let u = parsed.parsed();
     let mut specs: *mut ProgSpec = ptr::null_mut();
     let (nr_maps, nr_progs) = (u.hdr.nr_maps, u.hdr.nr_progs);
     let ret = if u.signed_attach.is_null() {
@@ -280,8 +275,6 @@ fn upatch_xdp_classes(body: &[u8]) -> Result<u32, c_int> {
             c
         }
     });
-    // SAFETY: the container opened above.
-    unsafe { upatch::upatch_close(&mut u) };
     classes.ok_or(ret)
 }
 
@@ -1085,23 +1078,17 @@ impl Append<'_> {
     /// manifest its upload will put, once its bytes are checked to be the
     /// directive the operation claims: its name, and load or unload.
     fn describe_artifact(&mut self, body: Vec<u8>, id: &[u8]) -> Result<Upload, c_int> {
-        // SAFETY: an all-zero container is a closed one.
-        let mut u: upatch::Upatch = unsafe { core::mem::zeroed() };
-        // SAFETY: the bytes and the container to fill.
-        let ret = unsafe { upatch::upatch_open_memory(body.as_ptr().cast(), body.len(), &mut u) };
-        if ret != 0 {
+        let parsed = super::super::package::MemoryUpatch::open(&body).inspect_err(|_| {
             err(format!(
                 "bpm tree append: {} is not a valid upatch",
                 lossy(id)
             ));
-            return Err(ret);
-        }
+        })?;
+        let u = parsed.parsed();
         let mut name = [0u8; upatch::NAME_MAX + 1];
-        upatch::header_name(&u, &mut name);
+        upatch::header_name(u, &mut name);
         let payload = u.hdr.payload_sha256;
-        let is_unload = upatch::is_unload(&u);
-        // SAFETY: the container opened above.
-        unsafe { upatch::upatch_close(&mut u) };
+        let is_unload = upatch::is_unload(u);
         if cstr(&name) != id || is_unload != self.unload {
             err(format!(
                 "bpm tree append: the {} artifact for {} is {} directive named {}",

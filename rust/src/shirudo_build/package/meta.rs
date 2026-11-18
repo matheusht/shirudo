@@ -206,11 +206,11 @@ fn is_syscall(sec: &[u8]) -> bool {
     sec == b"syscall"
 }
 
-fn validate_serializer_output_map(obj: &Object) -> c_int {
+fn validate_serializer_output_map(obj: &Object) -> Result<(), c_int> {
     let name = String::from_utf8_lossy(SERIAL_MAP_NAME);
     let Some(m) = obj.map(SERIAL_MAP_NAME) else {
         error(format!("serializer upatch requires {name} output map").as_bytes());
-        return -EINVAL;
+        return Err(-EINVAL);
     };
     let why = if m.map_type() != MAP_ARRAY {
         format!("{name} must be BPF_MAP_TYPE_ARRAY")
@@ -221,10 +221,10 @@ fn validate_serializer_output_map(obj: &Object) -> c_int {
     } else if m.max_entries() == 0 || m.max_entries() > SERIAL_MAX_CHUNKS {
         format!("{name} max_entries must be 1..{SERIAL_MAX_CHUNKS}")
     } else {
-        return 0;
+        return Ok(());
     };
     error(why.as_bytes());
-    -EINVAL
+    Err(-EINVAL)
 }
 
 fn put32(buf: &mut [u8], off: usize, v: u32) {
@@ -260,23 +260,23 @@ fn lossy(s: &[u8]) -> String {
 
 /// The device classes of an `xdp/<mask>` section into `entry`, each
 /// class to one program of the object.
-fn xdp_entry(shown_sec: &str, mask: &[u8], entry: &mut [u8], a: &mut Attach) -> c_int {
+fn xdp_entry(shown_sec: &str, mask: &[u8], entry: &mut [u8], a: &mut Attach) -> Result<(), c_int> {
     let all = u64::from(XDP_ALL);
     let Some(mask) = parse_u64(mask, all)
         .ok()
         .filter(|&m| m != 0 && m & !all == 0)
     else {
         error(format!("invalid XDP device class mask in section '{shown_sec}'; use xdp/<decimal-mask>, a sum of 1, 2, 8 and 16").as_bytes());
-        return -EINVAL;
+        return Err(-EINVAL);
     };
-    let mask = mask as u32;
+    let mask = u32::try_from(mask).map_err(|_| -EINVAL)?;
     if mask & a.xdp_classes != 0 {
         error(format!("XDP section '{shown_sec}' selects a device class another XDP program of this upatch selects; give each class to one program").as_bytes());
-        return -EINVAL;
+        return Err(-EINVAL);
     }
     a.xdp_classes |= mask;
     put32(entry, 8, mask);
-    0
+    Ok(())
 }
 
 /// `<path>:<function>[+<offset>]` or `<path>:0x<file offset>` of a
@@ -289,10 +289,10 @@ fn single_uprobe_entry(
     i: usize,
     entry: &mut [u8],
     a: &mut Attach,
-) -> c_int {
+) -> Result<(), c_int> {
     let invalid = || {
         error(format!("invalid uprobe section '{shown_sec}'; expected uprobe[.s]//absolute/path:function[+offset], uretprobe[.s]//absolute/path:function or a 0x file offset in place of the function").as_bytes());
-        -EINVAL
+        Err(-EINVAL)
     };
     let Ok((path, loc)) = split_uprobe_target(src) else {
         return invalid();
@@ -309,7 +309,7 @@ fn single_uprobe_entry(
                         format!("uretprobe offsets are unsupported in section '{shown_sec}'")
                             .as_bytes(),
                     );
-                    return -EINVAL;
+                    return Err(-EINVAL);
                 }
                 entry[8..16].copy_from_slice(&off.to_le_bytes());
                 (symbol, Some(symbol), off)
@@ -335,7 +335,7 @@ fn single_uprobe_entry(
                 )
             };
             error(msg.as_bytes());
-            return err;
+            return Err(err);
         }
     };
     // The kernel reports a uprobe link's offset in 32 bits.
@@ -344,20 +344,20 @@ fn single_uprobe_entry(
             format!("uprobe offset in section '{shown_sec}' is beyond 4 GiB of {shown_path}")
                 .as_bytes(),
         );
-        return -ERANGE;
+        return Err(-ERANGE);
     }
     a.uprobes.push(UprobeTarget {
-        prog_idx: i as u32,
+        prog_idx: u32::try_from(i).map_err(|_| -EOVERFLOW)?,
         path: path.to_vec(),
         elf,
     });
-    0
+    Ok(())
 }
 
 /// The entry of one attaching program: its kind, and its target and
 /// offset, its uprobe target, which it records, or its XDP device
 /// classes.
-fn attach_entry(sec: &[u8], i: usize, entry: &mut [u8], a: &mut Attach) -> c_int {
+fn attach_entry(sec: &[u8], i: usize, entry: &mut [u8], a: &mut Attach) -> Result<(), c_int> {
     let s = bare(sec);
     let unsupported: [Rule; 6] = [
         (
@@ -390,13 +390,13 @@ fn attach_entry(sec: &[u8], i: usize, entry: &mut [u8], a: &mut Attach) -> c_int
     for (test, msg) in unsupported {
         if test(s) {
             error(msg.replace("{}", &shown_sec).as_bytes());
-            return -EOPNOTSUPP;
+            return Err(-EOPNOTSUPP);
         }
     }
     let (kind, target) = attach_kind(s);
     if kind == ATTACH_RAW_TRACEPOINT && !default_attach(s) {
         error(format!("unsupported section '{shown_sec}'; supported are fentry, fexit, fmod_ret, lsm, tp_btf, kprobe, kretprobe, uprobe[.s], uretprobe[.s], uprobe.multi[.s], uretprobe.multi[.s], cgroup_skb, netfilter and xdp/<mask>").as_bytes());
-        return -EOPNOTSUPP;
+        return Err(-EOPNOTSUPP);
     }
     put32(entry, 0, ROLE_ATTACH);
     put32(entry, 4, kind);
@@ -423,7 +423,7 @@ fn attach_entry(sec: &[u8], i: usize, entry: &mut [u8], a: &mut Attach) -> c_int
                     )
                 };
                 error(msg.as_bytes());
-                return err;
+                return Err(err);
             }
         };
         put_str(&mut entry[16..16 + ATTACH_TARGET_MAX], pattern);
@@ -432,7 +432,7 @@ fn attach_entry(sec: &[u8], i: usize, entry: &mut [u8], a: &mut Attach) -> c_int
             Err(err) => (Target::default(), err),
         };
         a.uprobes.push(UprobeTarget {
-            prog_idx: i as u32,
+            prog_idx: u32::try_from(i).map_err(|_| -EOVERFLOW)?,
             path: path.to_vec(),
             elf,
         });
@@ -452,39 +452,39 @@ fn attach_entry(sec: &[u8], i: usize, entry: &mut [u8], a: &mut Attach) -> c_int
                 )
             };
             error(msg.as_bytes());
-            return err;
+            return Err(err);
         }
     } else if let Some(target) = target {
         let (symbol, off) = match split_probe_target(target) {
             Ok(t) => t,
             Err(err) => {
                 error(format!("invalid kprobe target in section '{shown_sec}'").as_bytes());
-                return err;
+                return Err(err);
             }
         };
         if kind == ATTACH_KRETPROBE && off != 0 {
             error(format!("kretprobe offsets are unsupported in section '{shown_sec}'").as_bytes());
-            return -EINVAL;
+            return Err(-EINVAL);
         }
         put_str(&mut entry[16..16 + ATTACH_TARGET_MAX], symbol);
         offset = off;
     }
     entry[8..16].copy_from_slice(&offset.to_le_bytes());
-    0
+    Ok(())
 }
 
 /// A section the target cannot attach, and what to use instead.
 type Rule = (fn(&[u8]) -> bool, &'static str);
 
 /// The uprobe targets that follow the program entries.
-fn append_uprobes(md: &mut Vec<u8>, uprobes: &[UprobeTarget]) -> c_int {
+fn append_uprobes(md: &mut Vec<u8>, uprobes: &[UprobeTarget]) -> Result<(), c_int> {
     let mut len = md.len() + UPROBE_TARGETS;
 
     for t in uprobes {
         len += UPROBE_TARGET + t.path.len() + t.elf.build_id.len() + 8 * t.elf.offsets.len();
     }
     if len > u32::MAX as usize {
-        return -EOVERFLOW;
+        return Err(-EOVERFLOW);
     }
     let mut head = [0u8; UPROBE_TARGETS];
     put32(&mut head, 0, UPROBE_TARGET_MAGIC);
@@ -504,17 +504,14 @@ fn append_uprobes(md: &mut Vec<u8>, uprobes: &[UprobeTarget]) -> c_int {
             md.extend_from_slice(&off.to_le_bytes());
         }
     }
-    0
+    Ok(())
 }
 
 /// The attach metadata of `obj`, of `nr_maps` maps and `nr_progs`
 /// programs.
 pub(super) fn prog_metadata(obj: &Object, nr_maps: u32, nr_progs: u32) -> Result<Vec<u8>, c_int> {
     if obj.programs().any(|p| serializer_map(p).is_some()) {
-        let err = validate_serializer_output_map(obj);
-        if err != 0 {
-            return Err(err);
-        }
+        validate_serializer_output_map(obj)?;
     }
     let base = PROG_METADATA + nr_progs as usize * PROG_ENTRY;
     if base > u32::MAX as usize {
@@ -592,16 +589,10 @@ pub(super) fn prog_metadata(obj: &Object, nr_maps: u32, nr_progs: u32) -> Result
             put32(entry, 0, ROLE_TEST_RUN);
             continue;
         }
-        let err = attach_entry(sec, i, entry, &mut attach);
-        if err != 0 {
-            return Err(err);
-        }
+        attach_entry(sec, i, entry, &mut attach)?;
     }
     if !attach.uprobes.is_empty() {
-        let err = append_uprobes(&mut md, &attach.uprobes);
-        if err != 0 {
-            return Err(err);
-        }
+        append_uprobes(&mut md, &attach.uprobes)?;
     }
     Ok(md)
 }

@@ -15,7 +15,7 @@
 mod decoders;
 mod meta;
 
-use core::ffi::{CStr, c_int, c_void};
+use core::ffi::{CStr, c_int};
 use std::ffi::CString;
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -24,7 +24,7 @@ use super::{KeyFiles, error, info, strerr};
 use crate::bpf::object::{self, GenOpts, Object};
 use crate::errno::{E2BIG, EBADMSG, EINVAL, EIO, ENAMETOOLONG, ENOENT, EOVERFLOW};
 use crate::util::bpm_package::verify_cms;
-use crate::util::crypto_openssl::sha256_into;
+use crate::util::crypto_openssl::sha256;
 use crate::util::help::{Help, HelpSection, print_help};
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::upatch::{
@@ -32,8 +32,7 @@ use crate::util::upatch::{
     POLICY_LABEL_ENTRY, POLICY_LABEL_HEADER, POLICY_LABELS_MAGIC, POLICY_LABELS_VERSION,
     SECTION_ATTACH, SECTION_DECODERS, SECTION_NAME, SECTION_POLICY_LABELS, SECTION_UNLOAD,
     SIGNED_SECTION, SIGNED_SECTIONS_MAX, SIGNED_TRAILER, SIGNED_TRAILER_MAGIC, SIGNED_VERSION,
-    TYPE_BPF, Upatch, VERSION, upatch_close, upatch_data, upatch_loader, upatch_metadata,
-    upatch_open, upatch_signature,
+    TYPE_BPF, Upatch, VERSION, upatch_metadata,
 };
 use crate::util::upatch_rodata::{self, RodataRange};
 
@@ -162,50 +161,45 @@ fn sign(insns: &[u8], data: &[u8], keys: (&CStr, &CStr)) -> Result<(Vec<u8>, [u8
 
 /// The parts of an open container.
 ///
-/// # Safety
-///
-/// `p` is NULL or holds `len` bytes of a container that stays open
-/// while the part is read.
-unsafe fn part<'a>(p: *const c_void, len: u32) -> &'a [u8] {
-    if p.is_null() || len == 0 {
-        return &[];
-    }
-    // SAFETY: a part of a container that stays open while it is read.
-    unsafe { crate::ffi::slice(p.cast::<u8>(), len as usize) }
-}
-
-/// A container opened, closed when it goes.
-struct Opened(Box<Upatch>);
+/// An opened container and its checked sections.
+struct Opened(upatch::Opened);
 
 impl Opened {
     fn open(path: &CStr) -> Result<Self, c_int> {
-        // SAFETY: an all-zero container is a closed one.
-        let mut u: Box<Upatch> = Box::new(unsafe { core::mem::zeroed() });
-        // SAFETY: a C string and the container to fill.
-        match unsafe { upatch_open(path.as_ptr(), &mut *u) } {
-            0 => Ok(Opened(u)),
-            err => Err(err),
+        upatch::Opened::open(path).map(Self)
+    }
+
+    fn section(&self, offset: u32, len: u32) -> &[u8] {
+        if len == 0 {
+            return &[];
         }
+        // SAFETY: Opened owns the container bytes until it is dropped.
+        let bytes = unsafe { crate::ffi::slice(self.0.map, self.0.map_size) };
+        usize::try_from(offset)
+            .ok()
+            .zip(usize::try_from(len).ok())
+            .and_then(|(start, len)| bytes.get(start..)?.get(..len))
+            .unwrap_or_default()
     }
 
     fn loader(&self) -> &[u8] {
-        // SAFETY: the open container, and the part of it the header sizes.
-        unsafe { part(upatch_loader(&*self.0), self.0.hdr.loader_insns_len) }
+        self.section(self.0.hdr.loader_insns_off, self.0.hdr.loader_insns_len)
     }
 
     fn data(&self) -> &[u8] {
-        // SAFETY: the open container, and the part of it the header sizes.
-        unsafe { part(upatch_data(&*self.0), self.0.hdr.data_len) }
+        self.section(self.0.hdr.data_off, self.0.hdr.data_len)
     }
 
     fn signature(&self) -> &[u8] {
-        // SAFETY: the open container, and the part of it the header sizes.
-        unsafe { part(upatch_signature(&*self.0), self.0.hdr.signature_len) }
+        self.section(self.0.hdr.signature_off, self.0.hdr.signature_len)
     }
 
     fn metadata(&self) -> &[u8] {
-        // SAFETY: the open container, and the part of it the header sizes.
-        unsafe { part(upatch_metadata(&*self.0), self.0.hdr.metadata_len) }
+        let len = usize::try_from(self.0.hdr.metadata_len).unwrap_or_default();
+        // SAFETY: the container is live and the parser bounds the metadata.
+        let metadata = unsafe { upatch_metadata(&*self.0) };
+        // SAFETY: a missing section is NULL and zero length.
+        unsafe { crate::ffi::slice(metadata.cast(), len) }
     }
 
     fn is_unload(&self) -> bool {
@@ -213,8 +207,7 @@ impl Opened {
     }
 
     fn symbol_range(&self, symbol: &CStr) -> Result<RodataRange, c_int> {
-        // SAFETY: an all-zero range is room for one.
-        let mut range: RodataRange = unsafe { core::mem::zeroed() };
+        let mut range = RodataRange { offset: 0, size: 0 };
         match upatch_rodata::symbol_range(&self.0, symbol, &mut range) {
             0 => Ok(range),
             err => Err(err),
@@ -222,27 +215,47 @@ impl Opened {
     }
 }
 
-impl Drop for Opened {
-    fn drop(&mut self) {
-        // SAFETY: the container opened.
-        unsafe { upatch_close(&mut *self.0) };
+/// Parsed sections borrow the artifact bytes for as long as they are used.
+pub(super) struct MemoryUpatch<'a> {
+    parsed: Upatch,
+    _bytes: &'a [u8],
+}
+
+impl<'a> MemoryUpatch<'a> {
+    pub(super) fn open(bytes: &'a [u8]) -> Result<Self, c_int> {
+        let mut parsed = std::mem::MaybeUninit::uninit();
+        // SAFETY: bytes outlives the returned view and parsed has room for Upatch.
+        let ret = unsafe {
+            upatch::upatch_open_memory(bytes.as_ptr().cast(), bytes.len(), parsed.as_mut_ptr())
+        };
+        if ret != 0 {
+            return Err(ret);
+        }
+        // SAFETY: the parser initialized the full container on success.
+        let parsed = unsafe { parsed.assume_init() };
+        Ok(Self {
+            parsed,
+            _bytes: bytes,
+        })
+    }
+
+    pub(super) fn parsed(&self) -> &Upatch {
+        &self.parsed
     }
 }
 
-/// The CMS covers the loader and the data but not the header, whose
-/// payload digest the target measures, so the digest is compared too.
-fn verify_payload(u: &Opened, cert: &CStr) -> c_int {
+/// The CMS covers the loader and data. The payload digest in the
+/// unsigned header must also match those bytes.
+fn verify_payload(u: &Opened, cert: &CStr) -> Result<(), c_int> {
     let payload = [u.loader(), u.data()].concat();
     let ret = verify_cms(&payload, u.signature(), cert);
-    let mut digest = [0u8; 32];
-
     if ret != 0 {
-        return ret;
+        return Err(ret);
     }
-    if sha256_into(&payload, &mut digest) != 0 || digest != u.0.hdr.payload_sha256 {
-        return -EBADMSG;
+    if sha256(&payload).map_err(|_| -EBADMSG)? != u.0.hdr.payload_sha256 {
+        return Err(-EBADMSG);
     }
-    0
+    Ok(())
 }
 
 /// An output that is the input, under whatever name, is refused before
@@ -380,10 +393,7 @@ pub(super) fn set_rodata(
         return Err(SetFailed::Package(-EINVAL));
     }
     if let Some((_, keys)) = output {
-        match verify_payload(&src, &keys.cert) {
-            0 => {}
-            err => return Err(SetFailed::Unverified(err)),
-        }
+        verify_payload(&src, &keys.cert).map_err(SetFailed::Unverified)?;
     }
     let mut data = src.data().to_vec();
     let mut placed = Vec::with_capacity(values.len());
@@ -391,11 +401,14 @@ pub(super) fn set_rodata(
         let r = src
             .symbol_range(symbol)
             .map_err(|e| SetFailed::Symbol(i, e))?;
-        if value.is_empty() || value.len() != r.size as usize {
+        if value.is_empty() || Some(value.len()) != usize::try_from(r.size).ok() {
             return Err(SetFailed::Size(i, r.size));
         }
-        let at = r.offset as usize;
-        data[at..at + value.len()].copy_from_slice(value);
+        let at = usize::try_from(r.offset).map_err(|_| SetFailed::Symbol(i, -EINVAL))?;
+        data.get_mut(at..)
+            .and_then(|tail| tail.get_mut(..value.len()))
+            .ok_or(SetFailed::Symbol(i, -EINVAL))?
+            .copy_from_slice(value);
         placed.push(r);
     }
     if let Some((output, keys)) = output {
@@ -412,19 +425,18 @@ pub(super) fn patch_rodata(
     symbol: &CStr,
     value: &[u8],
     keys: &KeyFiles,
-) -> c_int {
-    match set_rodata(input, Some((output, keys)), &[(symbol, value)]) {
-        Ok(_) => 0,
-        Err(f) => f.errno(),
-    }
+) -> Result<(), c_int> {
+    set_rodata(input, Some((output, keys)), &[(symbol, value)])
+        .map(|_| ())
+        .map_err(|e| e.errno())
 }
 
-pub(super) fn verify_package(input: &CStr, cert: &CStr) -> c_int {
-    match Opened::open(input) {
-        Ok(u) if u.is_unload() => -EINVAL,
-        Ok(u) => verify_payload(&u, cert),
-        Err(err) => err,
+pub(super) fn verify_package(input: &CStr, cert: &CStr) -> Result<(), c_int> {
+    let u = Opened::open(input)?;
+    if u.is_unload() {
+        return Err(-EINVAL);
     }
+    verify_payload(&u, cert)
 }
 
 const SET_OUTPUT: c_int = 0;
@@ -615,9 +627,9 @@ pub(super) fn upatch_cli(args: &[&CStr]) -> c_int {
 }
 
 /// Every target refuses a name upatch_name_valid() does not take.
-fn check_name(name: &[u8]) -> c_int {
+fn check_name(name: &[u8]) -> Result<(), c_int> {
     if upatch::name_valid(Some(name)) {
-        return 0;
+        return Ok(());
     }
     error(
         format!(
@@ -626,7 +638,7 @@ fn check_name(name: &[u8]) -> c_int {
         )
         .as_bytes(),
     );
-    -EINVAL
+    Err(-EINVAL)
 }
 
 /// What a package is made of besides its object.
@@ -639,28 +651,21 @@ struct Contents<'a> {
 }
 
 /// The object as a signed package at `out`.
-fn finalize(mut obj: Object, out: &CStr, c: &Contents, keys: (&CStr, &CStr)) -> c_int {
+fn finalize(mut obj: Object, out: &CStr, c: &Contents, keys: (&CStr, &CStr)) -> Result<(), c_int> {
     // The loader writes map_fd/prog_fd back into descriptor arrays past
     // its ctx, in the order libbpf iterates the object; the target finds
     // prog_fd[] after BPF_PROG_TEST_RUN by these counts. The attach
     // metadata comes before the loader so that an unsupported section
     // fails with shirudo's diagnostic, not the generator's.
-    let nr_maps = obj.maps.len() as u32;
-    let nr_progs = obj.programs().count() as u32;
+    let nr_maps = u32::try_from(obj.maps.len()).map_err(|_| -E2BIG)?;
+    let nr_progs = u32::try_from(obj.programs().count()).map_err(|_| -E2BIG)?;
     let unloading = c.flags & DIRECTIVE_UNLOAD != 0;
     let name = c.name.to_bytes();
     let (mut attach_meta, mut decoder_blob, mut nr_decoders) = (Vec::new(), Vec::new(), 0);
 
     if !unloading {
-        attach_meta = match meta::prog_metadata(&obj, nr_maps, nr_progs) {
-            Ok(m) => m,
-            Err(err) => return err,
-        };
-        (decoder_blob, nr_decoders) =
-            match decoders::blob(&obj, c.src_path.map(CStr::to_bytes), name) {
-                Ok(b) => b,
-                Err(err) => return err,
-            };
+        attach_meta = meta::prog_metadata(&obj, nr_maps, nr_progs)?;
+        (decoder_blob, nr_decoders) = decoders::blob(&obj, c.src_path.map(CStr::to_bytes), name)?;
     }
     let mut opts = GenOpts {
         gen_hash: true,
@@ -668,16 +673,20 @@ fn finalize(mut obj: Object, out: &CStr, c: &Contents, keys: (&CStr, &CStr)) -> 
     };
     if !c.policy_labels.is_empty() {
         let le = |off: usize| {
-            u32::from_le_bytes(c.policy_labels[off..off + 4].try_into().unwrap_or_default())
+            c.policy_labels
+                .get(off..off + 4)?
+                .try_into()
+                .ok()
+                .map(u32::from_le_bytes)
         };
-        let (map_idx, socket_idx) = (le(12), le(16));
+        let (map_idx, socket_idx) = le(12).zip(le(16)).ok_or(-EINVAL)?;
         if map_idx >= nr_maps
             || map_idx >= MAPS_MAX
             || socket_idx >= nr_maps
             || socket_idx >= MAPS_MAX
             || map_idx == socket_idx
         {
-            return -EINVAL;
+            return Err(-EINVAL);
         }
         opts.reuse_map_mask = (1u64 << map_idx) | (1u64 << socket_idx);
     }
@@ -685,14 +694,14 @@ fn finalize(mut obj: Object, out: &CStr, c: &Contents, keys: (&CStr, &CStr)) -> 
         Ok(l) => l,
         Err(err) => {
             error(format!("generate loader: {err}").as_bytes());
-            return err;
+            return Err(err);
         }
     };
     // The name the pin, the archive and the register event carry, the
     // attach sites, the unload target: signed with the data, since the
     // header is not.
     if name.len() >= NAME_MAX {
-        return -ENAMETOOLONG;
+        return Err(-ENAMETOOLONG);
     }
     let mut signed_name = [0u8; NAME_MAX];
     signed_name[..name.len()].copy_from_slice(name);
@@ -709,34 +718,31 @@ fn finalize(mut obj: Object, out: &CStr, c: &Contents, keys: (&CStr, &CStr)) -> 
         }
     }
     let insns = &insns[..];
-    let signed = match compose_signed_data(&data, &sections) {
-        Ok(s) => s,
-        Err(err) => return err,
-    };
+    let signed = compose_signed_data(&data, &sections)?;
     let loader_data = [insns, &signed].concat();
     // SAFETY: an all-zero container, given the loader and its data.
     let mut view: Upatch = unsafe { core::mem::zeroed() };
     view.map = loader_data.as_ptr();
-    view.hdr.loader_insns_len = insns.len() as u32;
-    view.hdr.data_off = insns.len() as u32;
-    view.hdr.data_len = signed.len() as u32;
+    view.hdr.loader_insns_len = u32::try_from(insns.len()).map_err(|_| -E2BIG)?;
+    view.hdr.data_off = view.hdr.loader_insns_len;
+    view.hdr.data_len = u32::try_from(signed.len()).map_err(|_| -E2BIG)?;
     let mut rodata_data_off = 0;
     match upatch_rodata::data_offset(&view, &mut rodata_data_off) {
         0 => {}
         err if err == -ENOENT => rodata_data_off = 0,
-        err => return err,
+        err => return Err(err),
     }
     let (sig, digest) = match sign(insns, &signed, keys) {
         Ok(s) => s,
         Err(err) => {
             error(format!("cms_sign: {err}").as_bytes());
-            return err;
+            return Err(err);
         }
     };
     let sig_off = HEADER_SIZE + insns.len();
     let data_off = sig_off + sig.len();
     if data_off > FILE_MAX || signed.len() > FILE_MAX - data_off {
-        return -E2BIG;
+        return Err(-E2BIG);
     }
     let hdr = Header {
         name,
@@ -764,7 +770,7 @@ fn finalize(mut obj: Object, out: &CStr, c: &Contents, keys: (&CStr, &CStr)) -> 
         Err(e) => {
             let err = errno_of(&e);
             error(&[b"open ", out.to_bytes(), b": ", strerr(-err)].concat());
-            return err;
+            return Err(err);
         }
     };
     let written = [&hdr.bytes()[..], insns, &sig, &signed]
@@ -774,7 +780,7 @@ fn finalize(mut obj: Object, out: &CStr, c: &Contents, keys: (&CStr, &CStr)) -> 
     drop(file);
     if let Err(e) = written {
         let _ = std::fs::remove_file(out_path);
-        return errno_of(&e);
+        return Err(errno_of(&e));
     }
     let directive = if unloading { " UNLOAD" } else { "" };
     let msg = format!(
@@ -787,7 +793,7 @@ fn finalize(mut obj: Object, out: &CStr, c: &Contents, keys: (&CStr, &CStr)) -> 
         String::from_utf8_lossy(name),
     );
     info(msg.as_bytes());
-    0
+    Ok(())
 }
 
 /// The policy labels a package signs: their header and the entries,
@@ -847,11 +853,8 @@ pub(super) fn load(
     policies: &[u8],
     nr: u32,
     keys: (&CStr, &CStr),
-) -> c_int {
-    let err = check_name(name.to_bytes());
-    if err != 0 {
-        return err;
-    }
+) -> Result<(), c_int> {
+    check_name(name.to_bytes())?;
     let path = bpf_o.to_bytes();
     let obj = std::fs::read(super::path(path))
         .map_err(|e| errno_of(&e))
@@ -860,14 +863,11 @@ pub(super) fn load(
         Ok(o) => o,
         Err(err) => {
             error(format!("open {}: {err}", String::from_utf8_lossy(bpf_o.to_bytes())).as_bytes());
-            return err;
+            return Err(err);
         }
     };
     let labels = if nr != 0 {
-        match policy_labels(&obj, policies, nr) {
-            Ok(l) => l,
-            Err(err) => return err,
-        }
+        policy_labels(&obj, policies, nr)?
     } else {
         Vec::new()
     };
@@ -891,11 +891,13 @@ static UNLOAD_TEMPLATE: &[u8] = include_bytes!("../../../../bpf/unload.bpf.o");
 
 /// Signs the directive that unloads upatch `name`, whose payload has
 /// the digest `payload`, at `out`.
-pub(super) fn unload(name: &CStr, payload: &[u8; 32], out: &CStr, keys: (&CStr, &CStr)) -> c_int {
-    let err = check_name(name.to_bytes());
-    if err != 0 {
-        return err;
-    }
+pub(super) fn unload(
+    name: &CStr,
+    payload: &[u8; 32],
+    out: &CStr,
+    keys: (&CStr, &CStr),
+) -> Result<(), c_int> {
+    check_name(name.to_bytes())?;
     let data = UNLOAD_TEMPLATE;
     // Named as libbpf names it opened from unload.bpf.o: from memory,
     // libbpf would name it from its address, and its .rodata map so.
@@ -903,23 +905,23 @@ pub(super) fn unload(name: &CStr, payload: &[u8; 32], out: &CStr, keys: (&CStr, 
         Ok(o) => o,
         Err(err) => {
             error(format!("open embedded unload template: {err}").as_bytes());
-            return err;
+            return Err(err);
         }
     };
     let Some(rodata) = obj.rodata_mut() else {
         error(b"unload template has no .rodata map");
-        return -EINVAL;
+        return Err(-EINVAL);
     };
     let n = name.to_bytes();
     if n.len() >= NAME_MAX {
-        return -ENAMETOOLONG;
+        return Err(-ENAMETOOLONG);
     }
     let mut params = [0u8; UNLOAD_PARAMS];
     params[..n.len()].copy_from_slice(n);
     params[NAME_MAX..].copy_from_slice(payload);
     if let Err(err) = rodata.set_initial_value(&params) {
         error(format!("set_initial_value(.rodata): {err}").as_bytes());
-        return err;
+        return Err(err);
     }
     // The target reads the name and the expected payload from the signed
     // sections, not from the loader's .rodata, which it has no portable
@@ -944,7 +946,7 @@ pub(super) fn load_object(
     name: &CStr,
     pkey: &CStr,
     cert: &CStr,
-) -> c_int {
+) -> Result<(), c_int> {
     load(bpf_o, src_path, out, name, &[], 0, (pkey, cert))
 }
 
@@ -955,6 +957,6 @@ pub(super) fn unload_directive(
     out: &CStr,
     pkey: &CStr,
     cert: &CStr,
-) -> c_int {
+) -> Result<(), c_int> {
     unload(name, payload, out, (pkey, cert))
 }

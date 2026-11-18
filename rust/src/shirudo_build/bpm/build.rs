@@ -211,13 +211,13 @@ pub(super) fn rodata_apply(
                 Ok(value) => {
                     let (l, p) = (cstring(load), cstring(&patched));
                     let s = cstring(&r.symbol);
-                    let mut ret = package::patch_rodata(&l, &p, &s, &value, keys);
-                    if ret == 0 {
-                        if let Err(e) = std::fs::rename(path(&patched), path(load)) {
-                            ret = -e.raw_os_error().unwrap_or(EIO);
-                        }
-                    }
-                    ret
+                    package::patch_rodata(&l, &p, &s, &value, keys)
+                        .and_then(|()| {
+                            std::fs::rename(path(&patched), path(load))
+                                .map_err(|e| -e.raw_os_error().unwrap_or(EIO))
+                        })
+                        .err()
+                        .unwrap_or(0)
                 }
                 Err(err) => err,
             };
@@ -509,8 +509,8 @@ fn build_upatches(
         if bpf_o == object {
             let _ = std::fs::remove_file(path(&object));
         }
-        if ret != 0 {
-            return if ret < 0 { ret } else { -EIO };
+        if let Err(err) = ret {
+            return err;
         }
         let ret = rodata_apply(spec, i, &load, keys, overrides, false);
         if ret != 0 {
@@ -528,8 +528,8 @@ fn build_upatches(
             &cstring(&unload),
             (&keys.pkey, &keys.cert),
         );
-        if ret != 0 {
-            return if ret < 0 { ret } else { -EIO };
+        if let Err(err) = ret {
+            return err;
         }
     }
     0

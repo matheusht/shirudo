@@ -448,7 +448,7 @@ fn unload(p: &OptParser<'_>, o: &Opts, name: &CStr, pkey: &CStr, cert: &CStr) ->
         }
     };
     let ret = package::unload_directive(name, &digest, output, pkey, cert);
-    if ret == 0 && o.emit_artifacts {
+    if ret.is_ok() && o.emit_artifacts {
         let text = [
             b"emitted:\n  upatch: ",
             output.to_bytes(),
@@ -457,7 +457,7 @@ fn unload(p: &OptParser<'_>, o: &Opts, name: &CStr, pkey: &CStr, cert: &CStr) ->
         .concat();
         print(true, &text);
     }
-    if ret != 0 { 1 } else { 0 }
+    c_int::from(ret.is_err())
 }
 
 fn load(o: &Opts, input: &CStr, pkey: &CStr, cert: &CStr) -> c_int {
@@ -570,7 +570,7 @@ fn load(o: &Opts, input: &CStr, pkey: &CStr, cert: &CStr) -> c_int {
     };
     let ret = package::load_object(bpf_o, src, output, name, pkey, cert);
     drop(temp);
-    if ret == 0 && o.emit_artifacts {
+    if ret.is_ok() && o.emit_artifacts {
         let obj: &[u8] = match emitted {
             Some(p) => p.to_bytes(),
             None => b"(none; input was a pre-compiled object, not recompiled)",
@@ -587,7 +587,7 @@ fn load(o: &Opts, input: &CStr, pkey: &CStr, cert: &CStr) -> c_int {
             .concat(),
         );
     }
-    if ret != 0 { 1 } else { 0 }
+    c_int::from(ret.is_err())
 }
 
 /// `shirudo-build` on `args`, its command line whole.
