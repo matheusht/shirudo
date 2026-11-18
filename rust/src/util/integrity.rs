@@ -165,3 +165,6 @@ mod capi {
         point_meaning(&POINTS, point as usize).as_ptr()
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -13,7 +13,7 @@ use crate::util::bpf_info::{Info, MAP_INFO_SIZE, MAP_MAX_ENTRIES, MAP_VALUE_SIZE
 use crate::util::bpf_sys::{bpf_map_lookup_elem, bpf_obj_get};
 
 /// `TAMPER_MAX` of `bpf/lib/tamper.h`: the tamper points there are.
-pub(crate) const TAMPER_MAX: usize = 42;
+pub(crate) const TAMPER_MAX: usize = 43;
 /// TAMPER_PIN of util/paths.h.
 const TAMPER_PIN: &CStr = c"/run/shirudo/bpffs/tamper";
 
@@ -246,6 +246,11 @@ const POINTS: [Point; TAMPER_MAX] = [
         name: c"SealRlimit",
         meaning: c"resource limit of a shirudo task changed by another task",
     },
+    // SHIRUDO_TAMPER_TPM_WRITE
+    Point {
+        name: c"TpmWrite",
+        meaning: c"protected TPM mutation by an unauthorized task",
+    },
 ];
 
 /// The name of tamper point `point`, "?" past the last.
@@ -327,3 +332,6 @@ mod capi {
         point_name(&POINTS, point as usize).as_ptr()
     }
 }
+
+#[cfg(test)]
+mod tests;

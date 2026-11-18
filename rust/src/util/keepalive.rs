@@ -527,3 +527,6 @@ mod capi {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
