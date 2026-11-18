@@ -254,8 +254,8 @@ fn curl_once(
     let mut headers: *mut CurlSlist = ptr::null_mut();
     let ret = curl_once_headers(c, req, auth, r, file, follow, &mut headers);
 
-    // SAFETY: a list curl built, or NULL.
-    unsafe { curl::curl_slist_free_all(headers) };
+    // SAFETY: a list curl built, or NULL, which the handle is done with.
+    unsafe { crate::util::curl::slist_free_sensitive(headers) };
     ret
 }
 
@@ -450,8 +450,8 @@ fn get_bearer_token(c: &mut OciClient, challenge: &[u8]) -> c_int {
     unsafe {
         curl::curl_free(esc[0].cast());
         curl::curl_free(esc[1].cast());
-        curl::curl_slist_free_all(headers);
         curl::curl_easy_cleanup(handle);
+        crate::util::curl::slist_free_sensitive(headers);
         tls_ca_cleanup(&mut c.tls_ca);
     }
     buffer_free(&mut r.body);

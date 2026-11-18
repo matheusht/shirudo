@@ -20,8 +20,8 @@ use crate::sys::curl::{
     CURLOPT_WRITEDATA, CURLOPT_WRITEFUNCTION, CURLUPART_HOST, CURLUPART_SCHEME, CURLUPART_URL,
     Curl, CurlCode, CurlSlist, curl_easy_cleanup, curl_easy_getinfo, curl_easy_init,
     curl_easy_perform, curl_easy_strerror, curl_free, curl_global_cleanup, curl_global_init,
-    curl_slist_append, curl_slist_free_all, curl_url, curl_url_cleanup, curl_url_get, curl_url_set,
-    set_callback, set_long, set_off, set_ptr,
+    curl_slist_append, curl_url, curl_url_cleanup, curl_url_get, curl_url_set, set_callback,
+    set_long, set_off, set_ptr,
 };
 use crate::sys::libc::{Tm, getrandom, strptime, timegm};
 use crate::text::parse_s64;
@@ -97,7 +97,7 @@ impl Slist {
 impl Drop for Slist {
     fn drop(&mut self) {
         // SAFETY: the list, or NULL, freed once.
-        unsafe { curl_slist_free_all(self.0) };
+        unsafe { crate::util::curl::slist_free_sensitive(self.0) };
     }
 }
 

@@ -251,12 +251,11 @@ UTIL_SRCS := \
     util/log.c \
      \
      \
-    util/chain_history.c \
+     \
      \
     util/string.c \
     util/bpm_tree_outcomes.c \
     util/bpm_tree_sync_compat.c \
-    util/curl.c \
     util/kconfig.c \
      \
      \
@@ -591,9 +590,8 @@ shirudo-target: $(MAIN_OBJ)  $(UTIL_OBJS) $(VERSION_OBJ) $(LIBBPF_A) \
 tools/shirudo-build/shirudo-build: $(BUILD_MAIN_OBJ) $(BUILD_OBJS) \
                                    util/log.o \
                                    util/malloc.o util/paths.o \
-                                   util/string.o util/curl.o \
-                                   util/bpm_tree_sync_compat.o \
-                                   util/chain_history.o $(VERSION_OBJ) \
+                                   util/string.o util/bpm_tree_sync_compat.o \
+                                   $(VERSION_OBJ) \
                                    $(LIBBPF_A) $(RUST_LIB)
 	@printf '  LD      $@\n'
 	$(Q)$(LD) $(CFLAGS) $(HARDEN_LDFLAGS) $(LDFLAGS) $(RPATH_LDFLAGS) -o $@ $^ \
@@ -996,7 +994,7 @@ testing/helper/test-signed-load: testing/helper/test-signed-load.c
 	    -o $@ $^ -lcrypto
 
 testing/helper/test-otel-map: testing/helper/test-otel-map.c \
-                        util/curl.o util/upatch_pins.o \
+                        util/upatch_pins.o \
                          util/string.o util/log.o \
                         util/paths.o \
                          util/malloc.o $(LIBBPF_A)  \
@@ -1232,8 +1230,8 @@ FUZZ_LIBS := $(RUST_FUZZ_LIB) $(LIBCRYPTO_LIBS) $(LIBSSL_LIBS) \
              -Wl,-z,start-stop-gc
 FUZZ_BASE := util/string.c  util/malloc.c testing/fuzz/log.c
 FUZZ_SEAL :=
-FUZZ_OCI := util/curl.c  $(FUZZ_SEAL)
-FUZZ_PACKAGE :=  util/chain_history.c \
+FUZZ_OCI := $(FUZZ_SEAL)
+FUZZ_PACKAGE :=   \
                  $(FUZZ_OCI)
 
 FUZZ_TARGETS := $(patsubst testing/fuzz/%.c,$(FUZZ_OUT)/%, \
@@ -1248,7 +1246,7 @@ $(FUZZ_OUT)/fuzz-oci-manifest: testing/fuzz/fuzz-oci-manifest.c \
 $(FUZZ_OUT)/fuzz-bpm-index: testing/fuzz/fuzz-bpm-index.c \
                              $(FUZZ_BASE) $(FUZZ_PACKAGE)
 $(FUZZ_OUT)/fuzz-tree: testing/fuzz/fuzz-tree.c $(FUZZ_BASE) \
-                         util/chain_history.c \
+                          \
                          $(FUZZ_OCI)
 $(FUZZ_OUT)/fuzz-upatch: testing/fuzz/fuzz-upatch.c $(FUZZ_BASE) \
 
@@ -1269,7 +1267,7 @@ $(FUZZ_OUT)/fuzz-tpm-wire: testing/fuzz/fuzz-tpm-wire.c $(FUZZ_BASE) \
                              \
                             $(FUZZ_SEAL)
 $(FUZZ_OUT)/fuzz-attest: testing/fuzz/fuzz-attest.c $(FUZZ_BASE) \
-                           util/chain_history.c \
+                            \
                            $(FUZZ_SEAL) \
                            \
                           $(VERSION_OBJ)  \
@@ -1320,7 +1318,7 @@ $(FUZZ_OUT)/fuzz-config-update: testing/fuzz/fuzz-config-update.c \
                                  $(FUZZ_BASE) \
                                   $(FUZZ_SEAL)
 FUZZ_TREE_STATE :=  \
-                   util/chain_history.c  $(FUZZ_OCI) \
+                     $(FUZZ_OCI) \
                    util/kconfig.c
 $(FUZZ_OUT)/fuzz-tree-state: testing/fuzz/fuzz-tree-state.c $(FUZZ_BASE) \
                               $(FUZZ_TREE_STATE)
@@ -1331,8 +1329,7 @@ $(FUZZ_OUT)/fuzz-quote-check: testing/fuzz/fuzz-quote-check.c $(FUZZ_BASE)
 $(FUZZ_OUT)/fuzz-upatch-info: testing/fuzz/fuzz-upatch-info.c $(FUZZ_BASE) \
                               testing/fuzz/output.c  \
                               builtin.h \
-                              util/curl.c \
-                               \
+                                                         \
                                util/java_agent.c  \
                               \
                               util/paths.c \
@@ -1362,7 +1359,7 @@ $(FUZZ_OUT)/fuzz-bpm-info: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) $(LIBELF_LIBS)
 $(FUZZ_OUT)/fuzz-attest-report: testing/fuzz/fuzz-attest-report.c \
                                $(FUZZ_BASE) testing/fuzz/output.c \
                                 builtin.h  \
-                               util/chain_history.c \
+                                \
                                \
                                 \
                                \
