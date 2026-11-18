@@ -323,14 +323,8 @@ fn update_one(name: &[u8]) -> Result {
 }
 
 /// `shirudo bpm repo update [<source>]`.
-pub(super) fn repo_update(args: &[&[u8]]) -> c_int {
-    if args.len() == 4 && crate::util::help::is_help(Some(args[3])) {
-        super::eprint(b"usage: shirudo bpm repo update [<source>]\n");
-        return 0;
-    }
-    if args.len() > 4 {
-        return 2;
-    }
+/// `bpm repo update` of the source `named`, or of every one.
+pub(super) fn repo_update(named: Option<&[u8]>) -> c_int {
     if !curl_ready() {
         return fail(b"initialize curl", -EIO);
     }
@@ -339,7 +333,9 @@ pub(super) fn repo_update(args: &[&[u8]]) -> c_int {
         Err(err) => return finish(None, Err(err), b"lock"),
     };
     let mut ret = Ok(());
-    if args.len() == 3 {
+    if let Some(name) = named {
+        ret = update_one(name);
+    } else {
         let registries = match source::registries() {
             Ok(d) => Some(d),
             Err(err) if err == -ENOENT => None,
@@ -361,8 +357,6 @@ pub(super) fn repo_update(args: &[&[u8]]) -> c_int {
                 ret = Err(-EIO);
             }
         }
-    } else {
-        ret = update_one(args[3]);
     }
     finish(Some(held), ret, b"repo update")
 }

@@ -10,7 +10,7 @@ use std::ffi::CString;
 
 use super::{
     BPM_KEYS_DIR, DirStream, INDEX_REPOSITORY_NAME, REGISTRIES_DIR, Result, Stream, TREE_ETC_PATH,
-    eprint, error, path, print, remove, status,
+    error, path, print, remove, status,
 };
 use crate::errno::{E2BIG, EINVAL, ENAMETOOLONG, EPERM};
 use crate::sys::libc::{O_DIRECTORY, O_RDONLY, PATH_MAX, close};
@@ -19,7 +19,6 @@ use crate::util::bpm_oci::{Client, MAX_DIGEST, MAX_ENDPOINT, MAX_NAME, name_ok};
 use crate::util::bpm_package::{verify_cms, verify_cms_fd};
 use crate::util::bpm_source_config::{parse_source_line, parse_tree_line};
 use crate::util::crypto_openssl::{Cert, cert_free, cert_read_file};
-use crate::util::help::is_help;
 use crate::util::image_config::{self, REGISTRIES, TREE_CONF};
 use crate::util::io::check_trusted;
 use crate::util::json::JsonEmit;
@@ -227,45 +226,12 @@ fn save(s: &Source) -> Result {
     status(unsafe { seal_write_file(file.as_ptr(), data.as_ptr().cast(), data.len(), 0o644) })
 }
 
-const CONFIG_USAGE: &[u8] = b"usage: shirudo bpm config register add <source> \
-oci://<registry> [--index-repository <repository>] --cert <certificate>\n       \
-shirudo bpm config register {list|remove} ...\n       \
-shirudo bpm config update --base-package <package.bee|oci://host/repo:tag> \
---version <version> [--file <name>.bee] [options]\n";
-
-/// `shirudo bpm config`, `args` from "config" on.
-pub(super) fn config(args: &[&[u8]]) -> c_int {
-    let op = args.get(1).copied();
-    let n = args.len();
-
-    if op.is_none() || is_help(op) {
-        eprint(CONFIG_USAGE);
-        return if op.is_some() { 0 } else { 2 };
-    }
-    if op != Some(b"register") || n < 3 {
-        return 2;
-    }
-    match args[2] {
-        b"list" => list(n == 4 && args[3] == b"--json", n),
-        b"add" | b"remove" | b"rm" if image_config::active() => {
-            error(&[b"image mode: change repository definitions and keys in \
-                     a signed config image, then run `shirudo image update`"]);
-            1
-        }
-        b"remove" | b"rm" if n == 4 => unregister(args[3]),
-        b"add" if n >= 5 => register(&args[3..]),
-        _ => 2,
-    }
-}
-
-fn list(json: bool, n: usize) -> c_int {
+/// `bpm config register list`.
+pub(super) fn list(json: bool) -> c_int {
     let mut buf = [0u8; 8192];
     let mut e = JsonEmit::fixed(buf.as_mut_ptr().cast(), buf.len());
     let mut count = 0;
 
-    if n != 3 && !json {
-        return 2;
-    }
     if json {
         e.obj_open();
         e.kv_int(b"schema", 1);
@@ -300,7 +266,8 @@ fn list(json: bool, n: usize) -> c_int {
     0
 }
 
-fn unregister(name: &[u8]) -> c_int {
+/// `bpm config register remove`.
+pub(super) fn unregister(name: &[u8]) -> c_int {
     let Ok(file) = source_path(name) else {
         return 2;
     };
@@ -322,59 +289,46 @@ fn unregister(name: &[u8]) -> c_int {
     0
 }
 
-/// `register add <source> <endpoint> [options]`, `args` from the source.
-fn register(args: &[&[u8]]) -> c_int {
+/// Whether a source's name and endpoint fit its record.
+pub(super) fn fits(name: &[u8], endpoint: &[u8]) -> bool {
+    let s = Source::new();
+
+    name.len() < s.name.len() && endpoint.len() < s.endpoint.len()
+}
+
+/// `bpm config register add`: the source `name` at `endpoint`, its
+/// index at `index_repository` or else <name>/bpm-index, signed for the
+/// certificate at `cert`.
+pub(super) fn register(
+    name: &[u8],
+    endpoint: &[u8],
+    cert: &[u8],
+    index_repository: Option<&[u8]>,
+) -> c_int {
     let mut s = Source::new();
-    let mut key: Option<&[u8]> = None;
-    let mut i = 2;
 
-    if strscpy(&mut s.name, args[0]).is_err() || strscpy(&mut s.endpoint, args[1]).is_err() {
-        error(&[b"bpm: register add: name or endpoint too long"]);
+    if strscpy(&mut s.name, name).is_err() || strscpy(&mut s.endpoint, endpoint).is_err() {
         return 2;
     }
-    while i < args.len() {
-        let a = args[i];
-
-        if let Some(cert) = a.strip_prefix(b"--cert=") {
-            key = Some(cert);
-        } else if a == b"--cert" && i + 1 < args.len() {
-            i += 1;
-            key = Some(args[i]);
-        } else if let Some(repo) = a.strip_prefix(b"--index-repository=") {
-            if strscpy(&mut s.index_repository, repo).is_err() {
-                return 2;
-            }
-        } else if a == b"--index-repository" && i + 1 < args.len() {
-            i += 1;
-            if strscpy(&mut s.index_repository, args[i]).is_err() {
-                return 2;
-            }
-        } else if a == b"--index-repository" {
-            return 2;
-        } else {
-            error(&[b"bpm: register add: unknown option '", a, b"'"]);
-            return 2;
-        }
-        i += 1;
-    }
-    if s.index_repository[0] == 0
-        && strsprintf(
+    let indexed = match index_repository {
+        Some(repo) => strscpy(&mut s.index_repository, repo).is_ok(),
+        None => strsprintf(
             &mut s.index_repository,
-            &[cstr(&s.name), b"/", INDEX_REPOSITORY_NAME],
+            &[name, b"/", INDEX_REPOSITORY_NAME],
         )
-        .is_err()
-    {
+        .is_ok(),
+    };
+    if !indexed {
         return 2;
     }
-    let valid = key.is_some_and(|key| {
-        let key = super::message(&[key]);
-        let mut cert = Cert::new();
-        // SAFETY: a C string and a certificate to fill, freed after.
-        let read = unsafe { cert_read_file(key.as_ptr(), &mut cert) } == 0;
-        // SAFETY: the certificate, read or not.
-        unsafe { cert_free(&mut cert) };
-        read
-    }) && name_ok(cstr(&s.name))
+    let key = super::message(&[cert]);
+    let mut read = Cert::new();
+    // SAFETY: a C string and a certificate to fill, freed after.
+    let cert_ok = unsafe { cert_read_file(key.as_ptr(), &mut read) } == 0;
+    // SAFETY: the certificate, read or not.
+    unsafe { cert_free(&mut read) };
+    let valid = cert_ok
+        && name_ok(cstr(&s.name))
         && Client::new().parse_endpoint(s.endpoint()).is_ok()
         && index_repository_valid(s.endpoint(), s.index_repository()).is_ok();
     if !valid {
@@ -392,7 +346,6 @@ fn register(args: &[&[u8]]) -> c_int {
     let Ok(managed) = path(&[BPM_KEYS_DIR.as_bytes(), b"/", cstr(&s.name), b".der"]) else {
         return 1;
     };
-    let key = super::message(&[key.unwrap_or_default()]);
     if super::package::copy_file(&key, &managed, 0o644, false).is_err() {
         return 1;
     }

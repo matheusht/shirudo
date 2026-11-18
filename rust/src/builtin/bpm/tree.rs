@@ -11,10 +11,10 @@
 use core::ffi::c_int;
 
 use super::{
-    Result, TREE_PENDING_PATH, TREE_STATUS_DIR, TREE_USAGE, curl_ready, eprint, error, fail,
-    finish, lock, message, path, print, remove, status, warn,
+    Result, TREE_PENDING_PATH, TREE_STATUS_DIR, curl_ready, error, fail, finish, lock, message,
+    path, print, remove, status, warn,
 };
-use crate::errno::{EINVAL, EIO, EKEYREJECTED, ENOENT, ENOMEM, ERANGE};
+use crate::errno::{EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT, ENOMEM, ERANGE};
 use crate::sys::upatch::UPATCH_INSTALL_TARGET_MISSING;
 use crate::text::{cstr, strscpy};
 use crate::util::bpm_oci::{Client, MAX_DIGEST};
@@ -36,7 +36,6 @@ use crate::util::eventlog::{
     eventlog_append, eventlog_lock, eventlog_record_open, eventlog_tree_op_measured,
     eventlog_unlock,
 };
-use crate::util::help::is_help;
 use crate::util::hex::sha256_digest_encode;
 use crate::util::json::JsonEmit;
 use crate::util::keys::{TrustedSet, keys_load_image_root};
@@ -832,40 +831,11 @@ fn write_report(path: Option<&[u8]>, sync: &Sync, tpm: bool) -> Result {
     }
 }
 
-/// The sync, `args` from "tree" on: `tree sync [--dry-run]
-/// [--report=<path>]`.
-fn sync(args: &[&[u8]]) -> Result {
-    let mut dry_run = false;
-    let mut report: &[u8] = b"";
-    let mut i = 2;
-
-    if args.len() < 2 || args[1] != b"sync" {
-        return Err(-EINVAL);
-    }
-    while i < args.len() {
-        let a = args[i];
-
-        if a == b"--dry-run" {
-            dry_run = true;
-        } else if a.starts_with(b"--report=") || (a == b"--report" && i + 1 < args.len()) {
-            let p = if a.get(8) == Some(&b'=') {
-                &a[9..]
-            } else {
-                i += 1;
-                args[i]
-            };
-            if p.len() >= crate::sys::libc::PATH_MAX {
-                error(&[b"bpm tree sync: report path too long"]);
-                return Err(2);
-            }
-            report = p;
-        } else if is_help(Some(a)) {
-            eprint(b"usage: shirudo bpm tree sync [--dry-run] [--report=<path>]\n");
-            return Ok(());
-        } else {
-            return Err(-EINVAL);
-        }
-        i += 1;
+/// The sync, a dry run that changes nothing or one that applies, and
+/// its report to `report`, standard output for none or "-".
+fn sync(dry_run: bool, report: Option<&[u8]>) -> Result {
+    if report.is_some_and(|r| r.len() >= crate::sys::libc::PATH_MAX) {
+        return Err(-ENAMETOOLONG);
     }
     // Optional integration: manual `shirudo upatch` remains valid.
     let cfg = match super::source::load_tree() {
@@ -920,22 +890,13 @@ fn sync(args: &[&[u8]]) -> Result {
         sync.state.last_seq = sync.dry_seq;
     }
     // "-" is standard output, where the report goes without --report.
-    let to = (!report.is_empty() && report != b"-").then_some(report);
+    let to = report.filter(|r| !r.is_empty() && *r != b"-");
     write_report(to, &sync, chain_bound())
 }
 
 /// `shirudo bpm tree sync`, which takes the bpm lock only once a tree is
 /// configured, so that a node without one needs no writable state.
-pub(super) fn tree(args: &[&[u8]]) -> c_int {
-    let n = args.len();
-
-    if n > 6 {
-        return 2;
-    }
-    if n == 4 && is_help(Some(args[3])) {
-        eprint(TREE_USAGE);
-        return 0;
-    }
+pub(super) fn sync_cmd(dry_run: bool, report: Option<&[u8]>) -> c_int {
     if !tree_configured() {
         return 0;
     }
@@ -946,5 +907,5 @@ pub(super) fn tree(args: &[&[u8]]) -> c_int {
         Ok(held) => held,
         Err(err) => return finish(None, Err(err), b"lock"),
     };
-    finish(Some(held), sync(&args[1..]), b"tree sync")
+    finish(Some(held), sync(dry_run, report), b"tree sync")
 }

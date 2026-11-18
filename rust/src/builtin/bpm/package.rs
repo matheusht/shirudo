@@ -16,8 +16,8 @@ use std::os::unix::fs::MetadataExt;
 use super::fetch::{self, sha256_file};
 use super::source::{self, Source};
 use super::{
-    PACKAGE_MEDIA, PACKAGES_DIR, Result, STAGING_DIR, curl_ready, eprint, error, fail, finish,
-    lock, message, os_err, path, print, remove, status, warn,
+    PACKAGE_MEDIA, PACKAGES_DIR, Result, STAGING_DIR, curl_ready, error, fail, finish, lock,
+    message, os_err, path, print, remove, status, warn,
 };
 use crate::errno::{E2BIG, EEXIST, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT};
 use crate::sys::libc::{F_OK, O_CREAT, O_EXCL, O_NOFOLLOW, O_TRUNC, O_WRONLY, access};
@@ -29,7 +29,6 @@ use crate::util::bpm_package::{
     IndexEntry, UpatchMember, extract, semver_compare, upatch_member, upatch_pair,
 };
 use crate::util::bpm_state::{self, BpmStateEntry};
-use crate::util::help::is_help;
 use crate::util::json::JsonEmit;
 use crate::util::seal::{seal_mkdir_p, seal_open};
 
@@ -542,17 +541,7 @@ fn padded(s: &[u8], width: usize) -> Vec<u8> {
 }
 
 /// `shirudo bpm list [--json]`.
-pub(super) fn list(args: &[&[u8]]) -> c_int {
-    let json = args.len() == 3 && args[2] == b"--json";
-
-    if args.len() != 2 && !json {
-        eprint(b"usage: shirudo bpm list [--json]\n");
-        return if args.len() == 3 && is_help(Some(args[2])) {
-            0
-        } else {
-            2
-        };
-    }
+pub(super) fn list(json: bool) -> c_int {
     let state = match bpm_state::read_all() {
         Ok(state) => state,
         Err(err) => return fail(b"list", err),
@@ -612,12 +601,7 @@ pub(super) fn list(args: &[&[u8]]) -> c_int {
 }
 
 /// `shirudo bpm uninstall <package>`.
-pub(super) fn uninstall(args: &[&[u8]]) -> c_int {
-    if args.len() != 3 || is_help(Some(args[2])) {
-        eprint(b"usage: shirudo bpm uninstall <package>\n");
-        return if args.len() == 3 { 0 } else { 2 };
-    }
-    let name = args[2];
+pub(super) fn uninstall(name: &[u8]) -> c_int {
     if !name_ok(name) {
         return fail(b"uninstall", -EINVAL);
     }

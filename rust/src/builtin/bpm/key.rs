@@ -4,55 +4,24 @@
 //! Package signing certificates: fingerprinting one, installing it as
 //! the node's package signer, and listing those installed.
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::CStr;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Write;
 use std::os::fd::{AsFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 
-use super::{
-    CERT_PATH, KEYS_DIR, Result, curl_ready, error, fail, finish, item, last_err, message, os_err,
-    path, print, remove, show_help, status,
-};
-use crate::errno::{EEXIST, EIO, EKEYREJECTED, ENOENT, EPERM};
+use super::{CERT_PATH, KEYS_DIR, Result, last_err, message, os_err, path, print, remove, status};
+use crate::errno::{EEXIST, EKEYREJECTED, ENOENT, EPERM};
 use crate::sys::libc::{O_CREAT, O_EXCL, O_WRONLY, close};
 use crate::text::name_has_suffix;
 use crate::util::bpm_package::read_member_fd;
 use crate::util::crypto_openssl::{
     Cert, cert_free, cert_pubkey_digest, cert_read_file, cert_read_memory,
 };
-use crate::util::help::{HelpItem, is_help, is_list_cmds, print_subcmd_list, resolve_subcommand};
-use crate::util::image_config;
 use crate::util::json::JsonEmit;
 use crate::util::keys::{DER_MAX, read_der_bytes};
 use crate::util::seal::{seal_inherit_path, seal_mkdir_p, seal_open};
-
-const ITEMS: [HelpItem; 3] = [
-    item(
-        c"add",
-        c"install a trusted package certificate and print its fingerprint",
-    ),
-    item(
-        c"fingerprint",
-        c"print the SHA-256 fingerprint of a certificate's SPKI",
-    ),
-    item(c"list", c"list installed certificate fingerprints"),
-];
-
-fn help() {
-    show_help(
-        c"shirudo bpm key <add|fingerprint|list>",
-        c"Manage package signing certificates.",
-        &ITEMS,
-        Some(
-            c"add and fingerprint accept a certificate file, .bee package, or\n\
-oci://registry/repository:tag. list reads /var/lib/shirudo/keys.\n\
-Examples:\n  shirudo bpm key fingerprint ./package.bee\n  \
-shirudo bpm key add oci://quay.io/namespace/package:tag\n  shirudo bpm key list",
-        ),
-    );
-}
 
 fn os(path: &CStr) -> &OsStr {
     OsStr::from_bytes(path.to_bytes())
@@ -236,7 +205,7 @@ fn installed() -> Result<Vec<[u8; 64]>> {
     Ok(found)
 }
 
-fn list(json: bool) -> Result {
+pub(super) fn list(json: bool) -> Result {
     let found = installed()?;
 
     if json {
@@ -267,57 +236,15 @@ fn list(json: bool) -> Result {
     Ok(())
 }
 
-/// `shirudo bpm key`, `raw` and `args` from "key" on.
-pub(super) fn key(raw: &[*const c_char], args: &[&[u8]]) -> c_int {
-    let n = args.len();
-    let arg = |i: usize| args.get(i).copied();
+/// `bpm key add` or `bpm key fingerprint` of `source`: its fingerprint
+/// printed, once add installed it.
+pub(super) fn show(source: &[u8], add: bool) -> Result {
+    let der = source_read(source)?;
+    let hex = fingerprint(&der)?;
 
-    if n < 2 || is_help(arg(1)) {
-        help();
-        return if n < 2 { 2 } else { 0 };
+    if add {
+        install(&der)?;
     }
-    if is_list_cmds(arg(1)) {
-        // SAFETY: items whose names are C strings.
-        unsafe { print_subcmd_list(&ITEMS) };
-        return 0;
-    }
-    // SAFETY: a label, the caller's word and items with names.
-    let sub = unsafe { resolve_subcommand(c"bpm key".as_ptr(), raw[1], &ITEMS) };
-    if sub.is_null() {
-        return 2;
-    }
-    // SAFETY: the name of one of the items.
-    let sub = unsafe { CStr::from_ptr(sub) }.to_bytes();
-    if n == 3 && is_help(arg(2)) {
-        help();
-        return 0;
-    }
-    let listing = sub == b"list";
-    if (listing && n != 2 && !(n == 3 && args[2] == b"--json")) || (!listing && n != 3) {
-        help();
-        return 2;
-    }
-    let add = sub == b"add";
-    if add && image_config::active() {
-        error(&[b"image mode: add vouched BPF signers to the signed config selected for boot and reboot to enroll them"]);
-        return 1;
-    }
-    if listing {
-        return match list(n == 3) {
-            Ok(()) => 0,
-            Err(err) => fail(b"key list", err),
-        };
-    }
-    if !curl_ready() {
-        return fail(b"initialize curl", -EIO);
-    }
-    let ret = source_read(args[2]).and_then(|der| {
-        let hex = fingerprint(&der)?;
-        if add {
-            install(&der)?;
-        }
-        print(&[&hex[..], b"\n"].concat());
-        Ok(())
-    });
-    finish(None, ret, if add { b"key add" } else { b"key fingerprint" })
+    print(&[&hex[..], b"\n"].concat());
+    Ok(())
 }
