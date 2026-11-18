@@ -35,9 +35,7 @@ use crate::util::crypto_openssl::{
     Cert, cert_free, cert_key_algorithm, cert_read_der, cms_signed_by, complain_stack,
     key_type_name, openssl_complain, sha256, utc, x509_from_der_bio,
 };
-use crate::util::eventlog::{
-    eventlog_append, eventlog_lock, eventlog_record_open, eventlog_unlock,
-};
+use crate::util::eventlog;
 use crate::util::format::fputs_sanitized;
 use crate::util::help::{
     Help, HelpItem, HelpSection, is_help, is_list_cmds, print_help, print_subcmd_list,
@@ -898,8 +896,7 @@ fn append_key_event(ty: &CStr, fp_hex: &[u8], sha_hex: &[u8], event: &[u8; 32]) 
     let mut buf = [0u8; 1024];
     let mut e = JsonEmit::fixed(&mut buf);
 
-    // SAFETY: the emitter, a C string and the event.
-    unsafe { eventlog_record_open(&mut e, ty.as_ptr(), event.as_ptr()) };
+    eventlog::record_open(&mut e, ty.to_bytes(), event);
     e.obj_open_key(b"key");
     e.kv_string(b"fingerprint", fp_hex);
     e.kv_string(b"cert_sha256", sha_hex);
@@ -914,8 +911,7 @@ fn append_key_event(ty: &CStr, fp_hex: &[u8], sha_hex: &[u8], event: &[u8; 32]) 
         ]);
         return e.err();
     }
-    // SAFETY: the emitter's NUL-terminated line.
-    unsafe { eventlog_append(buf.as_ptr().cast()) }
+    eventlog::append(e.output())
 }
 
 /// The register learns of the revocation before anything else changes
@@ -972,18 +968,19 @@ fn measure_revoke_locked(sha256: &[u8; 32], fp_hex: &[u8]) -> c_int {
 }
 
 fn measure_revoke(sha256: &[u8; 32], fp_hex: &[u8]) -> c_int {
-    let lock = eventlog_lock();
-
-    if lock < 0 {
-        error(&[
-            b"keys revoke: cannot take the register lock: ",
-            strerr(-lock),
-            b"; the revocation is NOT measured",
-        ]);
-        return lock;
-    }
+    let lock = match eventlog::lock() {
+        Ok(lock) => lock,
+        Err(err) => {
+            error(&[
+                b"keys revoke: cannot take the register lock: ",
+                strerr(-err),
+                b"; the revocation is NOT measured",
+            ]);
+            return err;
+        }
+    };
     let ret = measure_revoke_locked(sha256, fp_hex);
-    eventlog_unlock(lock);
+    drop(lock);
     ret
 }
 

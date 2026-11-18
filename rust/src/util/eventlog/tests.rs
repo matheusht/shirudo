@@ -68,7 +68,6 @@ fn unfinished_append_is_no_record() {
     assert_eq!(replayed(), Ok(alone));
     write_log(&[lines(&[&init]), load].concat());
     assert_eq!(replayed(), Ok(alone));
-    let unload = std::ffi::CString::new(unload).unwrap();
     assert_eq!(append_to(path(), &unload), 0);
     assert_eq!(replayed(), Ok(both));
 }

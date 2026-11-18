@@ -13,14 +13,14 @@ mod fuzz;
 mod records;
 
 pub(crate) use capi::{
-    eventlog_adopt_pending, eventlog_append, eventlog_append_to, eventlog_boot_id,
-    eventlog_boot_init, eventlog_boot_lines, eventlog_lock, eventlog_path, eventlog_pending_path,
-    eventlog_record_open, eventlog_replay, eventlog_timestamp, eventlog_tree_op_measured,
-    eventlog_unlock, eventlog_upatches, eventlog_would_exceed,
+    eventlog_boot_id, eventlog_boot_init, eventlog_boot_lines, eventlog_path, eventlog_timestamp,
+    eventlog_upatches,
 };
-pub(crate) use records::{EventlogInit, UPATCH_INIT, UPATCH_UNLOAD, upatches_record};
 #[cfg(feature = "test-helpers")]
-pub(crate) use records::{boot_init, boot_lines};
+pub(crate) use records::boot_lines;
+pub(crate) use records::{
+    EventlogInit, UPATCH_INIT, UPATCH_UNLOAD, boot_init, replay, tree_op_measured, upatches_record,
+};
 
 use core::ffi::{CStr, c_int};
 
@@ -30,12 +30,12 @@ use crate::sys::libc::{
     AT_FDCWD, F_OK, O_CLOEXEC, O_RDONLY, PATH_MAX, STATX_SIZE, Statx, access, close, env, errno,
     open, read, statx, unlink,
 };
-use crate::text::{cstr, strsprintf};
+use crate::text::cstr;
 use crate::util::crypto_openssl::sha256_into;
 use crate::util::hex::hex_encode;
 use crate::util::image_config;
 use crate::util::json::{JsonEmit, JsonField, MAX_BYTES, parse_schema};
-use crate::util::seal::{seal_append_line, seal_lock};
+use crate::util::seal;
 use crate::util::timefmt::iso8601;
 
 /// The most bytes one record takes.
@@ -81,9 +81,8 @@ pub(crate) fn pending_path() -> &'static CStr {
 
 /// `line` appended to the log at `path` whole, or nothing of it: a line
 /// cut short would join the next record and fail every reader on it.
-pub(crate) fn append_to(path: &CStr, line: &CStr) -> c_int {
-    // SAFETY: two C strings, and the line's length.
-    let ret = unsafe { seal_append_line(path.as_ptr(), line.as_ptr(), line.to_bytes().len()) };
+pub(crate) fn append_to(path: &CStr, line: &[u8]) -> c_int {
+    let ret = seal::append(path, line);
 
     if ret != 0 {
         crate::log::err(
@@ -102,7 +101,7 @@ pub(crate) fn append_to(path: &CStr, line: &CStr) -> c_int {
 /// `line` appended to the log, after the init record the initrd left
 /// pending, which opens this boot's part of it: a line appended ahead of
 /// that record would drop out of every replay.
-fn append(line: &CStr) -> c_int {
+pub(crate) fn append(line: &[u8]) -> c_int {
     let ret = adopt_pending();
     if ret != 0 {
         return ret;
@@ -112,18 +111,18 @@ fn append(line: &CStr) -> c_int {
 
 /// Whether one more record could take the log past `max` bytes; never
 /// for 0, no limit.
-fn would_exceed(max: u64) -> c_int {
+pub(crate) fn would_exceed(max: u64) -> bool {
     let mut st = Statx::zeroed();
     let mut cur = 0;
 
     if max == 0 {
-        return 0;
+        return false;
     }
     // SAFETY: a C string and a statx to fill.
     if unsafe { statx(AT_FDCWD, path().as_ptr(), 0, STATX_SIZE, &mut st) } == 0 {
         cur = st.stx_size;
     }
-    c_int::from(cur.wrapping_add(LINE_MAX) > max)
+    cur.wrapping_add(LINE_MAX) > max
 }
 
 /// A file read whole, and a NUL after its bytes.
@@ -391,7 +390,7 @@ fn adopt_pending() -> c_int {
             let held = log_holds(line.to_bytes());
 
             match held {
-                0 => append_to(path(), line),
+                0 => append_to(path(), line.to_bytes()),
                 n if n > 0 => 0,
                 e => e,
             }
@@ -411,22 +410,18 @@ fn adopt_pending() -> c_int {
 /// The lock beside the log that keeps one process at a time extending
 /// the register and appending: two measuring commands under locks of
 /// their own interleaved extend, extend, append, append and left a log
-/// that replays the events in the other order.
-fn lock() -> c_int {
-    let mut lock_path = [0u8; PATH_MAX];
-
-    if strsprintf(&mut lock_path, &[path().to_bytes(), b".lock"]).is_err() {
-        return -ENAMETOOLONG;
-    }
-    // SAFETY: strsprintf() terminated the path.
-    unsafe { seal_lock(lock_path.as_ptr().cast()) }
+/// that replays the events in the other order. Held until it goes.
+pub(crate) struct Lock {
+    _fd: seal::Fd,
 }
 
-fn unlock(fd: c_int) {
-    if fd >= 0 {
-        // SAFETY: the lock's fd, closed once, here.
-        unsafe { close(fd) };
+pub(crate) fn lock() -> Result<Lock, c_int> {
+    let lock_path = [path().to_bytes(), b".lock"].concat();
+
+    if lock_path.len() >= PATH_MAX {
+        return Err(-ENAMETOOLONG);
     }
+    seal::lock(&lock_path).map(|fd| Lock { _fd: fd })
 }
 
 /// The pending record adopted under the lock: init adopts it while a
@@ -438,13 +433,13 @@ pub(crate) fn adopt_pending_locked() -> c_int {
     if unsafe { access(pending_path().as_ptr(), F_OK) } != 0 && errno() == ENOENT {
         return 0;
     }
-    let fd = lock();
-    if fd < 0 {
-        return fd;
-    }
+    let lock = match lock() {
+        Ok(lock) => lock,
+        Err(err) => return err,
+    };
     let ret = adopt_pending();
 
-    unlock(fd);
+    drop(lock);
     ret
 }
 
@@ -486,7 +481,7 @@ pub(crate) fn read_boot_id(out: &mut [u8]) {
 }
 
 /// The fields every record opens with, into `e`.
-fn record_open(e: &mut JsonEmit, ty: &[u8], digest: &[u8; 32]) {
+pub(crate) fn record_open(e: &mut JsonEmit, ty: &[u8], digest: &[u8; 32]) {
     let mut ts = [0u8; 32];
     let mut boot_id = [0u8; 64];
     let mut digest_hex = [0u8; 65];

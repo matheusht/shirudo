@@ -35,10 +35,7 @@ use crate::util::bpf_sys::bpf_obj_get;
 use crate::util::chain::{self, memneq_explicit};
 use crate::util::config::{self, Scrubbed};
 use crate::util::crypto_openssl::{Cert, cms_signed_by};
-use crate::util::eventlog::{
-    eventlog_append, eventlog_lock, eventlog_path, eventlog_record_open, eventlog_unlock,
-    eventlog_would_exceed,
-};
+use crate::util::eventlog;
 use crate::util::help::{Help, HelpSection};
 use crate::util::hex::hex_decode;
 use crate::util::io::read_file;
@@ -720,11 +717,10 @@ fn eventlog_room(rep: &mut OpReport, op: &[u8]) -> Result<(), ()> {
     let mut cfg = Scrubbed::new();
     config::load(&mut cfg);
     let max = cfg.eventlog_max_bytes;
-    if eventlog_would_exceed(max) == 0 {
+    if !eventlog::would_exceed(max) {
         return Ok(());
     }
-    // SAFETY: the log's path, a static C string.
-    let path = unsafe { crate::ffi::c_str(eventlog_path()) };
+    let path = eventlog::path().to_bytes();
     log_err(
         &[
             b"upatch ",
@@ -747,42 +743,28 @@ fn eventlog_room(rep: &mut OpReport, op: &[u8]) -> Result<(), ()> {
     Err(())
 }
 
-/// The register lock, released when dropped.
-struct Lock(c_int);
-
-impl Lock {
-    fn take(rep: &mut OpReport, op: &[u8], nothing: &[u8]) -> Result<Lock, ()> {
-        match eventlog_lock() {
-            fd if fd >= 0 => Ok(Lock(fd)),
-            err => {
-                log_err(
-                    &[
-                        b"upatch ",
-                        op,
-                        b": cannot take the register lock: ",
-                        strerr(-err),
-                        b" (category: tpm_error); ",
-                        nothing,
-                    ]
-                    .concat(),
-                );
-                fail(
-                    rep,
-                    c"tpm_extend",
-                    c"tpm_error",
-                    err,
-                    b"cannot take the register lock",
-                );
-                Err(())
-            }
-        }
-    }
-}
-
-impl Drop for Lock {
-    fn drop(&mut self) {
-        eventlog_unlock(self.0);
-    }
+/// The register lock, or its failure logged and reported.
+fn take_lock(rep: &mut OpReport, op: &[u8], nothing: &[u8]) -> Result<eventlog::Lock, ()> {
+    eventlog::lock().map_err(|err| {
+        log_err(
+            &[
+                b"upatch ",
+                op,
+                b": cannot take the register lock: ",
+                strerr(-err),
+                b" (category: tpm_error); ",
+                nothing,
+            ]
+            .concat(),
+        );
+        fail(
+            rep,
+            c"tpm_extend",
+            c"tpm_error",
+            err,
+            b"cannot take the register lock",
+        );
+    })
 }
 
 /// The eventlog entry `ty` that mirrors the extend `event`, or -errno.
@@ -795,8 +777,7 @@ fn event_record(
 ) -> Result<Vec<u8>, c_int> {
     let mut buf = vec![0u8; 4096];
     let mut e = JsonEmit::fixed(&mut buf);
-    // SAFETY: the emitter, a C string and the event's digest.
-    unsafe { eventlog_record_open(&mut e, ty.as_ptr(), event.as_ptr()) };
+    eventlog::record_open(&mut e, ty.to_bytes(), event);
     e.obj_open_key(b"upatch");
     e.kv_string(b"name", name);
     e.kv_string(b"payload_sha256", &hex(payload));
@@ -818,7 +799,7 @@ fn event_record(
         return Err(e.err());
     }
     let len = e.written();
-    buf.truncate(len + 1);
+    buf.truncate(len);
     Ok(buf)
 }
 
@@ -862,8 +843,7 @@ fn measure(
         return (ret, false);
     }
     let appended = event_record(ty, name, payload, &event, reason).and_then(|line| {
-        // SAFETY: the record, NUL-terminated.
-        match unsafe { eventlog_append(line.as_ptr().cast()) } {
+        match eventlog::append(&line) {
             0 => Ok(()),
             err => Err(err),
         }
@@ -1035,7 +1015,7 @@ fn load_steps(a: &OpArgs, file: &CStr, rep: &mut OpReport, name_out: &mut CStrin
         fail(rep, c"parse", c"parser_rejected", 0, b"unsafe upatch name");
         return 1;
     }
-    let Ok(_lock) = Lock::take(rep, b"load", b"nothing loaded") else {
+    let Ok(_lock) = take_lock(rep, b"load", b"nothing loaded") else {
         return 1;
     };
     if undo_unmeasured(rep, b"load").is_err() {
@@ -1264,7 +1244,7 @@ fn unload_steps(a: &OpArgs, file: &CStr, rep: &mut OpReport, name_out: &mut CStr
     if precheck(a, rep, b"unload").is_err() || eventlog_room(rep, b"unload").is_err() {
         return 1;
     }
-    let Ok(_lock) = Lock::take(rep, b"unload", b"nothing detached") else {
+    let Ok(_lock) = take_lock(rep, b"unload", b"nothing detached") else {
         return 1;
     };
     if undo_unmeasured(rep, b"unload").is_err() {
@@ -1476,19 +1456,20 @@ pub(crate) fn purge(name: &CStr, signer: *const Cert, reason: &CStr) -> c_int {
     if !name_valid(Some(name.to_bytes())) {
         return -EINVAL;
     }
-    let lock = eventlog_lock();
-    if lock < 0 {
-        log_err(
-            &[
-                b"upatch purge: cannot take the register lock: ",
-                strerr(-lock),
-                b" (category: tpm_error); nothing measured or detached",
-            ]
-            .concat(),
-        );
-        return lock;
-    }
-    let _lock = Lock(lock);
+    let _lock = match eventlog::lock() {
+        Ok(lock) => lock,
+        Err(err) => {
+            log_err(
+                &[
+                    b"upatch purge: cannot take the register lock: ",
+                    strerr(-err),
+                    b" (category: tpm_error); nothing measured or detached",
+                ]
+                .concat(),
+            );
+            return err;
+        }
+    };
     purge_locked(name.to_bytes(), signer, reason.to_bytes())
 }
 

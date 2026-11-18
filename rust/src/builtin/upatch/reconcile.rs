@@ -20,7 +20,7 @@ use super::{log_audit, log_err, log_info, log_warn, pin_category, strerr};
 use crate::errno::{EACCES, ENAMETOOLONG, ENODATA, ENOENT, EOVERFLOW, EPERM, ESTALE};
 use crate::util::bpf_info::{Info, LINK_INFO_SIZE};
 use crate::util::chain::memneq_explicit;
-use crate::util::eventlog::{eventlog_lock, eventlog_pending_path, eventlog_unlock};
+use crate::util::eventlog;
 use crate::util::help::{Help, HelpSection};
 use crate::util::measured::{MeasuredSet, measured_set_boot, measured_set_free};
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
@@ -116,31 +116,17 @@ impl Drop for Work {
     }
 }
 
-/// The register lock, released when dropped.
-struct Locked(c_int);
-
-impl Locked {
-    fn take(rep: &mut OpReport) -> Result<Self, ()> {
-        match eventlog_lock() {
-            fd if fd >= 0 => Ok(Locked(fd)),
-            err => {
-                fail(
-                    rep,
-                    c"pre_flight",
-                    c"tpm_error",
-                    err,
-                    b"cannot take the register lock",
-                );
-                Err(())
-            }
-        }
-    }
-}
-
-impl Drop for Locked {
-    fn drop(&mut self) {
-        eventlog_unlock(self.0);
-    }
+/// The register lock, or its failure reported.
+fn take_lock(rep: &mut OpReport) -> Result<eventlog::Lock, ()> {
+    eventlog::lock().map_err(|err| {
+        fail(
+            rep,
+            c"pre_flight",
+            c"tpm_error",
+            err,
+            b"cannot take the register lock",
+        );
+    })
 }
 
 /// The payload this boot's records hold upatch `name` with, when they
@@ -215,7 +201,7 @@ fn open(w: &mut Work, rep: &mut OpReport) -> Result<bool, ()> {
     if w.read() == 0 {
         return Ok(true);
     }
-    let lock = Locked::take(rep)?;
+    let lock = take_lock(rep)?;
     match pin_is_measured(&w.name) {
         Err(err) => {
             records_failed(err, rep);
@@ -455,7 +441,7 @@ fn walk(
 /// `w` was read with and its archive still that payload: the pins of
 /// gone devices removed and the uncovered devices attached.
 fn apply(w: &Work, devices: &[XdpDevice], rep: &mut OpReport) -> Result<(), ()> {
-    let _lock = Locked::take(rep)?;
+    let _lock = take_lock(rep)?;
     let payload = match pin_is_measured(&w.name) {
         Err(err) => {
             records_failed(err, rep);
@@ -509,8 +495,7 @@ fn preflight(rep: &mut OpReport) -> Result<(), ()> {
         );
         return Err(());
     }
-    // SAFETY: the eventlog's C string, which lives as long as the process.
-    let pending = unsafe { CStr::from_ptr(eventlog_pending_path()) };
+    let pending = eventlog::pending_path();
     if !exists(LSM_LINK_PIN) || exists(pending) {
         fail(
             rep,

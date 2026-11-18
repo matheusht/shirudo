@@ -64,8 +64,7 @@ fuzz_target!(
         };
         env("SHIRUDO_EVENTLOG_PATH", &input.path.to_string_lossy());
         let mut root = [0u8; 32];
-        // SAFETY: room for the replayed register's value.
-        unsafe { super::capi::eventlog_replay(root.as_mut_ptr()) };
+        let _ = super::replay(&mut root);
         // SAFETY: a record of nothing, for which zeros are the value.
         let mut rec: EventlogInit = unsafe { core::mem::zeroed() };
         let _ = boot_init(&mut rec);

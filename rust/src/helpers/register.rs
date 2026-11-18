@@ -33,9 +33,7 @@ use crate::util::bpf_sys::{
 };
 use crate::util::chain::{self, ANCHOR_MAX, ChainInitInfo, ChainStatus, PCR, PCR_MASK, PHASE_PCR};
 use crate::util::crypto_openssl::sha256;
-use crate::util::eventlog::{
-    EventlogInit, NV_INDEX, boot_init, eventlog_append, read_boot_id, timestamp,
-};
+use crate::util::eventlog::{self, EventlogInit, NV_INDEX, boot_init, read_boot_id, timestamp};
 use crate::util::hex::{decode, encode};
 use crate::util::identity::IDENTITY_PIN;
 use crate::util::json::JsonEmit;
@@ -157,8 +155,7 @@ fn append(fill: impl FnOnce(&mut JsonEmit)) -> c_int {
     if e.err() != 0 {
         return e.err();
     }
-    // SAFETY: the record, which the emitter terminated.
-    unsafe { eventlog_append(buf.as_ptr().cast()) }
+    eventlog::append(e.output())
 }
 
 /// An init recorded the way shirudo init does, minus the set details.

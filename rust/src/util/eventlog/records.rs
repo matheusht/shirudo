@@ -63,7 +63,7 @@ fn decode(hex: &[u8], out: &mut [u8]) -> c_int {
 
 /// The register this boot's records replay to: each digest folded in
 /// order, from zero at an init record.
-pub(super) fn replay(out: &mut [u8; 32]) -> c_int {
+pub(crate) fn replay(out: &mut [u8; 32]) -> c_int {
     let mut chain = [0u8; 32];
     let ret = walk_boot(&mut |line, is_init| replay_line(line, is_init, &mut chain));
 
@@ -201,7 +201,7 @@ struct TreeOpLine {
 
 /// Whether this boot measured the tree operation of sequence `seq` and
 /// digest `digest`: 1, 0, or a negative errno.
-pub(super) fn tree_op_measured(seq: i64, digest: &[u8]) -> c_int {
+pub(crate) fn tree_op_measured(seq: i64, digest: &[u8]) -> c_int {
     let mut found = false;
     let ret = walk_boot(&mut |line, _| {
         let mut op = TreeOpLine {

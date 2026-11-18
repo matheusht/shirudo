@@ -17,7 +17,6 @@ use std::os::unix::ffi::OsStrExt;
 
 use crate::errno::{EINPROGRESS, ENAMETOOLONG, ENODEV, ENOENT, ENOKEY};
 use crate::ffi;
-use crate::heap::xfree;
 use crate::sys::identity::Identity;
 use crate::sys::libc::{
     access, close, explicit_bzero, fwrite, gethostname, stderr, stdout, strerror,
@@ -32,7 +31,7 @@ use crate::util::config::{self, Config};
 use crate::util::crypto_openssl::{
     Cert, cert_free, cert_key_algorithm, cert_not_before, cert_read_der, cert_subject,
 };
-use crate::util::eventlog::{eventlog_lock, eventlog_path, eventlog_replay, eventlog_unlock};
+use crate::util::eventlog;
 use crate::util::format::{fputs_sanitized, human_size};
 use crate::util::help::{Help, HelpSection};
 use crate::util::identity;
@@ -40,7 +39,7 @@ use crate::util::image_bootstrap::{self, ImageBootstrap};
 use crate::util::image_runtime;
 use crate::util::initrd;
 use crate::util::integrity::{self, IntegrityCounts};
-use crate::util::io::{bpffs_mounted_at, read_file};
+use crate::util::io::{self, bpffs_mounted_at};
 use crate::util::json::{JsonEmit, JsonField, MAX_BYTES, parse_schema};
 use crate::util::kernel_btf;
 use crate::util::keyring;
@@ -162,8 +161,7 @@ fn count_dir(dir: &str, upatch_only: bool) -> Option<usize> {
 }
 
 fn eventlog() -> &'static [u8] {
-    // SAFETY: the path, a static C string.
-    unsafe { ffi::c_str(eventlog_path()) }
+    eventlog::path().to_bytes()
 }
 
 /// The eventlog's lines and bytes.
@@ -182,17 +180,8 @@ fn count_eventlog() -> Option<(i64, i64)> {
 
 /// The eventlog, up to its first NUL as the C string it was read as.
 fn read_eventlog() -> Option<Vec<u8>> {
-    let (mut buf, mut len): (*mut u8, usize) = (ptr::null_mut(), 0);
-
-    // SAFETY: a C string and room for the buffer and its length.
-    if unsafe { read_file(eventlog_path(), MAX_BYTES, (&raw mut buf).cast(), &mut len) } != 0 {
-        return None;
-    }
-    // SAFETY: the len bytes read.
-    let text = cstr(unsafe { ffi::slice(buf, len) }).to_vec();
-    // SAFETY: read_file()'s buffer of len + 1 bytes.
-    unsafe { xfree(buf.cast(), len + 1) };
-    Some(text)
+    let buf = io::read(eventlog::path(), MAX_BYTES).ok()?;
+    Some(cstr(&buf).to_vec())
 }
 
 /// The lines strtok_r() would give: the non-empty ones.
@@ -978,10 +967,10 @@ fn check_pins() -> Checked {
         checks_rc: 0,
         coverage_rc: 0,
     };
-    let lock = eventlog_lock();
+    let lock = eventlog::lock();
     let mut set: *mut MeasuredSet = ptr::null_mut();
-    c.unmeasured = if lock < 0 {
-        lock
+    c.unmeasured = if let Err(err) = lock {
+        err
     } else {
         // SAFETY: room for the set.
         unsafe { measured_set_boot(&mut set) }
@@ -1054,7 +1043,7 @@ fn check_pins() -> Checked {
         // SAFETY: the set, freed once.
         unsafe { measured_set_free(set) };
     }
-    eventlog_unlock(lock);
+    drop(lock);
     c
 }
 
@@ -1263,10 +1252,9 @@ impl Report {
         // a register exists) is a mismatch.
         let matches = (chain_rc == 0).then(|| {
             let mut replay = [0u8; 32];
-            // SAFETY: room for the digest.
             cst.anchored
                 && !cst.rebound
-                && unsafe { eventlog_replay(replay.as_mut_ptr()) } == 0
+                && eventlog::replay(&mut replay) == 0
                 && cst.value == replay
         });
 

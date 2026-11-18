@@ -32,10 +32,7 @@ use crate::util::bpm_tree_state::{
 use crate::util::chain::{
     chain_bound, chain_extend, chain_tree_event, history_step, memneq_explicit, sha256_2,
 };
-use crate::util::eventlog::{
-    eventlog_append, eventlog_lock, eventlog_record_open, eventlog_tree_op_measured,
-    eventlog_unlock,
-};
+use crate::util::eventlog;
 use crate::util::hex::sha256_digest_encode;
 use crate::util::json::JsonEmit;
 use crate::util::keys::{TrustedSet, load_image_root};
@@ -144,14 +141,8 @@ fn refuse(text: String, phase: &[u8], ret: c_int) -> c_int {
 /// tree's own projection stays a file chain; the register is what an
 /// operator attests.
 fn measure(op: &TreeOperation, digest: &[u8; 32]) -> Result {
-    let lock = eventlog_lock();
-
-    if lock < 0 {
-        return Err(lock);
-    }
-    let ret = measure_locked(op, digest);
-    eventlog_unlock(lock);
-    ret
+    let _lock = eventlog::lock()?;
+    measure_locked(op, digest)
 }
 
 fn measure_locked(op: &TreeOperation, digest: &[u8; 32]) -> Result {
@@ -171,8 +162,7 @@ fn measure_locked(op: &TreeOperation, digest: &[u8; 32]) -> Result {
     }
     hex_into(&chain, &mut chain_hex);
     let mut e = JsonEmit::fixed(&mut line);
-    // SAFETY: the emitter, a C string and the event.
-    unsafe { eventlog_record_open(&mut e, c"tree_op".as_ptr(), event.as_ptr()) };
+    eventlog::record_open(&mut e, b"tree_op", &event);
     e.obj_open_key(b"tree");
     e.kv_int(b"seq", op.seq);
     e.kv_string(b"op", cstr(&op.op));
@@ -184,8 +174,7 @@ fn measure_locked(op: &TreeOperation, digest: &[u8; 32]) -> Result {
     if e.err() != 0 {
         return Err(e.err());
     }
-    // SAFETY: the emitter's NUL-terminated line.
-    status(unsafe { eventlog_append(line.as_ptr().cast()) })
+    status(eventlog::append(e.output()))
 }
 
 fn status_write(id: &[u8], text: &[u8]) -> Result {
@@ -299,8 +288,7 @@ fn recover_pending(
         _ => return Err(-EKEYREJECTED),
     }
     if !applied {
-        // SAFETY: the operation's NUL-terminated digest.
-        match unsafe { eventlog_tree_op_measured(op.seq, op.operation_digest.as_ptr().cast()) } {
+        match eventlog::tree_op_measured(op.seq, cstr(&op.operation_digest)) {
             r if r < 0 => return Err(-EKEYREJECTED),
             // Still pre-operation; retry normally.
             0 => return Ok(()),

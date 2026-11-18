@@ -5,7 +5,7 @@
 //! the binding of this boot's register to what it restored: one init
 //! event, extended once and recorded in the eventlog.
 
-use core::ffi::{CStr, c_int};
+use core::ffi::c_int;
 use core::{mem, ptr};
 use std::ffi::CString;
 
@@ -18,10 +18,7 @@ use crate::util::bpm_tree::TreeState;
 use crate::util::bpm_tree_state::tree_state_read;
 use crate::util::chain::{self, ChainInitInfo, MeasuredUpatch};
 use crate::util::config::{self, Config};
-use crate::util::eventlog::{
-    eventlog_append_to, eventlog_lock, eventlog_path, eventlog_pending_path, eventlog_record_open,
-    eventlog_unlock, eventlog_would_exceed,
-};
+use crate::util::eventlog;
 use crate::util::hex::hex_decode;
 use crate::util::json::JsonEmit;
 use crate::util::keys;
@@ -246,17 +243,18 @@ fn restore_locked(recorded: bool) -> Result<Vec<MeasuredUpatch>, c_int> {
 /// takes their lock: an unload between the archive scan and the pin
 /// check is otherwise taken for an archived upatch that is not loaded.
 pub(super) fn boot_restore(recorded: bool) -> Result<Vec<MeasuredUpatch>, c_int> {
-    let lock = if recorded { eventlog_lock() } else { -1 };
-
-    if lock < 0 && recorded {
-        error(&cat!(
-            "boot-restore: cannot take the register lock: ",
-            strerr(-lock)
-        ));
-        return Err(lock);
-    }
+    let lock = match recorded.then(eventlog::lock).transpose() {
+        Ok(lock) => lock,
+        Err(err) => {
+            error(&cat!(
+                "boot-restore: cannot take the register lock: ",
+                strerr(-err)
+            ));
+            return Err(err);
+        }
+    };
     let ret = restore_locked(recorded);
-    eventlog_unlock(lock);
+    drop(lock);
     ret
 }
 
@@ -273,8 +271,7 @@ fn append_init_event(
     let mut e = JsonEmit::fixed(&mut buf);
     let name_len = TPM_NAME_LEN.min(bound.name.len());
 
-    // SAFETY: the emitter, a C string and the digest.
-    unsafe { eventlog_record_open(&mut e, c"init".as_ptr(), digests.init.as_ptr()) };
+    eventlog::record_open(&mut e, b"init", &digests.init);
     e.kv_int(b"tpm_reset_count", bound.reset_count.into());
     e.kv_string(b"cert_sha256", &hex(&digests.cert));
     e.arr_open(b"certs");
@@ -310,16 +307,14 @@ fn append_init_event(
         ));
         return e.err();
     }
-    let line = CString::new(e.output().to_vec()).unwrap_or_default();
     // From the initrd the record waits under /run for the root file
     // system's init: the eventlog is on a root that is read-only here.
     let log = if init.initrd {
-        eventlog_pending_path()
+        eventlog::pending_path()
     } else {
-        eventlog_path()
+        eventlog::path()
     };
-    // SAFETY: two C strings.
-    unsafe { eventlog_append_to(log, line.as_ptr()) }
+    eventlog::append_to(log, e.output())
 }
 
 /// The upatch tree's projection root at boot, zero without a tree.
@@ -383,9 +378,8 @@ pub(super) fn bind_register(init: &Init, set: &mut [MeasuredUpatch]) -> c_int {
             error(&cat!("chain: configuration unreadable: ", strerr(-ret)));
             return ret;
         }
-        Ok(max) if eventlog_would_exceed(max) != 0 => {
-            // SAFETY: the path, a static C string.
-            let log = unsafe { CStr::from_ptr(eventlog_path()) };
+        Ok(max) if eventlog::would_exceed(max) => {
+            let log = eventlog::path();
             error(&cat!(
                 "eventlog ",
                 log,

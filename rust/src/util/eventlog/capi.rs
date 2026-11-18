@@ -3,57 +3,13 @@
 
 //! The C-shaped interface the crate still calls.
 
-use core::ffi::{CStr, c_char, c_int, c_void};
+use core::ffi::{c_char, c_int, c_void};
 
 use super::records::{self, EventlogInit, LineFn, UpatchFn};
 use crate::ffi;
-use crate::util::json::JsonEmit;
 
 pub extern "C" fn eventlog_path() -> *const c_char {
     super::path().as_ptr()
-}
-
-pub extern "C" fn eventlog_pending_path() -> *const c_char {
-    super::pending_path().as_ptr()
-}
-
-/// # Safety
-///
-/// `json_line` is a C string.
-pub unsafe extern "C" fn eventlog_append(json_line: *const c_char) -> c_int {
-    // SAFETY: the caller passes a C string.
-    super::append(unsafe { CStr::from_ptr(json_line) })
-}
-
-/// # Safety
-///
-/// `path` and `json_line` are C strings.
-pub unsafe extern "C" fn eventlog_append_to(
-    path: *const c_char,
-    json_line: *const c_char,
-) -> c_int {
-    // SAFETY: the caller passes two C strings.
-    unsafe { super::append_to(CStr::from_ptr(path), CStr::from_ptr(json_line)) }
-}
-
-pub extern "C" fn eventlog_adopt_pending() -> c_int {
-    super::adopt_pending_locked()
-}
-
-pub extern "C" fn eventlog_lock() -> c_int {
-    super::lock()
-}
-
-pub extern "C" fn eventlog_unlock(fd: c_int) {
-    super::unlock(fd)
-}
-
-/// # Safety
-///
-/// `out` has room for a digest.
-pub unsafe extern "C" fn eventlog_replay(out: *mut u8) -> c_int {
-    // SAFETY: the caller passes room for 32 bytes.
-    records::replay(unsafe { &mut *out.cast::<[u8; 32]>() })
 }
 
 /// # Safety
@@ -77,24 +33,9 @@ pub unsafe extern "C" fn eventlog_boot_lines(cb: Option<LineFn>, ctx: *mut c_voi
 
 /// # Safety
 ///
-/// `operation_digest` is a C string.
-pub unsafe extern "C" fn eventlog_tree_op_measured(
-    seq: i64,
-    operation_digest: *const c_char,
-) -> c_int {
-    // SAFETY: the caller passes a C string.
-    records::tree_op_measured(seq, unsafe { ffi::c_str(operation_digest) })
-}
-
-/// # Safety
-///
 /// `cb` takes `ctx`.
 pub unsafe extern "C" fn eventlog_upatches(cb: Option<UpatchFn>, ctx: *mut c_void) -> c_int {
     records::upatches(true, cb, ctx)
-}
-
-pub extern "C" fn eventlog_would_exceed(max_bytes: u64) -> c_int {
-    super::would_exceed(max_bytes)
 }
 
 /// # Safety
@@ -111,16 +52,4 @@ pub unsafe extern "C" fn eventlog_timestamp(out: *mut c_char, cap: usize) {
 pub unsafe extern "C" fn eventlog_boot_id(out: *mut c_char, cap: usize) {
     // SAFETY: the caller passes the room.
     super::read_boot_id(unsafe { ffi::bytes_mut(out.cast(), cap) })
-}
-
-/// # Safety
-///
-/// `e` is an emitter, `ty` a C string and `digest` holds 32 bytes.
-pub unsafe extern "C" fn eventlog_record_open(
-    e: *mut JsonEmit,
-    ty: *const c_char,
-    digest: *const u8,
-) {
-    // SAFETY: the caller passes its emitter, a C string and a digest.
-    unsafe { super::record_open(&mut *e, ffi::c_str(ty), &*digest.cast::<[u8; 32]>()) }
 }

@@ -68,7 +68,7 @@ fn append_init(log: &CStr, bound_in: &[u8], reset_count: u32) -> c_int {
         return e.err();
     }
     match CStr::from_bytes_until_nul(&buf) {
-        Ok(line) => append_to(log, line),
+        Ok(line) => append_to(log, line.to_bytes()),
         Err(_) => -crate::errno::E2BIG,
     }
 }

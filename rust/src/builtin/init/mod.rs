@@ -26,9 +26,7 @@ use crate::sys::libc::{
 };
 use crate::text::cstr;
 use crate::util::chain;
-use crate::util::eventlog::{
-    EventlogInit, eventlog_adopt_pending, eventlog_boot_init, eventlog_path,
-};
+use crate::util::eventlog::{self, EventlogInit};
 use crate::util::help::{Help, HelpSection};
 use crate::util::identity;
 use crate::util::image_runtime;
@@ -527,7 +525,7 @@ fn run(init: &mut Init) -> c_int {
             return phase(ret, "marking the directories above the state root");
         }
     }
-    let ret = eventlog_adopt_pending();
+    let ret = eventlog::adopt_pending_locked();
     if ret != 0 {
         return phase(ret, "adopting the pending eventlog");
     }
@@ -557,11 +555,9 @@ fn run(init: &mut Init) -> c_int {
     // it. Either says the restore has happened.
     // SAFETY: an all-zero record is room for one.
     let mut rec: EventlogInit = unsafe { mem::zeroed() };
-    // SAFETY: the record to fill.
-    let ret = unsafe { eventlog_boot_init(&mut rec) };
+    let ret = eventlog::boot_init(&mut rec);
     if ret != 0 && ret != -ENOENT {
-        // SAFETY: the path, a static C string.
-        let log = unsafe { ffi::c_str(eventlog_path()) };
+        let log = eventlog::path().to_bytes();
         error(&cat!("init: eventlog ", log, " unreadable: ", strerr(-ret)));
         return ret;
     }

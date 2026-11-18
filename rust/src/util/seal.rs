@@ -65,7 +65,7 @@ fn shown(p: &[u8]) -> std::borrow::Cow<'_, str> {
 
 /// An fd, closed when it goes; [`Fd::close`] for when the close's
 /// error counts.
-struct Fd(c_int);
+pub(crate) struct Fd(c_int);
 
 impl Fd {
     fn open_at(dfd: c_int, name: &CStr, flags: c_int, mode: u32) -> Result<Fd, c_int> {
@@ -635,7 +635,7 @@ fn open_file(path: &[u8], sealed: bool) -> Result<Fd, c_int> {
 
 /// The lock file at `path`, created sealed when missing, held
 /// exclusively until its fd is closed.
-fn lock(path: &[u8]) -> Result<Fd, c_int> {
+pub(crate) fn lock(path: &[u8]) -> Result<Fd, c_int> {
     let fd = open(path, O_RDWR | O_CREAT, 0o600)?;
     match lock_exclusive(fd.0) {
         0 => Ok(fd),
@@ -645,7 +645,7 @@ fn lock(path: &[u8]) -> Result<Fd, c_int> {
 
 /// `line` appended as one record to the sealed log at `path`, under the
 /// lock that keeps its appenders apart.
-fn append(path: &CStr, line: &[u8]) -> c_int {
+pub(crate) fn append(path: &CStr, line: &[u8]) -> c_int {
     let fd = match open(path.to_bytes(), O_RDWR | O_CREAT | O_APPEND, 0o600) {
         Ok(fd) => fd,
         Err(err) => return err,
