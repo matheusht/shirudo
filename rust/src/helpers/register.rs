@@ -19,13 +19,12 @@
 //!   test-register forge <index hex> <pcr> <phase pcr> <event hex> <nonce hex>
 //!   test-register evidence <nonce hex> [<challenge>]
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
 
 use super::{err, helper_main, out, out_bytes, perror, strerror};
-use crate::heap::xfree;
 use crate::sys::identity::Identity;
 use crate::sys::version::shirudo_version_id;
-use crate::util::attest::{AttestChallenge, PCR_DEFAULT, attest_evidence_config, challenge_read};
+use crate::util::attest::{PCR_DEFAULT, challenge_read, evidence_config};
 use crate::util::bpf_sys::{
     Attr, BPF_ANY, BPF_MAP_CREATE, bpf_map_freeze, bpf_map_update_elem, bpf_obj_pin,
 };
@@ -703,32 +702,17 @@ fn evidence(args: &[&CStr]) -> c_int {
             }
         }
     }
-    let c: *const AttestChallenge = challenge
-        .as_ref()
-        .map_or(core::ptr::null(), core::ptr::from_ref);
-    let (mut doc, mut len, mut cap): (*mut c_char, usize, usize) = (core::ptr::null_mut(), 0, 0);
-    // SAFETY: the nonce, the challenge or NULL, no journal, and rooms for
-    // the document, freed after.
-    unsafe {
-        let ret = attest_evidence_config(
-            nonce.as_ptr(),
-            nonce_len,
-            PCR_DEFAULT,
-            c,
-            core::ptr::null_mut(),
-            &mut doc,
-            &mut len,
-            &mut cap,
-        );
-        if ret != 0 {
-            err(&format!("evidence: {}\n", strerror(-ret)));
-            return 1;
+    match evidence_config(&nonce[..nonce_len], PCR_DEFAULT, challenge.as_ref(), None) {
+        Ok(doc) => {
+            out_bytes(&doc);
+            out("\n");
+            0
         }
-        out_bytes(crate::ffi::slice(doc.cast::<u8>(), len));
-        out("\n");
-        xfree(doc.cast(), cap);
+        Err(ret) => {
+            err(&format!("evidence: {}\n", strerror(-ret)));
+            1
+        }
     }
-    0
 }
 
 fn run(args: &[&CStr]) -> c_int {

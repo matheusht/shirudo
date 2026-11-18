@@ -9,7 +9,7 @@
 //!   test-config-attest parse <evidence>
 //!   test-config-attest replay <evidence> <root hex|-> <pcr|-> <reset> <restart> <pcr value hex>
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
 use std::ffi::OsStr;
 use std::os::fd::BorrowedFd;
 use std::os::unix::ffi::OsStrExt;
@@ -17,7 +17,6 @@ use std::os::unix::fs::OpenOptionsExt;
 
 use super::{err, helper_main, out};
 use crate::errno::{EINVAL, EIO, EPERM};
-use crate::heap::xfree;
 use crate::util::attest::{NONCE_MAX, evidence_config};
 use crate::util::chain::PCR_MASK;
 use crate::util::config_attest::{Evidence, Quote, parse, verify};
@@ -91,32 +90,17 @@ fn render(directory: &CStr, nonce_hex: &CStr) -> c_int {
     {
         return -EINVAL;
     }
-    let mut journal = match ConfigUpdate::open(directory, &ReadOnly, 0) {
+    let journal = match ConfigUpdate::open(directory, &ReadOnly, 0) {
         Ok(journal) => journal,
         Err(err) => return err,
     };
-    let (mut doc, mut len, mut cap): (*mut c_char, usize, usize) = (core::ptr::null_mut(), 0, 0);
-    // SAFETY: the nonce, the open journal, and rooms for the document.
-    let mut ret = unsafe {
-        evidence_config(
-            nonce.as_ptr(),
-            n,
-            PCR_MASK,
-            core::ptr::null(),
-            &mut journal,
-            &mut doc,
-            &mut len,
-            &mut cap,
-        )
-    };
-    if ret == 0 {
-        // SAFETY: the len bytes of the document.
-        ret = unsafe { crate::util::io::write_complete(libc::STDOUT_FILENO, doc.cast(), len) };
+    match evidence_config(&nonce[..n], PCR_MASK, None, Some(&journal)) {
+        // SAFETY: the document's bytes, to standard output.
+        Ok(doc) => unsafe {
+            crate::util::io::write_complete(libc::STDOUT_FILENO, doc.as_ptr().cast(), doc.len())
+        },
+        Err(err) => err,
     }
-    // SAFETY: the document evidence_config() allocated, cap bytes of it,
-    // or NULL.
-    unsafe { xfree(doc.cast(), cap) };
-    ret
 }
 
 /// The evidence document at `path`: a regular file of 1 to MAX_BYTES

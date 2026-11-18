@@ -5,20 +5,17 @@
 //! operator, verifying one, predicting the register a set of upatches
 //! yields, and making a credential challenge for a target's key.
 
-use core::ffi::{CStr, c_char, c_int};
-use core::ptr;
+use core::ffi::{CStr, c_int};
 use std::ffi::CString;
 
 use crate::errno::{EEXIST, EINVAL, EIO, EKEYREJECTED, ENODATA, ENODEV, ENXIO};
 use crate::ffi;
-use crate::heap::xfree;
 use crate::sys::libc::{fwrite, stdout, strerror};
 use crate::sys::tss2::NV_WRITTEN;
 use crate::text::{cstr, parse_u64};
 use crate::util::attest::{
-    self, AttestChallenge, AttestChallengePolicy, AttestExpect, MadeChallenge, NONCE_MAX,
-    PCR_DEFAULT, Report, attest_evidence_config, challenge_read, parse_name_digest,
-    parse_pcr_value, parse_pcrs,
+    self, AttestChallengePolicy, AttestExpect, MadeChallenge, NONCE_MAX, PCR_DEFAULT, Report,
+    challenge_read, evidence_config, parse_name_digest, parse_pcr_value, parse_pcrs,
 };
 use crate::util::chain::{
     self, ANCHOR_MAX, MeasuredUpatch, PCR, PCR_MASK as CHAIN_PCR_MASK, PHASE_PCR,
@@ -1151,29 +1148,16 @@ fn evidence(args: &[&CStr]) -> c_int {
             }
         }
     }
-    let request: *const AttestChallenge = challenge.as_ref().map_or(ptr::null(), ptr::from_ref);
-    let (mut doc, mut len, mut cap): (*mut c_char, usize, usize) = (ptr::null_mut(), 0, 0);
-    // SAFETY: the nonce, the challenge or NULL, the runtime's journal and
-    // rooms for the document.
-    let ret = unsafe {
-        attest_evidence_config(
-            nonce.as_ptr(),
-            nonce_len,
-            mask,
-            request,
-            image_runtime::update_context().cast(),
-            &mut doc,
-            &mut len,
-            &mut cap,
-        )
-    };
-    match ret {
-        0 => {}
-        r if r == -ENXIO => {
+    // SAFETY: the journal of the runtime's state, this thread's, which
+    // nothing else touches while attest reads it, or none.
+    let update = unsafe { image_runtime::update_context().as_ref() };
+    let body = match evidence_config(&nonce[..nonce_len], mask, challenge.as_ref(), update) {
+        Ok(body) => body,
+        Err(r) if r == -ENXIO => {
             error(&[b"attest: no TPM answered (tpm_error)"]);
             return 1;
         }
-        r if r == -ENODEV => {
+        Err(r) if r == -ENODEV => {
             error(&[format!(
                 "attest: register 0x{NV_INDEX:08X} is not bound this boot (tpm_error); \
                  run shirudo init first"
@@ -1181,17 +1165,15 @@ fn evidence(args: &[&CStr]) -> c_int {
             .as_bytes()]);
             return 1;
         }
-        r if r == -EKEYREJECTED => {
+        Err(r) if r == -EKEYREJECTED => {
             error(&[b"attest: the TPM refused the challenge; the attestation key or the endorsement key is not this TPM's"]);
             return 1;
         }
-        r => {
+        Err(r) => {
             error(&[b"attest: evidence failed: ", strerr(-r)]);
             return 1;
         }
-    }
-    // SAFETY: the document's len bytes.
-    let body = unsafe { ffi::slice(doc.cast::<u8>(), len) };
+    };
     let ret = match out_path {
         Some(path) => {
             let c = message(&[path]);
@@ -1219,8 +1201,6 @@ fn evidence(args: &[&CStr]) -> c_int {
             if nl { 0 } else { -EIO }
         }
     };
-    // SAFETY: the document's buffer of cap bytes.
-    unsafe { xfree(doc.cast(), cap) };
     c_int::from(ret != 0)
 }
 

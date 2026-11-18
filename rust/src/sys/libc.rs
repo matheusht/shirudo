@@ -10,7 +10,7 @@ use core::ffi::{CStr, c_char, c_int, c_long, c_ulong};
 #[cfg(not(miri))]
 pub use libc::explicit_bzero;
 pub use libc::{
-    _exit, abort, access, calloc, close, closedir, execv, execvp, faccessat,
+    _exit, access, calloc, close, closedir, execv, execvp, faccessat,
     fclose, fcntl, fdopen, fdopendir, ferror, fgets, fgetxattr, fileno, flock,
     fopen, fputc, fputs, free, fsetxattr, fstatfs, fstatvfs, fsync, ftruncate,
     fwrite, getenv, geteuid, gethostname, getline, getrandom, getsockopt, getxattr, gmtime_r,

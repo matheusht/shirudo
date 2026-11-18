@@ -100,6 +100,20 @@ pub struct TpmNvInfo {
     pub(crate) name_len: usize,
 }
 
+impl TpmNvInfo {
+    pub(crate) const fn zeroed() -> Self {
+        TpmNvInfo {
+            defined: false,
+            written: false,
+            attrs: 0,
+            data_size: 0,
+            policy: [0; DIGEST_LEN],
+            name: [0; NAME_LEN],
+            name_len: 0,
+        }
+    }
+}
+
 /// `struct tpm_attestation`.
 #[repr(C)]
 pub struct TpmAttestation {

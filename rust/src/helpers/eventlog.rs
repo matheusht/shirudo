@@ -9,7 +9,7 @@
 //!   test-eventlog init log|pending <bound_in> [<reset count>]
 //!   test-eventlog boot-init|lines|adopt
 
-use core::ffi::{CStr, c_char, c_int, c_void};
+use core::ffi::{CStr, c_int};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 
@@ -73,12 +73,6 @@ fn append_init(log: &CStr, bound_in: &[u8], reset_count: u32) -> c_int {
     }
 }
 
-unsafe extern "C" fn count_line(_: *const c_char, _: usize, ctx: *mut c_void) -> c_int {
-    // SAFETY: the count run() hands boot_lines().
-    unsafe { *ctx.cast::<u32>() += 1 };
-    0
-}
-
 fn run(args: &[&CStr]) -> c_int {
     let word = |i: usize| args.get(i).map(|a| a.to_bytes());
     match (word(1), args.len()) {
@@ -118,7 +112,10 @@ fn run(args: &[&CStr]) -> c_int {
         }
         (Some(b"lines"), _) => {
             let mut n = 0u32;
-            let ret = boot_lines(Some(count_line), (&raw mut n).cast());
+            let ret = boot_lines(&mut |_| {
+                n += 1;
+                0
+            });
             out(&format!("rc={ret}\nlines={n}\n"));
             c_int::from(ret != 0)
         }

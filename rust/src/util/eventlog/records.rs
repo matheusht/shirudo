@@ -5,11 +5,10 @@
 //! binding of its init record, a tree operation measured, and the
 //! upatches loaded and unloaded.
 
-use core::ffi::{CStr, c_char, c_int, c_void};
+use core::ffi::{CStr, c_char, c_int};
 
 use super::{sha256_into, walk_boot, walk_log};
 use crate::errno::{EINVAL, ENOENT};
-use crate::sys::libc::abort;
 use crate::text::cstr;
 use crate::util::hex::hex_decode;
 use crate::util::json::{JsonField, parse_schema};
@@ -23,9 +22,8 @@ pub(crate) const UPATCH_INIT: c_int = 0;
 pub(crate) const UPATCH_LOAD: c_int = 1;
 pub(crate) const UPATCH_UNLOAD: c_int = 2;
 
-/// What `eventlog_boot_lines()` calls with each line.
-pub(crate) type LineFn =
-    unsafe extern "C" fn(line: *const c_char, len: usize, ctx: *mut c_void) -> c_int;
+/// What the walk of this boot's lines calls with each.
+pub(crate) type LineFn<'a> = &'a mut dyn FnMut(&CStr) -> c_int;
 /// What the upatch walks call with each event: the event, and for a
 /// load or an unload the upatch's name and its payload's digest in hex.
 pub(crate) type UpatchFn<'a> = &'a mut dyn FnMut(c_int, &[u8], &[u8]) -> c_int;
@@ -173,18 +171,10 @@ fn init_line(line: &CStr, is_init: bool, out: &mut EventlogInit) -> c_int {
     0
 }
 
-/// Each of this boot's lines to `cb`, as a C string and its length; a
-/// NULL `cb` faults when called, as the C's call through it did.
-pub(crate) fn boot_lines(cb: Option<LineFn>, ctx: *mut c_void) -> c_int {
-    walk_boot(&mut |line, _| {
-        let Some(cb) = cb else {
-            // SAFETY: a call that takes nothing.
-            unsafe { abort() }
-        };
-        // SAFETY: the caller's function and context, with a line that
-        // lives for the call.
-        unsafe { cb(line.as_ptr(), line.to_bytes().len(), ctx) }
-    })
+/// Each of this boot's lines to `each`, which ends the walk with an
+/// error it returns.
+pub(crate) fn boot_lines(each: LineFn<'_>) -> c_int {
+    walk_boot(&mut |line, _| each(line))
 }
 
 /// What the line of a tree operation gives.

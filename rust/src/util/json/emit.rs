@@ -5,7 +5,7 @@
 //! latches in `err`, after which every call does nothing, so a caller
 //! checks it once after the final close.
 
-use core::ffi::{c_char, c_int};
+use core::ffi::c_int;
 
 use super::{EMIT_MAX_DEPTH, utf8_width};
 use crate::errno::{E2BIG, EILSEQ, ENOMEM, ENOSPC};
@@ -98,21 +98,6 @@ impl<'a> JsonEmit<'a> {
     /// An emitter into `buf`, which it does not grow.
     pub(crate) fn fixed(buf: &'a mut [u8]) -> Self {
         Self::new(Room::Fixed(buf))
-    }
-
-    /// An emitter into the `cap` bytes at `buf`, which it does not grow,
-    /// as a C-shaped caller hands one over.
-    ///
-    /// # Safety
-    ///
-    /// `buf` is valid for writes of `cap` bytes for as long as the
-    /// emitter lives, and nothing else reads or writes them meanwhile.
-    pub(crate) unsafe fn fixed_raw(buf: *mut c_char, cap: usize) -> Self {
-        if buf.is_null() || cap == 0 {
-            return Self::fixed(&mut []);
-        }
-        // SAFETY: the caller's cap bytes, lent to the emitter alone.
-        Self::fixed(unsafe { core::slice::from_raw_parts_mut(buf.cast::<u8>(), cap) })
     }
 
     /// An emitter that grows its own buffer while the document and a NUL

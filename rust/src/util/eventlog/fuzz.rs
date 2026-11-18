@@ -5,7 +5,6 @@
 //! found, and this boot's lines walked. The seed's boot ID is this
 //! boot's, so that the records of the corpus count as this boot's.
 
-use core::ffi::{c_char, c_int, c_void};
 use std::sync::OnceLock;
 
 use super::records::{boot_init, boot_lines};
@@ -21,15 +20,6 @@ fn env(name: &str, value: &str) {
     // SAFETY: the environment, which the fuzzer's one thread alone
     // touches.
     unsafe { std::env::set_var(name, value) };
-}
-
-/// # Safety
-///
-/// `ctx` is the count of bytes walked.
-unsafe extern "C" fn on_line(_: *const c_char, len: usize, ctx: *mut c_void) -> c_int {
-    // SAFETY: the caller's count.
-    unsafe { *ctx.cast::<usize>() += len };
-    0
 }
 
 fn init() {
@@ -69,7 +59,10 @@ fuzz_target!(
         let mut rec: EventlogInit = unsafe { core::mem::zeroed() };
         let _ = boot_init(&mut rec);
         let mut seen = 0usize;
-        let _ = boot_lines(Some(on_line), (&raw mut seen).cast());
+        let _ = boot_lines(&mut |line| {
+            seen += line.to_bytes().len();
+            0
+        });
     },
     init
 );

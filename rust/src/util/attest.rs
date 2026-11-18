@@ -5,21 +5,18 @@
 //! challenge an operator makes for its keys, and the verification the
 //! operator runs against the evidence.
 
-use core::ffi::{CStr, c_char, c_int, c_void};
-use core::mem::MaybeUninit;
+use core::ffi::{CStr, c_char, c_int};
 use core::ptr;
+use std::ffi::OsStr;
+use std::fs::File;
+use std::io::Read;
+use std::os::unix::ffi::OsStrExt;
 
 use crate::errno::{
-    E2BIG, EAGAIN, EBADMSG, EFBIG, EINTR, EINVAL, EIO, EKEYREJECTED, ENODEV, ENOMEM, ENOSPC, ENXIO,
-    EUCLEAN,
+    E2BIG, EAGAIN, EBADMSG, EINVAL, EIO, EKEYREJECTED, ENODEV, ENOMEM, ENOSPC, ENXIO, EUCLEAN,
 };
 use crate::ffi;
-use crate::heap::{xfree, xmalloc};
-use crate::sys::libc::Zeroed;
-use crate::sys::libc::{
-    AT_FDCWD, O_CLOEXEC, O_RDONLY, STATX_BASIC_STATS, Statx, close, errno, explicit_bzero,
-    getrandom, open, read, scrub, statx,
-};
+use crate::sys::libc::getrandom;
 use crate::sys::tss2::NV_WRITTEN;
 use crate::sys::version::shirudo_version_id;
 use crate::text::{cstr, digits, parse_u64, parse_x64};
@@ -31,13 +28,11 @@ use crate::util::chain::{
 use crate::util::config_attest::{self, Evidence, Quote};
 use crate::util::config_update::ConfigUpdate;
 use crate::util::crypto_openssl::{
-    Cert, CertPubkey, base64_decode, base64_encode, cert_free, cert_pubkey, cert_read_der,
+    Cert, CertPubkey, base64, base64_decode, cert_free, cert_pubkey, cert_read_der,
     cert_verify_chain, ecdh_p256_ephemeral, rsa_oaep_encrypt, sha256, sha256_into,
 };
-use crate::util::eventlog::{
-    NV_INDEX, eventlog_boot_id, eventlog_boot_lines, eventlog_path, eventlog_timestamp,
-};
-use crate::util::hex::{decode, decode_max, encode, hex_encode};
+use crate::util::eventlog::{self, NV_INDEX};
+use crate::util::hex::{decode, decode_max, encode};
 use crate::util::io;
 use crate::util::json::{JsonEmit, JsonField, MAX_BYTES as JSON_MAX_BYTES, parse_schema};
 use crate::util::tpm::{
@@ -272,109 +267,36 @@ impl Parse {
     }
 }
 
-/// A structure all of whose bits zeroed are a value of it, as `= {}` and
-/// memset() give it in C.
-fn zeroed<T>() -> T {
-    // SAFETY: called only for structures of integers, booleans, arrays
-    // and pointers, for which all-zero bytes are a value.
-    unsafe { MaybeUninit::zeroed().assume_init() }
-}
+/// The log at `path`, read to its end and of 1 to LOG_MAX_BYTES bytes,
+/// in base64; none where it cannot be. securityfs reports a size of 0
+/// for the firmware event log, so the log is read to its end rather than
+/// for the size a stat gives.
+fn read_log_base64(path: &CStr) -> Option<Vec<u8>> {
+    let file = File::open(OsStr::from_bytes(path.to_bytes())).ok()?;
+    let mut log = Vec::new();
 
-/// The file at `path`, read to its end and at most LOG_MAX_BYTES, as
-/// base64 into `*out`, xmalloc'd to `*out_cap` bytes. securityfs reports
-/// a size of 0 for the firmware event log, so the log is read to its end
-/// rather than for the size a stat gives.
-fn read_file_base64(path: &CStr, out: &mut *mut c_char, out_cap: &mut usize) -> c_int {
-    let mut len = 0usize;
-    let mut ret = 0;
-
-    *out = ptr::null_mut();
-    *out_cap = 0;
-    // SAFETY: a C string.
-    let fd = unsafe { open(path.as_ptr(), O_RDONLY | O_CLOEXEC) };
-    if fd < 0 {
-        return -errno();
+    file.take(LOG_MAX_BYTES as u64 + 1)
+        .read_to_end(&mut log)
+        .ok()?;
+    if log.is_empty() || log.len() > LOG_MAX_BYTES {
+        return None;
     }
-    // SAFETY: an allocation, freed below by its size.
-    let raw = unsafe { xmalloc(LOG_MAX_BYTES + 1) }.cast::<u8>();
-    if raw.is_null() {
-        // SAFETY: the file's descriptor, closed once.
-        unsafe { close(fd) };
-        return -ENOMEM;
-    }
-    while len <= LOG_MAX_BYTES {
-        // SAFETY: the file's descriptor and the room left in the
-        // allocation.
-        let got = unsafe { read(fd, raw.add(len).cast(), LOG_MAX_BYTES + 1 - len) };
-
-        if got < 0 && errno() == EINTR {
-            continue;
-        }
-        if got < 0 {
-            ret = -errno();
-        }
-        if got <= 0 {
-            break;
-        }
-        len += got as usize;
-    }
-    // SAFETY: the file's descriptor, closed once.
-    unsafe { close(fd) };
-    if ret == 0 && (len == 0 || len > LOG_MAX_BYTES) {
-        ret = -EFBIG;
-    }
-    if ret != 0 {
-        // SAFETY: the allocation, by its size.
-        unsafe { xfree(raw.cast(), LOG_MAX_BYTES + 1) };
-        return ret;
-    }
-    let cap = 4 * len.div_ceil(3) + 1;
-    // SAFETY: an allocation of cap bytes, the log's base64 into it, and
-    // the log freed by its size.
-    unsafe {
-        *out = xmalloc(cap).cast();
-        ret = if (*out).is_null() {
-            -ENOMEM
-        } else {
-            base64_encode(raw, len, *out, cap)
-        };
-        xfree(raw.cast(), LOG_MAX_BYTES + 1);
-    }
-    if ret != 0 {
-        // SAFETY: the allocation, or NULL, by its size.
-        unsafe { xfree((*out).cast(), cap) };
-        *out = ptr::null_mut();
-        return ret;
-    }
-    *out_cap = cap;
-    0
-}
-
-/// What the eventlog's walk calls with each line: the line as it stands,
-/// into the evidence's array.
-///
-/// # Safety
-///
-/// `ctx` is the emitter and `line` holds `len` bytes.
-unsafe extern "C" fn emit_line(line: *const c_char, len: usize, ctx: *mut c_void) -> c_int {
-    // SAFETY: the walk passes back the emitter, which nothing else
-    // touches during it, and the line.
-    unsafe { (*ctx.cast::<JsonEmit>()).raw(ffi::slice(line.cast(), len)) };
-    0
+    base64(&log).ok()
 }
 
 /// `data` as hex under `key`; more than an attestation's worth stops the
 /// emitter with -E2BIG.
 fn emit_hex(e: &mut JsonEmit, key: &[u8], data: &[u8]) {
-    let mut hex = [0u8; 2 * ATTEST_MAX + 1];
-
     if data.len() > ATTEST_MAX {
         e.set_err(-E2BIG);
         return;
     }
-    // SAFETY: the bytes, and room for their hex and a NUL.
-    unsafe { hex_encode(data.as_ptr(), data.len(), hex.as_mut_ptr().cast()) };
-    e.kv_string(key, &hex[..2 * data.len()]);
+    e.kv_string(key, &encode(data));
+}
+
+/// The first `len` bytes of `buf`, as many as it holds.
+fn bytes_of(buf: &[u8], len: usize) -> &[u8] {
+    buf.get(..len).unwrap_or(buf)
 }
 
 /// The digest a quote over `mask` carries: SHA-256 of the PCR values
@@ -389,442 +311,430 @@ fn pcr_values_digest(mask: u32, values: &[[u8; 32]; 24]) -> Option<[u8; 32]> {
     sha256(&selected).ok()
 }
 
+/// What the quote `quote` holds, as far as it parses: none where it
+/// does not.
+fn quoted(quote: &TpmAttestation) -> Option<TpmAttest> {
+    let mut a = TpmAttest::zeroed();
+    let bytes = quote.attest.get(..quote.attest_len)?;
+
+    (attest_parse(bytes, &mut a) == 0).then_some(a)
+}
+
 /// Whether the quote covers the PCR values read beside it, which alone
 /// makes it acceptable.
 fn quote_covers(quote: &TpmAttestation, mask: u32, values: &[[u8; 32]; 24]) -> bool {
-    let mut a = TpmAttest::zeroed();
-
-    if quote
-        .attest
-        .get(..quote.attest_len)
-        .is_none_or(|bytes| attest_parse(bytes, &mut a) != 0)
-        || a.ty != ST_ATTEST_QUOTE
-        || a.pcr_mask != mask
-    {
+    let Some(a) = quoted(quote).filter(|a| a.ty == ST_ATTEST_QUOTE && a.pcr_mask == mask) else {
         return false;
-    }
+    };
     pcr_values_digest(mask, values).is_some_and(|d| !memneq_explicit(&d, &a.pcr_digest))
 }
 
-/// What attest_evidence_config() holds across its steps, freed and wiped
-/// after them.
-struct Evidencing {
+/// A connection to the TPM and the keys attest makes on it, which go
+/// with it: each key flushed, the endorsement key first, then the
+/// connection closed.
+struct Session {
     tpm: *mut Tpm,
     ak: TpmKey,
     ek: TpmKey,
-    ak_copy: TpmKey,
-    ek_copy: TpmKey,
-    cred: [u8; CREDENTIAL_LEN],
-    cred_len: usize,
-    ek_cert: *mut u8,
-    ek_b64: *mut c_char,
-    ek_b64_cap: usize,
-    fw: *mut c_char,
-    fw_cap: usize,
-    sd: *mut c_char,
-    sd_cap: usize,
 }
 
-/// memzero_explicit() of a key, every byte of it.
-fn scrub_key(k: &mut TpmKey) {
-    // SAFETY: the key's bytes, which it owns whole.
-    unsafe { explicit_bzero(ptr::from_mut(k).cast(), size_of::<TpmKey>()) };
-}
+impl Session {
+    /// A connection, or -ENXIO where no TPM answers.
+    fn open() -> Result<Self, c_int> {
+        let mut tpm = ptr::null_mut();
 
-/// attest_evidence_config(): the target's register, its quoted PCRs, its
-/// keys and logs, and the config it runs, as a NUL-terminated document
-/// into `*out`, xmalloc'd to `*cap` bytes.
-///
-/// # Safety
-///
-/// `nonce` holds `nonce_len` bytes, `c` is NULL or a challenge, and
-/// `update` NULL or a journal.
-#[allow(clippy::too_many_arguments)]
-pub(crate) unsafe fn evidence_config(
-    nonce: *const u8,
-    nonce_len: usize,
-    pcr_mask: u32,
-    c: *const AttestChallenge,
-    update: *mut ConfigUpdate,
-    out: &mut *mut c_char,
-    len: &mut usize,
-    cap: &mut usize,
-) -> c_int {
-    *out = ptr::null_mut();
-    *len = 0;
-    *cap = 0;
-    if nonce_len > NONCE_MAX || pcr_mask == 0 || pcr_mask & !0x00FF_FFFF != 0 {
-        return -EINVAL;
+        // SAFETY: room for the connection.
+        if unsafe { tpm_open(&mut tpm) } != 0 {
+            return Err(-ENXIO);
+        }
+        Ok(Session {
+            tpm,
+            ak: TpmKey::zeroed(),
+            ek: TpmKey::zeroed(),
+        })
     }
-    // SAFETY: the caller's journal or NULL.
-    let config = match config_attest::collect(unsafe { update.as_ref() }) {
-        Ok(config) => config,
-        Err(ret) => return ret,
-    };
-    let mut s: Evidencing = zeroed();
-    // SAFETY: the caller's nonce and challenge.
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        // SAFETY: the endorsement key, made on the connection or empty,
+        // flushed once.
+        unsafe { tpm_key_flush(self.tpm, &mut self.ek) };
+        // SAFETY: the attestation key likewise.
+        unsafe { tpm_key_flush(self.tpm, &mut self.ak) };
+        // SAFETY: the connection tpm_open() gave, closed once, after its
+        // keys.
+        unsafe { tpm_close(self.tpm) };
+    }
+}
+
+/// What the TPM gave the evidence: the PCRs quoted and their values, the
+/// register's value and name, the quote and the certification, the keys'
+/// public parts, and the credential a challenge carried.
+struct Measured {
+    pcr_mask: u32,
+    values: [[u8; 32]; 24],
+    register: [u8; 32],
+    nv: TpmNvInfo,
+    quote: TpmAttestation,
+    certify: TpmAttestation,
+    /// The attestation and endorsement keys, on the heap so that they
+    /// are scrubbed when they go.
+    keys: Box<[TpmKey; 2]>,
+    ek_rsa: bool,
+    ek_certificate: Option<Vec<u8>>,
+    /// On the heap, so that it is scrubbed when it goes.
+    credential: Vec<u8>,
+}
+
+/// The PCRs of `mask` read and quoted with the nonce, again while they
+/// change under the quote: -EAGAIN when they kept changing.
+fn quote_pcrs(
+    session: &Session,
+    nonce: &[u8],
+    mask: u32,
+    values: &mut [[u8; 32]; 24],
+) -> Result<TpmAttestation, c_int> {
+    let mut quote = TpmAttestation::zeroed();
+
+    for _ in 0..QUOTE_ATTEMPTS {
+        for (i, value) in (0u32..).zip(values.iter_mut()) {
+            if mask & (1 << i) == 0 {
+                continue;
+            }
+            // SAFETY: the session's connection, and room for the value.
+            let ret = unsafe { tpm_pcr_read(session.tpm, i, value.as_mut_ptr()) };
+            if ret != 0 {
+                return Err(ret);
+            }
+        }
+        // SAFETY: the session's connection and key, the nonce, and room
+        // for the quote.
+        let ret = unsafe {
+            tpm_quote(
+                session.tpm,
+                &session.ak,
+                nonce.as_ptr(),
+                nonce.len(),
+                mask,
+                &mut quote,
+            )
+        };
+        if ret != 0 {
+            return Err(ret);
+        }
+        if quote_covers(&quote, mask, values) {
+            return Ok(quote);
+        }
+    }
+    crate::log::err(b"attest: PCRs kept changing while quoting");
+    Err(-EAGAIN)
+}
+
+/// The TPM's EK certificate in base64, and whether its key is RSA; none
+/// where it has no certificate or it does not encode.
+fn ek_certificate_base64(session: &Session) -> (Option<Vec<u8>>, bool) {
+    let mut cert = vec![0u8; EK_CERT_MAX];
+    let mut len = 0usize;
+    let mut rsa = false;
+
+    // SAFETY: the session's connection, room for a certificate, and for
+    // its length and kind.
     let ret = unsafe {
-        evidence(
-            &mut s,
-            &config,
-            nonce,
-            nonce_len,
-            pcr_mask,
-            c.as_ref(),
-            out,
-            len,
-            cap,
+        tpm_ek_certificate(
+            session.tpm,
+            cert.as_mut_ptr(),
+            cert.len(),
+            &mut len,
+            &mut rsa,
         )
     };
-
-    // SAFETY: what the steps left: the keys and the connection while it
-    // is open, and the allocations by their sizes.
-    unsafe {
-        if !s.tpm.is_null() {
-            tpm_key_flush(s.tpm, &mut s.ek);
-            tpm_key_flush(s.tpm, &mut s.ak);
-            tpm_close(s.tpm);
-        }
-        let ek_cert_size = if s.ek_cert.is_null() { 0 } else { EK_CERT_MAX };
-        xfree(s.ek_cert.cast(), ek_cert_size);
-        xfree(s.ek_b64.cast(), s.ek_b64_cap);
-        xfree(s.fw.cast(), s.fw_cap);
-        xfree(s.sd.cast(), s.sd_cap);
+    if ret != 0 {
+        return (None, rsa);
     }
-    scrub(&mut s.cred);
-    scrub_key(&mut s.ak);
-    scrub_key(&mut s.ek);
-    scrub_key(&mut s.ak_copy);
-    scrub_key(&mut s.ek_copy);
-    if ret != 0 && !(*out).is_null() {
-        // SAFETY: the document, by its size.
-        unsafe { xfree((*out).cast(), *cap) };
-        *out = ptr::null_mut();
-        *cap = 0;
-    }
-    ret
+    (cert.get(..len).and_then(|der| base64(der).ok()), rsa)
 }
 
-/// The steps of attest_evidence_config() once the config is collected.
-///
-/// # Safety
-///
-/// `nonce` holds `nonce_len` bytes.
-#[allow(clippy::too_many_arguments)]
-unsafe fn evidence(
-    s: &mut Evidencing,
+/// The credential the challenge carries, activated with the session's
+/// keys: -EKEYREJECTED for a challenge of another attestation key, or the
+/// TPM's refusal.
+fn activate(session: &Session, c: &AttestChallenge) -> Result<Vec<u8>, c_int> {
+    let ak = &session.ak;
+    let mut credential = vec![0u8; CREDENTIAL_LEN];
+    let mut len = 0usize;
+
+    if ak.name_len != NAME_LEN || c.ak_name != ak.name {
+        crate::log::err(b"attest: the challenge was made for another attestation key");
+        return Err(-EKEYREJECTED);
+    }
+    // SAFETY: the session's connection and keys, the challenge's blob and
+    // secret, and room for the credential and its length.
+    let ret = unsafe {
+        tpm_activate_credential(
+            session.tpm,
+            ak,
+            &session.ek,
+            c.blob.as_ptr(),
+            c.blob.len(),
+            c.secret.as_ptr(),
+            c.secret.len(),
+            credential.as_mut_ptr(),
+            credential.len(),
+            &mut len,
+        )
+    };
+    if ret != 0 {
+        crate::log::err(b"attest: the TPM refused the challenge: not made for this attestation key under this endorsement key");
+        return Err(ret);
+    }
+    credential.truncate(len);
+    Ok(credential)
+}
+
+/// What the TPM gives the evidence, the TPM let go of before the file
+/// work: -ENXIO without a TPM, -ENODEV without a register bound, and
+/// -EUCLEAN for a quote not of the config's TPM boot and PCR value.
+fn measure(
     config: &Evidence,
-    nonce: *const u8,
-    nonce_len: usize,
+    nonce: &[u8],
     mut pcr_mask: u32,
     challenge: Option<&AttestChallenge>,
-    out: &mut *mut c_char,
-    len: &mut usize,
-    cap: &mut usize,
-) -> c_int {
-    let mut quote: TpmAttestation = zeroed();
-    let mut certify: TpmAttestation = zeroed();
-    let mut nv: TpmNvInfo = zeroed();
+) -> Result<Measured, c_int> {
+    let mut nv = TpmNvInfo::zeroed();
     let mut values = [[0u8; 32]; 24];
-    let mut reg = [0u8; 32];
-    let mut ek_cert_len = 0usize;
-    let mut ek_cert_rsa = false;
-    let mut ts = [0u8; 32];
-    let mut boot_id = [0u8; 64];
-    let mut nv_index = [0u8; 16];
-    let mut nonce_hex = [0u8; 2 * 64 + 1];
-    let mut st = Statx::zeroed();
+    let mut register = [0u8; 32];
+    let mut certify = TpmAttestation::zeroed();
 
     if config.present {
         pcr_mask |= 1 << config.pcr;
     }
-    // SAFETY: where the connection goes.
-    if unsafe { tpm_open(&mut s.tpm) } != 0 {
-        return -ENXIO;
-    }
-    let tpm = s.tpm;
-    // SAFETY: the connection, and room for the index's state.
-    let ret = unsafe { tpm_nv_info(tpm, NV_INDEX, &mut nv) };
+    let mut session = Session::open()?;
+    // SAFETY: the session's connection, and room for the index's state.
+    let ret = unsafe { tpm_nv_info(session.tpm, NV_INDEX, &mut nv) };
     if ret != 0 {
-        return ret;
+        return Err(ret);
     }
     if !nv.defined || !nv.written {
-        return -ENODEV;
+        return Err(-ENODEV);
     }
-    // SAFETY: the connection, and room for the value.
-    let ret = unsafe { tpm_nv_read(tpm, NV_INDEX, reg.as_mut_ptr()) };
+    // SAFETY: the session's connection, and room for the value.
+    let ret = unsafe { tpm_nv_read(session.tpm, NV_INDEX, register.as_mut_ptr()) };
     if ret != 0 {
-        return ret;
+        return Err(ret);
     }
-    // SAFETY: the connection, and room for the key.
-    let ret = unsafe { tpm_ak_create(tpm, &mut s.ak) };
+    // SAFETY: the session's connection, and room for the key.
+    let ret = unsafe { tpm_ak_create(session.tpm, &mut session.ak) };
     if ret != 0 {
-        return ret;
+        return Err(ret);
     }
-    let mut attempt = 0;
-    while attempt < QUOTE_ATTEMPTS {
-        for (i, value) in values.iter_mut().enumerate() {
-            if pcr_mask & (1 << i) == 0 {
-                continue;
-            }
-            // SAFETY: the connection, and room for the value.
-            let ret = unsafe { tpm_pcr_read(tpm, i as u32, value.as_mut_ptr()) };
-            if ret != 0 {
-                return ret;
-            }
-        }
-        // SAFETY: the connection, the key, the caller's nonce, and room
-        // for the quote.
-        let ret = unsafe { tpm_quote(tpm, &s.ak, nonce, nonce_len, pcr_mask, &mut quote) };
-        if ret != 0 {
-            return ret;
-        }
-        if quote_covers(&quote, pcr_mask, &values) {
-            break;
-        }
-        attempt += 1;
-    }
-    if attempt == QUOTE_ATTEMPTS {
-        crate::log::err(b"attest: PCRs kept changing while quoting");
-        return -EAGAIN;
-    }
-    if config.present {
-        let mut quoted = TpmAttest::zeroed();
-
-        if quote
-            .attest
-            .get(..quote.attest_len)
-            .is_none_or(|bytes| attest_parse(bytes, &mut quoted) != 0)
-            || quoted.reset_count != config.reset_count
-            || quoted.restart_count != config.restart_count
-            || values[config.pcr as usize] != config.value
-        {
-            return -EUCLEAN;
-        }
-    }
-    // SAFETY: the connection, the key, the caller's nonce, and room for
-    // the certification.
-    let ret = unsafe { tpm_nv_certify(tpm, &s.ak, NV_INDEX, nonce, nonce_len, &mut certify) };
-    if ret != 0 {
-        return ret;
-    }
-    // SAFETY: an allocation, which the caller frees by its size.
-    s.ek_cert = unsafe { xmalloc(EK_CERT_MAX) }.cast();
-    if s.ek_cert.is_null() {
-        return -ENOMEM;
-    }
-    // SAFETY: the connection, room for a certificate, and its length and
-    // kind.
-    if unsafe {
-        tpm_ek_certificate(
-            tpm,
-            s.ek_cert,
-            EK_CERT_MAX,
-            &mut ek_cert_len,
-            &mut ek_cert_rsa,
-        )
-    } == 0
+    let quote = quote_pcrs(&session, nonce, pcr_mask, &mut values)?;
+    if config.present
+        && quoted(&quote).is_none_or(|q| {
+            q.reset_count != config.reset_count
+                || q.restart_count != config.restart_count
+                || values.get(config.pcr as usize) != Some(&config.value)
+        })
     {
-        s.ek_b64_cap = 4 * ek_cert_len.div_ceil(3) + 1;
-        // SAFETY: an allocation, which the caller frees by its size, and
-        // the certificate's base64 into it.
-        unsafe {
-            s.ek_b64 = xmalloc(s.ek_b64_cap).cast();
-            if s.ek_b64.is_null()
-                || base64_encode(s.ek_cert, ek_cert_len, s.ek_b64, s.ek_b64_cap) != 0
-            {
-                xfree(s.ek_b64.cast(), s.ek_b64_cap);
-                s.ek_b64 = ptr::null_mut();
-                s.ek_b64_cap = 0;
-            }
-        }
+        return Err(-EUCLEAN);
     }
+    // SAFETY: the session's connection and key, the nonce, and room for
+    // the certification.
+    let ret = unsafe {
+        tpm_nv_certify(
+            session.tpm,
+            &session.ak,
+            NV_INDEX,
+            nonce.as_ptr(),
+            nonce.len(),
+            &mut certify,
+        )
+    };
+    if ret != 0 {
+        return Err(ret);
+    }
+    let (ek_certificate, ek_cert_rsa) = ek_certificate_base64(&session);
     // The endorsement key the certificate describes, or the one the
     // challenge was made for; a TPM without a certificate yields its ECC
     // key, which the operator pins by name.
     let ek_rsa = challenge.map_or(ek_cert_rsa, |c| c.ek_rsa);
-    // SAFETY: the connection, and room for the key.
-    let ret = unsafe { tpm_ek_create(tpm, ek_rsa, &mut s.ek) };
+    // SAFETY: the session's connection, and room for the key.
+    let ret = unsafe { tpm_ek_create(session.tpm, ek_rsa, &mut session.ek) };
     if ret != 0 {
-        return ret;
+        return Err(ret);
     }
-    if let Some(c) = challenge {
-        if s.ak.name_len != NAME_LEN || c.ak_name != s.ak.name {
-            crate::log::err(b"attest: the challenge was made for another attestation key");
-            return -EKEYREJECTED;
-        }
-        // SAFETY: the connection, the keys, the challenge's blob and
-        // secret, and room for the credential.
-        let ret = unsafe {
-            tpm_activate_credential(
-                tpm,
-                &s.ak,
-                &s.ek,
-                c.blob.as_ptr(),
-                c.blob.len(),
-                c.secret.as_ptr(),
-                c.secret.len(),
-                s.cred.as_mut_ptr(),
-                s.cred.len(),
-                &mut s.cred_len,
-            )
-        };
-        if ret != 0 {
-            crate::log::err(b"attest: the TPM refused the challenge: not made for this attestation key under this endorsement key");
-            return ret;
-        }
-    }
+    let credential = match challenge {
+        Some(c) => activate(&session, c)?,
+        None => Vec::new(),
+    };
     // The keys are flushed before the file work; keep their public parts.
-    s.ak_copy = s.ak;
-    s.ek_copy = s.ek;
-    // SAFETY: the connection and its keys, flushed and closed once.
-    unsafe {
-        tpm_key_flush(tpm, &mut s.ek);
-        tpm_key_flush(tpm, &mut s.ak);
-        tpm_close(tpm);
-    }
-    s.tpm = ptr::null_mut();
+    let keys = Box::new([session.ak, session.ek]);
+    drop(session);
+    Ok(Measured {
+        pcr_mask,
+        values,
+        register,
+        nv,
+        quote,
+        certify,
+        keys,
+        ek_rsa,
+        ek_certificate,
+        credential,
+    })
+}
 
-    read_file_base64(FIRMWARE_LOG_PATH, &mut s.fw, &mut s.fw_cap);
-    read_file_base64(SYSTEMD_LOG_PATH, &mut s.sd, &mut s.sd_cap);
+/// The room the document may take: enough for the logs, the EK
+/// certificate, the config's events and the eventlog twice over, and at
+/// most what a JSON document may be.
+fn document_room(m: &Measured, logs: &[&Option<Vec<u8>>; 2], config: &Evidence) -> usize {
+    let with_nul = |b64: &Option<Vec<u8>>| b64.as_ref().map_or(0, |b| b.len() + 1);
     let mut need = (64 * 1024usize)
-        .wrapping_add(s.fw_cap)
-        .wrapping_add(s.sd_cap)
-        .wrapping_add(s.ek_b64_cap)
+        .wrapping_add(with_nul(logs[0]))
+        .wrapping_add(with_nul(logs[1]))
+        .wrapping_add(with_nul(&m.ek_certificate))
         .wrapping_add(config.n_events().wrapping_mul(160));
-    // SAFETY: the eventlog's path, and room for its state.
-    if unsafe { statx(AT_FDCWD, eventlog_path(), 0, STATX_BASIC_STATS, &mut st) } == 0
-        && st.stx_size as i64 > 0
-    {
-        need = need.saturating_add(2usize.saturating_mul(st.stx_size as usize));
-    }
-    if need > JSON_MAX_BYTES {
-        need = JSON_MAX_BYTES;
-    }
-    // SAFETY: an allocation, which the caller frees by its size.
-    *out = unsafe { xmalloc(need) }.cast();
-    if (*out).is_null() {
-        return -ENOMEM;
-    }
-    *cap = need;
+    let eventlog = std::fs::metadata(OsStr::from_bytes(eventlog::path().to_bytes()));
 
-    // SAFETY: rooms of their sizes.
-    unsafe {
-        eventlog_timestamp(ts.as_mut_ptr().cast(), ts.len());
-        eventlog_boot_id(boot_id.as_mut_ptr().cast(), boot_id.len());
-    }
-    // SAFETY: the room, and the C's format with its argument.
-    if unsafe {
-        crate::text::csprintf!(
-            nv_index.as_mut_ptr().cast(),
-            nv_index.len(),
-            c"0x%08X".as_ptr(),
-            NV_INDEX,
-        )
-    } < 0
+    if let Ok(size) = eventlog.map(|meta| meta.len())
+        && i64::try_from(size).is_ok_and(|size| size > 0)
     {
-        return -E2BIG;
+        let size = usize::try_from(size).unwrap_or(usize::MAX);
+        need = need.saturating_add(2usize.saturating_mul(size));
     }
-    // SAFETY: the caller's nonce, and room for its hex and a NUL.
-    unsafe { hex_encode(nonce, nonce_len, nonce_hex.as_mut_ptr().cast()) };
+    need.min(JSON_MAX_BYTES)
+}
 
-    // SAFETY: the need bytes xmalloc() gave at *out, which nothing else
-    // touches until the emitter is done.
-    let mut e = unsafe { JsonEmit::fixed_raw(*out, need) };
+/// attest: the target's register, its quoted PCRs, its keys and logs,
+/// and the config the journal `update` runs, with the nonce and the
+/// credential a challenge carried, as a document: -EINVAL for a nonce
+/// too long or a mask of no PCR or past 23.
+pub(crate) fn evidence_config(
+    nonce: &[u8],
+    pcr_mask: u32,
+    challenge: Option<&AttestChallenge>,
+    update: Option<&ConfigUpdate<'_>>,
+) -> Result<Vec<u8>, c_int> {
+    if nonce.len() > NONCE_MAX || pcr_mask == 0 || pcr_mask & !0x00FF_FFFF != 0 {
+        return Err(-EINVAL);
+    }
+    let config = config_attest::collect(update)?;
+    let m = measure(&config, nonce, pcr_mask, challenge)?;
+    let firmware = read_log_base64(FIRMWARE_LOG_PATH);
+    let systemd = read_log_base64(SYSTEMD_LOG_PATH);
+    let room = document_room(&m, &[&firmware, &systemd], &config);
+    let mut doc = Vec::new();
+
+    doc.try_reserve_exact(room).map_err(|_| -ENOMEM)?;
+    doc.resize(room, 0);
+    let mut e = JsonEmit::fixed(&mut doc);
+    emit_evidence(&mut e, &m, nonce, &config, [&firmware, &systemd])?;
+    let len = match e.err() {
+        0 => e.written(),
+        err => return Err(err),
+    };
+    doc.truncate(len);
+    Ok(doc)
+}
+
+/// The document of the evidence into `e`: the config's error, or the
+/// emitter's in it.
+fn emit_evidence(
+    e: &mut JsonEmit,
+    m: &Measured,
+    nonce: &[u8],
+    config: &Evidence,
+    logs: [&Option<Vec<u8>>; 2],
+) -> Result<(), c_int> {
+    let mut ts = [0u8; 32];
+    let mut boot_id = [0u8; 64];
+    let [ak, ek] = &*m.keys;
+
+    eventlog::timestamp(&mut ts);
+    eventlog::read_boot_id(&mut boot_id);
     e.obj_open();
     e.kv_int(b"schema", 1);
     e.kv_string(b"kind", b"shirudo-attestation");
-    // SAFETY: the build's version ID, a C string.
+    // SAFETY: the build's version ID, a C string the link provides.
     let version_id = unsafe { CStr::from_ptr(&raw const shirudo_version_id) };
     e.kv_string(b"version_id", version_id.to_bytes());
     e.kv_string(b"ts", cstr(&ts));
     e.kv_string(b"boot_id", cstr(&boot_id));
-    e.kv_string(b"nonce", cstr(&nonce_hex));
+    e.kv_string(b"nonce", &encode(nonce));
     e.kv_string(b"pcr_bank", b"sha256");
-    e.kv_int(b"pcr_mask", i64::from(pcr_mask));
+    e.kv_int(b"pcr_mask", i64::from(m.pcr_mask));
     e.arr_open(b"pcrs");
-    for (i, value) in values.iter().enumerate() {
-        if pcr_mask & (1 << i) == 0 {
+    for (i, value) in (0i64..).zip(&m.values) {
+        if m.pcr_mask & (1 << i) == 0 {
             continue;
         }
         e.obj_open();
-        e.kv_int(b"index", i as i64);
-        emit_hex(&mut e, b"value", value);
+        e.kv_int(b"index", i);
+        emit_hex(e, b"value", value);
         e.obj_close();
     }
     e.arr_close();
     e.obj_open_key(b"ak");
-    emit_hex(&mut e, b"public", &s.ak_copy.public[..s.ak_copy.public_len]);
-    emit_hex(&mut e, b"name", &s.ak_copy.name[..s.ak_copy.name_len]);
+    emit_hex(e, b"public", bytes_of(&ak.public, ak.public_len));
+    emit_hex(e, b"name", bytes_of(&ak.name, ak.name_len));
     e.obj_close();
     e.obj_open_key(b"ek");
-    e.kv_string(b"type", if ek_rsa { b"rsa" } else { b"ecc" });
-    emit_hex(&mut e, b"public", &s.ek_copy.public[..s.ek_copy.public_len]);
-    emit_hex(&mut e, b"name", &s.ek_copy.name[..s.ek_copy.name_len]);
+    e.kv_string(b"type", if m.ek_rsa { b"rsa" } else { b"ecc" });
+    emit_hex(e, b"public", bytes_of(&ek.public, ek.public_len));
+    emit_hex(e, b"name", bytes_of(&ek.name, ek.name_len));
     e.obj_close();
     e.obj_open_key(b"quote");
-    emit_hex(&mut e, b"attest", &quote.attest[..quote.attest_len]);
+    emit_hex(e, b"attest", bytes_of(&m.quote.attest, m.quote.attest_len));
     emit_hex(
-        &mut e,
+        e,
         b"signature",
-        &quote.signature[..quote.signature_len],
+        bytes_of(&m.quote.signature, m.quote.signature_len),
     );
     e.obj_close();
     e.obj_open_key(b"register");
-    e.kv_string(b"nv_index", cstr(&nv_index));
+    e.kv_string(b"nv_index", format!("0x{NV_INDEX:08X}").as_bytes());
     e.kv_int(b"pcr", i64::from(CHAIN_PCR));
-    emit_hex(&mut e, b"name", &nv.name[..nv.name_len]);
-    emit_hex(&mut e, b"value", &reg);
-    emit_hex(&mut e, b"attest", &certify.attest[..certify.attest_len]);
+    emit_hex(e, b"name", bytes_of(&m.nv.name, m.nv.name_len));
+    emit_hex(e, b"value", &m.register);
     emit_hex(
-        &mut e,
+        e,
+        b"attest",
+        bytes_of(&m.certify.attest, m.certify.attest_len),
+    );
+    emit_hex(
+        e,
         b"signature",
-        &certify.signature[..certify.signature_len],
+        bytes_of(&m.certify.signature, m.certify.signature_len),
     );
     e.obj_close();
     e.arr_open(b"eventlog");
-    // SAFETY: the callback, and the emitter it takes, which only the
-    // callback touches during the walk.
-    unsafe { eventlog_boot_lines(Some(emit_line), (&raw mut e).cast()) };
+    eventlog::boot_lines(&mut |line| {
+        e.raw(line.to_bytes());
+        0
+    });
     e.arr_close();
-    if let Err(ret) = config_attest::emit(&mut e, config) {
-        return ret;
-    }
-    if s.cred_len != 0 {
-        e.obj_open_key(b"credential");
-        emit_hex(&mut e, b"value", &s.cred[..s.cred_len]);
-        e.obj_close();
-    } else {
+    config_attest::emit(e, config)?;
+    if m.credential.is_empty() {
         e.kv_null(b"credential");
-    }
-    if s.ek_b64.is_null() {
-        e.kv_null(b"ek_certificate");
     } else {
-        // SAFETY: the certificate's base64, a C string.
-        e.kv_string(b"ek_certificate", unsafe { ffi::c_str(s.ek_b64) });
+        e.obj_open_key(b"credential");
+        emit_hex(e, b"value", &m.credential);
+        e.obj_close();
     }
+    emit_text_or_null(e, b"ek_certificate", &m.ek_certificate);
     e.obj_open_key(b"logs");
-    if s.fw.is_null() {
-        e.kv_null(b"firmware");
-    } else {
-        // SAFETY: the log's base64, a C string.
-        e.kv_string(b"firmware", unsafe { ffi::c_str(s.fw) });
-    }
-    if s.sd.is_null() {
-        e.kv_null(b"systemd");
-    } else {
-        // SAFETY: the log's base64, a C string.
-        e.kv_string(b"systemd", unsafe { ffi::c_str(s.sd) });
-    }
+    emit_text_or_null(e, b"firmware", logs[0]);
+    emit_text_or_null(e, b"systemd", logs[1]);
     e.obj_close();
     e.obj_close();
-    if e.err() != 0 {
-        return e.err();
+    Ok(())
+}
+
+/// `text` under `key`, or null without it.
+fn emit_text_or_null(e: &mut JsonEmit, key: &[u8], text: &Option<Vec<u8>>) {
+    match text {
+        Some(text) => e.kv_string(key, text),
+        None => e.kv_null(key),
     }
-    // SAFETY: the document's room, past what the emitter wrote.
-    unsafe { *(*out).add(e.written()) = 0 };
-    *len = e.written();
-    0
 }
 
 /* ---- verification ---------------------------------------------------- */
@@ -2311,40 +2221,7 @@ pub(crate) fn parse_name_digest(spec: &[u8]) -> Result<(&[u8], [u8; 32]), c_int>
     Ok((name, digest))
 }
 
-pub(crate) use capi::attest_evidence_config;
-
 #[cfg(shirudo_fuzz)]
 mod fuzz;
 #[cfg(test)]
 mod tests;
-
-mod capi {
-    use core::ffi::{c_char, c_int};
-
-    use super::AttestChallenge;
-    use crate::util::config_update::ConfigUpdate;
-
-    /// # Safety
-    ///
-    /// `nonce` holds `nonce_len` bytes, `c` is NULL or a challenge,
-    /// `update` NULL or a journal, and `out`, `len` and `cap` rooms.
-    #[allow(clippy::too_many_arguments)]
-    pub unsafe extern "C" fn attest_evidence_config(
-        nonce: *const u8,
-        nonce_len: usize,
-        pcr_mask: u32,
-        c: *const AttestChallenge,
-        update: *mut ConfigUpdate,
-        out: *mut *mut c_char,
-        len: *mut usize,
-        cap: *mut usize,
-    ) -> c_int {
-        // SAFETY: the caller passes the nonce, the challenge, the journal
-        // and the rooms.
-        unsafe {
-            super::evidence_config(
-                nonce, nonce_len, pcr_mask, c, update, &mut *out, &mut *len, &mut *cap,
-            )
-        }
-    }
-}
