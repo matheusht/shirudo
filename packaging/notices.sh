@@ -52,7 +52,8 @@ version=${SHIRUDO_CI_VERSION:-$(git -C "$root" describe --tags --always --dirty 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-"$root/.github/scripts/gen-sbom.sh" --components "$role" >"$work/components" ||
+SHIRUDO_CI_VERSION=$version "$root/.github/scripts/gen-sbom.sh" --components "$role" \
+	>"$work/components" ||
 	die 'cannot list the components'
 mkdir -p "$out"
 : >"$work/licences"
