@@ -205,7 +205,7 @@ def NameAdmitted (n : List UInt8) : Prop :=
 
 /-- What the encoding needs of a name: a C string that `strnlen()` does
 not cut. The names `attest predict` reads with
-`attest_parse_name_digest()`, of 1 to 256 bytes before the first `=`,
+`parse_name_digest()`, of 1 to 256 bytes before the first `=`,
 fit too, though `upatch_name_valid()` need not accept them. -/
 def NameFits (n : List UInt8) : Prop := 0 ∉ n ∧ n.length ≤ nameMax
 

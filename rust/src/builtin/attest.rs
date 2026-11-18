@@ -17,8 +17,8 @@ use crate::sys::tss2::NV_WRITTEN;
 use crate::text::{cstr, parse_u64};
 use crate::util::attest::{
     AttestChallenge, AttestChallengePolicy, AttestExpect, NONCE_MAX, PCR_DEFAULT,
-    attest_challenge_make, attest_challenge_read, attest_evidence_config, attest_parse_name_digest,
-    attest_parse_pcr_value, attest_parse_pcrs, attest_verify,
+    attest_challenge_make, attest_challenge_read, attest_evidence_config, attest_verify,
+    parse_name_digest, parse_pcr_value, parse_pcrs,
 };
 use crate::util::chain::{
     self, ANCHOR_MAX, MeasuredUpatch, PCR, PCR_MASK as CHAIN_PCR_MASK, PHASE_PCR,
@@ -44,7 +44,7 @@ use crate::util::tpm::REGISTER_ATTRS;
 use crate::util::tpm_wire::{
     CREDENTIAL_LEN, NAME_LEN, NV_RSA_BYTES, RegisterPolicy, nv_name, register_policy,
 };
-use crate::util::upatch::{self, Upatch, upatch_close, upatch_open};
+use crate::util::upatch::{Upatch, upatch_close, upatch_open};
 
 const MEMBERS_MAX: usize = 256;
 const REPORT_MAX: usize = 8192;
@@ -531,20 +531,10 @@ impl Members {
     }
 
     fn add_spec(&mut self, spec: &[u8]) -> Result<(), c_int> {
-        let mut name = [0u8; upatch::NAME_MAX + 1];
-        let mut payload = [0u8; 32];
-        let s = message(&[spec]);
-
-        // SAFETY: a C string and the room for a name and a digest.
-        let mut ret = unsafe {
-            attest_parse_name_digest(s.as_ptr(), name.as_mut_ptr().cast(), payload.as_mut_ptr())
+        let ret = match parse_name_digest(spec) {
+            Ok((name, payload)) => self.add(&message(&[name]), &message(&[&hex::encode(&payload)])),
+            Err(err) => err,
         };
-        if ret == 0 {
-            ret = self.add(
-                &message(&[cstr(&name)]),
-                &message(&[&hex::encode(&payload)]),
-            );
-        }
         if ret != 0 {
             let why: &[u8] = if ret == -EEXIST {
                 b"a second upatch of that name"
@@ -620,25 +610,18 @@ fn cert_add(p: &OptParser<'_>, v: &[u8], certs: &mut Vec<[u8; 32]>) -> Result<()
 
 /// Folds a `<kind>:<name>=<hex>` event into `register`.
 fn apply_event(spec: &[u8], register: &mut [u8; 32]) -> Result<(), c_int> {
-    let colon = spec.iter().position(|&c| c == b':').ok_or(-EINVAL)?;
-    let (kind, rest) = (&spec[..colon], &spec[colon + 1..]);
-    let mut name = [0u8; upatch::NAME_MAX + 1];
-    let mut digest = [0u8; 32];
-    let mut event = [0u8; 32];
-    let r = message(&[rest]);
-
-    // SAFETY: a C string and the room for a name and a digest.
-    if unsafe {
-        attest_parse_name_digest(r.as_ptr(), name.as_mut_ptr().cast(), digest.as_mut_ptr())
-    } != 0
-    {
+    let mut parts = spec.splitn(2, |&c| c == b':');
+    let (Some(kind), Some(rest)) = (parts.next(), parts.next()) else {
         return Err(-EINVAL);
-    }
+    };
+    let (name, digest) = parse_name_digest(rest)?;
+    let mut event = [0u8; 32];
+
     let ret = match kind {
-        b"load" => chain::upatch_event(c"shirudo-upatch", &name, &digest, &mut event),
-        b"unload" => chain::upatch_event(c"shirudo-unload", &name, &digest, &mut event),
+        b"load" => chain::upatch_event(c"shirudo-upatch", name, &digest, &mut event),
+        b"unload" => chain::upatch_event(c"shirudo-unload", name, &digest, &mut event),
         b"tree" => {
-            let seq = parse_u64(cstr(&name), i64::MAX as u64)
+            let seq = parse_u64(name, i64::MAX as u64)
                 .ok()
                 .and_then(|s| i64::try_from(s).ok())
                 .filter(|&s| s >= 1)
@@ -674,22 +657,6 @@ fn anchor_digest(certs: &[[u8; 32]]) -> Option<[u8; 32]> {
     keys::anchor_digest(certs).ok()
 }
 
-/// `<n>=<hex>` of a PCR, n its number below 24, as
-/// attest_parse_pcr_value() reads it.
-fn pcr_value(v: &[u8]) -> Option<(usize, &[u8])> {
-    let vc = message(&[v]);
-    let mut n = 0u64;
-    let mut value: *const c_char = ptr::null();
-
-    // SAFETY: a C string and the rooms for the number and value.
-    if unsafe { attest_parse_pcr_value(vc.as_ptr(), &mut n, &mut value) } != 0 {
-        return None;
-    }
-    // SAFETY: the value points into vc, a C string.
-    let at = unsafe { value.offset_from(vc.as_ptr()) } as usize;
-    Some((n as usize, &v[at..]))
-}
-
 /// A `<n>=<hex>` PCR value of the option `what` into `values`, once for
 /// each PCR, which `mask` marks.
 fn pcr_expect(
@@ -699,7 +666,7 @@ fn pcr_expect(
     values: &mut [[u8; 32]; 24],
     mask: &mut u32,
 ) -> Result<(), c_int> {
-    let (n, value) = pcr_value(v).ok_or(EXIT_USAGE)?;
+    let (n, value) = parse_pcr_value(v).map_err(|_| EXIT_USAGE)?;
 
     parse_hex32(format!("{what} value").as_bytes(), value, &mut values[n])?;
     if *mask & (1 << n) != 0 {
@@ -744,7 +711,7 @@ fn predict(args: &[&CStr]) -> c_int {
             }
             PREDICT_JSON => json = true,
             PREDICT_BIND_PCR => {
-                let slot = pcr_value(v).and_then(|(n, value)| {
+                let slot = parse_pcr_value(v).ok().and_then(|(n, value)| {
                     let s = [CHAIN_PCR, CHAIN_PHASE_PCR]
                         .iter()
                         .position(|&pcr| pcr == n as u64)?;
@@ -1241,13 +1208,10 @@ fn evidence(args: &[&CStr]) -> c_int {
                 Ok(n) => nonce_len = n,
                 Err(code) => return code,
             },
-            EVIDENCE_PCRS => {
-                let list = p.value().map_or(ptr::null(), CStr::as_ptr);
-                // SAFETY: a C string and room for the mask.
-                if unsafe { attest_parse_pcrs(list, &mut mask) } != 0 {
-                    return usage(&p, "--pcrs takes a comma separated list of 0..23");
-                }
-            }
+            EVIDENCE_PCRS => match parse_pcrs(v) {
+                Ok(pcrs) => mask = pcrs,
+                Err(_) => return usage(&p, "--pcrs takes a comma separated list of 0..23"),
+            },
             EVIDENCE_OUTPUT => out_path = Some(v),
             OPT_ARG => {
                 p.usage_arg(b"unexpected argument ");

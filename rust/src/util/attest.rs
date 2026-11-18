@@ -22,8 +22,8 @@ use crate::sys::libc::{
 };
 use crate::sys::tss2::NV_WRITTEN;
 use crate::sys::version::shirudo_version_id;
-use crate::text::capi::{digits, parse_u64, parse_x64, strscpy as c_strscpy};
-use crate::text::{cstr, strscpy};
+use crate::text::capi::{parse_x64, strscpy as c_strscpy};
+use crate::text::{cstr, digits, parse_u64, strscpy};
 use crate::util::chain::{
     self, ANCHOR_MAX, PCR as CHAIN_PCR, PCR_MASK as CHAIN_PCR_MASK, PHASE_PCR as CHAIN_PHASE_PCR,
     memneq_explicit,
@@ -37,7 +37,7 @@ use crate::util::crypto_openssl::{
 use crate::util::eventlog::{
     NV_INDEX, eventlog_boot_id, eventlog_boot_lines, eventlog_path, eventlog_timestamp,
 };
-use crate::util::hex::{hex_decode, hex_decode_max, hex_encode, sha256_digest_decode};
+use crate::util::hex::{decode, hex_decode, hex_decode_max, hex_encode, sha256_digest_decode};
 use crate::util::io::read_file;
 use crate::util::json::{JsonEmit, JsonField, MAX_BYTES as JSON_MAX_BYTES, parse_schema};
 use crate::util::tpm::{
@@ -2336,87 +2336,59 @@ unsafe fn make(
     0
 }
 
-/// attest_parse_pcrs(): PCRs 0 to 23 apart by commas, into a mask.
-///
-/// # Safety
-///
-/// `list` is a C string.
-unsafe fn parse_pcrs(list: *const c_char, mask: &mut u32) -> c_int {
-    let mut p = list;
+/// `--pcrs`: PCRs 0 to 23 apart by commas, as a mask; -EINVAL for
+/// anything else, an empty list among it.
+pub(crate) fn parse_pcrs(list: &[u8]) -> Result<u32, c_int> {
+    let mut mask = 0u32;
+    let mut rest = list;
 
-    *mask = 0;
-    // SAFETY: the caller's C string, walked up to its NUL.
-    unsafe {
-        while *p != 0 {
-            let len = digits(p, ffi::c_str(p).len());
-            let mut n = 0u64;
+    while !rest.is_empty() {
+        let (number, after) = rest.split_at(digits(rest));
+        let pcr = parse_u64(number, 23).map_err(|_| -EINVAL)?;
 
-            if parse_u64(p, len, 23, &mut n) != 0 {
-                return -EINVAL;
-            }
-            *mask |= 1 << n;
-            p = p.add(len);
-            if *p == b',' as c_char && *p.add(1) != 0 {
-                p = p.add(1);
-            } else if *p != 0 {
-                return -EINVAL;
-            }
-        }
+        mask |= 1 << pcr;
+        rest = match after {
+            [b',', next @ ..] if !next.is_empty() => next,
+            [] => after,
+            _ => return Err(-EINVAL),
+        };
     }
-    if *mask != 0 { 0 } else { -EINVAL }
+    if mask == 0 {
+        return Err(-EINVAL);
+    }
+    Ok(mask)
 }
 
-/// attest_parse_pcr_value(): "<pcr>=<value>", the PCR, below 24, and
-/// where its value starts.
-///
-/// # Safety
-///
-/// `arg` is a C string and `pcr` room for a number.
-unsafe fn parse_pcr_value(arg: *const c_char, pcr: *mut u64, value: &mut *const c_char) -> c_int {
-    // SAFETY: the caller's C string, and room for the number.
-    unsafe {
-        let len = digits(arg, ffi::c_str(arg).len());
-
-        if *arg.add(len) != b'=' as c_char || parse_u64(arg, len, 23, pcr) != 0 {
-            return -EINVAL;
-        }
-        *value = arg.add(len + 1);
-    }
-    0
-}
-
-/// attest_parse_name_digest(): "<name>=<digest>", a name of 1 to
-/// UPATCH_NAME_MAX bytes up to the first equals sign, then 64 hex digits.
-///
-/// # Safety
-///
-/// `spec` is a C string, `name` room for UPATCH_NAME_MAX + 1 bytes and
-/// `digest` for a digest.
-unsafe fn parse_name_digest(spec: *const c_char, name: *mut c_char, digest: *mut u8) -> c_int {
-    // SAFETY: the caller's C string.
-    let s = unsafe { ffi::c_str(spec) };
-    let Some(len) = s.iter().position(|&c| c == b'=') else {
-        return -EINVAL;
+/// `<pcr>=<value>`: the PCR, below 24, and the text of its value after
+/// the equals sign; -EINVAL for anything else.
+pub(crate) fn parse_pcr_value(arg: &[u8]) -> Result<(usize, &[u8]), c_int> {
+    let (number, rest) = arg.split_at(digits(arg));
+    let (Some(value), Ok(pcr)) = (rest.strip_prefix(b"="), parse_u64(number, 23)) else {
+        return Err(-EINVAL);
     };
+    let pcr = usize::try_from(pcr).map_err(|_| -EINVAL)?;
 
-    if len == 0
-        || len > UPATCH_NAME_MAX
-        // SAFETY: the C string after the sign, and the caller's room.
-        || unsafe { hex_decode(spec.add(len + 1), digest, 32) } != 0
-    {
-        return -EINVAL;
+    Ok((pcr, value))
+}
+
+/// `<name>=<digest>`: a name of 1 to UPATCH_NAME_MAX bytes up to the
+/// first equals sign, then the 64 hex digits of the digest; -EINVAL for
+/// anything else.
+pub(crate) fn parse_name_digest(spec: &[u8]) -> Result<(&[u8], [u8; 32]), c_int> {
+    let mut parts = spec.splitn(2, |&c| c == b'=');
+    let mut digest = [0u8; 32];
+
+    let (Some(name), Some(hex)) = (parts.next(), parts.next()) else {
+        return Err(-EINVAL);
+    };
+    if name.is_empty() || name.len() > UPATCH_NAME_MAX || decode(hex, &mut digest).is_err() {
+        return Err(-EINVAL);
     }
-    // SAFETY: the caller's room for the name and its NUL.
-    unsafe {
-        ptr::copy_nonoverlapping(spec, name, len);
-        *name.add(len) = 0;
-    }
-    0
+    Ok((name, digest))
 }
 
 pub(crate) use capi::{
-    attest_challenge_make, attest_challenge_read, attest_evidence_config, attest_parse_name_digest,
-    attest_parse_pcr_value, attest_parse_pcrs, attest_verify,
+    attest_challenge_make, attest_challenge_read, attest_evidence_config, attest_verify,
 };
 
 #[cfg(shirudo_fuzz)]
@@ -2513,38 +2485,5 @@ mod capi {
         // SAFETY: the caller passes the evidence, the expectation and the
         // report's room.
         unsafe { super::verify(evidence, len, &*expect, report, report_cap) }
-    }
-
-    /// # Safety
-    ///
-    /// `list` is a C string and `mask` room for a mask.
-    pub unsafe extern "C" fn attest_parse_pcrs(list: *const c_char, mask: *mut u32) -> c_int {
-        // SAFETY: the caller passes a C string and the room.
-        unsafe { super::parse_pcrs(list, &mut *mask) }
-    }
-
-    /// # Safety
-    ///
-    /// `arg` is a C string, and `pcr` and `value` rooms.
-    pub unsafe extern "C" fn attest_parse_pcr_value(
-        arg: *const c_char,
-        pcr: *mut u64,
-        value: *mut *const c_char,
-    ) -> c_int {
-        // SAFETY: the caller passes a C string and the rooms.
-        unsafe { super::parse_pcr_value(arg, pcr, &mut *value) }
-    }
-
-    /// # Safety
-    ///
-    /// `spec` is a C string, `name` room for UPATCH_NAME_MAX + 1 bytes
-    /// and `digest` for a digest.
-    pub unsafe extern "C" fn attest_parse_name_digest(
-        spec: *const c_char,
-        name: *mut c_char,
-        digest: *mut u8,
-    ) -> c_int {
-        // SAFETY: the caller passes a C string and the rooms.
-        unsafe { super::parse_name_digest(spec, name, digest) }
     }
 }

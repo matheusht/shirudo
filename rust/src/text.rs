@@ -316,14 +316,6 @@ pub(crate) mod capi {
 
     /// # Safety
     ///
-    /// `s` holds `len` bytes.
-    pub unsafe extern "C" fn digits(s: *const c_char, len: usize) -> usize {
-        // SAFETY: the caller's bytes.
-        super::digits(unsafe { bytes(s, len) })
-    }
-
-    /// # Safety
-    ///
     /// `out` is room for a `T`.
     unsafe fn put<T>(r: Result<T, c_int>, out: *mut T) -> c_int {
         match r {
@@ -339,6 +331,7 @@ pub(crate) mod capi {
     /// # Safety
     ///
     /// `s` holds `len` bytes, and `out` is room for the value.
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn parse_u64(
         s: *const c_char,
         len: usize,
