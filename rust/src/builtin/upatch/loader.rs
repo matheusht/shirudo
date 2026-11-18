@@ -25,8 +25,8 @@ use std::os::unix::net::UnixDatagram;
 use super::ops::{fail, remove_pins};
 use super::{log_audit, log_err, log_info, log_warn, strerr};
 use crate::errno::{
-    E2BIG, EACCES, EINVAL, EIO, ENAMETOOLONG, ENODATA, ENOENT, ENOKEY, ENOPKG, ENOTDIR, EOPNOTSUPP,
-    EPERM, ERANGE, ESTALE, EXDEV,
+    E2BIG, EACCES, EBUSY, EEXIST, EINVAL, EIO, ENAMETOOLONG, ENODATA, ENOENT, ENOKEY, ENOPKG,
+    ENOTDIR, EOPNOTSUPP, EOVERFLOW, EPERM, ERANGE, ESTALE, EXDEV,
 };
 use crate::sys::libc::{close, errno, fcntl, fgetxattr, fsetxattr, getsockopt, setxattr, syscall};
 use crate::text::{digits, parse_u64};
@@ -45,11 +45,14 @@ use crate::util::lskel::{Ctx, F_SLEEPABLE, MAP_TYPE_ARRAY, PROG_TYPE_SYSCALL, VE
 use crate::util::report::{OpReport, report_set_log};
 use crate::util::upatch::{
     self, ATTACH_CGROUP_SKB_EGRESS, ATTACH_CGROUP_SKB_INGRESS, ATTACH_FMOD_RET, ATTACH_KPROBE,
-    ATTACH_KRETPROBE, ATTACH_NETFILTER_IPV6_PRE_ROUTING, ATTACH_RAW_TRACEPOINT,
-    ATTACH_UPROBE_MULTI, MAPS_MAX, NAME_MAX, Opened, POLICY_LABEL_ENTRY, POLICY_LABEL_HEADER,
-    ProgSpec, ROLE_ATTACH, ROLE_SERIALIZER, ROLE_TEST_RUN, Upatch,
+    ATTACH_KRETPROBE, ATTACH_NETFILTER_IPV6_PRE_ROUTING, ATTACH_RAW_TRACEPOINT, ATTACH_UPROBE,
+    ATTACH_UPROBE_MULTI, ATTACH_URETPROBE, ATTACH_URETPROBE_MULTI, ATTACH_XDP, MAPS_MAX, NAME_MAX,
+    Opened, POLICY_LABEL_ENTRY, POLICY_LABEL_HEADER, ProgSpec, ROLE_ATTACH, ROLE_SERIALIZER,
+    ROLE_TEST_RUN, Upatch, kind_has_uprobe_target,
 };
+use crate::util::upatch_pins::{LINK_PIN_PREFIX, xdp_prog_pin};
 use crate::util::upatch_resolve::{BPFFS_UPATCHES_DIR, XATTR_PAYLOAD, pin_path};
+use crate::util::xdp::{self, XdpDevice};
 
 /// POLICY_PIN, SOCKET_POLICY_PIN and XATTR_POLICY of util/paths.h.
 const POLICY_PIN: &CStr = c"/run/shirudo/bpffs/task_policy";
@@ -79,7 +82,11 @@ const LSM_MAC: u32 = 27;
 const PERF_EVENT: u32 = 41;
 const NETFILTER: u32 = 45;
 const TRACE_UPROBE_MULTI: u32 = 48;
+const F_UPROBE_MULTI_RETURN: u32 = 1;
 const F_UPROBE_MULTI_PATH_FD: u32 = 2;
+/// BPF_XDP and XDP_FLAGS_DRV_MODE: shirudo attaches in driver mode only.
+const ATTACH_TYPE_XDP: u32 = 37;
+const XDP_FLAGS_DRV_MODE: u32 = 1 << 2;
 
 /// BPF_LINK_TYPE_*, and the perf event kinds a kprobe link reports.
 const LINK_RAW_TRACEPOINT: u32 = 1;
@@ -88,6 +95,9 @@ const LINK_CGROUP: u32 = 3;
 const LINK_PERF_EVENT: u32 = 7;
 const LINK_NETFILTER: u32 = 10;
 const LINK_UPROBE_MULTI: u32 = 12;
+const LINK_XDP: u32 = 6;
+const PERF_EVENT_UPROBE: u32 = 1;
+const PERF_EVENT_URETPROBE: u32 = 2;
 const PERF_EVENT_KPROBE: u32 = 3;
 const PERF_EVENT_KRETPROBE: u32 = 4;
 
@@ -179,6 +189,43 @@ fn link_category(e: c_int) -> &'static CStr {
     }
 }
 
+/// Why attaching and pinning failed: an errno, or shirudo's own verdict
+/// on an XDP device, one of `xdp::ERR_*`.
+#[derive(Clone, Copy)]
+pub(super) enum AttachError {
+    Errno(c_int),
+    Xdp(c_int),
+}
+
+impl AttachError {
+    fn category(self) -> &'static CStr {
+        match self {
+            AttachError::Xdp(xdp::ERR_NO_MULTIBUF) => c"xdp_multibuf_unsupported",
+            AttachError::Xdp(xdp::ERR_DRIVER_SETTINGS) => c"xdp_driver_refused",
+            AttachError::Xdp(xdp::ERR_OCCUPIED) => c"xdp_device_occupied",
+            AttachError::Xdp(xdp::ERR_LINK_SCOPE) | AttachError::Errno(EXDEV) => {
+                c"attach_scope_mismatch"
+            }
+            AttachError::Errno(e) => link_category(e),
+            AttachError::Xdp(_) => c"unknown",
+        }
+    }
+
+    /// The errno a report carries.
+    fn errno(self) -> c_int {
+        match self {
+            AttachError::Errno(e) => e,
+            AttachError::Xdp(x) => -xdp::attach_errno(x),
+        }
+    }
+}
+
+impl From<c_int> for AttachError {
+    fn from(e: c_int) -> Self {
+        AttachError::Errno(e)
+    }
+}
+
 fn kind_name(kind: u32) -> &'static [u8] {
     match kind {
         ATTACH_RAW_TRACEPOINT => b"raw_tracepoint",
@@ -189,6 +236,10 @@ fn kind_name(kind: u32) -> &'static [u8] {
         ATTACH_FMOD_RET => b"fmod_ret",
         ATTACH_NETFILTER_IPV6_PRE_ROUTING => b"netfilter/ipv6-pre-routing",
         ATTACH_UPROBE_MULTI => b"uprobe.multi",
+        ATTACH_XDP => b"xdp",
+        ATTACH_URETPROBE_MULTI => b"uretprobe.multi",
+        ATTACH_UPROBE => b"uprobe",
+        ATTACH_URETPROBE => b"uretprobe",
         _ => b"unknown",
     }
 }
@@ -362,29 +413,34 @@ fn read_int_file(path: &str, prefix: &[u8]) -> Result<u32, c_int> {
 }
 
 /// The perf event of a kprobe at `target` plus `offset`, or a kretprobe.
-fn perf_event_open_kprobe(target: &[u8], offset: u64, retprobe: bool) -> Result<OwnedFd, c_int> {
+/// A kprobe or uprobe event of the PMU `pmu` names in sysfs at `name`, a
+/// function or a path, and `offset`.
+fn perf_event_open_probe(
+    pmu: &str,
+    name: &[u8],
+    offset: u64,
+    retprobe: bool,
+) -> Result<OwnedFd, c_int> {
     const SIZE: usize = 144;
     #[repr(C, align(8))]
     struct PerfAttr([u8; SIZE]);
 
-    let ty = read_int_file("/sys/bus/event_source/devices/kprobe/type", b"")?;
+    let devices = format!("/sys/bus/event_source/devices/{pmu}");
+    let ty = read_int_file(&format!("{devices}/type"), b"")?;
     let mut config = 0u64;
     if retprobe {
-        let bit = read_int_file(
-            "/sys/bus/event_source/devices/kprobe/format/retprobe",
-            b"config:",
-        )?;
+        let bit = read_int_file(&format!("{devices}/format/retprobe"), b"config:")?;
         if bit >= 64 {
             return Err(EINVAL);
         }
         config |= 1 << bit;
     }
-    let func = CString::new(till_nul(target)).map_err(|_| EINVAL)?;
+    let name = CString::new(till_nul(name)).map_err(|_| EINVAL)?;
     let mut a = PerfAttr([0; SIZE]);
     a.0[0..4].copy_from_slice(&ty.to_ne_bytes());
     a.0[4..8].copy_from_slice(&(SIZE as u32).to_ne_bytes());
     a.0[8..16].copy_from_slice(&config.to_ne_bytes());
-    a.0[56..64].copy_from_slice(&(func.as_ptr() as u64).to_ne_bytes());
+    a.0[56..64].copy_from_slice(&(name.as_ptr() as u64).to_ne_bytes());
     a.0[64..72].copy_from_slice(&offset.to_ne_bytes());
     // SAFETY: the attribute, of its size, and the name it points to.
     let fd = unsafe {
@@ -404,12 +460,30 @@ fn perf_event_open_kprobe(target: &[u8], offset: u64, retprobe: bool) -> Result<
     Ok(unsafe { OwnedFd::from_raw_fd(fd as c_int) })
 }
 
+/// The kernel resolves the binary from a path, so name the descriptor
+/// prepare_uprobe_targets() checked: the probe lands in that inode, not
+/// in whatever the spec's path names by now.
+fn perf_event_open_uprobe(spec: &ProgSpec) -> Result<OwnedFd, c_int> {
+    if spec.target_fd < 0 || spec.uprobe_offsets.is_null() || spec.nr_uprobe_offsets != 1 {
+        return Err(EINVAL);
+    }
+    let path = format!("/proc/self/fd/{}", spec.target_fd);
+    // SAFETY: the spec's one offset.
+    let offset = unsafe { *spec.uprobe_offsets };
+    perf_event_open_probe(
+        "uprobe",
+        path.as_bytes(),
+        offset,
+        spec.kind == ATTACH_URETPROBE,
+    )
+}
+
 /// Each uprobe target opened and bound to its recorded GNU build ID
 /// before any program loads. The descriptor stays open in its spec
 /// through the link's creation, so that the path cannot be replaced in
 /// between.
 fn prepare_uprobe_targets(specs: &mut [ProgSpec]) -> Result<(), c_int> {
-    for spec in specs.iter_mut().filter(|s| s.kind == ATTACH_UPROBE_MULTI) {
+    for spec in specs.iter_mut().filter(|s| kind_has_uprobe_target(s.kind)) {
         // SAFETY: the spec's C string.
         let path = unsafe { CStr::from_ptr(spec.uprobe_path) };
         let at = OpenOptions::new()
@@ -455,10 +529,14 @@ fn attach_uprobe_multi(prog: c_int, spec: &ProgSpec) -> Result<OwnedFd, c_int> {
     {
         return Err(EINVAL);
     }
+    let mut flags = F_UPROBE_MULTI_PATH_FD;
+    if spec.kind == ATTACH_URETPROBE_MULTI {
+        flags |= F_UPROBE_MULTI_RETURN;
+    }
     link_create(prog, 0, TRACE_UPROBE_MULTI, |a| {
         a.ptr(24, spec.uprobe_offsets)
             .u32(48, spec.nr_uprobe_offsets)
-            .u32(52, F_UPROBE_MULTI_PATH_FD)
+            .u32(52, flags)
             .u32(60, spec.target_fd as u32)
     })
 }
@@ -474,10 +552,18 @@ fn attach(prog: c_int, spec: &ProgSpec) -> Result<OwnedFd, c_int> {
                 .u32(20, NF_INET_PRE_ROUTING)
                 .u32(24, NF_IP6_PRI_RAW_BEFORE_DEFRAG as u32)
         }),
-        ATTACH_UPROBE_MULTI => attach_uprobe_multi(prog, spec),
+        ATTACH_UPROBE_MULTI | ATTACH_URETPROBE_MULTI => attach_uprobe_multi(prog, spec),
         ATTACH_KPROBE | ATTACH_KRETPROBE => {
-            let perf =
-                perf_event_open_kprobe(&spec.target, spec.offset, spec.kind == ATTACH_KRETPROBE)?;
+            let perf = perf_event_open_probe(
+                "kprobe",
+                &spec.target,
+                spec.offset,
+                spec.kind == ATTACH_KRETPROBE,
+            )?;
+            link_create(prog, perf.as_raw_fd(), PERF_EVENT, |a| a)
+        }
+        ATTACH_UPROBE | ATTACH_URETPROBE => {
+            let perf = perf_event_open_uprobe(spec)?;
             link_create(prog, perf.as_raw_fd(), PERF_EVENT, |a| a)
         }
         _ => Err(EINVAL),
@@ -518,8 +604,10 @@ fn netns_initial() -> Result<(), c_int> {
 /// own guards nothing, a kprobe opened through a sysfs that names another
 /// PMU lands elsewhere, and each is measured as loaded. What the kernel
 /// reports about the link is compared with the spec before the link is
-/// pinned: EXDEV when they differ.
-fn link_matches_spec(link: c_int, spec: &ProgSpec) -> Result<(), c_int> {
+/// pinned: EXDEV when they differ. A uprobe's file name is not: the
+/// descriptor it was opened through fixes the inode, and the name the
+/// kernel reports can differ from the signed path by a symlink.
+fn link_matches_spec(link: c_int, spec: &ProgSpec, ifindex: u32) -> Result<(), c_int> {
     let mut func = [0u8; 128];
     let mut info = Info::<LINK_INFO_SIZE>::new();
     let kprobe = spec.kind == ATTACH_KPROBE || spec.kind == ATTACH_KRETPROBE;
@@ -539,6 +627,8 @@ fn link_matches_spec(link: c_int, spec: &ProgSpec) -> Result<(), c_int> {
         };
     }
     let ok = match spec.kind {
+        // The caller's namespace was checked before the devices were read.
+        ATTACH_XDP => ty == LINK_XDP && ifindex != 0 && info.u32_at(LINK_U) == ifindex,
         ATTACH_CGROUP_SKB_INGRESS | ATTACH_CGROUP_SKB_EGRESS => false,
         ATTACH_NETFILTER_IPV6_PRE_ROUTING => {
             if ty == LINK_NETFILTER
@@ -562,7 +652,27 @@ fn link_matches_spec(link: c_int, spec: &ProgSpec) -> Result<(), c_int> {
                 && u64::from(info.u32_at(36)) == spec.offset
                 && till_nul(&func) == till_nul(&spec.target)
         }
-        ATTACH_UPROBE_MULTI => ty == LINK_UPROBE_MULTI && info.u32_at(52) == spec.nr_uprobe_offsets,
+        ATTACH_UPROBE | ATTACH_URETPROBE => {
+            let want = if spec.kind == ATTACH_URETPROBE {
+                PERF_EVENT_URETPROBE
+            } else {
+                PERF_EVENT_UPROBE
+            };
+            let b = info.bytes();
+            let ref_ctr = u64::from_ne_bytes(b[48..56].try_into().unwrap_or_default());
+            spec.nr_uprobe_offsets == 1
+                && ty == LINK_PERF_EVENT
+                && info.u32_at(LINK_U) == want
+                // SAFETY: the spec's one offset.
+                && u64::from(info.u32_at(36)) == unsafe { *spec.uprobe_offsets }
+                && ref_ctr == 0
+        }
+        ATTACH_UPROBE_MULTI | ATTACH_URETPROBE_MULTI => {
+            let ret = spec.kind == ATTACH_URETPROBE_MULTI;
+            ty == LINK_UPROBE_MULTI
+                && info.u32_at(52) == spec.nr_uprobe_offsets
+                && (info.u32_at(56) & F_UPROBE_MULTI_RETURN != 0) == ret
+        }
         ATTACH_FMOD_RET => ty == LINK_TRACING && info.u32_at(LINK_U) == MODIFY_RETURN,
         _ => ty == LINK_RAW_TRACEPOINT || ty == LINK_TRACING,
     };
@@ -600,18 +710,210 @@ fn cpath(parts: &[&[u8]]) -> Result<CString, c_int> {
     CString::new(parts.concat()).map_err(|_| EINVAL)
 }
 
+/// A pin a load that died before its link left: bound to maps nothing
+/// reaches any more, so it is replaced.
+fn obj_repin(fd: c_int, pin: &CStr) -> Result<(), c_int> {
+    unlink_stale(pin)?;
+    obj_pin(fd, pin)
+}
+
+impl AttachError {
+    /// As C has it: a negative errno, or the verdict.
+    pub(super) fn code(self) -> c_int {
+        match self {
+            AttachError::Errno(e) => -e,
+            AttachError::Xdp(x) => x,
+        }
+    }
+}
+
+/// Links exist only per device, so with none attached the pin is what
+/// keeps the program loaded, and its index is what ties it to its signed
+/// classes.
+fn pin_xdp_prog(prog: c_int, name: &[u8], index: u32) -> Result<CString, c_int> {
+    let pin = xdp_prog_pin(name, index).map_err(|_| ENAMETOOLONG)?;
+    obj_repin(prog, &pin).inspect_err(|&e| {
+        log_err(&[&b"pin XDP program "[..], pin.to_bytes(), b": ", strerr(e)].concat());
+    })?;
+    Ok(pin)
+}
+
+/// The link of `prog` on `dev`, pinned at `pin`. Unpinned, a closed link
+/// detaches, so a failure leaves the device as it was.
+pub(super) fn xdp_attach_one(
+    prog: c_int,
+    spec: &ProgSpec,
+    dev: &XdpDevice,
+    pin: &CStr,
+) -> Result<(), AttachError> {
+    let errno_of = |e: c_int| AttachError::Errno(-e);
+
+    match xdp::device_verify(dev) {
+        0 => {}
+        e => return Err(errno_of(e)),
+    }
+    // Before the attach: it can reconfigure a NIC, and reconcile retries.
+    let features = xdp::device_features(dev.ifindex).map_err(errno_of)?;
+    if xdp::multibuf_refused(features) {
+        return Err(AttachError::Xdp(xdp::ERR_NO_MULTIBUF));
+    }
+    let link = match link_create(prog, dev.ifindex as c_int, ATTACH_TYPE_XDP, |a| {
+        a.u32(12, XDP_FLAGS_DRV_MODE)
+    }) {
+        Ok(l) => l,
+        Err(e) => {
+            if xdp::attach_unsupported(-e, features) {
+                return Err(AttachError::Xdp(xdp::ERR_NO_NATIVE));
+            }
+            if e == EBUSY || e == EEXIST {
+                return Err(AttachError::Xdp(xdp::ERR_OCCUPIED));
+            }
+            // Not a kernel without the link type: EOPNOTSUPP would read as
+            // one.
+            if xdp::driver_refused(-e) {
+                log_info(
+                    &[
+                        &b"XDP: the driver of "[..],
+                        dev.name(),
+                        b" refused the program: ",
+                        strerr(e),
+                    ]
+                    .concat(),
+                );
+                return Err(AttachError::Xdp(xdp::ERR_DRIVER_SETTINGS));
+            }
+            return Err(AttachError::Errno(e));
+        }
+    };
+    // Not to be read as device_verify()'s "the device changed".
+    link_matches_spec(link.as_raw_fd(), spec, dev.ifindex).map_err(|e| {
+        if e == EXDEV {
+            AttachError::Xdp(xdp::ERR_LINK_SCOPE)
+        } else {
+            AttachError::Errno(e)
+        }
+    })?;
+    match xdp::device_verify(dev) {
+        0 => {}
+        e => return Err(errno_of(e)),
+    }
+    obj_pin(link.as_raw_fd(), pin).map_err(AttachError::Errno)
+}
+
+/// `prog` attached to every device of `devices` its signed classes
+/// select, each link pinned at the next link number of `dir`, counted in
+/// `numbered` and kept in `pinned`. A device that cannot run it, or has
+/// gone, is passed over; any other failure fails the load.
+fn attach_xdp_devices(
+    prog: c_int,
+    spec: &ProgSpec,
+    devices: &[XdpDevice],
+    dir: &[u8],
+    numbered: &mut u32,
+    pinned: &mut Vec<CString>,
+) -> Result<(), AttachError> {
+    let mut attached = 0;
+
+    for (i, dev) in devices.iter().enumerate() {
+        if !xdp::selected(devices, i, spec.device_classes) {
+            continue;
+        }
+        if *numbered == u32::MAX {
+            return Err(AttachError::Errno(EOVERFLOW));
+        }
+        let pin = cpath(&[dir, b"/", LINK_PIN_PREFIX, num(*numbered).as_bytes()])?;
+        let ifindex = num(dev.ifindex);
+        match xdp_attach_one(prog, spec, dev, &pin) {
+            Ok(()) => {}
+            Err(AttachError::Xdp(xdp::ERR_NO_NATIVE)) => {
+                log_warn(
+                    &[
+                        &b"XDP: skipping "[..],
+                        dev.name(),
+                        b" (ifindex ",
+                        ifindex.as_bytes(),
+                        b", class ",
+                        num(dev.class()).as_bytes(),
+                        b"): native XDP unsupported",
+                    ]
+                    .concat(),
+                );
+                continue;
+            }
+            Err(e) if xdp::attach_skippable(e.code(), dev) => {
+                log_warn(
+                    &[
+                        &b"XDP: skipping "[..],
+                        dev.name(),
+                        b" (ifindex ",
+                        ifindex.as_bytes(),
+                        b"): ",
+                        xdp::attach_strerror(e.code()).to_bytes(),
+                    ]
+                    .concat(),
+                );
+                continue;
+            }
+            Err(e) => {
+                log_err(
+                    &[
+                        &b"XDP: attach "[..],
+                        dev.name(),
+                        b" (ifindex ",
+                        ifindex.as_bytes(),
+                        b"): ",
+                        xdp::attach_strerror(e.code()).to_bytes(),
+                    ]
+                    .concat(),
+                );
+                return Err(e);
+            }
+        }
+        *numbered += 1;
+        attached += 1;
+        log_info(
+            &[
+                &b"XDP: attached "[..],
+                dev.name(),
+                b" (ifindex ",
+                ifindex.as_bytes(),
+                b", class ",
+                num(dev.class()).as_bytes(),
+                b") at ",
+                pin.to_bytes(),
+            ]
+            .concat(),
+        );
+        pinned.push(pin);
+    }
+    if attached == 0 {
+        log_info(
+            &[
+                &b"XDP: no attachable interface matches signed class mask "[..],
+                num(spec.device_classes).as_bytes(),
+                b" yet",
+            ]
+            .concat(),
+        );
+    }
+    Ok(())
+}
+
 /// The programs the loader made, attached and pinned: serializers as
-/// programs for `upatch map`, the test-run program as one, the rest as
-/// links. A failure unpins what this call pinned: the upatch is then
-/// neither archived nor measured, so none of its programs may stay
-/// attached.
-fn attach_and_pin(cx: &Ctx, name: &[u8], specs: &[ProgSpec]) -> Result<(), c_int> {
+/// programs for `upatch map`, the test-run program as one, an XDP program
+/// as one and a link on each device it selects, the rest as links. With
+/// an XDP program the links of every attach program share one count of
+/// link numbers, as devices come and go. A failure unpins what this call
+/// pinned: the upatch is then neither archived nor measured, so none of
+/// its programs may stay attached.
+fn attach_and_pin(cx: &Ctx, name: &[u8], specs: &[ProgSpec]) -> Result<(), AttachError> {
     if specs.is_empty() {
         log_warn(b"upatch carries no programs to attach");
         return Ok(());
     }
     let dir = pin_path(name, &[]).map_err(|_| ENAMETOOLONG)?;
     let dir = dir.as_bytes();
+    let has_xdp = specs.iter().any(|s| s.kind == ATTACH_XDP);
     if let Err(e) = mkdir_if_absent(BPFFS_UPATCHES_DIR.as_bytes()) {
         log_err(
             &[
@@ -622,24 +924,32 @@ fn attach_and_pin(cx: &Ctx, name: &[u8], specs: &[ProgSpec]) -> Result<(), c_int
             ]
             .concat(),
         );
-        return Err(e);
+        return Err(e.into());
     }
     let serializers = [dir, b"/serializers"].concat();
     let mut pinned: Vec<CString> = Vec::new();
     let (mut made_dir, mut made_serializers) = (false, false);
-    let ret = (|| -> Result<(), c_int> {
+    let ret = (|| -> Result<(), AttachError> {
+        let devices = if has_xdp {
+            netns_initial()?;
+            let devices = xdp::devices_read().map_err(|e| AttachError::Errno(-e))?;
+            xdp::warn_unclassified(&devices);
+            devices
+        } else {
+            Vec::new()
+        };
         made_dir = mkdir_if_absent(dir).inspect_err(|&e| {
             log_err(&[&b"mkdir "[..], dir, b": ", strerr(e)].concat());
         })?;
         let attach_count = specs.iter().filter(|s| s.role == ROLE_ATTACH).count();
-        let mut attach_seen = 0u32;
+        let (mut attach_seen, mut numbered) = (0u32, 0u32);
         let mut test = None;
         for (i, spec) in specs.iter().enumerate() {
             let i = i as u32;
             let fd = cx.prog_fd(i);
             if fd <= 0 {
                 log_err(&[&b"loader produced no fd for prog "[..], num(i).as_bytes()].concat());
-                return Err(EINVAL);
+                return Err(EINVAL.into());
             }
             match spec.role {
                 ROLE_SERIALIZER => {
@@ -649,18 +959,7 @@ fn attach_and_pin(cx: &Ctx, name: &[u8], specs: &[ProgSpec]) -> Result<(), c_int
                             &[&b"mkdir "[..], serializers.as_slice(), b": ", strerr(e)].concat(),
                         );
                     })?;
-                    unlink_stale(&pin).inspect_err(|&e| {
-                        log_err(
-                            &[
-                                &b"unlink stale serializer pin "[..],
-                                pin.to_bytes(),
-                                b": ",
-                                strerr(e),
-                            ]
-                            .concat(),
-                        );
-                    })?;
-                    obj_pin(fd, &pin).inspect_err(|&e| {
+                    obj_repin(fd, &pin).inspect_err(|&e| {
                         log_err(
                             &[&b"pin serializer "[..], pin.to_bytes(), b": ", strerr(e)].concat(),
                         );
@@ -679,18 +978,7 @@ fn attach_and_pin(cx: &Ctx, name: &[u8], specs: &[ProgSpec]) -> Result<(), c_int
                 ROLE_TEST_RUN => {
                     let pin = cpath(&[dir, b"/test"])?;
                     test = Some(fd);
-                    unlink_stale(&pin).inspect_err(|&e| {
-                        log_err(
-                            &[
-                                &b"unlink stale test-run pin "[..],
-                                pin.to_bytes(),
-                                b": ",
-                                strerr(e),
-                            ]
-                            .concat(),
-                        );
-                    })?;
-                    obj_pin(fd, &pin).inspect_err(|&e| {
+                    obj_repin(fd, &pin).inspect_err(|&e| {
                         log_err(
                             &[
                                 &b"pin test-run program "[..],
@@ -713,16 +1001,26 @@ fn attach_and_pin(cx: &Ctx, name: &[u8], specs: &[ProgSpec]) -> Result<(), c_int
                     pinned.push(pin);
                 }
                 _ => {
-                    let pin = if attach_count == 1 {
+                    let pin = if has_xdp {
+                        if numbered == u32::MAX {
+                            return Err(EOVERFLOW.into());
+                        }
+                        cpath(&[dir, b"/", LINK_PIN_PREFIX, num(numbered).as_bytes()])?
+                    } else if attach_count == 1 {
                         cpath(&[dir, b"/link"])?
                     } else {
-                        cpath(&[dir, b"/link_", num(attach_seen).as_bytes()])?
+                        cpath(&[dir, b"/", LINK_PIN_PREFIX, num(attach_seen).as_bytes()])?
                     };
                     attach_seen += 1;
+                    if spec.kind == ATTACH_XDP {
+                        pinned.push(pin_xdp_prog(fd, name, i)?);
+                        attach_xdp_devices(fd, spec, &devices, dir, &mut numbered, &mut pinned)?;
+                        continue;
+                    }
                     let kind = kind_name(spec.kind);
                     let target = till_nul(&spec.target);
                     let link = attach(fd, spec).inspect_err(|&e| {
-                        let site: Vec<u8> = if spec.kind == ATTACH_UPROBE_MULTI {
+                        let site: Vec<u8> = if kind_has_uprobe_target(spec.kind) {
                             // SAFETY: the spec's C string.
                             let path = unsafe { CStr::from_ptr(spec.uprobe_path) }.to_bytes();
                             [&b" "[..], path, b":", target].concat()
@@ -745,7 +1043,7 @@ fn attach_and_pin(cx: &Ctx, name: &[u8], specs: &[ProgSpec]) -> Result<(), c_int
                         );
                     })?;
                     // Unpinned, a closed link detaches.
-                    link_matches_spec(link.as_raw_fd(), spec).inspect_err(|&e| {
+                    link_matches_spec(link.as_raw_fd(), spec, 0).inspect_err(|&e| {
                         log_err(
                             &[
                                 &b"attach prog "[..],
@@ -763,6 +1061,9 @@ fn attach_and_pin(cx: &Ctx, name: &[u8], specs: &[ProgSpec]) -> Result<(), c_int
                     obj_pin(link.as_raw_fd(), &pin).inspect_err(|&e| {
                         log_err(&[&b"pin "[..], pin.to_bytes(), b": ", strerr(e)].concat());
                     })?;
+                    if has_xdp {
+                        numbered += 1;
+                    }
                     log_info(
                         &[
                             &b"upatch load: program "[..],
@@ -788,7 +1089,7 @@ fn attach_and_pin(cx: &Ctx, name: &[u8], specs: &[ProgSpec]) -> Result<(), c_int
             };
             if ret < 0 {
                 log_err(&[&b"initialize test-run arena: "[..], strerr(-ret)].concat());
-                return Err(-ret);
+                return Err((-ret).into());
             }
         }
         Ok(())
@@ -1526,7 +1827,12 @@ pub(crate) fn apply_signed(
     // exits.
     let specs = specs.as_ref().map_or(&[][..], Specs::get);
     if let Err(e) = attach_and_pin(&cx, name, specs) {
-        rep.fail(c"link_create", link_category(e), e, b"attach or pin failed");
+        rep.fail(
+            c"link_create",
+            e.category(),
+            e.errno(),
+            b"attach or pin failed",
+        );
         return Err(());
     }
     pin_maps(&cx, skip, name);
