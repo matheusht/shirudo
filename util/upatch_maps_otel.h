@@ -89,8 +89,6 @@ struct json_emit;
 int otel_header_retry_after(const char *line, size_t len, __u64 *seconds);
 int otel_partial_success(enum otel_signal signal, const char *body,
 			 size_t len);
-int otel_anyvalue_from_json(struct json_emit *e, const char *json,
-			    size_t len, bool wrap);
 int otel_configured_headers(const char *input, struct curl_slist **out);
 bool otel_header_name_ok(const char *s);
 bool otel_header_value_ok(const char *s);

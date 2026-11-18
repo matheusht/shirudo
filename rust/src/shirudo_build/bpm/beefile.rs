@@ -812,7 +812,10 @@ mod capi {
     use core::ffi::c_int;
 
     /// Whether the `len` bytes at `body` are a Beefile `bpm build` takes:
-    /// 0 or -errno. For the fuzzer, which reaches the reader through it.
+    /// 0 or -errno. For the fuzzer, which reaches the reader through it:
+    /// of a Beefile taken, each tree entry's fixes are what the publisher
+    /// may emit, valid IDs in byte order, each once, or the process
+    /// aborts.
     ///
     /// # Safety
     ///
@@ -824,6 +827,19 @@ mod capi {
         }
         // SAFETY: the caller's bytes.
         let body = unsafe { crate::ffi::slice(body, len) };
-        super::parse(body, &mut super::Spec::default())
+        let mut spec = super::Spec::default();
+        let ret = super::parse(body, &mut spec);
+        if ret == 0 {
+            for u in &spec.upatches {
+                let fixes = &u.tree.fixes;
+                if fixes.len() > super::MAX_FIXES
+                    || !fixes.iter().all(|id| super::fix_id_ok(id))
+                    || !fixes.windows(2).all(|w| w[0] < w[1])
+                {
+                    std::process::abort();
+                }
+            }
+        }
+        ret
     }
 }

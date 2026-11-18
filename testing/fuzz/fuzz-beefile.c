@@ -3,7 +3,9 @@
  * Copyright (c) 2026 Authors of shirudo
  *
  * bpm_build_parse_beefile() on a Beefile, which bpm build reads from the
- * package context the operator gives it.
+ * package context the operator gives it. Of a Beefile it takes, the fixes
+ * of each tree entry must be what the publisher emits, valid IDs in byte
+ * order, each once, which the function checks, aborting where not.
  */
 
 #include <stddef.h>

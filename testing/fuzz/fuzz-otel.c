@@ -46,7 +46,6 @@ static size_t deepest_nesting(const char *s, size_t len)
 
 int LLVMFuzzerTestOneInput(const __u8 *data, size_t size)
 {
-	struct json_emit e = { .max = JSON_MAX_BYTES };
 	struct curl_slist *headers = NULL;
 	__u64 seconds;
 	size_t off, n;
@@ -77,26 +76,6 @@ int LLVMFuzzerTestOneInput(const __u8 *data, size_t size)
 	body[size] = '\0';
 	otel_partial_success(OTEL_LOG, body, size);
 	otel_partial_success(OTEL_METRIC, body, size);
-
-	json_obj_open(&e);
-	/*
-	 * What the conversion writes reads back as JSON, in a buffer that
-	 * grows for it. An input level takes up to four in the output,
-	 * which can so nest deeper than the walk goes; such output must read
-	 * back up to that depth.
-	 */
-	if (!otel_anyvalue_from_json(&e, body, size, false)) {
-		json_obj_close(&e);
-		if (e.err == -ENOSPC)
-			abort();
-		if (!e.err) {
-			ret = json_walk(e.buf, e.len, &any_value, NULL);
-			if (deepest_nesting(e.buf, e.len) <= JSON_MAX_DEPTH ?
-			    ret : ret != -E2BIG)
-				abort();
-		}
-	}
-	xfree(e.buf, e.cap);
 
 	if (!memchr(data, '\0', size)) {
 		if (!otel_configured_headers(body, &headers)) {

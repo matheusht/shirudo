@@ -16,14 +16,13 @@ use crate::util::decode::{
     upatch_decode_map_file_json, upatch_decode_map_file_otel, upatch_decode_map_json,
     upatch_decode_map_otel,
 };
-use crate::util::json::{self, JsonEmit, Visit};
+use crate::util::json::JsonEmit;
 use crate::util::map_format;
 
 /// JSON_MAX_BYTES: the largest document the emitter makes.
 pub(super) const JSON_MAX: usize = 8 * 1024 * 1024;
 /// S3_REFERENCE_MAX.
 pub(super) const REFERENCE_MAX: usize = 64 * 1024;
-const JSON_MAX_DEPTH: usize = 32;
 
 pub(super) fn kv_string(e: &mut JsonEmit, key: &[u8], value: &[u8]) {
     e.obj_open();
@@ -85,139 +84,6 @@ fn array_kvlist_end(e: &mut JsonEmit) {
     e.arr_close();
     e.obj_close();
     e.obj_close();
-}
-
-/// A JSON value walked into the OTLP JSON form of an AnyValue: a value in
-/// an array is an AnyValue object of its own, one in an object goes into
-/// the `{"key","value"}` its key opened, and one at the top is the
-/// caller's AnyValue, or with `wrap` an object of its own.
-struct AnyValue<'a> {
-    e: &'a mut JsonEmit,
-    depth: usize,
-    wrap: bool,
-    /// Whether the container at each depth is an array.
-    array: [bool; JSON_MAX_DEPTH + 1],
-}
-
-type Walked = Result<(), c_int>;
-
-impl AnyValue<'_> {
-    fn begin(&mut self) {
-        if if self.depth != 0 {
-            self.array[self.depth]
-        } else {
-            self.wrap
-        } {
-            self.e.obj_open();
-        }
-    }
-
-    fn end(&mut self) {
-        if self.depth == 0 {
-            if self.wrap {
-                self.e.obj_close();
-            }
-        } else if self.array[self.depth] {
-            self.e.obj_close();
-        } else {
-            self.e.obj_close();
-            self.e.obj_close();
-        }
-    }
-
-    fn status(&self) -> Walked {
-        match self.e.err() {
-            0 => Ok(()),
-            err => Err(err),
-        }
-    }
-
-    /// A scalar at the top is only an AnyValue of its own.
-    fn scalar(&self) -> Walked {
-        if self.depth == 0 && !self.wrap {
-            Err(-EINVAL)
-        } else {
-            Ok(())
-        }
-    }
-}
-
-impl Visit for AnyValue<'_> {
-    fn open(&mut self, array: bool) -> Walked {
-        if self.depth == 0 && !self.wrap && array {
-            return Err(-EINVAL);
-        }
-        self.begin();
-        self.e
-            .obj_open_key(if array { b"arrayValue" } else { b"kvlistValue" });
-        self.e.arr_open(b"values");
-        self.depth += 1;
-        self.array[self.depth] = array;
-        self.status()
-    }
-
-    fn close(&mut self, _array: bool) -> Walked {
-        self.e.arr_close();
-        self.e.obj_close();
-        self.depth -= 1;
-        self.end();
-        self.status()
-    }
-
-    fn key(&mut self, key: &CStr) -> Walked {
-        self.e.obj_open();
-        self.e.kv_string(b"key", key.to_bytes());
-        self.e.obj_open_key(b"value");
-        self.status()
-    }
-
-    fn string(&mut self, s: &CStr) -> Walked {
-        self.scalar()?;
-        self.begin();
-        self.e.kv_string(b"stringValue", s.to_bytes());
-        self.end();
-        self.status()
-    }
-
-    /// An intValue is a 64-bit integer: a longer one, or one with a
-    /// fraction or an exponent, goes as a doubleValue as it is written.
-    fn number(&mut self, text: &[u8], integer: bool) -> Walked {
-        self.scalar()?;
-        self.begin();
-        match crate::text::parse_s64(text, i64::MIN, i64::MAX) {
-            Ok(v) if integer => self.e.kv_string(b"intValue", v.to_string().as_bytes()),
-            _ => self.e.kv_raw(b"doubleValue", text),
-        }
-        self.end();
-        self.status()
-    }
-
-    /// An empty AnyValue is the OTLP JSON form of null.
-    fn literal(&mut self, value: c_int) -> Walked {
-        self.scalar()?;
-        self.begin();
-        if value >= 0 {
-            self.e.kv_bool(b"boolValue", value != 0);
-        }
-        self.end();
-        self.status()
-    }
-}
-
-/// One JSON document as an AnyValue: with `wrap` any value as an AnyValue
-/// object of its own, without it an object as the kvlistValue of the
-/// AnyValue the caller has open.
-pub(super) fn anyvalue_from_document(e: &mut JsonEmit, doc: &[u8], wrap: bool) -> c_int {
-    let mut w = AnyValue {
-        e,
-        depth: 0,
-        wrap,
-        array: [false; JSON_MAX_DEPTH + 1],
-    };
-    match json::walk(doc, &mut w) {
-        Ok(()) => 0,
-        Err(err) => err,
-    }
 }
 
 /// The host's name, `unknown` when it has none to give.

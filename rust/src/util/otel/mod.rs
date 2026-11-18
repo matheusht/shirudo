@@ -300,7 +300,6 @@ mod capi {
     use super::{OtelOpts, http, otlp};
     use crate::sys::curl::CurlSlist;
     use crate::sys::upatch_maps::MapView;
-    use crate::util::json::JsonEmit;
 
     fn opts<'a>(p: *const OtelOpts) -> Option<&'a OtelOpts> {
         // SAFETY: the caller's options, or NULL.
@@ -584,23 +583,6 @@ mod capi {
     ) -> c_int {
         // SAFETY: the caller's bytes.
         http::check_partial_success(signal, unsafe { crate::ffi::slice(body.cast(), len) })
-    }
-
-    /// For the fuzzer: the JSON document at `json` as an AnyValue into
-    /// the emitter, as a status body is.
-    ///
-    /// # Safety
-    ///
-    /// `e` is an emitter and `json` holds `len` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn otel_anyvalue_from_json(
-        e: *mut JsonEmit,
-        json: *const c_char,
-        len: usize,
-        wrap: bool,
-    ) -> c_int {
-        // SAFETY: the caller's emitter and bytes.
-        unsafe { otlp::anyvalue_from_document(&mut *e, crate::ffi::slice(json.cast(), len), wrap) }
     }
 
     /// For the fuzzer: the header lines OTEL_EXPORTER_OTLP_HEADERS of
