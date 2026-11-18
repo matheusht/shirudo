@@ -10,6 +10,63 @@ pub const AT_FDCWD: c_int = -100;
 pub const F_DUPFD_CLOEXEC: c_int = 1030;
 pub const SEEK_SET: c_int = 0;
 pub const MFD_CLOEXEC: core::ffi::c_uint = 1;
+pub const AF_UNIX: c_int = 1;
+pub const AF_INET: c_int = 2;
+pub const AF_NETLINK: c_int = 16;
+pub const SOCK_DGRAM: c_int = 2;
+pub const SOCK_RAW: c_int = 3;
+pub const SOCK_CLOEXEC: c_int = 0o2000000;
+pub const SOL_SOCKET: c_int = 1;
+pub const SO_RCVTIMEO: c_int = 20;
+pub const MSG_CTRUNC: c_int = 8;
+pub const MSG_TRUNC: c_int = 32;
+
+/// `struct timeval`.
+#[repr(C)]
+pub struct Timeval {
+    pub tv_sec: i64,
+    pub tv_usec: i64,
+}
+
+/// `struct iovec`.
+#[repr(C)]
+pub struct Iovec {
+    pub iov_base: *mut c_void,
+    pub iov_len: usize,
+}
+
+/// `struct msghdr`.
+#[repr(C)]
+pub struct Msghdr {
+    pub msg_name: *mut c_void,
+    pub msg_namelen: u32,
+    pub msg_iov: *mut Iovec,
+    pub msg_iovlen: usize,
+    pub msg_control: *mut c_void,
+    pub msg_controllen: usize,
+    pub msg_flags: c_int,
+}
+
+/// `struct sockaddr_nl`.
+#[repr(C)]
+pub struct SockaddrNl {
+    pub nl_family: u16,
+    pub nl_pad: u16,
+    pub nl_pid: u32,
+    pub nl_groups: u32,
+}
+
+impl SockaddrNl {
+    /// The kernel's address.
+    pub fn kernel() -> Self {
+        SockaddrNl {
+            nl_family: AF_NETLINK as u16,
+            nl_pad: 0,
+            nl_pid: 0,
+            nl_groups: 0,
+        }
+    }
+}
 pub const STDOUT_FILENO: c_int = 1;
 
 pub const F_OK: c_int = 0;
@@ -459,6 +516,23 @@ unsafe extern "C" {
     pub fn timegm(tm: *mut Tm) -> i64;
     pub fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64;
     pub fn memfd_create(name: *const c_char, flags: core::ffi::c_uint) -> c_int;
+    pub fn socket(domain: c_int, ty: c_int, protocol: c_int) -> c_int;
+    pub fn setsockopt(
+        fd: c_int,
+        level: c_int,
+        name: c_int,
+        value: *const c_void,
+        len: u32,
+    ) -> c_int;
+    pub fn sendto(
+        fd: c_int,
+        buf: *const c_void,
+        len: usize,
+        flags: c_int,
+        addr: *const c_void,
+        addrlen: u32,
+    ) -> isize;
+    pub fn recvmsg(fd: c_int, msg: *mut Msghdr, flags: c_int) -> isize;
     fn __errno_location() -> *mut c_int;
 }
 

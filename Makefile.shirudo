@@ -240,7 +240,6 @@ CLANG_BPF := $(CLANG) -target bpf -mcpu=v4 -fno-jump-tables -O2 -g -Wall -Wextra
 UTIL_SRCS := \
     util/sysinfo_image.c \
     util/io_trusted.c \
-    util/xdp.c \
     util/java_agent.c \
      \
      \
@@ -1339,7 +1338,7 @@ $(FUZZ_OUT)/fuzz-upatch-info: testing/fuzz/fuzz-upatch-info.c $(FUZZ_BASE) \
                                util/upatch_pins.c \
                                \
                               util/upatch_verify.c $(VERSION_OBJ) \
-                              util/xdp.c $(FUZZ_SEAL) $(LIBBPF_A)
+                               $(FUZZ_SEAL) $(LIBBPF_A)
 # Rust defines upatch_decode_map_signal(), which
 #  calls, with LuaJIT alone; upatch info runs no Lua.
 $(FUZZ_OUT)/fuzz-upatch-info: FUZZ_CFLAGS += $(TSS2_CFLAGS) $(LIBELF_CFLAGS) \
