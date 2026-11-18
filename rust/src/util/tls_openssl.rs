@@ -7,7 +7,7 @@
 //! a client trusts added to what libcurl does. The policy does not
 //! change how certificates are verified.
 
-use core::ffi::{CStr, c_char, c_int, c_long, c_void};
+use core::ffi::{CStr, c_int, c_void};
 use core::mem::ManuallyDrop;
 use core::ptr;
 use std::fs::File;
@@ -21,9 +21,8 @@ use openssl_sys::{NID_undef, SSL, SSL_ctrl, SSL_get_servername, TLSEXT_NAMETYPE_
 use crate::errno::EINVAL;
 use crate::sys::curl::{
     CURL_SSLVERSION_TLSV1_3, CURLE_OK, CURLE_SSL_CACERT_BADFILE, CURLE_SSL_CIPHER,
-    CURLE_SSL_CONNECT_ERROR, CURLINFO_EFFECTIVE_URL, CURLOPT_FORBID_REUSE, CURLOPT_SSL_CTX_DATA,
-    CURLOPT_SSL_CTX_FUNCTION, CURLOPT_SSL_SESSIONID_CACHE, CURLOPT_SSLVERSION, CURLUPART_HOST,
-    CURLUPART_SCHEME, Curl, CurlCode, SslCtxCallback, curl_easy_getinfo, curl_easy_setopt,
+    CURLE_SSL_CONNECT_ERROR, CURLOPT_FORBID_REUSE, CURLOPT_SSL_SESSIONID_CACHE, CURLOPT_SSLVERSION,
+    CURLUPART_HOST, CURLUPART_SCHEME, Curl, CurlCode,
 };
 use crate::sys::libc::{O_CLOEXEC, O_RDONLY, open, strcasecmp};
 use crate::sys::openssl::{
@@ -32,7 +31,7 @@ use crate::sys::openssl::{
 };
 use crate::text::{cstr, dns_name_valid};
 use crate::util::config::{self, Scrubbed};
-use crate::util::curl::Url;
+use crate::util::curl::{Easy, Url};
 use crate::util::image_config;
 use crate::util::io::check_trusted;
 
@@ -54,15 +53,11 @@ fn host_listed(host: &[u8], list: &[u8]) -> bool {
             .any(|entry| dns_name_valid(entry) && entry.eq_ignore_ascii_case(host))
 }
 
-/// Whether the configuration lets the host `curl` is connecting to fall
+/// Whether the configuration lets the host `easy` is connecting to fall
 /// back to classical key exchange: an https URL whose host is one of the
 /// exact DNS names of tls.classical_hosts. libcurl asks again for each
 /// redirect, so every registry host has to be named itself.
-///
-/// # Safety
-///
-/// `curl` is the handle libcurl is connecting.
-unsafe fn classical_host_allowed(curl: *mut Curl) -> bool {
+fn classical_host_allowed(easy: &Easy<'_>) -> bool {
     let mut cfg = Scrubbed::new();
 
     if image_config::get(&mut cfg) == 0 && config::load(&mut cfg) != 0 {
@@ -73,15 +68,9 @@ unsafe fn classical_host_allowed(curl: *mut Curl) -> bool {
     if !c.tls_classical_hosts_valid || c.tls_classical_hosts[0] == 0 {
         return false;
     }
-    let mut effective_url: *const c_char = ptr::null();
-    // SAFETY: the caller's handle, and room for the URL libcurl keeps.
-    let got = unsafe { curl_easy_getinfo(curl, CURLINFO_EFFECTIVE_URL, &raw mut effective_url) };
-
-    if got != CURLE_OK || effective_url.is_null() {
+    let Some(effective_url) = easy.effective_url() else {
         return false;
-    }
-    // SAFETY: the URL libcurl keeps, a C string.
-    let effective_url = unsafe { CStr::from_ptr(effective_url) };
+    };
     let Ok(url) = Url::parse(effective_url.to_bytes()) else {
         return false;
     };
@@ -193,16 +182,14 @@ unsafe extern "C" fn sslctx_callback(
     // that it is never dropped here.
     let mut ctx = ManuallyDrop::new(unsafe { SslContextBuilder::from_ptr(sslctx.cast()) });
     let mut groups = TLS_GROUPS;
+    // SAFETY: the handle libcurl is connecting, used only in this call.
+    let easy = unsafe { Easy::from_callback(curl) };
 
-    // SAFETY: the handle libcurl is connecting.
-    if unsafe { classical_host_allowed(curl) } {
+    if let Some(mut easy) = easy.filter(|easy| classical_host_allowed(easy)) {
         // Keep this host's policy from leaking through libcurl's reuse
         // of connections and sessions.
-        // SAFETY: the handle, and two long options.
-        let kept = unsafe {
-            curl_easy_setopt(curl, CURLOPT_FORBID_REUSE, 1 as c_long) == CURLE_OK
-                && curl_easy_setopt(curl, CURLOPT_SSL_SESSIONID_CACHE, 0 as c_long) == CURLE_OK
-        };
+        let kept = easy.set_long(CURLOPT_FORBID_REUSE, 1) == CURLE_OK
+            && easy.set_long(CURLOPT_SSL_SESSIONID_CACHE, 0) == CURLE_OK;
         if !kept {
             return CURLE_SSL_CONNECT_ERROR;
         }
@@ -222,29 +209,21 @@ unsafe extern "C" fn sslctx_callback(
     }
 }
 
-/// The policy on `curl`: TLS 1.3 at least, and the context callback,
+/// The policy on `easy`: TLS 1.3 at least, and the context callback,
 /// with `ca`, the path of the CA file a client trusts, that settles the
-/// rest each time libcurl connects. 0, or -EINVAL for no handle or one
-/// that refused an option.
-///
-/// # Safety
-///
-/// `curl` is NULL or a live handle, and `ca` outlives the handle's
-/// transfers.
-pub(crate) unsafe fn tls_curl_policy(curl: *mut Curl, ca: Option<&CStr>) -> c_int {
-    if curl.is_null() {
-        return -EINVAL;
+/// rest each time libcurl connects. -EINVAL for a handle that refuses
+/// an option.
+pub(crate) fn tls_curl_policy<'a>(easy: &mut Easy<'a>, ca: Option<&'a CStr>) -> Result<(), c_int> {
+    if easy.set_long(CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSV1_3) != CURLE_OK {
+        return Err(-EINVAL);
     }
-    let callback: SslCtxCallback = sslctx_callback;
     let ca = ca.map_or(ptr::null(), CStr::as_ptr);
-    // SAFETY: the caller's handle, a long option, a callback option and
-    // the pointer it is called with.
-    let set = unsafe {
-        curl_easy_setopt(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSV1_3) == CURLE_OK
-            && curl_easy_setopt(curl, CURLOPT_SSL_CTX_FUNCTION, callback) == CURLE_OK
-            && curl_easy_setopt(curl, CURLOPT_SSL_CTX_DATA, ca) == CURLE_OK
-    };
-    if set { 0 } else { -EINVAL }
+    // SAFETY: sslctx_callback() takes its pointer for NULL or a C string,
+    // and the path, which the handle borrows, outlives it.
+    if unsafe { easy.set_ssl_ctx(sslctx_callback, ca.cast()) } != CURLE_OK {
+        return Err(-EINVAL);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

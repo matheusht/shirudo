@@ -12,24 +12,23 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStringExt;
 
 use super::http::{
-    self, CURLOPT_CAINFO, CURLOPT_TIMEOUT_MS, CURLOPT_USERAGENT, DEFAULT_TIMEOUT_MS, ENDPOINT_MAX,
-    Response, Transport, attempt_error, curl_error, loopback_host, response_header, response_write,
-    retry_wait, retryable_curl, retryable_http, url_parts,
+    self, DEFAULT_TIMEOUT_MS, ENDPOINT_MAX, Response, Transport, attempt_error, curl_error,
+    loopback_host, response_header, response_write, retry_wait, retryable_curl, retryable_http,
+    url_parts,
 };
 use super::{LOG, MapView, OtelOpts, eprint, otlp};
 use crate::errno::{
-    E2BIG, EACCES, EINVAL, EIO, ENAMETOOLONG, ENOMEM, EOPNOTSUPP, EOVERFLOW, EPERM, EPROTONOSUPPORT,
+    E2BIG, EACCES, EINVAL, EIO, ENAMETOOLONG, EOPNOTSUPP, EOVERFLOW, EPERM, EPROTONOSUPPORT,
 };
 use crate::sys::curl::{
-    CURLE_OK, CURLINFO_RESPONSE_CODE, CURLOPT_HEADERDATA, CURLOPT_HEADERFUNCTION,
-    CURLOPT_HTTPHEADER, CURLOPT_NOSIGNAL, CURLOPT_SSL_VERIFYHOST, CURLOPT_SSL_VERIFYPEER,
-    CURLOPT_URL, CURLOPT_WRITEDATA, CURLOPT_WRITEFUNCTION, Curl, CurlCode, curl_easy_cleanup,
-    curl_easy_getinfo, curl_easy_init, curl_easy_perform, set_callback, set_long, set_off, set_ptr,
+    CURLE_OK, CURLOPT_AWS_SIGV4, CURLOPT_CAINFO, CURLOPT_INFILESIZE_LARGE, CURLOPT_NOSIGNAL,
+    CURLOPT_SSL_VERIFYHOST, CURLOPT_SSL_VERIFYPEER, CURLOPT_TIMEOUT_MS, CURLOPT_UPLOAD,
+    CURLOPT_URL, CURLOPT_USERAGENT, CURLOPT_USERPWD, CurlCode,
 };
 use crate::util::crypto_openssl::{
     Sha256Ctx, base64_encode, sha256_final, sha256_free, sha256_init, sha256_update,
 };
-use crate::util::curl::Slist;
+use crate::util::curl::{Easy, Slist};
 use crate::util::decode::decode_map;
 use crate::util::gzip::GzWrite;
 use crate::util::tls_openssl::tls_curl_policy;
@@ -42,13 +41,6 @@ const REGION_MAX: usize = 64;
 const KEY_MAX: usize = 1024;
 const HOST_MAX: usize = 256;
 const DECODER_JSON_MAX: usize = 64 * 1024 * 1024;
-
-const CURLOPT_UPLOAD: c_int = 46;
-const CURLOPT_READDATA: c_int = 10009;
-const CURLOPT_READFUNCTION: c_int = 20012;
-const CURLOPT_INFILESIZE_LARGE: c_int = 30115;
-const CURLOPT_USERPWD: c_int = 10005;
-const CURLOPT_AWS_SIGV4: c_int = 10305;
 
 fn env(name: &str) -> Option<Vec<u8>> {
     std::env::var_os(name)
@@ -461,30 +453,26 @@ impl S3 {
         let mut ret = Err(-EIO);
         for attempt in 0..max_attempts {
             let mut response = Response::new();
-            // SAFETY: a new handle.
-            let curl = unsafe { curl_easy_init() };
-            if curl.is_null() {
-                ret = Err(-ENOMEM);
-                break;
-            }
-            if s.file.seek(SeekFrom::Start(0)).is_err() {
-                // SAFETY: the handle, freed once.
-                unsafe { curl_easy_cleanup(curl) };
-                ret = Err(-EIO);
-                break;
-            }
-            let (code, status) = match self.perform(curl, s, &url, &headers, &sigv4, &mut response)
-            {
-                Ok(r) => r,
+            let mut easy = match Easy::new() {
+                Ok(easy) => easy,
                 Err(err) => {
-                    // SAFETY: the handle, freed once.
-                    unsafe { curl_easy_cleanup(curl) };
                     ret = Err(err);
                     break;
                 }
             };
-            // SAFETY: the handle, freed once.
-            unsafe { curl_easy_cleanup(curl) };
+            if s.file.seek(SeekFrom::Start(0)).is_err() {
+                ret = Err(-EIO);
+                break;
+            }
+            let done = self.perform(&mut easy, s, &url, &headers, &sigv4, &mut response);
+            drop(easy);
+            let (code, status) = match done {
+                Ok(done) => done,
+                Err(err) => {
+                    ret = Err(err);
+                    break;
+                }
+            };
             if code == CURLE_OK && matches!(status, 200 | 201 | 204 | 412) {
                 ret = Ok(status == 412);
                 break;
@@ -521,59 +509,57 @@ impl S3 {
         ret
     }
 
-    fn perform(
+    fn perform<'a>(
         &self,
-        curl: *mut Curl,
+        easy: &mut Easy<'a>,
         s: &mut Snapshot,
         url: &CStr,
-        headers: &Slist,
+        headers: &'a Slist,
         sigv4: &CStr,
         response: &mut Response,
     ) -> Result<(CurlCode, c_long), c_int> {
         let ctx: *mut Response = response;
         let file: *mut File = &mut s.file;
-        // SAFETY: the handle, and options whose values outlive the
-        // transfer: the URL, the file, the headers, the strings, the
-        // response.
-        unsafe {
-            set_ptr(curl, CURLOPT_URL, url.as_ptr());
-            set_long(curl, CURLOPT_UPLOAD, 1);
-            set_ptr(curl, CURLOPT_READDATA, file);
-            set_callback(curl, CURLOPT_READFUNCTION, read_file);
-            set_off(curl, CURLOPT_INFILESIZE_LARGE, s.object_bytes as i64);
-            set_ptr(curl, CURLOPT_HTTPHEADER, headers.raw());
-            set_ptr(curl, CURLOPT_AWS_SIGV4, sigv4.as_ptr());
-            set_ptr(curl, CURLOPT_USERPWD, self.credentials.as_ptr());
-            set_ptr(curl, CURLOPT_USERAGENT, c"shirudo-S3-Exporter-C/1".as_ptr());
-            set_callback(curl, CURLOPT_WRITEFUNCTION, response_write);
-            set_ptr(curl, CURLOPT_WRITEDATA, ctx);
-            set_callback(curl, CURLOPT_HEADERFUNCTION, response_header);
-            set_ptr(curl, CURLOPT_HEADERDATA, ctx);
-            set_long(curl, CURLOPT_NOSIGNAL, 1);
-            set_long(curl, CURLOPT_TIMEOUT_MS, DEFAULT_TIMEOUT_MS);
-            set_long(
-                curl,
-                CURLOPT_SSL_VERIFYPEER,
-                if self.insecure_tls { 0 } else { 1 },
-            );
-            set_long(
-                curl,
-                CURLOPT_SSL_VERIFYHOST,
-                if self.insecure_tls { 0 } else { 2 },
-            );
-            if tls_curl_policy(curl, None) != 0 {
-                return Err(-EINVAL);
-            }
-            if let Some(ca) = &self.ca_file {
-                set_ptr(curl, CURLOPT_CAINFO, ca.as_ptr());
-            }
-            let code = curl_easy_perform(curl);
-            let mut status: c_long = 0;
-            if code == CURLE_OK {
-                curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &mut status);
-            }
-            Ok((code, status))
+
+        easy.set_str(CURLOPT_URL, url);
+        easy.set_long(CURLOPT_UPLOAD, 1);
+        // SAFETY: read_file() takes its data for the snapshot's file,
+        // which outlives the handle and which only the callback touches
+        // while the transfer runs.
+        unsafe { easy.set_read(read_file, file) };
+        easy.set_off(CURLOPT_INFILESIZE_LARGE, s.object_bytes as i64);
+        easy.set_headers(headers);
+        easy.set_str(CURLOPT_AWS_SIGV4, sigv4);
+        easy.set_str(CURLOPT_USERPWD, &self.credentials);
+        easy.set_str(CURLOPT_USERAGENT, c"shirudo-S3-Exporter-C/1");
+        // SAFETY: response_write() takes its data for the response, which
+        // outlives the handle and which only the callbacks touch while
+        // the transfer runs.
+        unsafe { easy.set_write(response_write, ctx) };
+        // SAFETY: response_header() takes its data for the response, as
+        // above.
+        unsafe { easy.set_header(response_header, ctx) };
+        easy.set_long(CURLOPT_NOSIGNAL, 1);
+        easy.set_long(CURLOPT_TIMEOUT_MS, DEFAULT_TIMEOUT_MS);
+        easy.set_long(
+            CURLOPT_SSL_VERIFYPEER,
+            if self.insecure_tls { 0 } else { 1 },
+        );
+        easy.set_long(
+            CURLOPT_SSL_VERIFYHOST,
+            if self.insecure_tls { 0 } else { 2 },
+        );
+        tls_curl_policy(easy, None)?;
+        if let Some(ca) = &self.ca_file {
+            easy.set_str(CURLOPT_CAINFO, ca);
         }
+        let code = easy.perform();
+        let status = if code == CURLE_OK {
+            easy.response_code().unwrap_or(0)
+        } else {
+            0
+        };
+        Ok((code, status))
     }
 
     fn emit(&self, v: &MapView) -> c_int {

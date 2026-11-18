@@ -11,18 +11,25 @@ use super::auth::{encode_basic, parse_challenge, token_from_body};
 use super::refs::{upload_location, url};
 use super::{
     AUTH_VALUE_SIZE, BASIC_ENCODED_SIZE, BASIC_HEADER_SIZE, BpmBuffer, Descriptor, HttpResponse,
-    MANIFEST_MEDIA, MAX_HTTP_BODY, MAX_PACKAGE_BYTES, OciClient, PATH_MAX, c_ptr, copy_string,
-    cstr, digest_matches, is_space, strscpy, strsprintf,
+    MANIFEST_MEDIA, MAX_HTTP_BODY, MAX_PACKAGE_BYTES, OciClient, PATH_MAX, copy_string, cstr,
+    digest_matches, is_space, strscpy, strsprintf,
 };
 use crate::errno::{
     E2BIG, EACCES, EFBIG, EHOSTUNREACH, EINVAL, EKEYREJECTED, ENAMETOOLONG, ENOENT, ENOMEM,
 };
 use crate::ffi;
 use crate::heap::{xfree, xreallocarray};
-use crate::sys::curl::{self, Curl};
+use crate::sys::curl::{
+    CURL_ERROR_SIZE, CURLE_FILESIZE_EXCEEDED, CURLE_OK, CURLOPT_CONNECTTIMEOUT,
+    CURLOPT_CUSTOMREQUEST, CURLOPT_FOLLOWLOCATION, CURLOPT_HTTPGET, CURLOPT_LOW_SPEED_LIMIT,
+    CURLOPT_LOW_SPEED_TIME, CURLOPT_MAXFILESIZE_LARGE, CURLOPT_MAXREDIRS, CURLOPT_NOBODY,
+    CURLOPT_NOSIGNAL, CURLOPT_PROTOCOLS_STR, CURLOPT_REDIR_PROTOCOLS_STR, CURLOPT_SSL_VERIFYHOST,
+    CURLOPT_SSL_VERIFYPEER, CURLOPT_TIMEOUT, CURLOPT_UNRESTRICTED_AUTH, CURLOPT_URL, CurlCode,
+    CurlOff,
+};
 use crate::sys::libc::{self, SEEK_SET, scrub};
 use crate::util::crypto_openssl::sha256;
-use crate::util::curl::Slist;
+use crate::util::curl::{Easy, Slist, strerror};
 use crate::util::hex::encode;
 use crate::util::io::write_complete;
 use crate::util::tls_openssl::tls_curl_policy;
@@ -215,14 +222,11 @@ fn transfer_seconds(room: u64) -> c_long {
 /// every other command waits for, longer than the most a transfer may
 /// carry takes at a floor rate: `room` bytes, in a minute and at 128 KiB
 /// a second.
-fn deadlines(handle: *mut Curl, room: u64) {
-    // SAFETY: a live handle and long options.
-    unsafe {
-        curl::set_long(handle, curl::CURLOPT_CONNECTTIMEOUT, 30);
-        curl::set_long(handle, curl::CURLOPT_LOW_SPEED_LIMIT, 1);
-        curl::set_long(handle, curl::CURLOPT_LOW_SPEED_TIME, 60);
-        curl::set_long(handle, curl::CURLOPT_TIMEOUT, transfer_seconds(room));
-    }
+fn deadlines(easy: &mut Easy<'_>, room: u64) {
+    easy.set_long(CURLOPT_CONNECTTIMEOUT, 30);
+    easy.set_long(CURLOPT_LOW_SPEED_LIMIT, 1);
+    easy.set_long(CURLOPT_LOW_SPEED_TIME, 60);
+    easy.set_long(CURLOPT_TIMEOUT, transfer_seconds(room));
 }
 
 /// A `Name: value` header appended to `list` through a buffer of `CAP`
@@ -272,135 +276,111 @@ fn curl_once(
     req: &Request,
     auth: Option<&[u8]>,
     r: &mut HttpResponse,
-    file: Option<&mut FileSink>,
+    mut file: Option<&mut FileSink>,
     follow: bool,
 ) -> c_int {
     let headers = match request_headers(req, auth) {
         Ok(headers) => headers,
         Err(err) => return err,
     };
-    let mut errbuf = [0u8; curl::CURL_ERROR_SIZE];
-    let mut status: c_long = 0;
-
-    // SAFETY: curl_easy_init() takes nothing.
-    let handle = unsafe { curl::curl_easy_init() };
-    if handle.is_null() {
-        return -ENOMEM;
-    }
-    let file_ptr = file.map(|f| f as *mut FileSink);
+    let mut errbuf = [0u8; CURL_ERROR_SIZE];
+    let mut easy = match Easy::new() {
+        Ok(easy) => easy,
+        Err(err) => return err,
+    };
     // The package's declared size for a download to disk, the in-memory
     // cap otherwise, and the request body for an upload.
-    // SAFETY: the caller's sink, which outlives the transfer.
-    let room = file_ptr.map_or(MAX_HTTP_BODY as u64, |f| unsafe { (*f).room })
+    let room = file.as_ref().map_or(MAX_HTTP_BODY as u64, |f| f.room)
         + req.body.map_or(0, |b| b.len() as u64);
     let r_ptr = ptr::from_mut(r);
-    // SAFETY: a live handle; every pointer set, the URL, method, header
-    // list, error buffer, body, response and sink, outlives the transfer,
-    // and nothing touches them through another path until it ends.
-    let cc = unsafe {
-        curl::set_ptr(handle, curl::CURLOPT_URL, req.url.as_ptr());
-        curl::set_ptr(handle, curl::CURLOPT_CUSTOMREQUEST, req.method.as_ptr());
-        if req.method.to_bytes().eq_ignore_ascii_case(b"HEAD") {
-            curl::set_long(handle, curl::CURLOPT_NOBODY, 1);
-        }
-        curl::set_ptr(handle, curl::CURLOPT_HTTPHEADER, headers.raw());
-        curl::set_ptr(handle, curl::CURLOPT_ERRORBUFFER, errbuf.as_mut_ptr());
-        curl::set_long(handle, curl::CURLOPT_NOSIGNAL, 1);
-        deadlines(handle, room);
-        // OCI registries commonly redirect blob GETs to a signed CDN URL.
-        // Follow only for blobs, never for manifest or upload calls.
-        curl::set_long(handle, curl::CURLOPT_FOLLOWLOCATION, c_long::from(follow));
-        if follow {
-            let protocols: &CStr = if c.base_url.starts_with(b"https://") {
-                c"https"
-            } else {
-                c"http,https"
-            };
 
-            curl::set_long(handle, curl::CURLOPT_MAXREDIRS, 5);
-            curl::set_ptr(
-                handle,
-                curl::CURLOPT_REDIR_PROTOCOLS_STR,
-                protocols.as_ptr(),
-            );
-            // Keep Authorization restricted to the original registry host.
-            curl::set_long(handle, curl::CURLOPT_UNRESTRICTED_AUTH, 0);
-        }
-        curl::set_long(handle, curl::CURLOPT_SSL_VERIFYPEER, 1);
-        curl::set_long(handle, curl::CURLOPT_SSL_VERIFYHOST, 2);
-        if tls_curl_policy(handle, Some(as_cstr(&c.ca_file))) != 0 {
-            crate::log::err(
-                &[
-                    &b"bpm OCI request "[..],
-                    req.url.to_bytes(),
-                    b": cannot apply TLS policy",
-                ]
-                .concat(),
-            );
-            curl::curl_easy_cleanup(handle);
-            return -EHOSTUNREACH;
-        }
-        if let Some(body) = req.body {
-            curl::set_ptr(handle, curl::CURLOPT_POSTFIELDS, body.as_ptr());
-            curl::set_off(
-                handle,
-                curl::CURLOPT_POSTFIELDSIZE_LARGE,
-                body.len() as curl::CurlOff,
-            );
-        }
-        match file_ptr {
-            Some(f) => {
-                curl::set_off(
-                    handle,
-                    curl::CURLOPT_MAXFILESIZE_LARGE,
-                    (*f).room as curl::CurlOff,
-                );
-                curl::set_callback(handle, curl::CURLOPT_WRITEFUNCTION, write_file);
-                curl::set_ptr(handle, curl::CURLOPT_WRITEDATA, f);
-            }
-            None => {
-                curl::set_callback(handle, curl::CURLOPT_WRITEFUNCTION, write_memory);
-                curl::set_ptr(handle, curl::CURLOPT_WRITEDATA, r_ptr);
-            }
-        }
-        curl::set_callback(handle, curl::CURLOPT_HEADERFUNCTION, header);
-        curl::set_ptr(handle, curl::CURLOPT_HEADERDATA, r_ptr);
-        let cc = curl::curl_easy_perform(handle);
-        curl::curl_easy_getinfo(handle, curl::CURLINFO_RESPONSE_CODE, &raw mut status);
-        cc
-    };
-    r.status = status;
-    if cc != curl::CURLE_OK {
-        let reason = if errbuf[0] != 0 {
-            c_ptr(&errbuf)
-        } else {
-            // SAFETY: any code has a static message.
-            unsafe { curl::curl_easy_strerror(cc) }
-        };
-        // SAFETY: the error buffer libcurl filled, or its static text,
-        // a C string either way.
-        let reason = unsafe { CStr::from_ptr(reason) };
-
+    easy.set_str(CURLOPT_URL, req.url);
+    easy.set_str(CURLOPT_CUSTOMREQUEST, req.method);
+    if req.method.to_bytes().eq_ignore_ascii_case(b"HEAD") {
+        easy.set_long(CURLOPT_NOBODY, 1);
+    }
+    easy.set_headers(&headers);
+    easy.set_error_buffer(&mut errbuf);
+    easy.set_long(CURLOPT_NOSIGNAL, 1);
+    deadlines(&mut easy, room);
+    // OCI registries commonly redirect blob GETs to a signed CDN URL.
+    // Follow only for blobs, never for manifest or upload calls.
+    easy.set_long(CURLOPT_FOLLOWLOCATION, c_long::from(follow));
+    if follow {
+        follow_redirects(&mut easy, &c.base_url);
+    }
+    easy.set_long(CURLOPT_SSL_VERIFYPEER, 1);
+    easy.set_long(CURLOPT_SSL_VERIFYHOST, 2);
+    if tls_curl_policy(&mut easy, Some(as_cstr(&c.ca_file))).is_err() {
         crate::log::err(
             &[
                 &b"bpm OCI request "[..],
                 req.url.to_bytes(),
-                b": ",
-                reason.to_bytes(),
+                b": cannot apply TLS policy",
             ]
             .concat(),
         );
+        return -EHOSTUNREACH;
+    }
+    if let Some(body) = req.body {
+        easy.set_post_fields(body);
+    }
+    match file.as_deref_mut() {
+        Some(f) => {
+            easy.set_off(CURLOPT_MAXFILESIZE_LARGE, f.room as CurlOff);
+            // SAFETY: write_file() takes its data for the sink, which
+            // outlives the handle and which nothing else touches while
+            // the transfer runs.
+            unsafe { easy.set_write(write_file, ptr::from_mut(f)) };
+        }
+        // SAFETY: write_memory() takes its data for the response, which
+        // outlives the handle and which only the callbacks touch while
+        // the transfer runs.
+        None => unsafe { easy.set_write(write_memory, r_ptr) },
+    }
+    // SAFETY: header() takes its data for the response, as above.
+    unsafe { easy.set_header(header, r_ptr) };
+    let cc = easy.perform();
+    let mut status = easy.response_code().unwrap_or(0);
+    drop(easy);
+    r.status = status;
+    if cc != CURLE_OK {
+        log_failure(req.url, &errbuf, cc);
         status = -1;
     }
-    if let Some(f) = file_ptr {
-        if cc == curl::CURLE_FILESIZE_EXCEEDED {
-            // SAFETY: the caller's sink, which the transfer is done with.
-            unsafe { (*f).overflow = true };
+    if let Some(f) = file {
+        if cc == CURLE_FILESIZE_EXCEEDED {
+            f.overflow = true;
         }
     }
-    // SAFETY: the handle, done with.
-    unsafe { curl::curl_easy_cleanup(handle) };
     if status < 0 { -EHOSTUNREACH } else { 0 }
+}
+
+/// Up to five redirects, over no weaker a transport than the registry's
+/// own, and the Authorization kept to the registry's host.
+fn follow_redirects(easy: &mut Easy<'_>, base_url: &[u8]) {
+    let protocols: &CStr = if base_url.starts_with(b"https://") {
+        c"https"
+    } else {
+        c"http,https"
+    };
+
+    easy.set_long(CURLOPT_MAXREDIRS, 5);
+    easy.set_str(CURLOPT_REDIR_PROTOCOLS_STR, protocols);
+    // Keep Authorization restricted to the original registry host.
+    easy.set_long(CURLOPT_UNRESTRICTED_AUTH, 0);
+}
+
+/// Why the request to `url` failed: the message libcurl left in
+/// `errbuf`, or the text of `cc` when it left none.
+fn log_failure(url: &CStr, errbuf: &[u8; CURL_ERROR_SIZE], cc: CurlCode) {
+    let reason = if errbuf[0] != 0 {
+        cstr(errbuf)
+    } else {
+        strerror(cc).to_bytes()
+    };
+
+    crate::log::err(&[&b"bpm OCI request "[..], url.to_bytes(), b": ", reason].concat());
 }
 
 /// A token for the registry: BPM_OCI_BEARER_TOKEN, or the answer of the
@@ -421,20 +401,13 @@ fn get_bearer_token(c: &mut OciClient, challenge: &[u8]) -> c_int {
     if parse_challenge(challenge, &mut realm, &mut service, &mut scope) != 0 {
         return -EINVAL;
     }
-    // SAFETY: curl_easy_init() takes nothing.
-    let handle = unsafe { curl::curl_easy_init() };
-    if handle.is_null() {
-        return -ENOMEM;
-    }
     let mut basic = [0u8; BASIC_ENCODED_SIZE];
     let mut auth_header = [0u8; BASIC_HEADER_SIZE];
     let mut headers = Slist::default();
     let mut r = HttpResponse::new();
-    let mut esc = [ptr::null_mut::<c_char>(); 2];
 
     let ret = token_exchange(
         c,
-        handle,
         &realm,
         &service,
         &scope,
@@ -442,17 +415,9 @@ fn get_bearer_token(c: &mut OciClient, challenge: &[u8]) -> c_int {
         &mut auth_header,
         &mut headers,
         &mut r,
-        &mut esc,
     );
     scrub(&mut basic);
     scrub(&mut auth_header);
-    // SAFETY: what curl allocated for the escapes, NULL when it did not,
-    // and the handle.
-    unsafe {
-        curl::curl_free(esc[0].cast());
-        curl::curl_free(esc[1].cast());
-        curl::curl_easy_cleanup(handle);
-    }
     buffer_free(&mut r.body);
     ret
 }
@@ -460,7 +425,6 @@ fn get_bearer_token(c: &mut OciClient, challenge: &[u8]) -> c_int {
 #[allow(clippy::too_many_arguments)]
 fn token_exchange(
     c: &mut OciClient,
-    handle: *mut Curl,
     realm: &[u8],
     service: &[u8],
     scope: &[u8],
@@ -468,29 +432,27 @@ fn token_exchange(
     auth_header: &mut [u8],
     headers: &mut Slist,
     r: &mut HttpResponse,
-    esc: &mut [*mut c_char; 2],
 ) -> c_int {
     let mut url = [0u8; PATH_MAX * 2];
     let mut ret = -EINVAL;
+    let mut easy = match Easy::new() {
+        Ok(easy) => easy,
+        Err(err) => return err,
+    };
 
-    // SAFETY: a live handle and NUL-terminated strings, which curl copies.
-    unsafe {
-        esc[0] = curl::curl_easy_escape(handle, c_ptr(service), 0);
-        esc[1] = curl::curl_easy_escape(handle, c_ptr(scope), 0);
-    }
-    if esc[0].is_null() || esc[1].is_null() {
+    let esc_service = easy.escape(as_cstr(service));
+    let esc_scope = easy.escape(as_cstr(scope));
+    let (Some(esc_service), Some(esc_scope)) = (esc_service, esc_scope) else {
         return ret;
-    }
-    // SAFETY: curl_easy_escape() returns C strings.
-    let (esc_service, esc_scope) = unsafe { (CStr::from_ptr(esc[0]), CStr::from_ptr(esc[1])) };
+    };
     if strsprintf(
         &mut url,
         &[
             cstr(realm),
             b"?service=",
-            esc_service.to_bytes(),
+            &esc_service,
             b"&scope=",
-            esc_scope.to_bytes(),
+            &esc_scope,
         ],
     )
     .is_err()
@@ -517,32 +479,26 @@ fn token_exchange(
     } else {
         c"http,https"
     };
-    let r_ptr = ptr::from_mut(r);
-    // SAFETY: a live handle; the URL, list and response outlive the
-    // transfer and nothing else touches them until it ends.
-    let cc = unsafe {
-        curl::set_ptr(handle, curl::CURLOPT_URL, c_ptr(&url));
-        curl::set_ptr(handle, curl::CURLOPT_PROTOCOLS_STR, protocols.as_ptr());
-        curl::set_long(handle, curl::CURLOPT_HTTPGET, 1);
-        curl::set_ptr(handle, curl::CURLOPT_HTTPHEADER, headers.raw());
-        curl::set_long(handle, curl::CURLOPT_NOSIGNAL, 1);
-        deadlines(handle, MAX_HTTP_BODY as u64);
-        curl::set_callback(handle, curl::CURLOPT_WRITEFUNCTION, write_memory);
-        curl::set_ptr(handle, curl::CURLOPT_WRITEDATA, r_ptr);
-        curl::set_long(handle, curl::CURLOPT_SSL_VERIFYPEER, 1);
-        curl::set_long(handle, curl::CURLOPT_SSL_VERIFYHOST, 2);
-        if tls_curl_policy(handle, Some(as_cstr(&c.ca_file))) != 0 {
-            return -EINVAL;
-        }
-        let cc = curl::curl_easy_perform(handle);
-        curl::curl_easy_getinfo(
-            handle,
-            curl::CURLINFO_RESPONSE_CODE,
-            &raw mut (*r_ptr).status,
-        );
-        cc
-    };
-    if cc != curl::CURLE_OK {
+    easy.set_str(CURLOPT_URL, as_cstr(&url));
+    easy.set_str(CURLOPT_PROTOCOLS_STR, protocols);
+    easy.set_long(CURLOPT_HTTPGET, 1);
+    easy.set_headers(headers);
+    easy.set_long(CURLOPT_NOSIGNAL, 1);
+    deadlines(&mut easy, MAX_HTTP_BODY as u64);
+    // SAFETY: write_memory() takes its data for the response, which
+    // outlives the handle and which only the callback touches while the
+    // transfer runs.
+    unsafe { easy.set_write(write_memory, ptr::from_mut(r)) };
+    easy.set_long(CURLOPT_SSL_VERIFYPEER, 1);
+    easy.set_long(CURLOPT_SSL_VERIFYHOST, 2);
+    if tls_curl_policy(&mut easy, Some(as_cstr(&c.ca_file))).is_err() {
+        return -EINVAL;
+    }
+    let cc = easy.perform();
+    if let Some(status) = easy.response_code() {
+        r.status = status;
+    }
+    if cc != CURLE_OK {
         return -EHOSTUNREACH;
     }
     if r.status >= 300 {

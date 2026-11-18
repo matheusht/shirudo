@@ -6,16 +6,15 @@
 //! staging directory, verified through a dm-verity mapping, and published
 //! under the image's root hash.
 
-use core::ffi::{CStr, c_char, c_int, c_long, c_void};
+use core::ffi::{CStr, c_char, c_int, c_void};
 use core::mem::MaybeUninit;
 use core::ptr;
 
-use crate::errno::{EEXIST, EFBIG, EINTR, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOMEM, text};
+use crate::errno::{EEXIST, EFBIG, EINTR, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, text};
 use crate::sys::curl::{
     CURLE_OK, CURLOPT_CONNECTTIMEOUT, CURLOPT_FAILONERROR, CURLOPT_FOLLOWLOCATION,
     CURLOPT_LOW_SPEED_LIMIT, CURLOPT_LOW_SPEED_TIME, CURLOPT_MAXREDIRS, CURLOPT_PROTOCOLS_STR,
-    CURLOPT_REDIR_PROTOCOLS_STR, CURLOPT_URL, CURLOPT_WRITEDATA, CURLOPT_WRITEFUNCTION,
-    WriteCallback, curl_easy_cleanup, curl_easy_init, curl_easy_perform, curl_easy_setopt,
+    CURLOPT_REDIR_PROTOCOLS_STR, CURLOPT_URL,
 };
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
@@ -25,6 +24,7 @@ use crate::sys::libc::{
 };
 use crate::util::config_image::{self, ConfigImageOpen, MAX_BYTES, SIG_MAX};
 use crate::util::config_update::ConfigUpdateTarget;
+use crate::util::curl::Easy;
 use crate::util::dm_verity::{self, DmVerity};
 use crate::util::hex::hex_encode;
 use crate::util::io::write_complete;
@@ -98,43 +98,31 @@ unsafe extern "C" fn curl_write(
 }
 
 /// The file at the HTTPS URL `source` into the download.
-///
-/// # Safety
-///
-/// `source` is a C string.
-unsafe fn download_https(source: *const c_char, d: &mut Download) -> c_int {
-    // SAFETY: a call that takes nothing.
-    let curl = unsafe { curl_easy_init() };
-    if curl.is_null() {
-        return -ENOMEM;
+fn download_https(source: &CStr, d: &mut Download) -> c_int {
+    let mut easy = match Easy::new() {
+        Ok(easy) => easy,
+        Err(err) => return err,
+    };
+    if let Err(err) = tls_curl_policy(&mut easy, None) {
+        return err;
     }
-    // SAFETY: the handle, without a CA of the caller's.
-    let mut ret = unsafe { tls_curl_policy(curl, None) };
-    if ret == 0 {
-        let write: WriteCallback = curl_write;
-
-        // SAFETY: the handle, options with the types curl reads them as,
-        // and the download, which outlives the transfer.
-        unsafe {
-            curl_easy_setopt(curl, CURLOPT_URL, source);
-            curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, c"https".as_ptr());
-            curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, c"https".as_ptr());
-            curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1 as c_long);
-            curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5 as c_long);
-            curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1 as c_long);
-            curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30 as c_long);
-            curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024 as c_long);
-            curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60 as c_long);
-            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write);
-            curl_easy_setopt(curl, CURLOPT_WRITEDATA, ptr::from_mut(d).cast::<c_void>());
-            if curl_easy_perform(curl) != CURLE_OK {
-                ret = if d.err != 0 { d.err } else { -EIO };
-            }
-        }
+    easy.set_str(CURLOPT_URL, source);
+    easy.set_str(CURLOPT_PROTOCOLS_STR, c"https");
+    easy.set_str(CURLOPT_REDIR_PROTOCOLS_STR, c"https");
+    easy.set_long(CURLOPT_FOLLOWLOCATION, 1);
+    easy.set_long(CURLOPT_MAXREDIRS, 5);
+    easy.set_long(CURLOPT_FAILONERROR, 1);
+    easy.set_long(CURLOPT_CONNECTTIMEOUT, 30);
+    easy.set_long(CURLOPT_LOW_SPEED_LIMIT, 1024);
+    easy.set_long(CURLOPT_LOW_SPEED_TIME, 60);
+    // SAFETY: curl_write() takes its data for the download, which
+    // outlives the handle and which nothing else touches while the
+    // transfer runs.
+    unsafe { easy.set_write(curl_write, ptr::from_mut(d)) };
+    if easy.perform() != CURLE_OK {
+        return if d.err != 0 { d.err } else { -EIO };
     }
-    // SAFETY: the handle, freed once.
-    unsafe { curl_easy_cleanup(curl) };
-    ret
+    0
 }
 
 /// The regular file at `source`, no larger than the download may be,
@@ -227,12 +215,9 @@ unsafe fn fetch_file(source: *const c_char, destination: *const c_char, max: u64
     };
     if ret == 0 {
         // SAFETY: the caller's C string.
-        ret = if unsafe { CStr::from_ptr(source) }
-            .to_bytes()
-            .starts_with(b"https://")
-        {
-            // SAFETY: as above.
-            unsafe { download_https(source, &mut d) }
+        let url = unsafe { CStr::from_ptr(source) };
+        ret = if url.to_bytes().starts_with(b"https://") {
+            download_https(url, &mut d)
         } else {
             // SAFETY: as above.
             unsafe { copy_local(source, &mut d) }

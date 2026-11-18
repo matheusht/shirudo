@@ -10,22 +10,19 @@ use std::ffi::CString;
 
 use super::{LOG, MapView, OtelOpts, eprint, is_c_space, otlp};
 use crate::errno::{
-    E2BIG, EBADMSG, EFBIG, EHOSTUNREACH, EINVAL, EIO, ENAMETOOLONG, ENOMEM, EPERM, EPROTONOSUPPORT,
+    E2BIG, EBADMSG, EFBIG, EHOSTUNREACH, EINVAL, EIO, ENAMETOOLONG, EPERM, EPROTONOSUPPORT,
     EREMOTEIO, ETIMEDOUT,
 };
 use crate::sys::curl::{
-    CURL_GLOBAL_DEFAULT, CURLE_OK, CURLINFO_RESPONSE_CODE, CURLOPT_HEADERDATA,
-    CURLOPT_HEADERFUNCTION, CURLOPT_HTTPHEADER, CURLOPT_NOSIGNAL, CURLOPT_POSTFIELDS,
-    CURLOPT_POSTFIELDSIZE_LARGE, CURLOPT_SSL_VERIFYHOST, CURLOPT_SSL_VERIFYPEER, CURLOPT_URL,
-    CURLOPT_WRITEDATA, CURLOPT_WRITEFUNCTION, CURLUPART_HOST, CURLUPART_PASSWORD, CURLUPART_SCHEME,
-    CURLUPART_USER, Curl, CurlCode, curl_easy_cleanup, curl_easy_getinfo, curl_easy_init,
-    curl_easy_perform, curl_easy_strerror, curl_global_cleanup, curl_global_init, set_callback,
-    set_long, set_off, set_ptr,
+    CURL_GLOBAL_DEFAULT, CURLE_OK, CURLOPT_CAINFO, CURLOPT_NOSIGNAL, CURLOPT_POST,
+    CURLOPT_SSL_VERIFYHOST, CURLOPT_SSL_VERIFYPEER, CURLOPT_SSLCERT, CURLOPT_SSLKEY,
+    CURLOPT_TIMEOUT_MS, CURLOPT_URL, CURLOPT_USERAGENT, CURLUPART_HOST, CURLUPART_PASSWORD,
+    CURLUPART_SCHEME, CURLUPART_USER, CurlCode, curl_global_cleanup, curl_global_init,
 };
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{Tm, getrandom, strptime, timegm};
 use crate::text::parse_s64;
-use crate::util::curl::{Slist, Url};
+use crate::util::curl::{Easy, Slist, Url, strerror};
 use crate::util::json::{JsonField, parse_schema};
 use crate::util::tls_openssl::tls_curl_policy;
 
@@ -40,12 +37,6 @@ const TENANT_ID_MAX: usize = 128;
 const LOG_RECORD_MAX_DEFAULT: u32 = 1024 * 1024;
 const OTLP_MAX_DEFAULT: u32 = 4 * 1024 * 1024;
 
-pub(super) const CURLOPT_USERAGENT: c_int = 10018;
-pub(super) const CURLOPT_TIMEOUT_MS: c_int = 155;
-pub(super) const CURLOPT_CAINFO: c_int = 10065;
-const CURLOPT_POST: c_int = 47;
-const CURLOPT_SSLCERT: c_int = 10025;
-const CURLOPT_SSLKEY: c_int = 10087;
 const CURLE_OPERATION_TIMEDOUT: CurlCode = 28;
 
 fn say(text: String) {
@@ -506,10 +497,7 @@ pub(super) fn retryable_http(code: c_long) -> bool {
 }
 
 pub(super) fn curl_error(code: CurlCode) -> String {
-    // SAFETY: curl's static C string.
-    unsafe { CStr::from_ptr(curl_easy_strerror(code)) }
-        .to_string_lossy()
-        .into_owned()
+    strerror(code).to_string_lossy().into_owned()
 }
 
 /// What a failed attempt returns: a timeout, a transport failure, or a
@@ -735,22 +723,22 @@ impl Transport {
         let mut ret = -EIO;
         for attempt in 0..max_attempts {
             let mut response = Response::new();
-            // SAFETY: a new handle.
-            let curl = unsafe { curl_easy_init() };
-            if curl.is_null() {
-                ret = -ENOMEM;
-                break;
-            }
-            let (code, status) = self.perform(curl, body, &mut response);
-            if let Err(err) = code {
-                // SAFETY: the handle, freed once.
-                unsafe { curl_easy_cleanup(curl) };
-                ret = err;
-                break;
-            }
-            let code = code.unwrap_or(CURLE_OK);
-            // SAFETY: the handle, freed once.
-            unsafe { curl_easy_cleanup(curl) };
+            let mut easy = match Easy::new() {
+                Ok(easy) => easy,
+                Err(err) => {
+                    ret = err;
+                    break;
+                }
+            };
+            let done = self.perform(&mut easy, body, &mut response);
+            drop(easy);
+            let (code, status) = match done {
+                Ok(done) => done,
+                Err(err) => {
+                    ret = err;
+                    break;
+                }
+            };
             if code == CURLE_OK && status == 200 {
                 ret = check_partial_success(self.signal, &response.body);
                 break;
@@ -787,63 +775,55 @@ impl Transport {
         ret
     }
 
-    /// One attempt on `curl`: curl's code and the HTTP status, or the
+    /// One attempt on `easy`: curl's code and the HTTP status, or the
     /// error of a TLS policy curl does not take.
-    fn perform(
-        &self,
-        curl: *mut Curl,
-        body: &[u8],
+    fn perform<'a>(
+        &'a self,
+        easy: &mut Easy<'a>,
+        body: &'a [u8],
         response: &mut Response,
-    ) -> (Result<CurlCode, c_int>, c_long) {
+    ) -> Result<(CurlCode, c_long), c_int> {
         let ctx: *mut Response = response;
-        // SAFETY: the handle, and options whose values outlive the
-        // transfer: the endpoint, the body, the headers, the response.
-        unsafe {
-            set_ptr(curl, CURLOPT_URL, self.endpoint.as_ptr());
-            set_long(curl, CURLOPT_POST, 1);
-            set_ptr(curl, CURLOPT_POSTFIELDS, body.as_ptr());
-            set_off(curl, CURLOPT_POSTFIELDSIZE_LARGE, body.len() as i64);
-            set_ptr(curl, CURLOPT_HTTPHEADER, self.headers.raw());
-            set_ptr(
-                curl,
-                CURLOPT_USERAGENT,
-                c"shirudo OTel-OTLP-Exporter-C/1".as_ptr(),
-            );
-            set_callback(curl, CURLOPT_WRITEFUNCTION, response_write);
-            set_ptr(curl, CURLOPT_WRITEDATA, ctx);
-            set_callback(curl, CURLOPT_HEADERFUNCTION, response_header);
-            set_ptr(curl, CURLOPT_HEADERDATA, ctx);
-            set_long(curl, CURLOPT_NOSIGNAL, 1);
-            set_long(curl, CURLOPT_TIMEOUT_MS, self.timeout_ms);
-            set_long(
-                curl,
-                CURLOPT_SSL_VERIFYPEER,
-                if self.insecure_tls { 0 } else { 1 },
-            );
-            set_long(
-                curl,
-                CURLOPT_SSL_VERIFYHOST,
-                if self.insecure_tls { 0 } else { 2 },
-            );
-            if tls_curl_policy(curl, None) != 0 {
-                return (Err(-EINVAL), 0);
+
+        easy.set_str(CURLOPT_URL, &self.endpoint);
+        easy.set_long(CURLOPT_POST, 1);
+        easy.set_post_fields(body);
+        easy.set_headers(&self.headers);
+        easy.set_str(CURLOPT_USERAGENT, c"shirudo OTel-OTLP-Exporter-C/1");
+        // SAFETY: response_write() takes its data for the response, which
+        // outlives the handle and which only the callbacks touch while
+        // the transfer runs.
+        unsafe { easy.set_write(response_write, ctx) };
+        // SAFETY: response_header() takes its data for the response, as
+        // above.
+        unsafe { easy.set_header(response_header, ctx) };
+        easy.set_long(CURLOPT_NOSIGNAL, 1);
+        easy.set_long(CURLOPT_TIMEOUT_MS, self.timeout_ms);
+        easy.set_long(
+            CURLOPT_SSL_VERIFYPEER,
+            if self.insecure_tls { 0 } else { 1 },
+        );
+        easy.set_long(
+            CURLOPT_SSL_VERIFYHOST,
+            if self.insecure_tls { 0 } else { 2 },
+        );
+        tls_curl_policy(easy, None)?;
+        for (option, value) in [
+            (CURLOPT_CAINFO, &self.ca_file),
+            (CURLOPT_SSLCERT, &self.client_cert),
+            (CURLOPT_SSLKEY, &self.client_key),
+        ] {
+            if let Some(value) = value {
+                easy.set_str(option, value);
             }
-            for (opt, v) in [
-                (CURLOPT_CAINFO, &self.ca_file),
-                (CURLOPT_SSLCERT, &self.client_cert),
-                (CURLOPT_SSLKEY, &self.client_key),
-            ] {
-                if let Some(v) = v {
-                    set_ptr(curl, opt, v.as_ptr());
-                }
-            }
-            let code = curl_easy_perform(curl);
-            let mut status: c_long = 0;
-            if code == CURLE_OK {
-                curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &mut status);
-            }
-            (Ok(code), status)
         }
+        let code = easy.perform();
+        let status = if code == CURLE_OK {
+            easy.response_code().unwrap_or(0)
+        } else {
+            0
+        };
+        Ok((code, status))
     }
 
     /// Builds the map's document for the signal and posts it.
