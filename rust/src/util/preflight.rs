@@ -12,9 +12,8 @@ use crate::bpf::lskel::Lskel;
 use crate::errno::{ENOENT, ENOPKG};
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
-    AT_FDCWD, O_CLOEXEC, O_RDONLY, R_OK, S_IFMT, S_IFREG, STATX_SIZE, STATX_TYPE, SYS_ADD_KEY,
-    SYS_KEYCTL, Statx, W_OK, access, close, errno, fclose, fgets, fopen, geteuid, open, read,
-    statx, strerror, syscall,
+    AT_FDCWD, R_OK, S_IFMT, S_IFREG, STATX_SIZE, STATX_TYPE, SYS_ADD_KEY, SYS_KEYCTL, Statx, W_OK,
+    access, errno, fclose, fgets, fopen, geteuid, statx, strerror, syscall,
 };
 use crate::text::{cstr, decimal, strscpy, strsprintf};
 use crate::util::config::{self, Scrubbed};
@@ -129,25 +128,17 @@ fn check_root(r: &mut PreflightResult) {
 
 /// Whether the active LSMs the kernel lists include bpf.
 fn lsm_lists_bpf() -> bool {
+    use std::io::Read;
+
     let mut buf = [0u8; 1024];
-    // SAFETY: a C string and flags.
-    let fd = unsafe { open(c"/sys/kernel/security/lsm".as_ptr(), O_RDONLY | O_CLOEXEC) };
-
-    if fd < 0 {
+    // One read into all but the last byte of buf.
+    let n = std::fs::File::open("/sys/kernel/security/lsm")
+        .and_then(|mut f| f.read(&mut buf[..1023]))
+        .unwrap_or(0);
+    if n == 0 {
         return false;
     }
-    // SAFETY: the fd, read once into all but the last byte of buf, and
-    // closed.
-    let n = unsafe {
-        let n = read(fd, buf.as_mut_ptr().cast(), buf.len() - 1);
-
-        close(fd);
-        n
-    };
-    if n <= 0 {
-        return false;
-    }
-    cstr(&buf[..n as usize])
+    cstr(&buf[..n])
         .split(|&c| c == b',' || c == b'\n')
         .any(|lsm| lsm == b"bpf")
 }

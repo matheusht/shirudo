@@ -7,7 +7,6 @@
 use core::ffi::{c_char, c_int};
 
 use crate::errno::{E2BIG, EINVAL, ENOENT};
-use crate::sys::libc::{O_CLOEXEC, O_RDONLY, close, errno, open, read};
 use crate::util::hex::hex_encode;
 
 const BUILD_ID_MAX: usize = 64;
@@ -75,29 +74,25 @@ pub(crate) unsafe fn read_build_id(out: *mut c_char) -> c_int {
     let mut notes = [0u8; NOTES_MAX];
     let mut len = 0;
 
-    // SAFETY: a C string and flags without a mode.
-    let fd = unsafe { open(c"/sys/kernel/notes".as_ptr(), O_RDONLY | O_CLOEXEC) };
-    if fd < 0 {
-        return -errno();
-    }
-    let ret = loop {
-        if len == notes.len() {
-            break -E2BIG;
-        }
-        // SAFETY: the room left in notes, from the fd open() gave.
-        let n = unsafe { read(fd, notes[len..].as_mut_ptr().cast(), notes.len() - len) };
-        if n < 0 {
-            break -errno();
-        }
-        if n == 0 {
-            // SAFETY: the caller's room.
-            break unsafe { from_notes(&notes[..len], out) };
-        }
-        len += n as usize;
+    use std::io::Read;
+
+    let errno = |e: std::io::Error| -e.raw_os_error().unwrap_or(crate::errno::EIO);
+    let mut f = match std::fs::File::open("/sys/kernel/notes") {
+        Ok(f) => f,
+        Err(e) => return errno(e),
     };
-    // SAFETY: the fd open() gave, closed once, here.
-    unsafe { close(fd) };
-    ret
+    loop {
+        if len == notes.len() {
+            return -E2BIG;
+        }
+        match f.read(&mut notes[len..]) {
+            // SAFETY: the caller's room.
+            Ok(0) => return unsafe { from_notes(&notes[..len], out) },
+            Ok(n) => len += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return errno(e),
+        }
+    }
 }
 
 mod capi {

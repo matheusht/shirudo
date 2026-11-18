@@ -14,8 +14,8 @@ use crate::errno::ENOENT;
 use crate::heap::{xfree, xreallocarray, xstrdup, xstrfree};
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
-    O_CLOEXEC, O_RDONLY, SC_NPROCESSORS_ONLN, Statvfs, Utsname, close, fclose, fgets, fopen,
-    gethostname, open, read, sscanf, statvfs, sysconf, uname,
+    SC_NPROCESSORS_ONLN, Statvfs, Utsname, fclose, fgets, fopen, gethostname, sscanf, statvfs,
+    sysconf, uname,
 };
 use crate::text::{cstr, digits, parse_u64, strscpy, strsprintf};
 use crate::util::io::read_file;
@@ -48,26 +48,24 @@ const _: () = assert!(core::mem::offset_of!(Sysinfo, nproc) == 1224);
 type KernelConfigCb =
     unsafe extern "C" fn(ctx: *mut c_void, key: *const c_char, value: *const c_char);
 
+/// One read() of the file at `path` into all of `buf` but its last byte:
+/// how many bytes, or None where it cannot be opened or read.
+fn read_once(path: &CStr, buf: &mut [u8]) -> Option<usize> {
+    use std::io::Read;
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut f = std::fs::File::open(std::ffi::OsStr::from_bytes(path.to_bytes())).ok()?;
+    let room = buf.len() - 1;
+    f.read(&mut buf[..room]).ok()
+}
+
 /// The first line of the file at `path`, without its line end, or "".
 fn read_first_line(path: &CStr, buf: &mut [u8]) {
     buf[0] = 0;
-    // SAFETY: a C string and flags without a mode.
-    let fd = unsafe { open(path.as_ptr(), O_RDONLY | O_CLOEXEC) };
-    if fd < 0 {
-        return;
-    }
-    // SAFETY: the room in buf before its last byte, from the fd open()
-    // gave, which is closed once, here.
-    let n = unsafe {
-        let n = read(fd, buf.as_mut_ptr().cast(), buf.len() - 1);
-        close(fd);
-        n
+    let n = match read_once(path, buf) {
+        Some(n) if n > 0 => n,
+        _ => return,
     };
-    if n <= 0 {
-        buf[0] = 0;
-        return;
-    }
-    let n = n as usize;
 
     buf[n] = 0;
     let end = buf[..n]
@@ -226,22 +224,11 @@ pub(crate) fn image_read() -> SysinfoImage {
 fn read_uptime_sec() -> c_long {
     let mut buf = [0u8; 64];
 
-    // SAFETY: a C string and flags without a mode.
-    let fd = unsafe { open(c"/proc/uptime".as_ptr(), O_RDONLY | O_CLOEXEC) };
-    if fd < 0 {
-        return -1;
-    }
-    // SAFETY: the room in buf before its last byte, from the fd open()
-    // gave, which is closed once, here.
-    let n = unsafe {
-        let n = read(fd, buf.as_mut_ptr().cast(), buf.len() - 1);
-        close(fd);
-        n
+    let n = match read_once(c"/proc/uptime", &mut buf) {
+        Some(n) if n > 0 => n,
+        _ => return -1,
     };
-    if n <= 0 {
-        return -1;
-    }
-    let text = &buf[..n as usize];
+    let text = &buf[..n];
 
     match parse_u64(&text[..digits(text)], c_long::MAX as u64) {
         Ok(sec) => sec as c_long,
