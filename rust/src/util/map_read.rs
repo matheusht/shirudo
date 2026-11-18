@@ -80,7 +80,7 @@ const SYS_SCHED_GETAFFINITY: c_long = 204;
 const SYS_SCHED_GETAFFINITY: c_long = 123;
 
 /// The name status and the table give BPF_MAP_TYPE_* `ty`.
-fn map_type_name(ty: u32) -> &'static CStr {
+pub(crate) fn map_type_name(ty: u32) -> &'static CStr {
     match ty {
         ARRAY => c"array",
         PERCPU_ARRAY => c"percpu_array",
@@ -98,7 +98,7 @@ fn map_type_name(ty: u32) -> &'static CStr {
 }
 
 /// Why a map of type `ty` is not read generically, if it is not.
-fn map_skip_reason(ty: u32) -> Option<&'static CStr> {
+pub(crate) fn map_skip_reason(ty: u32) -> Option<&'static CStr> {
     match ty {
         RINGBUF => Some(c"use `shirudo upatch ringbuf` (future work)"),
         PERF_EVENT_ARRAY => Some(c"perf-event-array: use `shirudo upatch perfbuf` (future work)"),

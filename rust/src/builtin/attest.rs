@@ -1467,7 +1467,7 @@ unsafe fn attest(args: &[*const c_char]) -> c_int {
     evidence(args)
 }
 
-pub(super) use capi::cmd_attest;
+pub(crate) use capi::cmd_attest;
 
 mod capi {
     use core::ffi::{c_char, c_int};

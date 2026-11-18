@@ -11,8 +11,12 @@ use core::ffi::{CStr, c_char, c_int};
 use crate::sys::libc::{fwrite, stderr, stdout};
 
 mod conditions;
+mod config_image;
 mod harden;
 mod image_cleanup;
+mod mode_objects;
+mod register_cli;
+mod upatch_map_types;
 
 /// The arguments the C runtime gave main(), as C strings.
 ///

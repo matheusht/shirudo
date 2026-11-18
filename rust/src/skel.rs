@@ -54,6 +54,13 @@ impl EmbeddedBpf {
         unsafe { crate::ffi::c_str(self.name) }
     }
 
+    /// The light skeleton's bytes.
+    #[cfg(feature = "test-helpers")]
+    pub(crate) fn data(&self) -> &'static [u8] {
+        // SAFETY: a static slice of this module, as its size says.
+        unsafe { crate::ffi::slice(self.data, self.size) }
+    }
+
     /// Whether this build embeds no loader for it.
     pub(crate) fn is_empty(&self) -> bool {
         self.size == 0

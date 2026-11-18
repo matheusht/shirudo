@@ -175,7 +175,7 @@ fn superblock_ok(h: &[u8; SUPERBLOCK_SIZE]) -> bool {
 }
 
 /// The image the superblock at the start of `hash_fd` describes.
-fn read_header(hash_fd: c_int) -> Result<ConfigImage, c_int> {
+pub(crate) fn read_header(hash_fd: c_int) -> Result<ConfigImage, c_int> {
     let mut header = [0u8; SUPERBLOCK_SIZE];
     let mut image = ConfigImage::zeroed();
 
