@@ -1164,15 +1164,6 @@ mod capi {
 
     /// # Safety
     ///
-    /// `specs` holds `nr_progs` specs.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn prog_specs_xdp_classes(specs: *const ProgSpec, nr_progs: u32) -> u32 {
-        // SAFETY: the caller's specs.
-        super::specs_xdp_classes(unsafe { ffi::slice(specs, nr_progs as usize) })
-    }
-
-    /// # Safety
-    ///
     /// `path` is a C string, and `out` points to room for a container.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn upatch_open(path: *const c_char, out: *mut Upatch) -> c_int {
@@ -1183,7 +1174,6 @@ mod capi {
     /// # Safety
     ///
     /// `out` points to room for a container.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn upatch_open_fd(fd: c_int, out: *mut Upatch) -> c_int {
         // SAFETY: the caller passes the room.
         unsafe { super::open_fd(fd, out) }
@@ -1215,28 +1205,9 @@ mod capi {
     /// # Safety
     ///
     /// `u` is a container, and `out` room for NAME_MAX + 1 bytes.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn upatch_header_name(u: *const Upatch, out: *mut c_char) {
         // SAFETY: the caller passes a container and the room.
         unsafe { super::header_name(&*u, &mut *out.cast::<[u8; NAME_MAX + 1]>()) };
-    }
-
-    /// # Safety
-    ///
-    /// `u` is a container.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_name_signed(u: *const Upatch) -> bool {
-        // SAFETY: the caller passes a container.
-        super::name_signed(unsafe { &*u })
-    }
-
-    /// # Safety
-    ///
-    /// `u` is a container, and `out` room for `size` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_prog_name(u: *const Upatch, out: *mut c_char, size: usize) {
-        // SAFETY: the caller passes a container and the room.
-        unsafe { super::prog_name(&*u, ffi::bytes_mut(out.cast(), size)) };
     }
 
     /// # Safety
@@ -1312,7 +1283,6 @@ mod capi {
     /// # Safety
     ///
     /// `u` is a container.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn upatch_loader(u: *const Upatch) -> *const c_void {
         // SAFETY: the caller passes a container.
         let u = unsafe { &*u };
@@ -1353,7 +1323,6 @@ mod capi {
     /// # Safety
     ///
     /// `u` is a container.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn upatch_data(u: *const Upatch) -> *const c_void {
         // SAFETY: the caller passes a container.
         let u = unsafe { &*u };
@@ -1401,7 +1370,6 @@ mod capi {
     /// # Safety
     ///
     /// `name` is NULL or a C string.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn upatch_name_valid(name: *const c_char) -> bool {
         // SAFETY: the caller passes NULL or a C string.
         super::name_valid((!name.is_null()).then(|| unsafe { ffi::c_str(name) }))
@@ -1410,7 +1378,6 @@ mod capi {
     /// # Safety
     ///
     /// `name` and `payload_hex` are NULL or C strings.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn upatch_member_valid(
         name: *const c_char,
         payload_hex: *const c_char,
