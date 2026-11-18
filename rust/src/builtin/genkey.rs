@@ -6,10 +6,13 @@
 
 use core::ffi::{CStr, c_char, c_int};
 use core::ptr;
-use std::ffi::CString;
-use std::fs::File;
-use std::io::Write;
-use std::os::fd::{FromRawFd, OwnedFd};
+use std::ffi::{CString, OsStr};
+use std::fs::{self, File, OpenOptions, Permissions};
+use std::io::{self, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::Path;
 
 use foreign_types::ForeignType;
 use openssl::asn1::{Asn1Integer, Asn1Time};
@@ -20,12 +23,11 @@ use openssl::nid::Nid;
 use openssl::pkey::{PKey, PKeyRef, Private};
 use openssl::x509::{X509, X509Extension, X509NameBuilder, X509Ref};
 
-use crate::errno::{EINVAL, EIO, ENAMETOOLONG, ENOENT, EPERM};
+use crate::errno::{EINVAL, ENAMETOOLONG, EPERM, describe, last_errno, text};
 use crate::ffi::c_splice;
-use crate::sys::libc::Zeroed;
+use crate::log;
 use crate::sys::libc::{
-    O_CLOEXEC, O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_RDONLY, O_WRONLY, PATH_MAX, Statx,
-    close, errno, fchmod, geteuid, link, open, openat, rename, strerror, unlink,
+    O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW, O_RDONLY, PATH_MAX, Statx, Zeroed, geteuid, open, openat,
 };
 use crate::util::crypto_openssl::{complain_stack, openssl_complain};
 use crate::util::help::{Help, HelpSection};
@@ -33,7 +35,7 @@ use crate::util::identity;
 use crate::util::io::stat_fd;
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::paths::{key_files, keys_dir, path_exists};
-use crate::util::seal::seal_mkdir_p;
+use crate::util::seal::mkdir_p;
 
 const CERT_CN: &str = "shirudo";
 const CERT_NO_EXPIRY: &str = "99991231235959Z";
@@ -64,26 +66,30 @@ const FOOTER: &CStr = c_splice!(
     " environment variable\noverrides the default directory.",
 );
 
-fn ensure_keys_dir(keys_dir: &CStr) -> c_int {
+/// A failure, logged from its parts.
+fn err(parts: &[&[u8]]) {
+    log::err(&parts.concat());
+}
+
+/// A path as std's file calls take one.
+fn path(p: &CStr) -> &Path {
+    Path::new(OsStr::from_bytes(p.to_bytes()))
+}
+
+/// The keys directory, made with mode 0700 where it is missing; Err
+/// logged.
+fn ensure_keys_dir(keys_dir: &CStr) -> Result<(), ()> {
     if keys_dir.to_bytes() == b"/" {
-        // SAFETY: a message without arguments.
-        unsafe { crate::log::log_c!(crate::log::err, c"keys dir cannot be /".as_ptr()) };
-        return -EINVAL;
+        err(&[b"keys dir cannot be /"]);
+        return Err(());
     }
-    // SAFETY: a C string, and a mode.
-    let ret = unsafe { seal_mkdir_p(keys_dir.as_ptr(), 0o700) };
-    if ret != 0 {
-        // SAFETY: the C's format, the path and the error's text.
-        unsafe {
-            crate::log::log_c!(
-                crate::log::err,
-                c"mkdir %s: %s".as_ptr(),
-                keys_dir.as_ptr(),
-                strerror(-ret)
-            )
-        };
+    match mkdir_p(keys_dir.to_bytes(), 0o700) {
+        0 => Ok(()),
+        ret => {
+            err(&[b"mkdir ", keys_dir.to_bytes(), b": ", text(ret).as_bytes()]);
+            Err(())
+        }
     }
-    ret
 }
 
 /// The effective uid, asked each time the C's conditions asked it.
@@ -92,89 +98,64 @@ fn euid() -> u32 {
     unsafe { geteuid() }
 }
 
+/// The directory `name` under `dir`, a link not followed, or / for no
+/// `dir`; and its status.
+fn open_dir(dir: Option<&OwnedFd>, name: &[u8]) -> Result<(OwnedFd, Statx), c_int> {
+    let name = CString::new(name).map_err(|_| -EINVAL)?;
+    let fd = match dir {
+        // SAFETY: a C string and flags.
+        None => unsafe { open(name.as_ptr(), O_RDONLY | O_DIRECTORY | O_CLOEXEC) },
+        // SAFETY: an open directory, a C string and flags.
+        Some(dir) => unsafe {
+            openat(
+                dir.as_raw_fd(),
+                name.as_ptr(),
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW,
+            )
+        },
+    };
+    if fd < 0 {
+        return Err(last_errno());
+    }
+    // SAFETY: the fd just opened, owned from here.
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    let mut st = Statx::zeroed();
+    match stat_fd(fd.as_raw_fd(), &mut st) {
+        0 => Ok((fd, st)),
+        r => Err(r),
+    }
+}
+
 /// Whether the default keys directory may take a user's key: every
 /// directory from / down root's or the user's, the last the user's, and
 /// none writable by group or others.
-fn check_user_keys_dir(keys_dir: &[u8]) -> c_int {
-    let mut component = [0u8; NAME_MAX + 1];
-    let mut st = Statx::zeroed();
-    let mut ret = 0;
-
-    if keys_dir.first() != Some(&b'/') {
-        return -EINVAL;
-    }
-    // SAFETY: a path, and flags.
-    let mut dirfd = unsafe { open(c"/".as_ptr(), O_RDONLY | O_DIRECTORY | O_CLOEXEC) };
-    if dirfd < 0 {
-        return -errno();
-    }
-    let r = stat_fd(dirfd, &mut st);
-    if r != 0 {
-        // SAFETY: the fd open() gave, closed once.
-        unsafe { close(dirfd) };
-        return r;
-    }
+fn check_user_keys_dir(keys_dir: &[u8]) -> Result<(), c_int> {
+    let Some(rest) = keys_dir.strip_prefix(b"/") else {
+        return Err(-EINVAL);
+    };
+    let (mut dir, st) = open_dir(None, b"/")?;
     if st.stx_uid != 0 || st.stx_mode & 0o022 != 0 {
-        // SAFETY: as above.
-        unsafe { close(dirfd) };
-        return -EPERM;
+        return Err(-EPERM);
     }
-    let mut p = 1;
-    while p < keys_dir.len() {
-        let rest = &keys_dir[p..];
-        let end = rest.iter().position(|&c| c == b'/');
-        let len = end.unwrap_or(rest.len());
-
-        if len == 0 {
-            p += 1;
-            continue;
+    let names: Vec<&[u8]> = rest
+        .split(|&c| c == b'/')
+        .filter(|n| !n.is_empty())
+        .collect();
+    for (i, name) in names.iter().enumerate() {
+        if name.len() > NAME_MAX {
+            return Err(-ENAMETOOLONG);
         }
-        if len > NAME_MAX {
-            ret = -ENAMETOOLONG;
-            break;
-        }
-        component[..len].copy_from_slice(&rest[..len]);
-        component[len] = 0;
-        // SAFETY: the fd of the directory, a C string, and flags.
-        let nextfd = unsafe {
-            openat(
-                dirfd,
-                component.as_ptr().cast(),
-                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW,
-            )
-        };
-        if nextfd < 0 {
-            ret = -errno();
-            break;
-        }
-        let r = stat_fd(nextfd, &mut st);
-        if r != 0 {
-            ret = r;
-            // SAFETY: the fd openat() gave, closed once.
-            unsafe { close(nextfd) };
-            break;
-        }
-        let last = end.is_none_or(|e| rest.get(e + 1).is_none());
+        let (next, st) = open_dir(Some(&dir), name)?;
+        let last = i + 1 == names.len();
         if (st.stx_uid != 0 && st.stx_uid != euid())
             || (last && st.stx_uid != euid())
             || st.stx_mode & 0o022 != 0
         {
-            ret = -EPERM;
-            // SAFETY: as above.
-            unsafe { close(nextfd) };
-            break;
+            return Err(-EPERM);
         }
-        // SAFETY: the directory's fd, closed once, replaced by the next.
-        unsafe { close(dirfd) };
-        dirfd = nextfd;
-        if last {
-            break;
-        }
-        p += len + 1;
+        dir = next;
     }
-    // SAFETY: the fd of the last directory, closed once.
-    unsafe { close(dirfd) };
-    ret
+    Ok(())
 }
 
 /// A new ML-DSA-87 key; none, logged, when libcrypto cannot make one.
@@ -193,16 +174,13 @@ fn gen_keypair() -> Option<PKey<Private>> {
     let version = openssl::version::number();
     let (major, minor) = (version >> 28, (version >> 20) & 0xff);
     if major < 3 || (major == 3 && minor < 5) {
-        let running = CString::new(openssl::version::version()).unwrap_or_default();
-        // SAFETY: the C's format, the algorithm and OpenSSL's version.
-        unsafe {
-            crate::log::log_c!(
-                crate::log::err,
-                c"genkey: %s needs OpenSSL 3.5 or newer (running %s); upgrade libcrypto".as_ptr(),
-                GENKEY_ALG.as_ptr(),
-                running.as_ptr(),
-            );
-        }
+        err(&[
+            b"genkey: ",
+            GENKEY_ALG.to_bytes(),
+            b" needs OpenSSL 3.5 or newer (running ",
+            openssl::version::version().as_bytes(),
+            b"); upgrade libcrypto",
+        ]);
     }
     None
 }
@@ -284,158 +262,112 @@ enum Payload<'a> {
     Cert(&'a X509Ref),
 }
 
-/// `payload` into a new file at `path`, mode 0600, synced; the file goes
-/// when anything fails. 0, or -1 logged.
-///
-/// # Safety
-///
-/// `path` is a C string.
-unsafe fn write_new(payload: Payload, path: *const c_char) -> c_int {
-    // SAFETY: the caller's C string, flags and a mode.
-    let fd = unsafe {
-        open(
-            path,
-            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC,
-            0o600 as c_int,
-        )
+/// `payload` into a new file at `p`, mode 0600, synced; the file goes
+/// when anything fails. Err logged.
+fn write_new(payload: Payload, p: &CStr) -> Result<(), ()> {
+    let fail = |what: &[u8], e: &io::Error| {
+        err(&[what, b" ", p.to_bytes(), b": ", describe(e).as_bytes()]);
     };
-    if fd < 0 {
-        // SAFETY: the C's format, the path and the error's text.
-        unsafe {
-            crate::log::log_c!(
-                crate::log::err,
-                c"open %s: %s".as_ptr(),
-                path,
-                strerror(errno())
-            )
-        };
-        return -1;
-    }
-    // SAFETY: the fd open() gave, owned from here and closed with it.
-    let file = File::from(unsafe { OwnedFd::from_raw_fd(fd) });
-    let fail = |format: &CStr, err: c_int| {
-        // SAFETY: the C's format, the path and the error's text.
-        unsafe { crate::log::log_c!(crate::log::err, format.as_ptr(), path, strerror(err)) };
-        -1
-    };
-    let ret = 'out: {
-        // SAFETY: the fd and a mode.
-        if unsafe { fchmod(fd, 0o600) } != 0 {
-            break 'out fail(c"fchmod %s: %s", errno());
-        }
-        // Written unbuffered, and the allocator scrubs the key's text when
-        // it goes, so no copy stays behind.
-        let (text, what, sync) = match payload {
-            Payload::Key(k) => (
-                k.private_key_to_pem_pkcs8(),
-                c"PEM_write_bio_PrivateKey",
-                c"flush %s: %s",
-            ),
-            Payload::Cert(c) => (c.to_der(), c"i2d_X509_bio", c"fsync %s: %s"),
-        };
-        let text = match text {
-            Ok(text) => text,
-            Err(e) => {
-                complain_stack(what, &e);
-                break 'out -1;
-            }
-        };
-        if let Err(e) = (&file).write_all(&text) {
-            break 'out fail(c"write %s: %s", e.raw_os_error().unwrap_or(EIO));
-        }
-        if let Err(e) = file.sync_all() {
-            break 'out fail(sync, e.raw_os_error().unwrap_or(EIO));
-        }
-        0
-    };
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path(p))
+        .map_err(|e| fail(b"open", &e))?;
+    let written = fill(&file, payload, &fail);
     drop(file);
-    if ret != 0 {
-        // SAFETY: the caller's C string.
-        unsafe { unlink(path) };
+    if written.is_err() {
+        let _ = fs::remove_file(path(p));
     }
-    ret
+    written
+}
+
+/// The new file `file` made 0600 whatever the umask, and `payload`
+/// written into it and synced; Err logged by `fail`.
+fn fill(file: &File, payload: Payload, fail: &dyn Fn(&[u8], &io::Error)) -> Result<(), ()> {
+    file.set_permissions(Permissions::from_mode(0o600))
+        .map_err(|e| fail(b"fchmod", &e))?;
+    // Written unbuffered, and the allocator scrubs the key's text when
+    // it goes, so no copy stays behind.
+    let (text, what, sync): (_, _, &[u8]) = match payload {
+        Payload::Key(k) => (
+            k.private_key_to_pem_pkcs8(),
+            c"PEM_write_bio_PrivateKey",
+            b"flush",
+        ),
+        Payload::Cert(c) => (c.to_der(), c"i2d_X509_bio", b"fsync"),
+    };
+    let text = text.map_err(|e| complain_stack(what, &e))?;
+    let mut out = file;
+    out.write_all(&text).map_err(|e| fail(b"write", &e))?;
+    file.sync_all().map_err(|e| fail(sync, &e))
 }
 
 /// The two renames cannot be one, so the old key stays linked aside
 /// until the new certificate is in place: a rename that fails between
 /// them puts the old key back rather than leave the new key beside a
-/// certificate it does not match.
-///
-/// # Safety
-///
-/// Each path is a C string.
-unsafe fn replace_pair(
-    pkey_new: *const c_char,
-    pkey_path: *const c_char,
-    cert_new: *const c_char,
-    cert_path: *const c_char,
-    pkey_old: *const c_char,
-) -> c_int {
-    let mut had_old = true;
-
-    // SAFETY: the caller's C strings, and the C's formats with them and
-    // the errors' texts.
-    unsafe {
-        if link(pkey_path, pkey_old) != 0 {
-            if errno() != ENOENT {
-                let err = errno();
-
-                crate::log::log_c!(
-                    crate::log::err,
-                    c"genkey: cannot keep the old key aside as %s: %s".as_ptr(),
-                    pkey_old,
-                    strerror(err),
-                );
-                return -err;
-            }
-            had_old = false;
+/// certificate it does not match. Err logged.
+fn replace_pair(
+    pkey_new: &CStr,
+    pkey_path: &CStr,
+    cert_new: &CStr,
+    cert_path: &CStr,
+    pkey_old: &CStr,
+) -> Result<(), ()> {
+    let not_moved = |from: &CStr, to: &CStr, e: &io::Error| {
+        err(&[
+            b"genkey: cannot move ",
+            from.to_bytes(),
+            b" to ",
+            to.to_bytes(),
+            b": ",
+            describe(e).as_bytes(),
+        ]);
+    };
+    let had_old = match fs::hard_link(path(pkey_path), path(pkey_old)) {
+        Ok(()) => true,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => false,
+        Err(e) => {
+            err(&[
+                b"genkey: cannot keep the old key aside as ",
+                pkey_old.to_bytes(),
+                b": ",
+                describe(&e).as_bytes(),
+            ]);
+            return Err(());
         }
-        if rename(pkey_new, pkey_path) != 0 {
-            let err = errno();
-
-            crate::log::log_c!(
-                crate::log::err,
-                c"genkey: cannot move %s to %s: %s".as_ptr(),
-                pkey_new,
-                pkey_path,
-                strerror(err),
-            );
-            if had_old {
-                unlink(pkey_old);
-            }
-            return -err;
-        }
-        if rename(cert_new, cert_path) != 0 {
-            let err = errno();
-
-            crate::log::log_c!(
-                crate::log::err,
-                c"genkey: cannot move %s to %s: %s".as_ptr(),
-                cert_new,
-                cert_path,
-                strerror(err),
-            );
-            let undo = if had_old {
-                rename(pkey_old, pkey_path)
-            } else {
-                unlink(pkey_path)
-            };
-            if undo != 0 {
-                crate::log::log_c!(crate::log::err,
-                    c"genkey: %s and %s are no longer a pair (%s); remove both and run genkey again"
-                        .as_ptr(),
-                    pkey_path,
-                    cert_path,
-                    strerror(errno()),
-                );
-            }
-            return -err;
-        }
+    };
+    if let Err(e) = fs::rename(path(pkey_new), path(pkey_path)) {
+        not_moved(pkey_new, pkey_path, &e);
         if had_old {
-            unlink(pkey_old);
+            let _ = fs::remove_file(path(pkey_old));
         }
+        return Err(());
     }
-    0
+    if let Err(e) = fs::rename(path(cert_new), path(cert_path)) {
+        not_moved(cert_new, cert_path, &e);
+        let undo = if had_old {
+            fs::rename(path(pkey_old), path(pkey_path))
+        } else {
+            fs::remove_file(path(pkey_path))
+        };
+        if let Err(e) = undo {
+            err(&[
+                b"genkey: ",
+                pkey_path.to_bytes(),
+                b" and ",
+                cert_path.to_bytes(),
+                b" are no longer a pair (",
+                describe(&e).as_bytes(),
+                b"); remove both and run genkey again",
+            ]);
+        }
+        return Err(());
+    }
+    if had_old {
+        let _ = fs::remove_file(path(pkey_old));
+    }
+    Ok(())
 }
 
 const GENKEY_FORCE: c_int = 0;
@@ -464,69 +396,54 @@ static HELP: Help = Help::new(USAGE, Some(SUMMARY), &SECTIONS, Some(FOOTER));
 
 /// The new key and certificate written at `pkey_path` and `cert_path`:
 /// beside them first and then moved over the old pair with `force`, or
-/// else in place. 0, or -1 logged.
-///
-/// # Safety
-///
-/// The key and certificate are valid, and the paths C strings.
-unsafe fn write_pair(
+/// else in place. Err logged.
+fn write_pair(
     pkey: &PKeyRef<Private>,
     cert: &X509Ref,
-    pkey_path: *const c_char,
-    cert_path: *const c_char,
+    pkey_path: &CStr,
+    cert_path: &CStr,
     force: bool,
-) -> c_int {
-    // SAFETY: the caller's key, certificate and paths; rooms of PATH_MAX
-    // bytes for strsprintf() and the C's formats.
-    unsafe {
-        if !force {
-            if write_new(Payload::Key(pkey), pkey_path) != 0 {
-                return -1;
-            }
-            if write_new(Payload::Cert(cert), cert_path) != 0 {
-                unlink(pkey_path);
-                return -1;
-            }
-            return 0;
+) -> Result<(), ()> {
+    if !force {
+        write_new(Payload::Key(pkey), pkey_path)?;
+        if write_new(Payload::Cert(cert), cert_path).is_err() {
+            let _ = fs::remove_file(path(pkey_path));
+            return Err(());
         }
-        let mut pkey_new = [0u8; PATH_MAX];
-        let mut cert_new = [0u8; PATH_MAX];
-        let mut pkey_old = [0u8; PATH_MAX];
-        let (pn, cn, po) = (
-            pkey_new.as_mut_ptr().cast::<c_char>(),
-            cert_new.as_mut_ptr().cast::<c_char>(),
-            pkey_old.as_mut_ptr().cast::<c_char>(),
-        );
-
-        // The old pair goes only once the new one is on disk.
-        if crate::text::csprintf!(pn, PATH_MAX, c"%s.new".as_ptr(), pkey_path) < 0
-            || crate::text::csprintf!(cn, PATH_MAX, c"%s.new".as_ptr(), cert_path) < 0
-            || crate::text::csprintf!(po, PATH_MAX, c"%s.old".as_ptr(), pkey_path) < 0
-        {
-            crate::log::log_c!(
-                crate::log::err,
-                c"genkey: no room for a temporary beside %s".as_ptr(),
-                pkey_path,
-            );
-            return -1;
-        }
-        unlink(pn);
-        unlink(cn);
-        unlink(po);
-        if write_new(Payload::Key(pkey), pn) != 0 {
-            return -1;
-        }
-        if write_new(Payload::Cert(cert), cn) != 0 {
-            unlink(pn);
-            return -1;
-        }
-        if replace_pair(pn, pkey_path, cn, cert_path, po) != 0 {
-            unlink(pn);
-            unlink(cn);
-            return -1;
-        }
+        return Ok(());
     }
-    0
+    // The old pair goes only once the new one is on disk.
+    let beside = |p: &CStr, suffix: &[u8]| {
+        let name = [p.to_bytes(), suffix].concat();
+        CString::new(name)
+            .ok()
+            .filter(|n| n.as_bytes().len() < PATH_MAX)
+    };
+    let (Some(pkey_new), Some(cert_new), Some(pkey_old)) = (
+        beside(pkey_path, b".new"),
+        beside(cert_path, b".new"),
+        beside(pkey_path, b".old"),
+    ) else {
+        err(&[
+            b"genkey: no room for a temporary beside ",
+            pkey_path.to_bytes(),
+        ]);
+        return Err(());
+    };
+    for p in [&pkey_new, &cert_new, &pkey_old] {
+        let _ = fs::remove_file(path(p));
+    }
+    write_new(Payload::Key(pkey), &pkey_new)?;
+    if write_new(Payload::Cert(cert), &cert_new).is_err() {
+        let _ = fs::remove_file(path(&pkey_new));
+        return Err(());
+    }
+    if replace_pair(&pkey_new, pkey_path, &cert_new, cert_path, &pkey_old).is_err() {
+        let _ = fs::remove_file(path(&pkey_new));
+        let _ = fs::remove_file(path(&cert_new));
+        return Err(());
+    }
+    Ok(())
 }
 
 /// The command on `args`, its name first.
@@ -557,112 +474,81 @@ unsafe fn genkey(args: &[*const c_char]) -> c_int {
     // the seal denies root, which would write the pair wherever root
     // asks.
     if identity::enforcement_active() != 0 {
-        // SAFETY: a message without arguments.
-        unsafe {
-            crate::log::log_c!(
-                crate::log::err,
-                c"genkey: refusing on a target: the signing key belongs on the operator host"
-                    .as_ptr(),
-            )
-        };
+        err(&[b"genkey: refusing on a target: the signing key belongs on the operator host"]);
         return 1;
     }
 
     let keys_dir = keys_dir(keys_dir_arg);
-    let (pkey_path, cert_path) = match key_files(keys_dir.to_bytes()) {
+    let dir = keys_dir.to_bytes();
+    let (pkey_path, cert_path) = match key_files(dir) {
         Ok(paths) => paths,
         Err(ret) => {
-            // SAFETY: the C's format, the directory and the error's text.
-            unsafe {
-                crate::log::log_c!(
-                    crate::log::err,
-                    c"genkey: invalid keys dir %s: %s".as_ptr(),
-                    keys_dir.as_ptr(),
-                    strerror(-ret),
-                )
-            };
+            err(&[
+                b"genkey: invalid keys dir ",
+                dir,
+                b": ",
+                text(ret).as_bytes(),
+            ]);
             return 1;
         }
     };
-    let (pp, cp) = (pkey_path.as_ptr(), cert_path.as_ptr());
-    if ensure_keys_dir(keys_dir) != 0 {
+    if ensure_keys_dir(keys_dir).is_err() {
         return 1;
     }
-    let dir = keys_dir.to_bytes();
     if euid() != 0 && dir == KEYS_DIR.to_bytes() {
-        let ret = check_user_keys_dir(dir);
-
-        if ret != 0 {
-            // SAFETY: the C's formats, the directory and the error's
-            // text.
-            unsafe {
-                crate::log::log_c!(
-                    crate::log::err,
-                    c"genkey: default keys dir %s is not safe for user key generation: %s".as_ptr(),
-                    KEYS_DIR.as_ptr(),
-                    strerror(-ret),
-                );
-                crate::log::log_c!(
-                    crate::log::err,
-                    c"it must be owned by the current user and not writable by group or others"
-                        .as_ptr(),
-                );
-                crate::log::log_c!(
-                    crate::log::err,
-                    c"rerun with sudo or pass --keys-dir <dir>".as_ptr()
-                );
-            }
+        if let Err(ret) = check_user_keys_dir(dir) {
+            err(&[
+                b"genkey: default keys dir ",
+                KEYS_DIR.to_bytes(),
+                b" is not safe for user key generation: ",
+                text(ret).as_bytes(),
+            ]);
+            err(&[b"it must be owned by the current user and not writable by group or others"]);
+            err(&[b"rerun with sudo or pass --keys-dir <dir>"]);
             return 1;
         }
     }
 
     if !force && (path_exists(&pkey_path) || path_exists(&cert_path)) {
-        // SAFETY: the C's format and the paths.
-        unsafe {
-            crate::log::log_c!(
-                crate::log::err,
-                c"genkey: %s or %s already exists; pass --force".as_ptr(),
-                pp,
-                cp,
-            )
-        };
+        err(&[
+            b"genkey: ",
+            pkey_path.to_bytes(),
+            b" or ",
+            cert_path.to_bytes(),
+            b" already exists; pass --force",
+        ]);
         return 1;
     }
 
-    let mut ret = 1;
-    // SAFETY: the paths, C strings and the C's formats.
-    unsafe {
-        'out: {
-            let Some(pkey) = gen_keypair() else {
-                break 'out;
-            };
-            let Some(cert) = build_cert(&pkey) else {
-                break 'out;
-            };
-            if write_pair(&pkey, &cert, pp, cp, force) != 0 {
-                break 'out;
-            }
-            crate::log::log_c!(
-                crate::log::info,
-                c"wrote %s (%s, mode 0600)".as_ptr(),
-                pp,
-                GENKEY_ALG.as_ptr(),
-            );
-            crate::log::log_c!(
-                crate::log::info,
-                c"wrote %s (X.509 self-signed, no expiration date)".as_ptr(),
-                cp,
-            );
-            crate::log::log_c!(
-                crate::log::audit,
-                c"genkey: created shirudo %s signing material at %s".as_ptr(),
-                GENKEY_ALG.as_ptr(),
-                keys_dir.as_ptr(),
-            );
-            ret = 0;
-        }
+    let Some(pkey) = gen_keypair() else {
+        return 1;
+    };
+    let Some(cert) = build_cert(&pkey) else {
+        return 1;
+    };
+    if write_pair(&pkey, &cert, &pkey_path, &cert_path, force).is_err() {
+        return 1;
     }
-    ret
+    let alg = GENKEY_ALG.to_bytes();
+    log::info(&[b"wrote ", pkey_path.to_bytes(), b" (", alg, b", mode 0600)"].concat());
+    log::info(
+        &[
+            b"wrote ",
+            cert_path.to_bytes(),
+            b" (X.509 self-signed, no expiration date)",
+        ]
+        .concat(),
+    );
+    log::audit(
+        &[
+            b"genkey: created shirudo ",
+            alg,
+            b" signing material at ",
+            dir,
+        ]
+        .concat(),
+    );
+    0
 }
 
 pub(super) use capi::cmd_genkey;

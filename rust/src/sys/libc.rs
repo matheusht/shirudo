@@ -16,7 +16,7 @@ pub use libc::{
     fwrite, getenv, geteuid, gethostname, getline, getrandom, getsockopt, getxattr, gmtime_r,
     if_indextoname, ioctl, lgetxattr, link, lseek, lsetxattr, memfd_create, mkdirat, mkdtemp,
     mknod, mkstemp, mkstemps, mlockall, mount, open, openat, opendir, openlog, personality,
-    posix_memalign, prctl, pread, printf, putchar, read, readdir, recvmsg, rename, renameat, rmdir,
+    posix_memalign, prctl, pread, printf, putchar, read, readdir, recvmsg, renameat, rmdir,
     sendto, setenv, setitimer, setrlimit, setsockopt, setvbuf, setxattr, snprintf, socket, sscanf,
     statfs, statvfs, statx, strcasecmp, strcmp, strerror, strftime, strlen, strncasecmp, strnlen,
     strptime, syscall, sysconf, syslog, timegm, umount2, uname, unlink, unlinkat, unsetenv, write,

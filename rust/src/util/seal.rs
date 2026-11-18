@@ -702,7 +702,7 @@ fn commit(fd: Fd, dir: Fd, name: &[u8], buf: &[u8]) -> c_int {
 }
 
 /// mkdir -p, every directory it makes labelled as its parent is.
-fn mkdir_p(path: &[u8], mode: u32) -> c_int {
+pub(crate) fn mkdir_p(path: &[u8], mode: u32) -> c_int {
     match open_dir(path, true, mode) {
         Ok(_) => 0,
         Err(err) => err,
