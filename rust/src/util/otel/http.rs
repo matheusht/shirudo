@@ -970,15 +970,3 @@ pub(super) fn send_log_string(opts: Option<&OtelOpts>, r: &otlp::StringRecord<'_
         Err(err) => err,
     }
 }
-
-/// One structured log, as `shirudo status` sends its keepalive.
-pub(super) fn send_log_json(opts: Option<&OtelOpts>, r: &otlp::Record<'_>) -> c_int {
-    let t = match Transport::open(LOG, opts.and_then(OtelOpts::endpoint), opts, None) {
-        Ok(t) => t,
-        Err(err) => return err,
-    };
-    match otlp::generic_log_payload(r) {
-        Ok(p) => t.post(p.bytes()),
-        Err(err) => err,
-    }
-}

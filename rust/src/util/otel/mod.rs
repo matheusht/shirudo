@@ -472,49 +472,6 @@ mod capi {
         }
     }
 
-    /// Sends the `body_len` bytes of the JSON object at `body_json` as
-    /// the body of one OTLP log; a `tamper_attempts` of 0 or more rides
-    /// along as an attribute. 0 or -errno.
-    ///
-    /// # Safety
-    ///
-    /// `opts` is options or NULL; the strings are C strings, `status`
-    /// and `version_id` or NULL; `body_json` holds `body_len` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn otel_send_log_json(
-        opts: *const OtelOpts,
-        scope_name: *const c_char,
-        event_name: *const c_char,
-        severity_number: c_int,
-        severity_text: *const c_char,
-        status: *const c_char,
-        version_id: *const c_char,
-        tamper_attempts: i64,
-        body_json: *const c_char,
-        body_len: usize,
-    ) -> c_int {
-        let (Some(scope), Some(event), Some(text)) =
-            (path(scope_name), path(event_name), path(severity_text))
-        else {
-            return -crate::errno::EINVAL;
-        };
-        if body_json.is_null() {
-            return -crate::errno::EINVAL;
-        }
-        let record = otlp::Record {
-            scope_name: scope.to_bytes(),
-            event_name: event.to_bytes(),
-            severity_number,
-            severity_text: text.to_bytes(),
-            status: path(status).map(CStr::to_bytes),
-            version_id: path(version_id).map(CStr::to_bytes),
-            tamper_attempts,
-            // SAFETY: the caller's body_len bytes.
-            body: unsafe { crate::ffi::slice(body_json.cast(), body_len) },
-        };
-        http::send_log_json(self::opts(opts), &record)
-    }
-
     /// Sends the `body_len` bytes at `body` as the string body of one
     /// OTLP log with the one string attribute `attr_key`: the receiver
     /// decodes the very bytes passed in. A body with a NUL or malformed

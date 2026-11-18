@@ -518,55 +518,6 @@ pub(super) fn metric_payload(path: Option<&CStr>, v: &MapView) -> Result<Buffer,
     Ok(buf)
 }
 
-/// What a log of [`super::send_log_json`] says.
-pub(super) struct Record<'a> {
-    pub(super) scope_name: &'a [u8],
-    pub(super) event_name: &'a [u8],
-    pub(super) severity_number: c_int,
-    pub(super) severity_text: &'a [u8],
-    pub(super) status: Option<&'a [u8]>,
-    pub(super) version_id: Option<&'a [u8]>,
-    pub(super) tamper_attempts: i64,
-    pub(super) body: &'a [u8],
-}
-
-/// A JSON object as the structured body of one log.
-pub(super) fn generic_log_payload(r: &Record<'_>) -> Result<Buffer, c_int> {
-    let mut e = JsonEmit::growing(JSON_MAX);
-
-    log_open(
-        &mut e,
-        r.scope_name,
-        i64::from(r.severity_number),
-        r.severity_text,
-        r.event_name,
-    );
-    e.obj_open_key(b"body");
-    let ret = anyvalue_from_document(&mut e, r.body, false);
-    e.obj_close();
-    if ret != 0 {
-        drop(Buffer::from_emitter(&e));
-        return Err(ret);
-    }
-    e.arr_open(b"attributes");
-    if let Some(s) = r.status {
-        kv_string(&mut e, b"shirudo.status", s);
-    }
-    if let Some(v) = r.version_id {
-        kv_string(&mut e, b"shirudo.version_id", v);
-    }
-    if r.tamper_attempts >= 0 {
-        kv_int(&mut e, b"shirudo.tamper_attempts", r.tamper_attempts);
-    }
-    e.arr_close();
-    log_close(&mut e);
-    let buf = Buffer::from_emitter(&e);
-    if e.err() != 0 {
-        return Err(e.err());
-    }
-    Ok(buf)
-}
-
 /// What a log of [`super::send_log_string`] says: a body the receiver
 /// decodes to the very bytes given, and one string attribute.
 pub(super) struct StringRecord<'a> {
