@@ -588,32 +588,13 @@ fn emit_json(e: &mut JsonEmit, si: &Sysinfo) {
 
 pub(crate) use capi::{sysinfo_emit_json, sysinfo_gather};
 
+#[cfg(test)]
+mod tests;
+
 mod capi {
-    use core::ffi::{CStr, c_char};
 
-    use super::{Sysinfo, SysinfoImage};
+    use super::Sysinfo;
     use crate::util::json::JsonEmit;
-
-    /// # Safety
-    ///
-    /// The paths are C strings, and `img` room for a `struct
-    /// sysinfo_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn sysinfo_image_read_at(
-        os_release: *const c_char,
-        os_release_fallback: *const c_char,
-        cmdline: *const c_char,
-        img: *mut SysinfoImage,
-    ) {
-        // SAFETY: the caller passes three C strings and the room.
-        unsafe {
-            img.write(super::image_read_at(
-                CStr::from_ptr(os_release),
-                CStr::from_ptr(os_release_fallback),
-                CStr::from_ptr(cmdline),
-            ));
-        }
-    }
 
     /// # Safety
     ///
