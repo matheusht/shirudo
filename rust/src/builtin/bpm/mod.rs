@@ -104,15 +104,13 @@ fn message(parts: &[&[u8]]) -> CString {
 fn error(parts: &[&[u8]]) {
     let msg = message(parts);
 
-    // SAFETY: a "%s" format with a C string.
-    unsafe { crate::log::log_c!(crate::log::err, c"%s".as_ptr(), msg.as_ptr()) };
+    crate::log::err(msg.to_bytes());
 }
 
 fn warn(parts: &[&[u8]]) {
     let msg = message(parts);
 
-    // SAFETY: a "%s" format with a C string.
-    unsafe { crate::log::log_c!(crate::log::warn, c"%s".as_ptr(), msg.as_ptr()) };
+    crate::log::warn(msg.to_bytes());
 }
 
 /// What a failed bpm command says: 1.

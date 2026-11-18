@@ -1118,18 +1118,11 @@ impl Otel {
         let err = config::load(&mut o.cfg);
         if err != 0 {
             let msg = message(&[b"status: load OTEL configuration: ", strerr(-err)]);
-            // SAFETY: a "%s" format with a C string.
-            unsafe { crate::log::log_c!(crate::log::err, c"%s".as_ptr(), msg.as_ptr()) };
+            crate::log::err(msg.to_bytes());
             return Err(1);
         }
         if !o.cfg.map_export_valid {
-            // SAFETY: a format without conversions.
-            unsafe {
-                crate::log::log_c!(
-                    crate::log::err,
-                    c"status: invalid OTEL configuration".as_ptr()
-                )
-            };
+            crate::log::err(b"status: invalid OTEL configuration");
             return Err(2);
         }
         Ok(o)
@@ -1952,8 +1945,7 @@ pub(crate) fn cmd_status(args: &[&CStr]) -> c_int {
             why,
             b", no export endpoint is known, since a config image is used only when its activation record vouches for it; OTEL_EXPORTER_OTLP_ENDPOINT in /etc/shirudo/map-export.env still names one",
         ]);
-        // SAFETY: a "%s" format with a C string.
-        unsafe { crate::log::log_c!(crate::log::warn, c"%s".as_ptr(), msg.as_ptr()) };
+        crate::log::warn(msg.to_bytes());
     }
     if json_stdout {
         let mut buf = vec![0u8; r.json_cap(include_eventlog)];

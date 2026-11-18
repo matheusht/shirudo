@@ -6,9 +6,9 @@
 
 use core::ffi::{CStr, c_int};
 
-use crate::errno::ENOENT;
+use crate::errno::{ENOENT, text};
 use crate::ffi::c_splice;
-use crate::sys::libc::{F_OK, access, env, printf, strerror};
+use crate::sys::libc::{F_OK, access, env, printf};
 use crate::util::config::{CONF_PATH, Scrubbed, load};
 use crate::util::help::Help;
 use crate::util::image_config;
@@ -53,15 +53,15 @@ pub(crate) fn cmd_config(args: &[&CStr]) -> c_int {
     let file_present = unsafe { access(CONF_PATH.as_ptr(), F_OK) } == 0;
     let ret = load(&mut cfg);
     if ret != 0 && ret != -ENOENT {
-        // SAFETY: the C's format, the path and the error's text.
-        unsafe {
-            crate::log::log_c!(
-                crate::log::err,
-                c"config: load %s: %s".as_ptr(),
-                CONF_PATH.as_ptr(),
-                strerror(-ret),
-            )
-        };
+        crate::log::err(
+            &[
+                &b"config: load "[..],
+                CONF_PATH.to_bytes(),
+                b": ",
+                text(ret).as_bytes(),
+            ]
+            .concat(),
+        );
         return 1;
     }
     let c = &*cfg;

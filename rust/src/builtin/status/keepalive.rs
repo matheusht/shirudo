@@ -43,8 +43,7 @@ fn log_err(text: &[u8]) {
             .collect::<Vec<u8>>(),
     )
     .unwrap_or_default();
-    // SAFETY: a "%s" format with a C string.
-    unsafe { crate::log::log_c!(crate::log::err, c"%s".as_ptr(), text.as_ptr()) };
+    crate::log::err(text.to_bytes());
 }
 
 /// What a snapshot reads past the tree state, for one try.

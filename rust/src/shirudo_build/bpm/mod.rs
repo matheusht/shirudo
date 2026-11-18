@@ -33,8 +33,7 @@ const MAX_ENDPOINT: usize = 512;
 fn say(level: fn(&[u8]), text: &[u8]) {
     let msg = CString::new(cstr(text).to_vec()).unwrap_or_default();
 
-    // SAFETY: a "%s" format with a C string.
-    unsafe { crate::log::log_c!(level, c"%s".as_ptr(), msg.as_ptr()) };
+    level(msg.to_bytes());
 }
 
 fn error(text: &[u8]) {

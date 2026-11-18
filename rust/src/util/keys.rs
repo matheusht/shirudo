@@ -10,14 +10,16 @@ use core::cell::UnsafeCell;
 use core::ffi::{CStr, c_char, c_int};
 use core::ptr;
 
-use crate::errno::{E2BIG, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT, ENOKEY, ENOMEM, EPERM};
+use crate::errno::{
+    E2BIG, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT, ENOKEY, ENOMEM, EPERM, text,
+};
 use crate::ffi;
 use crate::heap::{libc_free, xcalloc, xfree, xmalloc};
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     AT_EMPTY_PATH, Dirent, F_OK, O_CLOEXEC, O_DIRECTORY, O_RDONLY, PATH_MAX, S_IFMT, S_IFREG,
     STATX_SIZE, STATX_TYPE, Statx, access, alphasort, close, errno, faccessat, open, read,
-    scandirat, statx, strerror, unlink,
+    scandirat, statx, unlink,
 };
 use crate::text::capi::name_has_suffix;
 use crate::text::{cstr, strscpy, strsprintf};
@@ -1269,14 +1271,13 @@ unsafe fn load_image_root(
     let keys_fd = unsafe { open_beneath(root_fd, c"keys".as_ptr(), O_RDONLY | O_DIRECTORY) };
 
     if keys_fd < 0 && keys_fd != -ENOENT {
-        // SAFETY: the C's format, and the C library's message.
-        unsafe {
-            crate::log::log_c!(
-                crate::log::err,
-                c"image trust set: open config image keys/: %s".as_ptr(),
-                strerror(-keys_fd),
+        crate::log::err(
+            format!(
+                "image trust set: open config image keys/: {}",
+                text(keys_fd)
             )
-        };
+            .as_bytes(),
+        );
         return keys_fd;
     }
     // SAFETY: the caller's C string and room, and then the fd closed once.

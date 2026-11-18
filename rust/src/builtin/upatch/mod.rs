@@ -94,8 +94,7 @@ fn log(f: fn(&[u8]), text: &[u8]) {
             .collect::<Vec<u8>>(),
     )
     .unwrap_or_default();
-    // SAFETY: a "%s" format with a C string.
-    unsafe { crate::log::log_c!(f, c"%s".as_ptr(), text.as_ptr()) };
+    f(text.to_bytes());
 }
 
 fn log_err(text: &[u8]) {

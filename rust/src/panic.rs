@@ -33,10 +33,8 @@ fn report(info: &PanicHookInfo<'_>) {
     };
 
     let _ = write!(msg, "{info}");
-    // A NUL inside would only cut the message short.
-    msg.buf[msg.len] = 0;
-    // SAFETY: a "%s" format with the NUL-terminated message.
-    unsafe { crate::log::log_c!(crate::log::err, c"rust: %s".as_ptr(), msg.buf.as_ptr()) };
+    // A NUL inside cuts the message short, as the C string it was.
+    crate::log::err(&[b"rust: ", crate::text::cstr(&msg.buf[..msg.len])].concat());
     process::abort()
 }
 

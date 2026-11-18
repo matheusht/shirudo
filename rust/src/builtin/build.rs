@@ -8,9 +8,9 @@
 use core::ffi::{CStr, c_int};
 use core::ptr;
 
-use crate::errno::ENOMEM;
+use crate::errno::{ENOMEM, text};
 use crate::ffi::c_splice;
-use crate::sys::libc::{PATH_MAX, X_OK, access, env, errno, execv, execvp, strerror};
+use crate::sys::libc::{PATH_MAX, X_OK, access, env, errno, execv, execvp};
 use crate::util::help::{Help, is_help, print_help};
 
 /// LIBEXEC_DIR: where packages install the helper, which the build
@@ -95,29 +95,29 @@ fn helper(label: &CStr) -> Result<(&'static CStr, bool), c_int> {
     let (path, use_path) = resolve_helper();
 
     if path.is_empty() {
-        // SAFETY: the C's format and the label, a C string.
-        unsafe {
-            crate::log::log_c!(
-                crate::log::err,
-                c"'%s' cannot use empty SHIRUDO_BUILD".as_ptr(),
-                label.as_ptr()
-            )
-        };
+        crate::log::err(
+            &[
+                &b"'"[..],
+                label.to_bytes(),
+                b"' cannot use empty SHIRUDO_BUILD",
+            ]
+            .concat(),
+        );
         return Err(127);
     }
     // SAFETY: a path, and a mode.
     if !use_path && unsafe { access(path.as_ptr(), X_OK) } != 0 {
-        // SAFETY: the C's format, the label and the path, C strings.
-        unsafe {
-            crate::log::log_c!(
-                crate::log::err,
-                c"'%s' is an operator-only subcommand; shirudo-build helper '%s' is not \
-                  executable. Set SHIRUDO_BUILD to a helper path or put shirudo-build on PATH."
-                    .as_ptr(),
-                label.as_ptr(),
-                path.as_ptr(),
-            )
-        };
+        crate::log::err(
+            &[
+                &b"'"[..],
+                label.to_bytes(),
+                b"' is an operator-only subcommand; shirudo-build helper '",
+                path.to_bytes(),
+                b"' is not \
+                  executable. Set SHIRUDO_BUILD to a helper path or put shirudo-build on PATH.",
+            ]
+            .concat(),
+        );
         return Err(127);
     }
     Ok((path, use_path))
@@ -132,15 +132,15 @@ pub(super) fn forward(label: &CStr, words: &[&CStr], args: &[&CStr]) -> c_int {
         .try_reserve_exact(words.len() + args.len() + 2)
         .is_err()
     {
-        // SAFETY: the C's format, the label and the error's text.
-        unsafe {
-            crate::log::log_c!(
-                crate::log::err,
-                c"'%s': %s".as_ptr(),
-                label.as_ptr(),
-                strerror(ENOMEM)
-            )
-        };
+        crate::log::err(
+            &[
+                &b"'"[..],
+                label.to_bytes(),
+                b"': ",
+                text(-ENOMEM).as_bytes(),
+            ]
+            .concat(),
+        );
         return 1;
     }
     let (path, use_path) = match helper(label) {
@@ -158,15 +158,15 @@ pub(super) fn forward(label: &CStr, words: &[&CStr], args: &[&CStr]) -> c_int {
         // SAFETY: as above.
         unsafe { execv(path.as_ptr(), argv.as_ptr()) };
     }
-    // SAFETY: the C's format, the path and the error's text.
-    unsafe {
-        crate::log::log_c!(
-            crate::log::err,
-            c"exec %s: %s".as_ptr(),
-            path.as_ptr(),
-            strerror(errno())
-        )
-    };
+    crate::log::err(
+        &[
+            &b"exec "[..],
+            path.to_bytes(),
+            b": ",
+            text(-errno()).as_bytes(),
+        ]
+        .concat(),
+    );
     127
 }
 

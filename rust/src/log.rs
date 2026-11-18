@@ -3,8 +3,7 @@
 
 //! The log: each message to syslog under LOG_AUTHPRIV, as `shirudo` with
 //! its pid, and to stderr, at the priority of err(), warn(), info() or
-//! audit(); log_c! for a message a C format spells. A fuzz build makes
-//! each line and drops it.
+//! audit(). A fuzz build makes each line and drops it.
 
 use core::ffi::c_int;
 use std::ffi::CString;
@@ -93,40 +92,6 @@ pub(crate) fn info(msg: &[u8]) {
 pub(crate) fn audit(msg: &[u8]) {
     emit(LOG_NOTICE, msg);
 }
-
-/// The message snprintf() wrote into `buf`, which it said is `n` bytes,
-/// or when it did not fit the format `fmt` itself, cut to the buffer.
-///
-/// # Safety
-///
-/// `fmt` is a C string.
-pub(crate) unsafe fn formatted(buf: &[u8], n: c_int, fmt: *const core::ffi::c_char) -> Vec<u8> {
-    match usize::try_from(n) {
-        Ok(n) if n < buf.len() => buf[..n].to_vec(),
-        _ => {
-            // SAFETY: the caller's C string.
-            let fmt = unsafe { core::ffi::CStr::from_ptr(fmt) }.to_bytes();
-            fmt[..fmt.len().min(buf.len() - 1)].to_vec()
-        }
-    }
-}
-
-/// A message of a C format and the arguments it converts, made by the C
-/// library's snprintf() into 8192 bytes, or the bare format when it does
-/// not fit, and logged by `level`, err() or its kin; errno as the caller
-/// left it. The caller's unsafe block holds the format and its
-/// arguments.
-macro_rules! log_c {
-    ($level:expr, $fmt:expr $(, $arg:expr)* $(,)?) => {{
-        let saved = $crate::sys::libc::errno();
-        let mut buf = [0u8; 8192];
-        let fmt: *const ::core::ffi::c_char = $fmt;
-        let n = $crate::sys::libc::snprintf(buf.as_mut_ptr().cast(), buf.len(), fmt $(, $arg)*);
-        ($level)(&$crate::log::formatted(&buf, n, fmt));
-        $crate::sys::libc::set_errno(saved);
-    }};
-}
-pub(crate) use log_c;
 
 mod capi {
     use core::ffi::{CStr, c_char, c_int};
