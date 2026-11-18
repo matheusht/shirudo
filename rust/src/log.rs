@@ -58,12 +58,14 @@ pub(crate) fn emit(priority: c_int, msg: &[u8]) {
         set_errno(saved);
         return;
     }
-    // SAFETY: a "%s" format with a C string, and the C library's stderr.
-    unsafe {
-        syslog(priority, c"%s".as_ptr(), line.as_ptr());
-        fputs(line.as_ptr(), stderr);
-        fputs(c"\n".as_ptr(), stderr);
-    }
+    // The line and its newline in one fputs(): stderr is unbuffered, so
+    // that is one write(), which a write from another thread or process
+    // sharing the stream cannot split.
+    let out = CString::new([line.as_bytes(), b"\n"].concat()).unwrap_or_default();
+    // SAFETY: a "%s" format with a C string.
+    unsafe { syslog(priority, c"%s".as_ptr(), line.as_ptr()) };
+    // SAFETY: a C string, and the C library's stderr.
+    unsafe { fputs(out.as_ptr(), stderr) };
     set_errno(saved);
 }
 
@@ -91,22 +93,4 @@ pub(crate) fn info(msg: &[u8]) {
 /// What changed the trust state, for the audit trail.
 pub(crate) fn audit(msg: &[u8]) {
     emit(LOG_NOTICE, msg);
-}
-
-mod capi {
-    use core::ffi::{CStr, c_char, c_int};
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn log_init() {
-        super::init();
-    }
-
-    /// # Safety
-    ///
-    /// `msg` is a C string.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn log_emit(priority: c_int, msg: *const c_char) {
-        // SAFETY: the C logger passes a terminated message.
-        super::emit(priority, unsafe { CStr::from_ptr(msg) }.to_bytes());
-    }
 }
