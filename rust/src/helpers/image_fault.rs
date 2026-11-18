@@ -23,7 +23,7 @@ use super::{err, out, real_syscall, set_syscall_hook, strerror};
 use crate::skel::bpf2::ExpectedRoot;
 use crate::sys::identity::{DEVICE_CONFIG, DeviceAuthority};
 use crate::util::bpf_sys::Attr;
-use crate::util::config_image::{ConfigImageOpen, config_image_close, config_image_open};
+use crate::util::config_image::{self, ConfigImageOpen};
 use crate::util::dm_verity::{self, DmVerity};
 use crate::util::io::kernel_dev;
 
@@ -281,7 +281,7 @@ fn config_root_test(mode: &[u8], prefix: &CStr) -> c_int {
     // the calls fill; what they open closed and removed after.
     let ret = unsafe {
         let mut opened: ConfigImageOpen = core::mem::zeroed();
-        let mut ret = config_image_open(prefix.as_ptr(), &mut opened);
+        let mut ret = config_image::place(ConfigImageOpen::open(prefix, None), &mut opened);
         if ret == 0 {
             let mut device = Box::new(DmVerity::empty());
             let name =
@@ -313,7 +313,7 @@ fn config_root_test(mode: &[u8], prefix: &CStr) -> c_int {
                     ret = cleanup;
                 }
             }
-            config_image_close(&mut opened);
+            opened.close();
         }
         ret
     };

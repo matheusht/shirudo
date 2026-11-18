@@ -36,9 +36,7 @@ use crate::sys::libc::{
 use crate::text::cstr;
 use crate::util::bpf_sys::{bpf_map_get_next_key, bpf_map_lookup_elem, bpf_obj_get};
 use crate::util::config::{CONF_PATH, Config, config_load_fd, config_load_path};
-use crate::util::config_image::{
-    ConfigImageOpen, config_image_close, config_image_open, config_image_open_root,
-};
+use crate::util::config_image::{self, ConfigImageOpen};
 use crate::util::config_update::{
     ConfigUpdate, ConfigUpdateOps, ConfigUpdateRecord, ConfigUpdateTarget, config_update_begin,
     config_update_boot, config_update_check, config_update_clear_staged, config_update_close,
@@ -528,14 +526,13 @@ fn mount_runtime(s: &mut State, trusted_boot: bool) -> c_int {
     let mut device = DmVerity::empty();
     let mut created = false;
     let mut step = "open runtime image";
-    // SAFETY: the bootstrap's prefix and root, and the image to open.
-    let mut ret = unsafe {
-        config_image_open_root(
-            s.bootstrap.runtime.as_ptr().cast(),
-            s.bootstrap.runtime_root.as_ptr(),
-            &mut opened,
-        )
-    };
+    let mut ret = config_image::place(
+        ConfigImageOpen::open(
+            CStr::from_bytes_until_nul(&s.bootstrap.runtime).unwrap_or_default(),
+            Some(&s.bootstrap.runtime_root),
+        ),
+        &mut opened,
+    );
     if ret == 0 {
         step = "prepare runtime mountpoint";
         ret = mkdir_owned(RUNTIME_DIR);
@@ -573,8 +570,7 @@ fn mount_runtime(s: &mut State, trusted_boot: bool) -> c_int {
     if ret == 0 && trusted_boot {
         s.boot_runtime = device;
     }
-    // SAFETY: the image opened above.
-    unsafe { config_image_close(&mut opened) };
+    opened.close();
     if ret == 0 {
         step = "load runtime config";
         ret = load_runtime_config(s, trusted_boot);
@@ -680,11 +676,8 @@ fn close_candidate(s: &mut State, journal_open: bool) {
             ));
         }
     }
-    // SAFETY: the candidate's mapping and image, their fds closed once.
-    unsafe {
-        dm_verity::close_loops(&mut s.candidate_device);
-        config_image_close(&mut s.candidate);
-    }
+    dm_verity::close_loops(&mut s.candidate_device);
+    s.candidate.close();
 }
 
 /// `remove` until it is not -EBUSY, 100 times at most and 10 ms apart:
@@ -779,8 +772,13 @@ fn prepare_config(s: &mut State, target: &ConfigUpdateTarget, purpose: Prepare) 
     if !prefix.starts_with(&cache) || !path_valid(prefix) {
         return -EPERM;
     }
-    // SAFETY: the target's prefix and the candidate to open.
-    let ret = unsafe { config_image_open(target.prefix.as_ptr().cast(), &mut s.candidate) };
+    let ret = config_image::place(
+        ConfigImageOpen::open(
+            CStr::from_bytes_until_nul(&target.prefix).unwrap_or_default(),
+            None,
+        ),
+        &mut s.candidate,
+    );
     if ret != 0 {
         return ret;
     }
@@ -975,8 +973,7 @@ fn boot_target(target: &mut ConfigUpdateTarget) -> c_int {
     };
     let prefix_c = CString::new(prefix.clone()).unwrap_or_default();
     let mut opened = ConfigImageOpen::closed();
-    // SAFETY: a C string and the image to open.
-    let ret = unsafe { config_image_open(prefix_c.as_ptr(), &mut opened) };
+    let ret = config_image::place(ConfigImageOpen::open(&prefix_c, None), &mut opened);
     if ret != 0 {
         return ret;
     }
@@ -987,8 +984,7 @@ fn boot_target(target: &mut ConfigUpdateTarget) -> c_int {
         target.root_hash = opened.image.root_hash;
         0
     };
-    // SAFETY: the image opened above.
-    unsafe { config_image_close(&mut opened) };
+    opened.close();
     ret
 }
 
@@ -1226,8 +1222,7 @@ pub(crate) fn boot_keys_close() -> c_int {
                 }
             }
             if let Some(image) = image {
-                // SAFETY: the candidate image, its fds closed once.
-                unsafe { config_image_close(image) };
+                image.close();
             }
         }
         s.boot_keys_open = false;
@@ -1271,8 +1266,13 @@ pub(crate) fn boot() -> c_int {
 /// config reads: 0, -EUCLEAN or -errno.
 fn config_mount_check(s: &State, record: &ConfigUpdateRecord) -> c_int {
     let mut opened = ConfigImageOpen::closed();
-    // SAFETY: the record's prefix and the image to open.
-    let mut ret = unsafe { config_image_open(record.target.prefix.as_ptr().cast(), &mut opened) };
+    let mut ret = config_image::place(
+        ConfigImageOpen::open(
+            CStr::from_bytes_until_nul(&record.target.prefix).unwrap_or_default(),
+            None,
+        ),
+        &mut opened,
+    );
     if ret != 0 {
         return ret;
     }
@@ -1284,8 +1284,7 @@ fn config_mount_check(s: &State, record: &ConfigUpdateRecord) -> c_int {
         let name = mapping_name(&record.target.root_hash);
         ret = dm_verity::place(dm_verity::inspect(&name, &opened.image), &mut device);
     }
-    // SAFETY: the image opened above.
-    unsafe { config_image_close(&mut opened) };
+    opened.close();
     if ret != 0 {
         return ret;
     }

@@ -20,7 +20,7 @@ use std::process::Command;
 use super::{KeyFiles, error, hex, print, strerr};
 use crate::errno::{EINVAL, EIO, EKEYREJECTED, ENOENT};
 use crate::sys::libc::{F_SETFD, O_NOFOLLOW, O_NONBLOCK, access, fcntl};
-use crate::util::config_image::{self, ConfigImageOpen, config_image_close, config_image_open};
+use crate::util::config_image::{self, ConfigImageOpen};
 use crate::util::crypto_openssl::{
     Cert, cert_free, cert_key_algorithm, cert_read_file, cms_signed_by, verify_detached,
 };
@@ -160,23 +160,17 @@ struct Opened(ConfigImageOpen);
 
 impl Drop for Opened {
     fn drop(&mut self) {
-        // SAFETY: the image config_image_open() opened.
-        unsafe { config_image_close(&mut self.0) };
+        self.0.close();
     }
 }
 
 /// `image verify`: the signature, the verity tree, then the root hash
 /// on stdout.
 fn verify(prefix: &CStr, cert: &CStr) -> c_int {
-    // SAFETY: an all-zero image with no descriptors open.
-    let mut img: ConfigImageOpen = unsafe { core::mem::zeroed() };
-    (img.data_fd, img.hash_fd, img.signature_fd) = (-1, -1, -1);
-    // SAFETY: a C string and the image to fill.
-    let ret = unsafe { config_image_open(prefix.as_ptr(), &mut img) };
-    if ret != 0 {
-        return ret;
-    }
-    let img = Opened(img);
+    let img = match ConfigImageOpen::open(prefix, None) {
+        Ok(img) => Opened(img),
+        Err(err) => return err,
+    };
     // SAFETY: the signature's descriptor, which the image keeps open.
     let file = ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(img.0.signature_fd) });
     let mut signature = vec![0u8; SIG_MAX + 1];

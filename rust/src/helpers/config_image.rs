@@ -12,9 +12,7 @@ use std::os::fd::AsRawFd;
 
 use super::{err, helper_main, out, strerror};
 use crate::errno::EINVAL;
-use crate::util::config_image::{
-    ConfigImageOpen, config_image_close, config_image_open_root, read_header,
-};
+use crate::util::config_image::{ConfigImageOpen, read_header};
 
 helper_main!(shirudo_helper_test_config_image, run);
 
@@ -23,17 +21,12 @@ fn open_root(prefix: &CStr, root_hex: &CStr) -> c_int {
     if crate::util::hex::decode(root_hex.to_bytes(), &mut root).is_err() {
         return -EINVAL;
     }
-    // SAFETY: an image of no part open, for which zeros and -1 fds are
-    // the value.
-    let mut op: ConfigImageOpen = unsafe { core::mem::zeroed() };
-    op.data_fd = -1;
-    op.hash_fd = -1;
-    op.signature_fd = -1;
-    // SAFETY: a C string, 32 bytes, and the image to fill, closed after.
-    unsafe {
-        let ret = config_image_open_root(prefix.as_ptr(), root.as_ptr(), &mut op);
-        config_image_close(&mut op);
-        ret
+    match ConfigImageOpen::open(prefix, Some(&root)) {
+        Ok(mut op) => {
+            op.close();
+            0
+        }
+        Err(err) => err,
     }
 }
 

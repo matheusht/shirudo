@@ -34,7 +34,7 @@ pub struct ConfigImage {
     pub(crate) root_hash: [u8; 32],
 }
 
-/// `struct config_image_open`: an image and its open parts, -1 for one
+/// An image and its open parts, -1 for one
 /// not open.
 #[repr(C)]
 pub struct ConfigImageOpen {
@@ -60,6 +60,21 @@ impl ConfigImage {
 }
 
 impl ConfigImageOpen {
+    /// The image at `prefix`, its `.img`, `.hash` and `.sig` opened and
+    /// checked; with `expected_root`, signed for that root hash.
+    pub(crate) fn open(prefix: &CStr, expected_root: Option<&[u8; 32]>) -> Result<Self, c_int> {
+        if prefix.is_empty() {
+            return Err(-EINVAL);
+        }
+        let mut image = Self::closed();
+        let ret = open_image(prefix, expected_root, &mut image);
+        if ret != 0 {
+            image.close();
+            return Err(ret);
+        }
+        Ok(image)
+    }
+
     pub(crate) const fn closed() -> Self {
         ConfigImageOpen {
             image: ConfigImage::zeroed(),
@@ -69,7 +84,7 @@ impl ConfigImageOpen {
         }
     }
 
-    fn close(&mut self) {
+    pub(crate) fn close(&mut self) {
         for fd in [&mut self.data_fd, &mut self.hash_fd, &mut self.signature_fd] {
             if *fd >= 0 {
                 // SAFETY: an fd this image opened, closed once, here.
@@ -320,114 +335,17 @@ fn open_image(
     }
 }
 
-pub(crate) use capi::{config_image_close, config_image_open, config_image_open_root};
-
-mod capi {
-    use core::ffi::{CStr, c_char, c_int};
-
-    use super::{ConfigImage, ConfigImageOpen, open_image};
-    use crate::errno::EINVAL;
-
-    /// `src` into `dst` field by field after its bytes are zeroed, so that
-    /// its padding stays zero, as the C's assignment of a structure it
-    /// initialised empty left it.
-    ///
-    /// # Safety
-    ///
-    /// `dst` is room for an image nothing else accesses meanwhile.
-    unsafe fn store_image(dst: *mut ConfigImage, src: &ConfigImage) {
-        // SAFETY: the caller's room.
-        unsafe {
-            dst.write_bytes(0, 1);
-            (*dst).data_blocks = src.data_blocks;
-            (*dst).hash_blocks = src.hash_blocks;
-            (*dst).signed_root = src.signed_root;
-            (*dst).salt = src.salt;
-            (*dst).root_hash = src.root_hash;
+/// `opened` into `image`, or a closed image in its place when it failed:
+/// 0 or -errno, for the callers that keep an image across steps.
+pub(crate) fn place(opened: Result<ConfigImageOpen, c_int>, image: &mut ConfigImageOpen) -> c_int {
+    match opened {
+        Ok(opened) => {
+            *image = opened;
+            0
         }
-    }
-
-    /// As [`store_image`], for an image and its fds.
-    ///
-    /// # Safety
-    ///
-    /// `dst` is room for an open image nothing else accesses meanwhile.
-    unsafe fn store_open(dst: *mut ConfigImageOpen, src: &ConfigImageOpen) {
-        // SAFETY: the caller's room.
-        unsafe {
-            dst.write_bytes(0, 1);
-            store_image(&raw mut (*dst).image, &src.image);
-            (*dst).data_fd = src.data_fd;
-            (*dst).hash_fd = src.hash_fd;
-            (*dst).signature_fd = src.signature_fd;
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `prefix` is NULL or a C string, `expected_root` NULL or 32 bytes,
-    /// and `out` NULL or an image to fill.
-    unsafe fn open(
-        prefix: *const c_char,
-        expected_root: *const u8,
-        out: *mut ConfigImageOpen,
-    ) -> c_int {
-        // SAFETY: the caller passes NULL or a C string.
-        if prefix.is_null() || out.is_null() || unsafe { *prefix } == 0 {
-            return -EINVAL;
-        }
-        let mut image = ConfigImageOpen::closed();
-
-        // SAFETY: the caller's image, reset until the open succeeds, and
-        // its C string and root.
-        unsafe {
-            store_open(out, &ConfigImageOpen::closed());
-            let root = (!expected_root.is_null()).then(|| &*expected_root.cast::<[u8; 32]>());
-            let ret = open_image(CStr::from_ptr(prefix), root, &mut image);
-
-            if ret != 0 {
-                image.close();
-                return ret;
-            }
-            store_open(out, &image);
-        }
-        0
-    }
-
-    /// # Safety
-    ///
-    /// `prefix` is NULL or a C string and `out` NULL or an image to fill.
-    pub unsafe extern "C" fn config_image_open(
-        prefix: *const c_char,
-        out: *mut ConfigImageOpen,
-    ) -> c_int {
-        // SAFETY: the caller's arguments.
-        unsafe { open(prefix, core::ptr::null(), out) }
-    }
-
-    /// # Safety
-    ///
-    /// `prefix` is NULL or a C string, `expected_root` NULL or 32 bytes,
-    /// and `out` NULL or an image to fill.
-    pub unsafe extern "C" fn config_image_open_root(
-        prefix: *const c_char,
-        expected_root: *const u8,
-        out: *mut ConfigImageOpen,
-    ) -> c_int {
-        if expected_root.is_null() {
-            return -EINVAL;
-        }
-        // SAFETY: the caller's arguments.
-        unsafe { open(prefix, expected_root, out) }
-    }
-
-    /// # Safety
-    ///
-    /// `image` is NULL or an image whose fds it may close.
-    pub unsafe extern "C" fn config_image_close(image: *mut ConfigImageOpen) {
-        if !image.is_null() {
-            // SAFETY: the caller passes its image.
-            unsafe { (*image).close() };
+        Err(err) => {
+            *image = ConfigImageOpen::closed();
+            err
         }
     }
 }

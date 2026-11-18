@@ -23,9 +23,7 @@ use crate::sys::libc::{
     O_WRONLY, PATH_MAX, S_IFMT, S_IFREG, STATX_BASIC_STATS, Statx, close, errno, fsetxattr, fsync,
     link, mkdtemp, open, read, rmdir, statx, unlink,
 };
-use crate::util::config_image::{
-    ConfigImageOpen, MAX_BYTES, SIG_MAX, config_image_close, config_image_open,
-};
+use crate::util::config_image::{self, ConfigImageOpen, MAX_BYTES, SIG_MAX};
 use crate::util::config_update::ConfigUpdateTarget;
 use crate::util::dm_verity::{self, DmVerity};
 use crate::util::hex::hex_encode;
@@ -311,8 +309,7 @@ unsafe fn fetch(
     target: &mut ConfigUpdateTarget,
     verify: &mut dyn FnMut(&ConfigImageOpen) -> c_int,
 ) -> c_int {
-    // SAFETY: a structure of integers and arrays, which the open fills.
-    let mut opened: ConfigImageOpen = unsafe { MaybeUninit::zeroed().assume_init() };
+    let mut opened = ConfigImageOpen::closed();
     let mut staging = *b"/var/lib/shirudo/images/incoming-XXXXXX\0";
     let mut incoming = [0u8; PATH_MAX];
     let mut from = [0u8; PATH_MAX];
@@ -368,7 +365,13 @@ unsafe fn fetch(
                     break 'out;
                 }
             }
-            ret = config_image_open(incoming.as_ptr().cast(), &mut opened);
+            ret = config_image::place(
+                ConfigImageOpen::open(
+                    CStr::from_bytes_until_nul(&incoming).unwrap_or_default(),
+                    None,
+                ),
+                &mut opened,
+            );
             if ret != 0 {
                 break 'out;
             }
@@ -390,7 +393,7 @@ unsafe fn fetch(
                     ret = -ENAMETOOLONG;
                 }
             }
-            config_image_close(&mut opened);
+            opened.close();
             if ret != 0 {
                 break 'out;
             }
@@ -426,12 +429,18 @@ unsafe fn fetch(
                 ret = -errno();
                 break 'out;
             }
-            ret = config_image_open(target.prefix.as_ptr().cast(), &mut opened);
+            ret = config_image::place(
+                ConfigImageOpen::open(
+                    CStr::from_bytes_until_nul(&target.prefix).unwrap_or_default(),
+                    None,
+                ),
+                &mut opened,
+            );
             if ret == 0 {
                 if opened.image.root_hash != target.root_hash {
                     ret = -EKEYREJECTED;
                 }
-                config_image_close(&mut opened);
+                opened.close();
             }
         }
         if dir >= 0 {
