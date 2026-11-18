@@ -67,6 +67,7 @@ fn events_fold_into_the_set() {
 
 /// A full set still takes a load of a name it holds, not a new one.
 #[test]
+#[cfg_attr(miri, ignore = "4096 loads, each a scan of the set, take Miri hours")]
 fn a_full_set_takes_no_new_name() {
     let p = PAYLOAD.to_bytes();
     let mut s = MeasuredSet::default();
