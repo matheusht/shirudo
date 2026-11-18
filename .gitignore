@@ -65,6 +65,7 @@
 !/testing/helper/*.c
 !/testing/helper/*.h
 !/testing/helper/main.rs.in
+!/testing/helper/test-preload.rs
 !/testing/helper/otel-mock.py
 !/testing/helper/otel-s3-mock.py
 !/testing/helper/test-bpm-key.py

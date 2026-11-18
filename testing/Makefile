@@ -104,7 +104,7 @@ TEST_VM_BUNDLE_SOURCES := $(sort $(wildcard \
 	$(ROOT)/vendor/libbpf/include/uapi/linux/*.h \
 	$(ROOT)/vendor/libbpf/include/asm/*.h \
 	$(ROOT)/testing/helper/*.c $(ROOT)/testing/helper/*.h $(ROOT)/testing/helper/*.py \
-	$(ROOT)/testing/helper/main.rs.in \
+	$(ROOT)/testing/helper/main.rs.in $(ROOT)/testing/helper/test-preload.rs \
 	$(ROOT)/testing/vm/bundle-images.sh $(ROOT)/testing/vm/image-fixtures.sh \
 	$(ROOT)/tools/gen-image/shirudo-gen-* $(ROOT)/tools/gen-image/*.sh \
 	$(ROOT)/tools/gen-image/*.in \

@@ -954,17 +954,17 @@ testing/helper/test-bpf-cmd: testing/helper/test-bpf-cmd.c
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^
 
-testing/helper/test-exec-fail: testing/helper/test-exec-fail.c
-	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) -o $@ $^
+testing/helper/test-exec-fail: $(HELPER_MAIN_DIR)/test-exec-fail.o $(RUST_HELPER_LIB)
+	@printf '  LD      $@\n'
+	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(RUST_TEST_LDLIBS)
 
-testing/helper/test-exec-shared: testing/helper/test-exec-shared.c
-	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) -o $@ $^
+testing/helper/test-exec-shared: $(HELPER_MAIN_DIR)/test-exec-shared.o $(RUST_HELPER_LIB)
+	@printf '  LD      $@\n'
+	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(RUST_TEST_LDLIBS)
 
-testing/helper/test-xfs-attrmulti: testing/helper/test-xfs-attrmulti.c
-	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) -o $@ $^
+testing/helper/test-xfs-attrmulti: $(HELPER_MAIN_DIR)/test-xfs-attrmulti.o $(RUST_HELPER_LIB)
+	@printf '  LD      $@\n'
+	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(RUST_TEST_LDLIBS)
 
 testing/helper/test-perf-attach: testing/helper/test-perf-attach.c util/string.o
 	@printf '  CC      $@\n'

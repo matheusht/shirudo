@@ -18,6 +18,8 @@ mod config_image;
 mod config_update;
 mod eventlog;
 mod exec_churn;
+mod exec_fail;
+mod exec_shared;
 mod harden;
 mod image_cleanup;
 mod image_cli;
@@ -41,6 +43,7 @@ mod upatch_decode;
 mod upatch_map_types;
 mod upatch_prog_metadata;
 mod upatch_serializer_pages;
+mod xfs_attrmulti;
 
 /// The arguments the C runtime gave main(), as C strings.
 ///

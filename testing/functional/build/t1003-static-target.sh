@@ -50,7 +50,8 @@ test_expect_success 'the static ELF checker rejects non-PIE and search paths' '
 # with SANITIZE=address cannot show the constructor run.
 if ! ldd "$OPERATOR" 2>/dev/null | grep -q libasan; then
 test_expect_success 'preload constructors run in the operator but not the target' '
-	${CC:-cc} -shared -fPIC helper/test-preload.c -o "$WORK/preload.so" &&
+	${RUSTC:-rustc} --edition 2024 --crate-type cdylib -C panic=abort \
+		-o "$WORK/preload.so" helper/test-preload.rs &&
 	env LD_PRELOAD="$WORK/preload.so" SHIRUDO_PRELOAD_MARKER="$WORK/operator" \
 		"$OPERATOR" version >"$WORK/operator-version" &&
 	test -f "$WORK/operator" &&
