@@ -7,7 +7,7 @@
 //! image offline, its signature against a certificate and its tree with
 //! veritysetup, on the very files it authenticated.
 
-use core::ffi::{CStr, c_int};
+use core::ffi::{CStr, c_char, c_int};
 use std::ffi::OsStr;
 use std::io::{ErrorKind, Read, Write};
 use std::mem::ManuallyDrop;
@@ -24,23 +24,11 @@ use crate::util::config_image::{self, ConfigImageOpen, config_image_close, confi
 use crate::util::crypto_openssl::{
     Cert, cert_free, cert_key_algorithm, cert_read_file, cms_signed_by, verify_detached,
 };
+use crate::util::help::{Help, HelpSection, is_help, print_help};
+use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 
 const SIG_MAX: usize = config_image::SIG_MAX as usize;
 const X_OK: c_int = 1;
-
-fn usage(to_stdout: bool) {
-    print(
-        to_stdout,
-        b"usage: shirudo-build image build <filesystem.img> -o <prefix>
-       [--kind config|runtime] [--keys-dir <dir>]
-       [--key <private.pem>] [--cert <cert.der>] [--salt <64-hex>]
-Writes <prefix>.img/.verity/.roothash/.p7s; existing files are refused.
-Input is a 4096-byte-aligned ext4 filesystem image.
-       shirudo-build image verify <prefix> --cert <cert.der>
-Build and offline verification require veritysetup.
-",
-    );
-}
 
 fn errno_of(e: &std::io::Error) -> c_int {
     -e.raw_os_error().unwrap_or(EIO)
@@ -280,65 +268,167 @@ fn sign_root(input: &CStr, output: &CStr, keys: &KeyFiles) -> c_int {
     ret
 }
 
-/// `shirudo-build image`, from `image` on.
-pub(super) fn run(args: &[&CStr]) -> c_int {
-    let word = |i: usize| args.get(i).map(|a| a.to_bytes());
+const IMAGE_VERIFY_CERT: c_int = 0;
 
-    match (args.len(), word(1)) {
-        (_, Some(b"build")) => return build(args),
-        (2, Some(b"--help")) => {
-            usage(true);
-            return 0;
-        }
-        (5, Some(b"verify")) if word(3) == Some(&b"--cert"[..]) => {
-            let ret = verify(args[2], args[4]);
-            if ret != 0 {
-                error(&[b"image verify: ", strerr(-ret)].concat());
+static IMAGE_VERIFY_OPTS: [OptSpec; 1] = [OptSpec::new(
+    c"--cert",
+    0,
+    0,
+    Some(c"<cert.der>"),
+    c"the certificate the image's root hash is signed for",
+)];
+
+const IMAGE_SIGN_OUTPUT: c_int = 0;
+const IMAGE_SIGN_KEYS_DIR: c_int = 1;
+const IMAGE_SIGN_KEY: c_int = 2;
+const IMAGE_SIGN_CERT: c_int = 3;
+
+static IMAGE_SIGN_OPTS: [OptSpec; 4] = [
+    OptSpec::new(
+        c"--output",
+        b'o',
+        0,
+        Some(c"<signature>"),
+        c"where to write the signature",
+    ),
+    OptSpec::new(
+        c"--keys-dir",
+        0,
+        0,
+        Some(c"<dir>"),
+        c"read signing_key.pem and cert.der from <dir>",
+    ),
+    OptSpec::new(
+        c"--key",
+        0,
+        0,
+        Some(c"<private.pem>"),
+        c"the signing key, over --keys-dir",
+    ),
+    OptSpec::new(
+        c"--cert",
+        0,
+        0,
+        Some(c"<cert.der>"),
+        c"the certificate, over --keys-dir",
+    ),
+];
+
+static IMAGE_SECTIONS: [HelpSection; 1] =
+    [HelpSection::options(c"verify options:", &IMAGE_VERIFY_OPTS)];
+
+static IMAGE_HELP: Help = Help::new(
+    c"shirudo image build <filesystem.img> -o <prefix> [--kind config|runtime]\n                     \
+      [--keys-dir <dir>] [--key <private.pem>] [--cert <cert.der>]\n                     \
+      [--salt <64-hex>]\n       \
+      shirudo image verify <prefix> --cert <cert.der>",
+    Some(
+        c"build writes <prefix>.img, .verity, .roothash and .p7s from a 4096-byte\n\
+          aligned ext4 file system image and refuses files that exist. Build and\n\
+          offline verification require veritysetup.",
+    ),
+    &IMAGE_SECTIONS,
+    None,
+);
+
+fn verify_cmd(args: &[&CStr]) -> c_int {
+    let raw: Vec<*const c_char> = args.iter().map(|a| a.as_ptr()).collect();
+    let mut p = OptParser::new(
+        c"image verify",
+        &IMAGE_VERIFY_OPTS,
+        Some(&IMAGE_HELP),
+        &raw,
+        2,
+    );
+    let (mut prefix, mut cert) = (None, None);
+
+    loop {
+        let opt = p.next();
+        let value = p.value();
+        match opt {
+            OPT_END => break,
+            IMAGE_VERIFY_CERT => cert = value,
+            OPT_ARG => {
+                if prefix.is_some() {
+                    p.usage_arg(b"unexpected argument ");
+                    return EXIT_USAGE;
+                }
+                prefix = value;
             }
-            return if ret != 0 { 1 } else { 0 };
-        }
-        (_, Some(b"sign-root")) => {}
-        _ => {
-            usage(false);
-            return 2;
+            OPT_DONE => return 0,
+            _ => return EXIT_USAGE,
         }
     }
+    let (Some(prefix), Some(cert)) = (prefix, cert) else {
+        p.usage(b"takes <prefix> and --cert <cert.der>");
+        return EXIT_USAGE;
+    };
+    let ret = verify(prefix, cert);
+    if ret != 0 {
+        error(&[b"image verify: ", strerr(-ret)].concat());
+    }
+    c_int::from(ret != 0)
+}
+
+/// What shirudo-gen-verity calls back with for the root hash it made.
+fn sign_root_cmd(args: &[&CStr]) -> c_int {
+    let raw: Vec<*const c_char> = args.iter().map(|a| a.as_ptr()).collect();
+    let mut p = OptParser::new(c"image sign-root", &IMAGE_SIGN_OPTS, None, &raw, 2);
     let mut keys = KeyFiles::default();
-    let (mut input, mut prefix, mut keys_dir) = (None, None, None);
-    let mut i = 2;
-    while i < args.len() {
-        let a = args[i].to_bytes();
-        let next = args.get(i + 1).copied();
-        match (a, next) {
-            (b"--help", _) => {
-                usage(true);
-                return 0;
+    let (mut input, mut signature, mut keys_dir) = (None, None, None);
+
+    loop {
+        let opt = p.next();
+        let value = p.value();
+        match opt {
+            OPT_END => break,
+            IMAGE_SIGN_OUTPUT => signature = value,
+            IMAGE_SIGN_KEYS_DIR => keys_dir = value,
+            IMAGE_SIGN_KEY => keys.set_pkey(value.unwrap_or_default()),
+            IMAGE_SIGN_CERT => keys.set_cert(value.unwrap_or_default()),
+            OPT_ARG => {
+                if input.is_some() {
+                    p.usage_arg(b"unexpected argument ");
+                    return EXIT_USAGE;
+                }
+                input = value;
             }
-            (b"-o" | b"--output", Some(v)) => prefix = Some(v),
-            (b"--keys-dir", Some(v)) => keys_dir = Some(v),
-            (b"--key", Some(v)) => keys.set_pkey(v),
-            (b"--cert", Some(v)) => keys.set_cert(v),
-            _ if a.first() != Some(&b'-') && input.is_none() => {
-                input = Some(args[i]);
-                i += 1;
-                continue;
-            }
-            _ => {
-                usage(false);
-                return 2;
-            }
+            OPT_DONE => return 0,
+            _ => return EXIT_USAGE,
         }
-        i += 2;
     }
-    let (Some(input), Some(prefix)) = (input, prefix.filter(|p| !p.is_empty())) else {
-        return 2;
+    let (Some(input), Some(signature)) = (input, signature) else {
+        p.usage(b"takes <root-hash-file> and -o <signature>");
+        return EXIT_USAGE;
     };
     if keys.resolve_both(keys_dir).is_err() {
-        return 2;
+        return EXIT_USAGE;
     }
-    let ret = sign_root(input, prefix, &keys);
+    let ret = sign_root(input, signature, &keys);
     if ret != 0 {
         error(&[b"image sign-root: ", strerr(-ret)].concat());
     }
-    if ret != 0 { 1 } else { 0 }
+    c_int::from(ret != 0)
+}
+
+/// `shirudo-build image`, from `image` on.
+pub(super) fn run(args: &[&CStr]) -> c_int {
+    let word = args.get(1).map(|a| a.to_bytes());
+
+    if word == Some(b"build") {
+        return build(args);
+    }
+    if args.len() < 2 || is_help(word) {
+        // SAFETY: help of C strings.
+        unsafe { print_help(&IMAGE_HELP) };
+        return if args.len() < 2 { EXIT_USAGE } else { 0 };
+    }
+    match word.unwrap_or_default() {
+        b"verify" => verify_cmd(args),
+        b"sign-root" => sign_root_cmd(args),
+        other => {
+            error(&[b"image: '", other, b"' is not a subcommand"].concat());
+            EXIT_USAGE
+        }
+    }
 }

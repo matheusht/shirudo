@@ -5,7 +5,7 @@
 //! another certificate, which `shirudo keys add --vouch` takes on the
 //! targets that enrol this key.
 
-use core::ffi::{CStr, c_int};
+use core::ffi::{CStr, c_char, c_int};
 use core::ptr;
 use std::ffi::CString;
 use std::io::Write;
@@ -16,25 +16,13 @@ use super::{Bytes, KeyFiles, error, hex, info, last_err, print, strerr};
 use crate::errno::{EINVAL, EIO, EKEYREJECTED};
 use crate::sys::libc::close;
 use crate::util::crypto_openssl::{Cert, cert_free, cert_key_algorithm, cert_read_der};
+use crate::util::help::{Help, HelpSection};
 use crate::util::keys::{keys_digest_der, keys_read_der, keys_vouch_payload};
+use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 
 /// The room a vouch's CMS signature gets.
 const SIG_MAX: usize = 64 * 1024;
 const PATH_MAX: usize = 4096;
-
-fn usage(to_stdout: bool) {
-    print(
-        to_stdout,
-        b"usage: shirudo-build keys vouch <cert.der> [-o <file>]
-                [--keys-dir <dir>] [--key <signing_key.pem>]
-                [--cert <cert.der>]
-
-Sign a vouch for <cert.der> with the operator key, for
-`shirudo keys add --vouch` on the targets that enrol this
-key. -o defaults to <cert.der>.vouch.
-",
-    );
-}
 
 /// Whether the certificate's key is ML-DSA-87, the one algorithm
 /// shirudo accepts.
@@ -222,56 +210,87 @@ fn vouch(input: &CStr, output: &CStr, keys: &KeyFiles) -> c_int {
     0
 }
 
+const VOUCH_OUTPUT: c_int = 0;
+const VOUCH_KEYS_DIR: c_int = 1;
+const VOUCH_KEY: c_int = 2;
+const VOUCH_CERT: c_int = 3;
+
+static VOUCH_OPTS: [OptSpec; 4] = [
+    OptSpec::new(
+        c"--output",
+        b'o',
+        0,
+        Some(c"<file>"),
+        c"where to write the vouch (default <cert.der>.vouch)",
+    ),
+    OptSpec::new(
+        c"--keys-dir",
+        0,
+        0,
+        Some(c"<dir>"),
+        c"read signing_key.pem and cert.der from <dir>",
+    ),
+    OptSpec::new(
+        c"--key",
+        0,
+        0,
+        Some(c"<signing_key.pem>"),
+        c"the signing key (overrides --keys-dir)",
+    ),
+    OptSpec::new(
+        c"--cert",
+        0,
+        0,
+        Some(c"<cert.der>"),
+        c"the signing certificate (overrides --keys-dir)",
+    ),
+];
+
+static VOUCH_SECTIONS: [HelpSection; 1] = [HelpSection::options(c"options:", &VOUCH_OPTS)];
+
+static VOUCH_HELP: Help = Help::new(
+    c"shirudo keys vouch <cert.der> [-o <file>] [--keys-dir <dir>]\n                          \
+      [--key <signing_key.pem>] [--cert <cert.der>]",
+    Some(
+        c"Sign a vouch for another operator's certificate with this operator's key,\n\
+          for `shirudo keys add --vouch` on the targets that enrol this key.\n\
+          Prints the vouched certificate's fingerprint.",
+    ),
+    &VOUCH_SECTIONS,
+    None,
+);
+
 /// `shirudo-build keys vouch`, from `vouch` on.
 pub(super) fn run(args: &[&CStr]) -> c_int {
+    let raw: Vec<*const c_char> = args.iter().map(|a| a.as_ptr()).collect();
+    let mut p = OptParser::new(c"keys vouch", &VOUCH_OPTS, Some(&VOUCH_HELP), &raw, 1);
     let mut keys = KeyFiles::default();
     let (mut input, mut output): (Option<&CStr>, Option<&CStr>) = (None, None);
     let mut keys_dir = None;
-    let mut i = 1;
 
-    while i < args.len() {
-        let a = args[i].to_bytes();
-        let next = args.get(i + 1).copied();
-        match (a, next) {
-            (b"-o" | b"--output", Some(v)) => {
-                output = Some(v);
-                i += 1;
+    loop {
+        let opt = p.next();
+        let value = p.value();
+        match opt {
+            OPT_END => break,
+            VOUCH_OUTPUT => output = value,
+            VOUCH_KEYS_DIR => keys_dir = value,
+            VOUCH_KEY => keys.set_pkey(value.unwrap_or_default()),
+            VOUCH_CERT => keys.set_cert(value.unwrap_or_default()),
+            OPT_ARG => {
+                if input.is_some() {
+                    p.usage_arg(b"unexpected argument ");
+                    return EXIT_USAGE;
+                }
+                input = value;
             }
-            (b"--keys-dir", Some(v)) => {
-                keys_dir = Some(v);
-                i += 1;
-            }
-            (b"--key", Some(v)) => {
-                keys.set_pkey(v);
-                i += 1;
-            }
-            (b"--cert", Some(v)) => {
-                keys.set_cert(v);
-                i += 1;
-            }
-            _ if a.starts_with(b"--keys-dir=") => {
-                keys_dir = CStr::from_bytes_with_nul(&args[i].to_bytes_with_nul()[11..]).ok()
-            }
-            (b"-h" | b"--help", _) => {
-                usage(true);
-                return 0;
-            }
-            _ if a.first() == Some(&b'-') => {
-                error(&[b"keys vouch: unknown option '", a, b"'"].concat());
-                usage(false);
-                return 2;
-            }
-            _ if input.is_none() => input = Some(args[i]),
-            _ => {
-                error(&[b"keys vouch: unexpected argument '", a, b"'"].concat());
-                return 2;
-            }
+            OPT_DONE => return 0,
+            _ => return EXIT_USAGE,
         }
-        i += 1;
     }
     let Some(input) = input else {
-        usage(false);
-        return 2;
+        p.usage(b"takes <cert.der>");
+        return EXIT_USAGE;
     };
     if let Err((dir, _)) = keys.resolve(keys_dir) {
         error(&[b"invalid keys dir ", &dir[..]].concat());

@@ -7,20 +7,24 @@
 //! verified against the operator's certificate, re-signed with the new
 //! .rodata, and their unload directives bound anew.
 
-use core::ffi::{CStr, c_int};
+use core::ffi::{CStr, c_char, c_int};
 use core::ptr;
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 
 use super::build::{self, Override, cstring};
-use super::{archive, error, path, print};
+use super::{archive, error, path};
 use crate::errno::{EACCES, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT, ENOTDIR};
 use crate::heap::xfree;
 use crate::shirudo_build::{KeyFiles, check_keys, package};
 use crate::util::bpm_oci::{Client, MANIFEST_MEDIA, digest_matches, manifest_layers, sha256_hex};
 use crate::util::bpm_package::{
     PackageInfo, bpm_pkg_load_info, bpm_pkg_read_member, semver_compare,
+};
+use crate::util::help::{Help, HelpSection};
+use crate::util::options::{
+    EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OPT_REPEAT, OptParser, OptSpec,
 };
 use crate::util::upatch;
 
@@ -128,11 +132,30 @@ fn copy_member(package: &CStr, member: &[u8], output: &[u8]) -> c_int {
 
 /// The package an `oci://` reference names, into a temporary file whose
 /// path it returns, checked against the digest its manifest gives.
-fn download(reference: &[u8]) -> Result<Vec<u8>, c_int> {
+/// The package of the manifest whose digest the operator named, `want`,
+/// into a file of /tmp, removed again on a failure once it was made.
+fn download(reference: &[u8], want: &[u8]) -> Result<Vec<u8>, c_int> {
     let mut c = Client::new();
     let (repo, tag) = c.parse_pull_ref(reference)?;
     let url = c.url(&repo, b"manifests", &tag)?;
     let manifest = c.get(&url, MANIFEST_MEDIA, false)?;
+    let mut hex = [0u8; 65];
+    if sha256_hex(manifest.bytes().as_ptr(), manifest.bytes().len(), &mut hex) != 0 {
+        return Err(-EINVAL);
+    }
+    let served = crate::text::cstr(&hex);
+    if !digest_matches(want, served) {
+        error(
+            format!(
+                "bpm config update: {} serves manifest sha256:{}, not {}",
+                String::from_utf8_lossy(reference),
+                String::from_utf8_lossy(served),
+                String::from_utf8_lossy(want)
+            )
+            .as_bytes(),
+        );
+        return Err(-EKEYREJECTED);
+    }
     let (layers, _) = manifest_layers(manifest.bytes(), 8, false)?;
     let Some(layer) = layers
         .iter()
@@ -176,75 +199,172 @@ fn download(reference: &[u8]) -> Result<Vec<u8>, c_int> {
     Ok(tmp)
 }
 
-fn help() {
-    print(
-        true,
-        b"usage: shirudo bpm config update --base-package <package.bee|oci://host/repo:tag> --version <version> [--file <name>.bee] [--keys-dir <dir>] [--rodata-input <name>=<path>]...
-Without --file, the Beefile and updater inputs come from --base-package and are trusted as operator-side code.
-",
-    );
-}
-
-fn usage() -> c_int {
-    print(
-        false,
-        b"usage: shirudo bpm config update --base-package <package.bee|oci://host/repo:tag> --version <version> [--file <name>.bee] [--rodata-input <name>=<path>]... [--keys-dir <dir>]\n",
-    );
-    -EINVAL
-}
-
 /// `bpm config update`, from `update` on.
-pub(super) fn run(args: &[&CStr]) -> c_int {
-    let (mut file, mut base, mut version, mut keys_arg) = (None, None, None, None);
-    let mut overrides = Vec::new();
-    let mut i = 1;
+const CONFIG_UPDATE_FILE: c_int = 0;
+const CONFIG_UPDATE_BASE_PACKAGE: c_int = 1;
+const CONFIG_UPDATE_BASE_DIGEST: c_int = 2;
+const CONFIG_UPDATE_VERSION: c_int = 3;
+const CONFIG_UPDATE_KEYS_DIR: c_int = 4;
+const CONFIG_UPDATE_RODATA_INPUT: c_int = 5;
 
-    while i < args.len() {
-        let b = args[i].to_bytes();
-        if super::is_help(b) {
-            help();
-            return 0;
+static CONFIG_UPDATE_OPTS: [OptSpec; 6] = [
+    OptSpec::new(
+        c"--file",
+        0,
+        0,
+        Some(c"<name>.bee"),
+        c"the Beefile, instead of the base package's",
+    ),
+    OptSpec::new(
+        c"--base-package",
+        0,
+        0,
+        Some(c"<package.bee|oci://host/repo:tag>"),
+        c"the package the update builds on",
+    ),
+    OptSpec::new(
+        c"--base-digest",
+        0,
+        0,
+        Some(c"sha256:<manifest>"),
+        c"the manifest digest of an oci:// base package",
+    ),
+    OptSpec::new(
+        c"--version",
+        0,
+        0,
+        Some(c"<version>"),
+        c"the SemVer 2.0.0 version of the update",
+    ),
+    OptSpec::new(
+        c"--keys-dir",
+        0,
+        0,
+        Some(c"<dir>"),
+        c"read signing_key.pem and cert.der from <dir>",
+    ),
+    OptSpec::new(
+        c"--rodata-input",
+        0,
+        OPT_REPEAT,
+        Some(c"<name>=<path>"),
+        c"a file for a .rodata input (repeatable)",
+    ),
+];
+
+static CONFIG_UPDATE_SECTIONS: [HelpSection; 1] =
+    [HelpSection::options(c"options:", &CONFIG_UPDATE_OPTS)];
+
+static CONFIG_UPDATE_HELP: Help = Help::new(
+    c"shirudo bpm config update --base-package <package.bee|oci://host/repo:tag>\n                                 \
+      --version <version> [options]",
+    Some(
+        c"Build a config update package on a base package. Without --file, the\n\
+          Beefile and the updater inputs come from --base-package and are trusted\n\
+          as operator-side code. An oci:// base package needs --base-digest, the\n\
+          manifest digest bpm push printed for it.",
+    ),
+    &CONFIG_UPDATE_SECTIONS,
+    None,
+);
+
+/// Whether `digest` is sha256:<64 lowercase hex>.
+fn digest_ok(digest: &[u8]) -> bool {
+    digest.strip_prefix(b"sha256:").is_some_and(|hex| {
+        hex.len() == 64 && hex.iter().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
+    })
+}
+
+/// `bpm config update`, from `update` on: 0, EXIT_USAGE, or -errno.
+pub(super) fn run(args: &[&CStr]) -> c_int {
+    let raw: Vec<*const c_char> = args.iter().map(|a| a.as_ptr()).collect();
+    let mut p = OptParser::new(
+        c"bpm config update",
+        &CONFIG_UPDATE_OPTS,
+        Some(&CONFIG_UPDATE_HELP),
+        &raw,
+        1,
+    );
+    let (mut file, mut base, mut base_digest) = (None, None, None);
+    let (mut version, mut keys_arg) = (None, None);
+    let mut overrides = Vec::new();
+
+    loop {
+        let opt = p.next();
+        let value = p.value();
+        match opt {
+            OPT_END => break,
+            CONFIG_UPDATE_FILE => file = value,
+            CONFIG_UPDATE_BASE_PACKAGE => base = value,
+            CONFIG_UPDATE_BASE_DIGEST => base_digest = value,
+            CONFIG_UPDATE_VERSION => version = value,
+            CONFIG_UPDATE_KEYS_DIR => keys_arg = value,
+            CONFIG_UPDATE_RODATA_INPUT => {
+                match build::parse_override(value.map_or(&b""[..], CStr::to_bytes), &mut overrides)
+                {
+                    Ok(()) => {}
+                    Err(None) => {
+                        p.usage(b"--rodata-input takes <name>=<path>");
+                        return EXIT_USAGE;
+                    }
+                    Err(Some(err)) => return err,
+                }
+            }
+            OPT_ARG => {
+                p.usage_arg(b"unexpected argument ");
+                return EXIT_USAGE;
+            }
+            OPT_DONE => return 0,
+            _ => return EXIT_USAGE,
         }
-        if !matches!(
-            b,
-            b"--file" | b"--base-package" | b"--version" | b"--keys-dir" | b"--rodata-input"
-        ) {
-            return usage();
-        }
-        i += 1;
-        let Some(v) = args.get(i).copied() else {
-            return usage();
-        };
-        match b {
-            b"--file" => file = Some(v),
-            b"--base-package" => base = Some(v),
-            b"--version" => version = Some(v),
-            b"--keys-dir" => keys_arg = Some(v),
-            _ => match build::parse_override(v.to_bytes(), &mut overrides) {
-                Ok(()) => {}
-                Err(None) => return usage(),
-                Err(Some(err)) => return err,
-            },
-        }
-        i += 1;
     }
     let (Some(base), Some(version)) = (base, version) else {
-        return usage();
+        p.usage(b"takes --base-package and --version");
+        return EXIT_USAGE;
     };
     if !build::version_ok(version) {
         error(format!("bpm config update: --version {} is not a SemVer 2.0.0 version such as 1.2.0, 1.2.0-rc.1 or 1.2.0+build.5", String::from_utf8_lossy(version.to_bytes())).as_bytes());
         return -EINVAL;
     }
-    let (package, downloaded) = if base.to_bytes().starts_with(b"oci://") {
-        match download(base.to_bytes()) {
+    // A tag is the registry's to point at any package the key ever
+    // signed, an older one included, whose loaders this would sign as a
+    // new version: an oci:// base package is the manifest the operator
+    // names.
+    if base.to_bytes().starts_with(b"oci://") != base_digest.is_some() {
+        error(b"bpm config update: --base-digest names the manifest of an oci:// base package, and one needs it");
+        return -EINVAL;
+    }
+    if let Some(d) = base_digest.filter(|d| !digest_ok(d.to_bytes())) {
+        error(
+            format!(
+                "bpm config update: --base-digest {} is not sha256:<64 lowercase hex>",
+                String::from_utf8_lossy(d.to_bytes())
+            )
+            .as_bytes(),
+        );
+        return -EINVAL;
+    }
+    let (package, downloaded) = match base_digest {
+        Some(want) => match download(base.to_bytes(), want.to_bytes()) {
             Ok(p) => (p, true),
             Err(err) => return err,
-        }
-    } else {
-        match std::fs::canonicalize(path(base.to_bytes())) {
+        },
+        None => match std::fs::canonicalize(path(base.to_bytes())) {
             Ok(p) => (p.as_os_str().as_bytes().to_vec(), false),
-            Err(_) => return usage(),
-        }
+            Err(e) => {
+                let err = e.raw_os_error().unwrap_or(EIO);
+                p.usage(
+                    &[
+                        b"--base-package ",
+                        base.to_bytes(),
+                        b": ",
+                        super::strerr(err),
+                    ]
+                    .concat(),
+                );
+                return EXIT_USAGE;
+            }
+        },
     };
     let ret = update(&cstring(&package), file, version, keys_arg, &overrides);
     if downloaded {

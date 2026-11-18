@@ -25,11 +25,12 @@ use crate::heap::xfree;
 use crate::sys::libc::{access, close, fwrite, mkstemps, stderr, stdout, strerror, unlink};
 use crate::text::{cstr, name_has_suffix};
 use crate::util::harden::{harden_self, harden_stdio};
+use crate::util::help::{Help, HelpSection};
 use crate::util::hex::hex_decode;
+use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::paths::{format_key_path, key_paths, keys_dir_resolve};
 use crate::util::upatch::{Upatch, upatch_close, upatch_open};
 
-const KEYS_DIR_ENV: &str = "SHIRUDO_KEYS_DIR";
 const SIGNING_KEY_PATH: &CStr = c"/var/lib/shirudo/keys/signing_key.pem";
 const CERT_PATH: &CStr = c"/var/lib/shirudo/keys/cert.der";
 const SIGNING_KEY_FILE: &CStr = c"signing_key.pem";
@@ -72,59 +73,105 @@ fn print(to_stdout: bool, text: &[u8]) {
     }
 }
 
-fn usage(to_stdout: bool) {
-    let key = String::from_utf8_lossy(SIGNING_KEY_PATH.to_bytes());
-    let cert = String::from_utf8_lossy(CERT_PATH.to_bytes());
-    let vmlinux = compile::VMLINUX_PATH;
-    let env = KEYS_DIR_ENV;
-    let text = format!(
-        "usage:
-  shirudo-build <input> [-o <output.upatch>]
-                [--name <upatch-name>]
-                [--keys-dir <dir>]
-                [--key <signing_key.pem>] [--cert <cert.der>]
-                [--vmlinux <vmlinux.h>] [--extra-cflags '<flags>']
-                [--emit-artifacts]
+const BUILD_OUTPUT: c_int = 0;
+const BUILD_NAME: c_int = 1;
+const BUILD_KEYS_DIR: c_int = 2;
+const BUILD_KEY: c_int = 3;
+const BUILD_CERT: c_int = 4;
+const BUILD_VMLINUX: c_int = 5;
+const BUILD_EXTRA_CFLAGS: c_int = 6;
+const BUILD_UNLOAD: c_int = 7;
+const BUILD_PAYLOAD_SHA256: c_int = 8;
+const BUILD_EMIT_ARTIFACTS: c_int = 9;
 
-  shirudo-build --unload <upatch-name> [-o <output.upatch>]
-                [--payload-sha256 <64-hex>]
-                [--keys-dir <dir>]
-                [--key <signing_key.pem>] [--cert <cert.der>]
+const VMLINUX_HELP: &CStr = ffi::c_splice!(
+    "compile against it instead of ./vmlinux.h, ./vendor/linux/vmlinux.h or ",
+    compile::VMLINUX_PATH
+);
 
-  shirudo-build image build <filesystem.img> -o <prefix> ...
-  shirudo-build bpm <build|push|tree append> ...
-  shirudo-build keys vouch <cert.der> [-o <file>] ...
-  shirudo-build skeleton <object.bpf.o> [name <name>]
-                [--key <signing_key.pem> --cert <cert.der>] [-o <out.lskel.h>]
+static BUILD_OPTS: [OptSpec; 10] = [
+    OptSpec::new(
+        c"--output",
+        b'o',
+        0,
+        Some(c"<output.upatch>"),
+        c"where to write the upatch instead of beside the input, or of <name>.unload.upatch in the current directory",
+    ),
+    OptSpec::new(
+        c"--name",
+        0,
+        0,
+        Some(c"<upatch-name>"),
+        c"the upatch's name instead of the one the input gives",
+    ),
+    OptSpec::new(
+        c"--keys-dir",
+        0,
+        0,
+        Some(c"<dir>"),
+        c"read signing_key.pem and cert.der from <dir>, where SHIRUDO_KEYS_DIR points otherwise",
+    ),
+    OptSpec::new(
+        c"--key",
+        0,
+        0,
+        Some(c"<signing_key.pem>"),
+        c"the signing key, over --keys-dir (default /var/lib/shirudo/keys/signing_key.pem)",
+    ),
+    OptSpec::new(
+        c"--cert",
+        0,
+        0,
+        Some(c"<cert.der>"),
+        c"the certificate, over --keys-dir (default /var/lib/shirudo/keys/cert.der)",
+    ),
+    OptSpec::new(c"--vmlinux", 0, 0, Some(c"<vmlinux.h>"), VMLINUX_HELP),
+    OptSpec::new(
+        c"--extra-cflags",
+        0,
+        0,
+        Some(c"'<flags>'"),
+        c"more flags for clang",
+    ),
+    OptSpec::new(
+        c"--unload",
+        0,
+        0,
+        Some(c"<upatch-name>"),
+        c"sign the UNLOAD directive of the named upatch",
+    ),
+    OptSpec::new(
+        c"--payload-sha256",
+        0,
+        0,
+        Some(c"<64-hex>"),
+        c"with --unload, the payload digest, which the archive /var/lib/shirudo/upatches/<name>.upatch gives otherwise",
+    ),
+    OptSpec::new(
+        c"--emit-artifacts",
+        0,
+        0,
+        None,
+        c"keep the compiled .bpf.o beside the .upatch and print each path written",
+    ),
+];
 
-<input> is .bpf.c (compiled via clang) or .bpf.o.
--o defaults to <input> with a trailing .c/.o replaced by
-   .upatch (foo/bar.bpf.c -> foo/bar.bpf.upatch), written
-   next to the input; for --unload it defaults to
-   <name>.unload.upatch in the current directory. Pass -o
-   only to write somewhere else.
---keys-dir defaults key/cert to <dir>/signing_key.pem and
-           <dir>/cert.der. If omitted, {env} is used when set.
-           Explicit --keys-dir overrides the environment;
-           explicit --key/--cert override both.
---key default without --keys-dir/{env}: {key}
---cert default without --keys-dir/{env}: {cert}
---vmlinux: explicit; else ./vmlinux.h, ./vendor/linux/vmlinux.h,
-           then {vmlinux}.
---payload-sha256: 64 hex chars; if omitted, read from the local
-                  archive /var/lib/shirudo/upatches/<name>.upatch,
-                  which must then exist.
---emit-artifacts: for a .bpf.c input, also keep the compiled
-                  .bpf.o next to the .upatch (instead of a temp
-                  file that is removed). Reports every emitted
-                  path on stdout. A debugging aid.
-bpm: the operator-only package commands (`shirudo bpm build`,
-     `push`, `tree append`); see `shirudo-build bpm --help`.
-"
-    );
+static BUILD_SECTIONS: [HelpSection; 1] = [HelpSection::options(c"options:", &BUILD_OPTS)];
 
-    print(to_stdout, text.as_bytes());
-}
+static BUILD_HELP: Help = Help::new(
+    c"shirudo build <input.bpf.c|.bpf.o> [-o <output.upatch>] [options]\n       \
+      shirudo build --unload <upatch-name> [-o <output.upatch>] [options]",
+    Some(
+        c"Compile a .bpf.c, or take a .bpf.o, and sign it into a .upatch, or sign\n\
+          the UNLOAD directive of a loaded upatch. foo/bar.bpf.c becomes\n\
+          foo/bar.bpf.upatch.",
+    ),
+    &BUILD_SECTIONS,
+    Some(
+        c"The helper also serves shirudo image build and verify, the operator\n\
+          bpm commands and keys vouch; each takes --help.",
+    ),
+);
 
 fn has_suffix(s: &CStr, suffix: &CStr) -> bool {
     name_has_suffix(s.to_bytes(), suffix.to_bytes())
@@ -380,21 +427,21 @@ struct Opts<'a> {
 /// The digest of the payload an unload directive names: the one given,
 /// else the loaded payload's as the operator's local archive records it,
 /// since the target refuses a directive whose digest is not that.
-fn unload_digest(name: &CStr, given: Option<&CStr>) -> Result<[u8; 32], c_int> {
+/// None when the digest given is no 64 hex digits, a usage error.
+fn unload_digest(name: &CStr, given: Option<&CStr>) -> Result<[u8; 32], Option<c_int>> {
     let mut digest = [0u8; 32];
 
     if let Some(hex) = given {
         // SAFETY: a C string and room for 32 bytes.
         if unsafe { hex_decode(hex.as_ptr(), digest.as_mut_ptr(), 32) } != 0 {
-            error(b"--payload-sha256 must be 64 hex chars");
-            return Err(2);
+            return Err(None);
         }
         return Ok(digest);
     }
     let archive = [UPATCHES_DIR.as_bytes(), b"/", name.to_bytes(), b".upatch"].concat();
     if archive.len() >= PATH_MAX {
         error(&[b"archive path too long for '", name.to_bytes(), b"'"].concat());
-        return Err(1);
+        return Err(Some(1));
     }
     let path = CString::new(archive).unwrap_or_default();
     // SAFETY: an all-zero container is a closed one.
@@ -409,7 +456,7 @@ fn unload_digest(name: &CStr, given: Option<&CStr>) -> Result<[u8; 32], c_int> {
             ]
             .concat(),
         );
-        return Err(2);
+        return Err(Some(2));
     }
     digest = u.hdr.payload_sha256;
     // SAFETY: the container opened above.
@@ -418,14 +465,14 @@ fn unload_digest(name: &CStr, given: Option<&CStr>) -> Result<[u8; 32], c_int> {
     Ok(digest)
 }
 
-fn unload(o: &Opts, name: &CStr, pkey: &CStr, cert: &CStr) -> c_int {
-    if o.input.is_some() {
-        error(b"--unload takes no positional input");
-        return 2;
-    }
+fn unload(p: &OptParser<'_>, o: &Opts, name: &CStr, pkey: &CStr, cert: &CStr) -> c_int {
     let digest = match unload_digest(name, o.payload_sha256) {
         Ok(d) => d,
-        Err(ret) => return ret,
+        Err(None) => {
+            p.usage(b"--payload-sha256 must be 64 hex characters");
+            return EXIT_USAGE;
+        }
+        Err(Some(ret)) => return ret,
     };
     let derived;
     let output = match o.output {
@@ -622,48 +669,42 @@ unsafe fn run(argc: c_int, argv: *mut *mut c_char) -> c_int {
         _ => {}
     }
 
+    let raw: Vec<*const c_char> = words.iter().map(|w| w.cast_const()).collect();
+    let mut p = OptParser::new(c"build", &BUILD_OPTS, Some(&BUILD_HELP), &raw, 1);
     let mut o = Opts::default();
-    let mut i = 1;
-    while i < n {
-        let a = word(i);
-        let next = (i + 1 < n).then(|| word(i + 1));
-        let slot = match a.to_bytes() {
-            b"-o" | b"--output" => Some(&mut o.output),
-            b"--name" => Some(&mut o.name),
-            b"--keys-dir" => Some(&mut o.keys_dir),
-            b"--key" => Some(&mut o.pkey),
-            b"--cert" => Some(&mut o.cert),
-            b"--vmlinux" => Some(&mut o.vmlinux),
-            b"--extra-cflags" => Some(&mut o.extra_cflags),
-            b"--unload" => Some(&mut o.unload),
-            b"--payload-sha256" => Some(&mut o.payload_sha256),
-            _ => None,
-        };
-        match (slot, next) {
-            (Some(slot), Some(value)) => {
-                *slot = Some(value);
-                i += 1;
+    loop {
+        let opt = p.next();
+        let value = p.value();
+        match opt {
+            OPT_END => break,
+            BUILD_OUTPUT => o.output = value,
+            BUILD_NAME => o.name = value,
+            BUILD_KEYS_DIR => o.keys_dir = value,
+            BUILD_KEY => o.pkey = value,
+            BUILD_CERT => o.cert = value,
+            BUILD_VMLINUX => o.vmlinux = value,
+            BUILD_EXTRA_CFLAGS => o.extra_cflags = value,
+            BUILD_UNLOAD => o.unload = value,
+            BUILD_PAYLOAD_SHA256 => o.payload_sha256 = value,
+            BUILD_EMIT_ARTIFACTS => o.emit_artifacts = true,
+            OPT_ARG => {
+                if o.input.is_some() {
+                    p.usage_arg(b"unexpected argument ");
+                    return EXIT_USAGE;
+                }
+                o.input = value;
             }
-            _ if a.to_bytes().starts_with(b"--keys-dir=") => {
-                o.keys_dir = CStr::from_bytes_with_nul(&a.to_bytes_with_nul()[11..]).ok();
-            }
-            _ if a.to_bytes() == b"--emit-artifacts" => o.emit_artifacts = true,
-            _ if matches!(a.to_bytes(), b"-h" | b"--help") => {
-                usage(true);
-                return 0;
-            }
-            _ if a.to_bytes().first() == Some(&b'-') => {
-                error(&[b"unknown option '", a.to_bytes(), b"'"].concat());
-                usage(false);
-                return 2;
-            }
-            _ if o.input.is_none() => o.input = Some(a),
-            _ => {
-                error(&[b"unexpected positional arg '", a.to_bytes(), b"'"].concat());
-                return 2;
-            }
+            OPT_DONE => return 0,
+            _ => return EXIT_USAGE,
         }
-        i += 1;
+    }
+    if o.unload.is_some() && o.input.is_some() {
+        p.usage(b"--unload takes no input");
+        return EXIT_USAGE;
+    }
+    if o.unload.is_none() && o.input.is_none() {
+        p.usage(b"takes <input.bpf.c|.bpf.o> or --unload <upatch-name>");
+        return EXIT_USAGE;
     }
 
     let mut keys = KeyFiles::default();
@@ -680,14 +721,11 @@ unsafe fn run(argc: c_int, argv: *mut *mut c_char) -> c_int {
     if check_keys(&keys.pkey, &keys.cert) != 0 {
         return 1;
     }
-    if let Some(name) = o.unload {
-        return unload(&o, name, &keys.pkey, &keys.cert);
+    match (o.unload, o.input) {
+        (Some(name), _) => unload(&p, &o, name, &keys.pkey, &keys.cert),
+        (None, Some(input)) => load(&o, input, &keys.pkey, &keys.cert),
+        (None, None) => EXIT_USAGE,
     }
-    let Some(input) = o.input else {
-        usage(false);
-        return 2;
-    };
-    load(&o, input, &keys.pkey, &keys.cert)
 }
 
 mod capi {

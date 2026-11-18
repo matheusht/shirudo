@@ -21,6 +21,8 @@ use std::os::unix::ffi::OsStrExt;
 use crate::errno::{EINVAL, EIO};
 use crate::text::cstr;
 use crate::text::name_has_suffix;
+use crate::util::help::{Help, print_help};
+use crate::util::options::EXIT_USAGE;
 use crate::util::paths::keys_dir_resolve;
 
 pub(crate) use build::upatch_name;
@@ -80,11 +82,6 @@ fn path(p: &[u8]) -> &OsStr {
     OsStr::from_bytes(p)
 }
 
-/// `--help`, `-h` or `help`.
-fn is_help(arg: &[u8]) -> bool {
-    matches!(arg, b"--help" | b"-h" | b"help")
-}
-
 /// The keys directory: `arg`, else SHIRUDO_KEYS_DIR or the default, with
 /// a leading `~` for $HOME; None when it cannot be spelled.
 fn resolve_keys_dir(arg: Option<&CStr>) -> Option<Vec<u8>> {
@@ -107,62 +104,51 @@ const fn build_path_max() -> usize {
     beefile::PATH_MAX
 }
 
-fn usage(to_stdout: bool) {
-    print(
-        to_stdout,
-        b"usage: shirudo bpm build [context] --version <version> [--file <name>.bee]
-                         [--keys-dir <dir>] [--vmlinux <vmlinux.h>]
-                         [--rodata-input <name>=<path>]...
-       shirudo bpm config update --base-package <package.bee|oci://...>
-                         --version <version> [--file <name>.bee]
-                         [--rodata-input <name>=<path>]...
-       shirudo bpm push <package-file> <repository> [--keys-dir <dir> |
-                        --index-cert <cert.der> --index-key <key.pem>]
-       shirudo bpm tree append <package-file> <repository> [options]
+static OPERATOR_HELP: Help = Help::new(
+    c"shirudo bpm build [context] --version <version> [options]\n       \
+      shirudo bpm config update --base-package <package> --version <version> [options]\n       \
+      shirudo bpm push <package-file> <repository> [options]\n       \
+      shirudo bpm tree append <package-file> <repository> [options]\n       \
+      shirudo bpm tree show <repository> --cert <cert.der> [options]",
+    Some(
+        c"Operator-only BPM commands, implemented in shirudo-build and reached\n\
+          through `shirudo bpm`. Each takes --help.",
+    ),
+    &[],
+    None,
+);
 
-Operator-only BPM commands, implemented in shirudo-build and reached
-through `shirudo bpm`. Each accepts --help.
-",
-    );
-}
-
-/// The exit of `build` or `config update`, reporting an error the
-/// command did not.
+/// The exit of `build` or `config update`: a usage error's, or 1 for a
+/// failure, said where the command did not say it.
 fn reported(what: &str, ret: c_int) -> c_int {
+    if ret == EXIT_USAGE {
+        return EXIT_USAGE;
+    }
     if ret < 0 && ret != -EINVAL {
         error(format!("bpm {what}: {}", String::from_utf8_lossy(strerr(-ret))).as_bytes());
     }
-    if ret != 0 { 1 } else { 0 }
+    c_int::from(ret != 0)
 }
 
 /// `shirudo-build bpm`, from `bpm` on.
 pub(super) fn run(args: &[&CStr]) -> c_int {
-    let Some(sub) = args.get(1).map(|a| a.to_bytes()) else {
-        usage(false);
-        return 2;
-    };
-    if is_help(sub) {
-        usage(true);
-        return 0;
+    let sub = args.get(1).map(|a| a.to_bytes());
+
+    if args.len() < 2 || crate::util::help::is_help(sub) {
+        // SAFETY: help of C strings.
+        unsafe { print_help(&OPERATOR_HELP) };
+        return if args.len() < 2 { EXIT_USAGE } else { 0 };
     }
-    match sub {
+    match sub.unwrap_or_default() {
         b"build" => reported("build", build::run(&args[1..])),
         b"config" if args.get(2).map(|a| a.to_bytes()) == Some(b"update") => {
             reported("config update", config_update::run(&args[2..]))
         }
         b"push" => publish::run(&args[1..]),
         b"tree" => tree::run(&args[1..]),
-        _ => {
-            error(
-                &[
-                    b"shirudo-build bpm: '",
-                    sub,
-                    b"' is not an operator bpm command",
-                ]
-                .concat(),
-            );
-            usage(false);
-            2
+        other => {
+            error(&[b"bpm: '", other, b"' is not an operator bpm command"].concat());
+            EXIT_USAGE
         }
     }
 }

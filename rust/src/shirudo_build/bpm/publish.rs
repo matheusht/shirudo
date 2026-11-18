@@ -7,7 +7,7 @@
 //! entry in the signed index beside the repository's namespace. Also the
 //! OCI writing `bpm tree append` shares.
 
-use core::ffi::{CStr, c_int};
+use core::ffi::{CStr, c_char, c_int};
 use core::ptr;
 
 use super::build::cstring;
@@ -21,7 +21,9 @@ use crate::util::bpm_oci::{
     bpm_oci_put_manifest, digest_matches, manifest_layers, sha256_hex,
 };
 use crate::util::bpm_package::{IndexEntry, index_parse, verify_cms};
+use crate::util::help::{Help, HelpSection};
 use crate::util::json::JsonEmit;
+use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::timefmt::iso8601;
 
 /// Room for a manifest.
@@ -467,76 +469,96 @@ fn push_package(
     Ok(reference)
 }
 
-fn usage() {
-    print(
-        false,
-        b"usage: shirudo bpm push <package-file> <repository>
-                        [--keys-dir <dir> | --index-cert <cert.der>
-                         --index-key <signing_key.pem>] [--new-index]
+const PUSH_KEYS_DIR: c_int = 0;
+const PUSH_INDEX_CERT: c_int = 1;
+const PUSH_INDEX_KEY: c_int = 2;
+const PUSH_NEW_INDEX: c_int = 3;
 
-The repository must start with oci:// and must not include a tag.
-With signing material the registry's signed index at
-<namespace>/bpm-index:stable gains the package entry, signed with the
-operator key; without it only the package is published. A namespace
-without an index is refused unless --new-index starts one, which in
-turn is refused where an index exists.
-Examples:
-  shirudo bpm push ./package.bee oci://quay.io/namespace/package
-  shirudo bpm push ./package.bee oci://quay.io/namespace/package \\
-      --keys-dir /var/lib/shirudo/keys
-",
-    );
-}
+static PUSH_OPTS: [OptSpec; 4] = [
+    OptSpec::new(
+        c"--keys-dir",
+        0,
+        0,
+        Some(c"<dir>"),
+        c"sign the index entry with signing_key.pem and cert.der there",
+    ),
+    OptSpec::new(
+        c"--index-cert",
+        0,
+        0,
+        Some(c"<cert.der>"),
+        c"the index certificate, with --index-key",
+    ),
+    OptSpec::new(
+        c"--index-key",
+        0,
+        0,
+        Some(c"<signing_key.pem>"),
+        c"the index key, with --index-cert",
+    ),
+    OptSpec::new(
+        c"--new-index",
+        0,
+        0,
+        None,
+        c"start the index of a namespace that has none",
+    ),
+];
+
+static PUSH_SECTIONS: [HelpSection; 1] = [HelpSection::options(c"options:", &PUSH_OPTS)];
+
+static PUSH_HELP: Help = Help::new(
+    c"shirudo bpm push <package-file> <repository> [options]",
+    Some(
+        c"Publish a package to an oci:// repository without a tag. With signing\n\
+          material, the signed index at <namespace>/bpm-index:stable gains the\n\
+          package's entry; without it, only the package is published. A namespace\n\
+          without an index is refused unless --new-index starts one, which is\n\
+          refused where an index exists.",
+    ),
+    &PUSH_SECTIONS,
+    Some(
+        c"Examples:\n  shirudo bpm push ./package.bee oci://quay.io/namespace/package\n  \
+          shirudo bpm push ./package.bee oci://quay.io/namespace/package \\\n      \
+          --keys-dir /var/lib/shirudo/keys",
+    ),
+);
 
 /// `bpm push`, from `push` on.
 pub(super) fn run(args: &[&CStr]) -> c_int {
-    let (mut package, mut repo, mut keys_dir, mut index_cert, mut index_key) =
-        (None, None, None, None, None);
+    let raw: Vec<*const c_char> = args.iter().map(|a| a.as_ptr()).collect();
+    let mut p = OptParser::new(c"bpm push", &PUSH_OPTS, Some(&PUSH_HELP), &raw, 1);
+    let (mut package, mut repo): (Option<&CStr>, Option<&CStr>) = (None, None);
+    let (mut keys_dir, mut index_cert, mut index_key) = (None, None, None);
     let mut new_index = false;
 
-    if args.len() == 2 && super::is_help(args[1].to_bytes()) {
-        usage();
-        return 0;
-    }
-    let mut i = 1;
-    while i < args.len() {
-        let a = args[i];
-        let b = a.to_bytes();
-        let next = args.get(i + 1).copied();
-        let tail = |prefix: &[u8]| {
-            b.strip_prefix(prefix).and_then(|_| {
-                CStr::from_bytes_with_nul(&a.to_bytes_with_nul()[prefix.len()..]).ok()
-            })
-        };
-        match (b, next) {
-            (b"--keys-dir", Some(v)) => {
-                keys_dir = Some(v);
-                i += 1;
+    loop {
+        let opt = p.next();
+        let value = p.value();
+        match opt {
+            OPT_END => break,
+            PUSH_KEYS_DIR => keys_dir = value,
+            PUSH_INDEX_CERT => index_cert = value,
+            PUSH_INDEX_KEY => index_key = value,
+            PUSH_NEW_INDEX => new_index = true,
+            OPT_ARG => {
+                if repo.is_some() {
+                    p.usage_arg(b"unexpected argument ");
+                    return EXIT_USAGE;
+                }
+                if package.is_some() {
+                    repo = value;
+                } else {
+                    package = value;
+                }
             }
-            (b"--index-cert", Some(v)) => {
-                index_cert = Some(v);
-                i += 1;
-            }
-            (b"--index-key", Some(v)) => {
-                index_key = Some(v);
-                i += 1;
-            }
-            _ if tail(b"--keys-dir=").is_some() => keys_dir = tail(b"--keys-dir="),
-            _ if tail(b"--index-cert=").is_some() => index_cert = tail(b"--index-cert="),
-            _ if tail(b"--index-key=").is_some() => index_key = tail(b"--index-key="),
-            (b"--new-index", _) => new_index = true,
-            _ if b.first() == Some(&b'-') || (package.is_some() && repo.is_some()) => {
-                usage();
-                return 2;
-            }
-            _ if package.is_none() => package = Some(a),
-            _ => repo = Some(a),
+            OPT_DONE => return 0,
+            _ => return EXIT_USAGE,
         }
-        i += 1;
     }
     let (Some(package), Some(repo)) = (package, repo) else {
-        usage();
-        return 2;
+        p.usage(b"takes <package-file> and <repository>");
+        return EXIT_USAGE;
     };
     let (mut cert_buf, mut key_buf) = (None, None);
     if let Some(dir) = keys_dir {
@@ -555,12 +577,12 @@ pub(super) fn run(args: &[&CStr]) -> c_int {
     let index_cert = index_cert.or(cert_buf.as_deref());
     let index_key = index_key.or(key_buf.as_deref());
     if index_cert.is_some() != index_key.is_some() {
-        error(b"bpm push: --index-cert and --index-key must be supplied together");
-        return 2;
+        p.usage(b"--index-cert and --index-key must be supplied together");
+        return EXIT_USAGE;
     }
     if new_index && index_key.is_none() {
-        error(b"bpm push: --new-index needs --keys-dir, or --index-cert and --index-key");
-        return 2;
+        p.usage(b"--new-index needs --keys-dir, or --index-cert and --index-key");
+        return EXIT_USAGE;
     }
     let keys = index_key.zip(index_cert);
     if let Some((k, c)) = keys {

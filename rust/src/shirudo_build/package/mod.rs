@@ -15,7 +15,7 @@
 mod decoders;
 mod meta;
 
-use core::ffi::{CStr, c_int, c_void};
+use core::ffi::{CStr, c_char, c_int, c_void};
 use std::ffi::CString;
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -25,6 +25,8 @@ use crate::bpf::object::{self, GenOpts, Object};
 use crate::errno::{E2BIG, EBADMSG, EINVAL, EIO, ENAMETOOLONG, ENOENT, EOVERFLOW};
 use crate::util::bpm_package::verify_cms;
 use crate::util::crypto_openssl::sha256_into;
+use crate::util::help::{Help, HelpSection, print_help};
+use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::upatch::{
     self, DIRECTIVE_UNLOAD, FILE_MAX, HEADER_SIZE, MAGIC, MAPS_MAX, NAME_MAX, PAYLOAD_HASH_LEN,
     POLICY_LABEL_ENTRY, POLICY_LABEL_HEADER, POLICY_LABELS_MAGIC, POLICY_LABELS_VERSION,
@@ -432,8 +434,63 @@ pub(super) fn verify_package(input: &CStr, cert: &CStr) -> c_int {
     }
 }
 
-const SET_USAGE: &[u8] = b"usage: shirudo-build upatch set <input.upatch> <symbol>=@<file>... \
-(-o <output.upatch> | --dry-run) [--keys-dir <dir>] [--key <signing_key.pem>] [--cert <cert.der>]\n";
+const SET_OUTPUT: c_int = 0;
+const SET_DRY_RUN: c_int = 1;
+const SET_KEYS_DIR: c_int = 2;
+const SET_KEY: c_int = 3;
+const SET_CERT: c_int = 4;
+
+static SET_OPTS: [OptSpec; 5] = [
+    OptSpec::new(
+        c"--output",
+        b'o',
+        0,
+        Some(c"<output.upatch>"),
+        c"where to write the re-signed upatch",
+    ),
+    OptSpec::new(
+        c"--dry-run",
+        0,
+        0,
+        None,
+        c"check the variables and their values, without keys, and write nothing",
+    ),
+    OptSpec::new(
+        c"--keys-dir",
+        0,
+        0,
+        Some(c"<dir>"),
+        c"read signing_key.pem and cert.der from <dir>",
+    ),
+    OptSpec::new(
+        c"--key",
+        0,
+        0,
+        Some(c"<signing_key.pem>"),
+        c"the signing key, over --keys-dir",
+    ),
+    OptSpec::new(
+        c"--cert",
+        0,
+        0,
+        Some(c"<cert.der>"),
+        c"the certificate, over --keys-dir",
+    ),
+];
+
+static SET_SECTIONS: [HelpSection; 1] = [HelpSection::options(c"options:", &SET_OPTS)];
+
+static SET_HELP: Help = Help::new(
+    c"shirudo-build upatch set <input.upatch> <symbol>=@<file>...\n              \
+      (-o <output.upatch> | --dry-run) [options]",
+    Some(
+        c"Write each file's bytes into the .rodata variable of the upatch it names,\n\
+          found through the upatch's BTF, and sign the upatch anew. A value is as\n\
+          large as its variable.",
+    ),
+    &SET_SECTIONS,
+    None,
+);
 
 /// `<symbol>=@<file>`: the symbol, and the bytes the file holds.
 fn parse_value(arg: &CStr) -> Result<(CString, Vec<u8>), Vec<u8>> {
@@ -465,60 +522,50 @@ pub(super) fn upatch_cli(args: &[&CStr]) -> c_int {
     let mut sets: Vec<(CString, Vec<u8>)> = Vec::new();
 
     if args.get(1).map(|a| a.to_bytes()) != Some(b"set") {
-        super::print(false, SET_USAGE);
-        return 2;
+        // SAFETY: help of C strings.
+        unsafe { print_help(&SET_HELP) };
+        return EXIT_USAGE;
     }
-    let mut i = 2;
-    while i < args.len() {
-        let a = args[i].to_bytes();
-        let next = args.get(i + 1).copied();
-        match (a, next) {
-            (b"--dry-run", _) => {
-                dry_run = true;
-                i += 1;
-                continue;
-            }
-            (b"-o" | b"--output", Some(v)) => output = Some(v),
-            (b"--keys-dir", Some(v)) => keys_dir = Some(v),
-            (b"--key", Some(v)) => keys.set_pkey(v),
-            (b"--cert", Some(v)) => keys.set_cert(v),
-            _ if a.first() == Some(&b'-') => {
-                error(&[b"upatch set: unknown option ", a].concat());
-                return 2;
-            }
-            _ if input.is_none() => {
-                input = Some(args[i]);
-                i += 1;
-                continue;
-            }
-            _ => {
+    let raw: Vec<*const c_char> = args.iter().map(|a| a.as_ptr()).collect();
+    let mut p = OptParser::new(c"upatch set", &SET_OPTS, Some(&SET_HELP), &raw, 2);
+    loop {
+        let opt = p.next();
+        let value = p.value();
+        match opt {
+            OPT_END => break,
+            SET_OUTPUT => output = value,
+            SET_DRY_RUN => dry_run = true,
+            SET_KEYS_DIR => keys_dir = value,
+            SET_KEY => keys.set_pkey(value.unwrap_or_default()),
+            SET_CERT => keys.set_cert(value.unwrap_or_default()),
+            OPT_ARG if input.is_none() => input = value,
+            OPT_ARG => {
                 if sets.len() == SET_MAX {
-                    error(format!("upatch set: more than {SET_MAX} symbols").as_bytes());
-                    return 2;
+                    p.usage(format!("more than {SET_MAX} symbols").as_bytes());
+                    return EXIT_USAGE;
                 }
-                match parse_value(args[i]) {
+                match parse_value(value.unwrap_or_default()) {
                     Ok(v) => sets.push(v),
                     Err(msg) => {
-                        error(&[b"upatch set: ", &msg[..]].concat());
-                        return 2;
+                        p.usage(&msg);
+                        return EXIT_USAGE;
                     }
                 }
-                i += 1;
-                continue;
             }
+            OPT_DONE => return 0,
+            _ => return EXIT_USAGE,
         }
-        i += 2;
     }
     let (Some(input), false) = (input, sets.is_empty()) else {
-        super::print(false, SET_USAGE);
-        return 2;
+        p.usage(b"takes <input.upatch> and <symbol>=@<file>");
+        return EXIT_USAGE;
     };
     if output.is_none() && !dry_run {
-        error(b"upatch set: -o <output.upatch> or --dry-run");
-        return 2;
+        p.usage(b"takes -o <output.upatch> or --dry-run");
+        return EXIT_USAGE;
     }
     if !dry_run && keys.resolve(keys_dir).is_err() {
-        return 2;
+        return EXIT_USAGE;
     }
     let values: Vec<(&CStr, &[u8])> = sets.iter().map(|(s, v)| (s.as_c_str(), &v[..])).collect();
     let output = output.filter(|_| !dry_run);

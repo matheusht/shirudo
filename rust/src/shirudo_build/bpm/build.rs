@@ -7,7 +7,7 @@
 //! and the package archived. Also what `bpm config update` shares with
 //! it: the paths a Beefile may name, the converters, the stage.
 
-use core::ffi::{CStr, c_int};
+use core::ffi::{CStr, c_char, c_int};
 use std::ffi::{CString, OsStr};
 use std::os::unix::ffi::OsStrExt;
 use std::process::Command;
@@ -17,6 +17,10 @@ use super::{archive, error, hex, last_err, name_has_suffix, path, strerr};
 use crate::errno::{E2BIG, EEXIST, EINVAL, EIO, ENAMETOOLONG, ENOENT};
 use crate::shirudo_build::{KeyFiles, compile, package};
 use crate::util::crypto_openssl::{Cert, cert_free, cert_pubkey_digest, cert_read_file};
+use crate::util::help::{Help, HelpSection};
+use crate::util::options::{
+    EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OPT_REPEAT, OptParser, OptSpec,
+};
 use crate::util::upatch::{self, FILE_MAX};
 
 /// A `--rodata-input <name>=<path>`: the input a .rodata converter reads
@@ -594,21 +598,6 @@ pub(super) fn fingerprint(cert_path: &CStr) -> Result<Vec<u8>, c_int> {
     if ret != 0 { Err(ret) } else { Ok(hex(&digest)) }
 }
 
-fn usage() {
-    super::print(
-        false,
-        b"usage: shirudo bpm build [context] --version <version>
-       shirudo bpm build [context] --file <name>.bee --version <version>
-                              [--keys-dir <dir>]
-                              [--vmlinux <vmlinux.h>]
-                              [--rodata-input <name>=<path>]...
-
-Builds a signed .bee package from a Beefile. The build command
-is available only in shirudo-operator and requires signing keys.
-",
-    );
-}
-
 /// The Beefile at `file`, read and checked, into a spec scoped to its
 /// directory.
 pub(super) fn load_spec(file: &[u8], allow_missing: bool, what: &str) -> Result<Spec, c_int> {
@@ -639,68 +628,114 @@ pub(super) fn load_spec(file: &[u8], allow_missing: bool, what: &str) -> Result<
 }
 
 /// `bpm build`, from `build` on.
+const BPM_BUILD_FILE: c_int = 0;
+const BPM_BUILD_VERSION: c_int = 1;
+const BPM_BUILD_KEYS_DIR: c_int = 2;
+const BPM_BUILD_VMLINUX: c_int = 3;
+const BPM_BUILD_RODATA_INPUT: c_int = 4;
+
+static BPM_BUILD_OPTS: [OptSpec; 5] = [
+    OptSpec::new(
+        c"--file",
+        0,
+        0,
+        Some(c"<name>.bee"),
+        c"the Beefile to build, in the context directory",
+    ),
+    OptSpec::new(
+        c"--version",
+        0,
+        0,
+        Some(c"<version>"),
+        c"the SemVer 2.0.0 version of the package",
+    ),
+    OptSpec::new(
+        c"--keys-dir",
+        0,
+        0,
+        Some(c"<dir>"),
+        c"read signing_key.pem and cert.der from <dir>",
+    ),
+    OptSpec::new(
+        c"--vmlinux",
+        0,
+        0,
+        Some(c"<vmlinux.h>"),
+        c"compile against it",
+    ),
+    OptSpec::new(
+        c"--rodata-input",
+        0,
+        OPT_REPEAT,
+        Some(c"<name>=<path>"),
+        c"a file for a .rodata input (repeatable)",
+    ),
+];
+
+static BPM_BUILD_SECTIONS: [HelpSection; 1] = [HelpSection::options(c"options:", &BPM_BUILD_OPTS)];
+
+static BPM_BUILD_HELP: Help = Help::new(
+    c"shirudo bpm build [context] --version <version> [--file <name>.bee]\n                         \
+      [--keys-dir <dir>] [--vmlinux <vmlinux.h>]\n                         \
+      [--rodata-input <name>=<path>]...",
+    Some(
+        c"Build a signed .bee package from a Beefile. Operator-only; needs the\n\
+          signing keys.",
+    ),
+    &BPM_BUILD_SECTIONS,
+    None,
+);
+
+/// `bpm build`, from `build` on: 0, EXIT_USAGE, or -errno.
 pub(super) fn run(args: &[&CStr]) -> c_int {
+    let raw: Vec<*const c_char> = args.iter().map(|a| a.as_ptr()).collect();
+    let mut p = OptParser::new(
+        c"bpm build",
+        &BPM_BUILD_OPTS,
+        Some(&BPM_BUILD_HELP),
+        &raw,
+        1,
+    );
     let mut context: &[u8] = b".";
     let (mut file, mut version): (Option<&CStr>, Option<&CStr>) = (None, None);
     let (mut keys_arg, mut vmlinux_arg): (Option<&CStr>, Option<&CStr>) = (None, None);
     let mut overrides = Vec::new();
     let mut positional = 0;
-    let mut i = 1;
 
-    macro_rules! usage_error {
-        () => {{
-            usage();
-            return -EINVAL;
-        }};
-    }
-    while i < args.len() {
-        let a = args[i];
-        let b = a.to_bytes();
-        let tail = |prefix: &[u8]| {
-            b.strip_prefix(prefix).and_then(|_| {
-                CStr::from_bytes_with_nul(&a.to_bytes_with_nul()[prefix.len()..]).ok()
-            })
-        };
-        if super::is_help(b) {
-            usage();
-            return 0;
-        }
-        match b {
-            b"--file" | b"--version" | b"--keys-dir" | b"--vmlinux" | b"--rodata-input" => {
-                i += 1;
-                let Some(v) = args.get(i).copied() else {
-                    usage_error!()
-                };
-                match b {
-                    b"--file" => file = Some(v),
-                    b"--version" => version = Some(v),
-                    b"--keys-dir" => keys_arg = Some(v),
-                    b"--vmlinux" => vmlinux_arg = Some(v),
-                    _ => match parse_override(v.to_bytes(), &mut overrides) {
-                        Ok(()) => {}
-                        Err(None) => usage_error!(),
-                        Err(Some(err)) => return err,
-                    },
+    loop {
+        let opt = p.next();
+        let value = p.value();
+        match opt {
+            OPT_END => break,
+            BPM_BUILD_FILE => file = value,
+            BPM_BUILD_VERSION => version = value,
+            BPM_BUILD_KEYS_DIR => keys_arg = value,
+            BPM_BUILD_VMLINUX => vmlinux_arg = value,
+            BPM_BUILD_RODATA_INPUT => {
+                match parse_override(value.map_or(&b""[..], CStr::to_bytes), &mut overrides) {
+                    Ok(()) => {}
+                    Err(None) => {
+                        p.usage(b"--rodata-input takes <name>=<path>");
+                        return EXIT_USAGE;
+                    }
+                    Err(Some(err)) => return err,
                 }
             }
-            _ if tail(b"--file=").is_some() => file = tail(b"--file="),
-            _ if tail(b"--version=").is_some() => version = tail(b"--version="),
-            _ if tail(b"--keys-dir=").is_some() => keys_arg = tail(b"--keys-dir="),
-            _ if tail(b"--vmlinux=").is_some() => vmlinux_arg = tail(b"--vmlinux="),
-            _ if b.first() == Some(&b'-') => usage_error!(),
-            _ => {
+            OPT_ARG => {
                 positional += 1;
                 if positional > 1 {
-                    usage_error!();
+                    p.usage_arg(b"unexpected argument ");
+                    return EXIT_USAGE;
                 }
-                context = b;
+                context = value.map_or(&b"."[..], CStr::to_bytes);
             }
+            OPT_DONE => return 0,
+            _ => return EXIT_USAGE,
         }
-        i += 1;
     }
     let Some(version) = version else {
-        error(b"bpm build: --version <version> is required");
-        usage_error!();
+        p.usage(b"--version <version> is required");
+        return EXIT_USAGE;
     };
     if !version_ok(version) {
         error(format!("bpm build: --version {} is not a SemVer 2.0.0 version such as 1.2.0, 1.2.0-rc.1 or 1.2.0+build.5", String::from_utf8_lossy(version.to_bytes())).as_bytes());
