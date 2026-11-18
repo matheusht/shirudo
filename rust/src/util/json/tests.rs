@@ -5,8 +5,7 @@ use super::parse::{Visit, walk};
 use super::*;
 use crate::errno::{E2BIG, EEXIST, EILSEQ, EINVAL, ENOENT, ENOSPC};
 use crate::text::{cstr, strscpy};
-use core::ffi::{CStr, c_char, c_int, c_void};
-use core::ptr;
+use core::ffi::{CStr, c_int};
 
 /// What an eventlog-shaped schema extracts from one document.
 struct Doc {
@@ -39,66 +38,38 @@ impl Doc {
     }
 }
 
-/// # Safety
-///
-/// `ctx` is the Doc being parsed into.
-unsafe extern "C" fn name_on_elem(ctx: *mut c_void) -> c_int {
-    // SAFETY: the Doc the schema names, which nothing else touches
-    // during the call.
-    let d = unsafe { &mut *ctx.cast::<Doc>() };
+fn name_on_elem(d: &mut Doc) -> core::result::Result<(), c_int> {
     if d.names == 0 {
         let _ = strscpy(&mut d.first_name, cstr(&d.name));
     }
     d.names += 1;
-    0
+    Ok(())
 }
 
-/// # Safety
-///
-/// `ctx` is the Doc being parsed into.
-unsafe extern "C" fn event_on_elem(ctx: *mut c_void) -> c_int {
-    // SAFETY: as name_on_elem().
-    let d = unsafe { &mut *ctx.cast::<Doc>() };
+fn event_on_elem(d: &mut Doc) -> core::result::Result<(), c_int> {
     let _ = strscpy(&mut d.last_type, cstr(&d.ev_type));
     d.events += 1;
-    0
+    Ok(())
 }
 
 /// The document `text` parsed into a fresh `d`.
 fn parse_into(text: &[u8], d: &mut Doc) -> c_int {
     *d = Doc::new();
-    let dp: *mut Doc = d;
-    // SAFETY: pointers to the fields of the Doc, which outlives the
-    // parse and is touched meanwhile only through them and the sinks.
-    unsafe {
-        let mut event_sink = JsonArray::new(event_on_elem, dp.cast());
-        let mut name_sink = JsonArray::new(name_on_elem, dp.cast());
-        let mut name_sub = [JsonField::string(c"", (&raw mut (*dp).name).cast(), 64)];
-        let mut event_sub = [
-            JsonField::string(c"type", (&raw mut (*dp).ev_type).cast(), 32),
-            JsonField::string(c"digest", (&raw mut (*dp).ev_digest).cast(), 65),
-        ];
-        let mut f = [
-            JsonField::int(c"schema", &raw mut (*dp).schema),
-            JsonField::string(c"type", (&raw mut (*dp).ty).cast(), 64),
-            JsonField::string(c"digest", (&raw mut (*dp).digest).cast(), 65),
-            JsonField::array(
-                c"names",
-                &mut name_sink,
-                name_sub.as_mut_ptr(),
-                name_sub.len(),
-            ),
-            JsonField::array(
-                c"events",
-                &mut event_sink,
-                event_sub.as_mut_ptr(),
-                event_sub.len(),
-            ),
-            // An empty schema slot must be ignored, not dereferenced.
-            JsonField::string(c"", ptr::null_mut(), 0).keyless(),
-        ];
-        parse_schema(text, f.as_mut_ptr(), f.len())
-    }
+    let name_sub = [JsonField::string(c"", |d: &mut Doc| &mut d.name)];
+    let event_sub = [
+        JsonField::string(c"type", |d: &mut Doc| &mut d.ev_type),
+        JsonField::string(c"digest", |d| &mut d.ev_digest),
+    ];
+    let f = [
+        JsonField::int(c"schema", |d: &mut Doc| &mut d.schema),
+        JsonField::string(c"type", |d| &mut d.ty),
+        JsonField::string(c"digest", |d| &mut d.digest),
+        JsonField::array(c"names", &name_sub, &name_on_elem),
+        JsonField::array(c"events", &event_sub, &event_on_elem),
+        // An empty schema slot must be ignored.
+        JsonField::string(c"", |_| &mut []).keyless(),
+    ];
+    parse_schema(text, &f, d).err().unwrap_or(0)
 }
 
 fn parse(text: &str) -> (c_int, Doc) {
@@ -230,8 +201,6 @@ fn nested_array_then_trailing_scalar() {
 /// What an array of items, each with an id and a meta object of a tag,
 /// tells of the fields each element gave.
 struct Nested {
-    meta: *const JsonField,
-    tag_field: *const JsonField,
     meta_seen: [bool; 4],
     tag_seen: [bool; 4],
     id: [u8; 8],
@@ -239,53 +208,29 @@ struct Nested {
     n: usize,
 }
 
-/// # Safety
-///
-/// `ctx` is the Nested being parsed into, its fields pointing into the
-/// schema.
-unsafe extern "C" fn nested_on_elem(ctx: *mut c_void) -> c_int {
-    // SAFETY: the Nested the schema names, and two fields of the schema,
-    // which the parse does not write during the call.
-    unsafe {
-        let x = &mut *ctx.cast::<Nested>();
-        if x.n < 4 {
-            x.meta_seen[x.n] = (*x.meta).seen();
-            x.tag_seen[x.n] = (*x.tag_field).seen();
-        }
-        x.n += 1;
-    }
-    0
-}
-
 fn parse_nested(text: &str) -> (c_int, Nested) {
     let mut x = Nested {
-        meta: ptr::null(),
-        tag_field: ptr::null(),
         meta_seen: [false; 4],
         tag_seen: [false; 4],
         id: [0; 8],
         tag: [0; 8],
         n: 0,
     };
-    let xp: *mut Nested = &mut x;
-    // SAFETY: pointers to the fields of x and of the schema, which
-    // outlive the parse.
-    let ret = unsafe {
-        let mut sink = JsonArray::new(nested_on_elem, xp.cast());
-        let mut meta_sub = [JsonField::string(c"tag", (&raw mut (*xp).tag).cast(), 8)];
-        // The parse writes the fields through these pointers, so the
-        // callback reads them through the same ones.
-        let meta_ptr = meta_sub.as_mut_ptr();
-        let mut item_sub = [
-            JsonField::string(c"id", (&raw mut (*xp).id).cast(), 8),
-            JsonField::object(c"meta", meta_ptr, 1),
-        ];
-        let item_ptr = item_sub.as_mut_ptr();
-        let mut f = [JsonField::array(c"items", &mut sink, item_ptr, 2)];
-        (*xp).meta = item_ptr.add(1).cast_const();
-        (*xp).tag_field = meta_ptr.cast_const();
-        parse_schema(text.as_bytes(), f.as_mut_ptr(), f.len())
+    let meta_sub = [JsonField::string(c"tag", |x: &mut Nested| &mut x.tag)];
+    let item_sub = [
+        JsonField::string(c"id", |x: &mut Nested| &mut x.id),
+        JsonField::object(c"meta", &meta_sub),
+    ];
+    let nested_on_elem = |x: &mut Nested| {
+        if x.n < 4 {
+            x.meta_seen[x.n] = item_sub[1].seen();
+            x.tag_seen[x.n] = meta_sub[0].seen();
+        }
+        x.n += 1;
+        Ok(())
     };
+    let f = [JsonField::array(c"items", &item_sub, &nested_on_elem)];
+    let ret = parse_schema(text.as_bytes(), &f, &mut x).err().unwrap_or(0);
     (ret, x)
 }
 
@@ -301,17 +246,11 @@ fn seen_flags_are_the_elements_own() {
         (&[true, false][..], &[true, false][..])
     );
     let mut k = [0u8; 8];
-    let mut sub = [JsonField::string(c"k", k.as_mut_ptr(), k.len())];
-    let mut top = [JsonField::object(c"o", sub.as_mut_ptr(), sub.len())];
-    // SAFETY: a schema of fields that outlive the parses.
-    unsafe {
-        assert_eq!(
-            parse_schema(br#"{"o":{"k":"v"}}"#, top.as_mut_ptr(), top.len()),
-            0
-        );
-        assert!(sub[0].seen());
-        assert_eq!(parse_schema(b"{}", top.as_mut_ptr(), top.len()), 0);
-    }
+    let sub = [JsonField::string(c"k", |k: &mut [u8; 8]| k)];
+    let top = [JsonField::object(c"o", &sub)];
+    assert_eq!(parse_schema(br#"{"o":{"k":"v"}}"#, &top, &mut k), Ok(()));
+    assert!(sub[0].seen());
+    assert_eq!(parse_schema(b"{}", &top, &mut k), Ok(()));
     assert!(!top[0].seen());
     assert!(!sub[0].seen());
 }
@@ -330,11 +269,10 @@ fn declared_key_takes_one_value() {
         assert_eq!(err(bad), -EINVAL, "{bad}");
     }
     let mut k = [0u8; 8];
-    let mut sub = [JsonField::string(c"k", k.as_mut_ptr(), k.len())];
-    let mut top = [JsonField::object(c"o", sub.as_mut_ptr(), sub.len())];
-    // SAFETY: a schema of fields that outlive the parse.
-    let ret = unsafe { parse_schema(br#"{"o":{"k":"v"},"o":{}}"#, top.as_mut_ptr(), top.len()) };
-    assert_eq!(ret, -EINVAL);
+    let sub = [JsonField::string(c"k", |k: &mut [u8; 8]| k)];
+    let top = [JsonField::object(c"o", &sub)];
+    let ret = parse_schema(br#"{"o":{"k":"v"},"o":{}}"#, &top, &mut k);
+    assert_eq!(ret, Err(-EINVAL));
     assert_eq!(cstr(&ok(r#"{"x":1,"x":{},"type":"t"}"#).ty), b"t");
     assert_eq!(ok(r#"{"events":[{"type":"a"},{"type":"b"}]}"#).events, 2);
 }
@@ -706,37 +644,11 @@ struct Members {
     value: [u8; 16],
     values: c_int,
     members: c_int,
-    slot: *const JsonField,
 }
 
-/// # Safety
-///
-/// `ctx` is the Members being parsed into.
-unsafe extern "C" fn member_value(ctx: *mut c_void) -> c_int {
-    // SAFETY: the Members the schema names.
-    unsafe { (*ctx.cast::<Members>()).values += 1 };
-    0
-}
-
-/// # Safety
-///
-/// `ctx` is the Members being parsed into and `key` a C string.
-unsafe extern "C" fn member_key(ctx: *mut c_void, key: *const c_char) -> c_int {
-    // SAFETY: the Members the schema names, the member's key, and the
-    // slot of the schema, which the parse does not write during the call.
-    unsafe {
-        let m = &mut *ctx.cast::<Members>();
-        let key = CStr::from_ptr(key).to_bytes();
-        if crate::text::find(&m.keys, key).is_some() {
-            return -EEXIST;
-        }
-        let count = if (*m.slot).seen() { m.values } else { -1 };
-        m.keys
-            .extend_from_slice(&[key, b"=", count.to_string().as_bytes(), b" "].concat());
-        m.values = 0;
-        m.members += 1;
-    }
-    0
+fn member_value(m: &mut Members) -> core::result::Result<(), c_int> {
+    m.values += 1;
+    Ok(())
 }
 
 fn parse_members(text: &str) -> (c_int, Members) {
@@ -745,35 +657,25 @@ fn parse_members(text: &str) -> (c_int, Members) {
         value: [0; 16],
         values: 0,
         members: 0,
-        slot: ptr::null(),
     };
-    let mp: *mut Members = &mut m;
-    // SAFETY: pointers to the fields of m and of the schema, which
-    // outlive the parse.
-    let ret = unsafe {
-        let mut values = JsonArray::new(member_value, mp.cast());
-        let mut map = JsonMap::new(member_key, mp.cast());
-        let mut value_sub = [JsonField::string(c"", (&raw mut (*mp).value).cast(), 16)];
-        let mut member_sub = [JsonField::array(
-            c"",
-            &mut values,
-            value_sub.as_mut_ptr(),
-            value_sub.len(),
-        )];
-        // The parse writes the slot through this pointer, so the callback
-        // reads it through the same one.
-        let member_ptr = member_sub.as_mut_ptr();
-        let mut f = [JsonField::map(
-            c"map",
-            &mut map,
-            member_ptr,
-            member_sub.len(),
-        )];
-        (*mp).slot = member_ptr.cast_const();
-        match parse_schema(text.as_bytes(), f.as_mut_ptr(), f.len()) {
-            0 if !f[0].seen() => -ENOENT,
-            ret => ret,
+    let value_sub = [JsonField::string(c"", |m: &mut Members| &mut m.value)];
+    let slot = JsonField::array(c"", &value_sub, &member_value);
+    let member_key = |m: &mut Members, key: &CStr| {
+        let key = key.to_bytes();
+        if crate::text::find(&m.keys, key).is_some() {
+            return Err(-EEXIST);
         }
+        let count = if slot.seen() { m.values } else { -1 };
+        m.keys
+            .extend_from_slice(&[key, b"=", count.to_string().as_bytes(), b" "].concat());
+        m.values = 0;
+        m.members += 1;
+        Ok(())
+    };
+    let f = [JsonField::map(c"map", &slot, &member_key)];
+    let ret = match parse_schema(text.as_bytes(), &f, &mut m) {
+        Ok(()) if !f[0].seen() => -ENOENT,
+        ret => ret.err().unwrap_or(0),
     };
     (ret, m)
 }
@@ -852,17 +754,11 @@ fn growth_keeps_room_for_the_nul() {
 #[test]
 fn string_field_needs_room_for_the_nul() {
     let mut guard = [b'x', b'y'];
-    let mut f = [JsonField::string(c"s", guard[1..].as_mut_ptr(), 0)];
+    let f = [JsonField::string(c"s", |g: &mut [u8; 2]| &mut g[1..1])];
 
-    // SAFETY: a field of no room, then of one byte of guard.
-    unsafe {
-        assert_eq!(
-            parse_schema(br#"{"s":""}"#, f.as_mut_ptr(), f.len()),
-            -ENOSPC
-        );
-        assert_eq!(guard[1], b'y');
-        let mut f = [JsonField::string(c"s", guard.as_mut_ptr(), 1)];
-        assert_eq!(parse_schema(br#"{"s":""}"#, f.as_mut_ptr(), f.len()), 0);
-    }
+    assert_eq!(parse_schema(br#"{"s":""}"#, &f, &mut guard), Err(-ENOSPC));
+    assert_eq!(guard[1], b'y');
+    let f = [JsonField::string(c"s", |g: &mut [u8; 2]| &mut g[..1])];
+    assert_eq!(parse_schema(br#"{"s":""}"#, &f, &mut guard), Ok(()));
     assert_eq!(guard, [0, b'y']);
 }

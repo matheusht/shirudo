@@ -220,29 +220,19 @@ fn parse_event(line: &[u8]) -> Option<Event> {
         up_name: [0; 257],
         up_payload: [0; 65],
     };
-    let mut up = [
-        JsonField::string(c"name", ev.up_name.as_mut_ptr(), ev.up_name.len()),
-        JsonField::string(
-            c"payload_sha256",
-            ev.up_payload.as_mut_ptr(),
-            ev.up_payload.len(),
-        ),
+    let up = [
+        JsonField::string(c"name", |ev: &mut Event| &mut ev.up_name),
+        JsonField::string(c"payload_sha256", |ev| &mut ev.up_payload),
     ];
-    let mut f = [
-        JsonField::string(c"ts", ev.ts.as_mut_ptr(), ev.ts.len()),
-        JsonField::string(c"type", ev.ty.as_mut_ptr(), ev.ty.len()),
-        JsonField::string(c"digest", ev.digest.as_mut_ptr(), ev.digest.len()),
-        JsonField::string(
-            c"set_digest",
-            ev.set_digest.as_mut_ptr(),
-            ev.set_digest.len(),
-        ),
-        JsonField::object(c"upatch", up.as_mut_ptr(), up.len()),
+    let f = [
+        JsonField::string(c"ts", |ev: &mut Event| &mut ev.ts),
+        JsonField::string(c"type", |ev| &mut ev.ty),
+        JsonField::string(c"digest", |ev| &mut ev.digest),
+        JsonField::string(c"set_digest", |ev| &mut ev.set_digest),
+        JsonField::object(c"upatch", &up),
     ];
 
-    // SAFETY: the fields point into ev and up, which outlive the parse.
-    let ret = unsafe { parse_schema(line, f.as_mut_ptr(), f.len()) };
-    (ret == 0).then_some(ev)
+    parse_schema(line, &f, &mut ev).is_ok().then_some(ev)
 }
 
 impl Event {

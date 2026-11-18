@@ -273,6 +273,21 @@ fn record_encode(
     0
 }
 
+/// What a record's JSON gives before it is checked; the prefix goes
+/// straight into the record.
+struct RecordJson<'r> {
+    schema: i64,
+    sequence: i64,
+    reset: i64,
+    restart: i64,
+    pcr: i64,
+    kind: i64,
+    root: [u8; 65],
+    initial: [u8; 65],
+    pending: bool,
+    record: &'r mut ConfigUpdateRecord,
+}
+
 /// The record in the `length` bytes at `data` into `record`, with the
 /// prefix and whether it is pending for the state file: 0, or -EBADMSG
 /// for one that is not a record, or the parser's error.
@@ -286,31 +301,48 @@ unsafe fn record_decode(
     state: bool,
     record: &mut ConfigUpdateRecord,
 ) -> c_int {
-    let (mut schema, mut sequence, mut reset, mut restart) = (0i64, 0i64, 0i64, 0i64);
-    let (mut pcr, mut kind) = (0i64, 0i64);
-    let mut root = [0u8; 65];
-    let mut initial = [0u8; 65];
-    let mut pending: c_int = 0;
-
     *record = ConfigUpdateRecord::zeroed();
-    let mut fields = [
-        JsonField::int(c"schema", &mut schema),
-        JsonField::int(c"sequence", &mut sequence),
-        JsonField::int(c"reset_count", &mut reset),
-        JsonField::int(c"restart_count", &mut restart),
-        JsonField::int(c"pcr", &mut pcr),
-        JsonField::int(c"kind", &mut kind),
-        JsonField::string(c"root_hash", root.as_mut_ptr(), root.len()),
-        JsonField::string(c"initial_pcr", initial.as_mut_ptr(), initial.len()),
-        JsonField::string(c"prefix", record.target.prefix.as_mut_ptr(), PREFIX_MAX),
-        JsonField::boolean(c"pending", &mut pending),
+    let mut json = RecordJson {
+        schema: 0,
+        sequence: 0,
+        reset: 0,
+        restart: 0,
+        pcr: 0,
+        kind: 0,
+        root: [0; 65],
+        initial: [0; 65],
+        pending: false,
+        record,
+    };
+    let fields = [
+        JsonField::int(c"schema", |j: &mut RecordJson| &mut j.schema),
+        JsonField::int(c"sequence", |j| &mut j.sequence),
+        JsonField::int(c"reset_count", |j| &mut j.reset),
+        JsonField::int(c"restart_count", |j| &mut j.restart),
+        JsonField::int(c"pcr", |j| &mut j.pcr),
+        JsonField::int(c"kind", |j| &mut j.kind),
+        JsonField::string(c"root_hash", |j| &mut j.root),
+        JsonField::string(c"initial_pcr", |j| &mut j.initial),
+        JsonField::string(c"prefix", |j| &mut j.record.target.prefix),
+        JsonField::boolean(c"pending", |j| &mut j.pending),
     ];
-    // SAFETY: the caller's bytes, and the schema, which names locals of
-    // this call and the caller's record.
-    let ret = unsafe { parse_schema(ffi::slice(data, length), fields.as_mut_ptr(), fields.len()) };
-    if ret != 0 {
-        return ret;
+    // SAFETY: the caller's bytes.
+    let data = unsafe { ffi::slice(data, length) };
+    if let Err(err) = parse_schema(data, &fields, &mut json) {
+        return err;
     }
+    let RecordJson {
+        schema,
+        sequence,
+        reset,
+        restart,
+        pcr,
+        kind,
+        root,
+        initial,
+        pending,
+        record,
+    } = json;
     let required = fields.len() - if state { 0 } else { 2 };
     if fields[..required].iter().any(|f| !f.seen()) {
         return -EBADMSG;
@@ -335,7 +367,7 @@ unsafe fn record_decode(
     record.restart_count = restart as u32;
     record.pcr = pcr as u32;
     record.kind = kind as c_int;
-    record.pending = pending != 0;
+    record.pending = pending;
     0
 }
 

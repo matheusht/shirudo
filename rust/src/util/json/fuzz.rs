@@ -4,10 +4,10 @@
 //! fuzz-json: a document parsed against a schema of every kind of field,
 //! and walked, each string and key valid UTF-8 as the walk gives them.
 
-use core::ffi::{CStr, c_char, c_int, c_void};
+use core::ffi::{CStr, c_int};
 
 use super::parse::{Visit, walk};
-use super::{JsonArray, JsonField, JsonMap, parse_schema};
+use super::{JsonField, parse_schema};
 use crate::fuzzing::fuzz_target;
 use crate::text::utf8_width;
 
@@ -24,22 +24,32 @@ fn check_text(s: &[u8]) {
     }
 }
 
-/// # Safety
-///
-/// `ctx` is the count the array hands.
-unsafe extern "C" fn on_elem(ctx: *mut c_void) -> c_int {
-    // SAFETY: the caller's count.
-    unsafe { *ctx.cast::<c_int>() += 1 };
-    0
+/// What the schema of every kind of field fills.
+struct Parsed {
+    s: [u8; 64],
+    k: [u8; 32],
+    v: [u8; 16],
+    w: [u8; 16],
+    i: i64,
+    n: i64,
+    b: bool,
+    elems: c_int,
+    words: c_int,
 }
 
-/// # Safety
-///
-/// `key` is a C string.
-unsafe extern "C" fn on_member(_: *mut c_void, key: *const c_char) -> c_int {
-    // SAFETY: the parser's key.
-    check_text(unsafe { CStr::from_ptr(key) }.to_bytes());
-    0
+fn on_elem(f: &mut Parsed) -> Result {
+    f.elems += 1;
+    Ok(())
+}
+
+fn on_word(f: &mut Parsed) -> Result {
+    f.words += 1;
+    Ok(())
+}
+
+fn on_member(_: &mut Parsed, key: &CStr) -> Result {
+    check_text(key.to_bytes());
+    Ok(())
 }
 
 struct Checker;
@@ -68,38 +78,35 @@ impl Visit for Checker {
 }
 
 fuzz_target!(shirudo_fuzz_json, shirudo_fuzz_json_init, |data| {
-    let (mut s, mut k, mut v, mut w) = ([0u8; 64], [0u8; 32], [0u8; 16], [0u8; 16]);
-    let (mut i, mut n) = (0i64, 0i64);
-    let mut b: c_int = 0;
-    let (mut elems, mut words): (c_int, c_int) = (0, 0);
-    let mut arr = JsonArray::new(on_elem, (&raw mut elems).cast());
-    let mut list = JsonArray::new(on_elem, (&raw mut words).cast());
-    let mut map = JsonMap::new(on_member, core::ptr::null_mut());
-    let mut obj = [
-        JsonField::string(c"k", k.as_mut_ptr(), k.len()),
-        JsonField::int(c"n", &raw mut n),
+    let mut parsed = Parsed {
+        s: [0; 64],
+        k: [0; 32],
+        v: [0; 16],
+        w: [0; 16],
+        i: 0,
+        n: 0,
+        b: false,
+        elems: 0,
+        words: 0,
+    };
+    let obj = [
+        JsonField::string(c"k", |f: &mut Parsed| &mut f.k),
+        JsonField::int(c"n", |f| &mut f.n),
     ];
-    let mut elem = [
-        JsonField::string(c"v", v.as_mut_ptr(), v.len()),
-        JsonField::object(c"o", obj.as_mut_ptr(), obj.len()),
+    let elem = [
+        JsonField::string(c"v", |f: &mut Parsed| &mut f.v),
+        JsonField::object(c"o", &obj),
     ];
-    let mut word = [JsonField::string(c"", w.as_mut_ptr(), w.len())];
-    let mut member = [JsonField::array(
-        c"",
-        &raw mut list,
-        word.as_mut_ptr(),
-        word.len(),
-    )];
-    let mut root = [
-        JsonField::string(c"s", s.as_mut_ptr(), s.len()),
-        JsonField::int(c"i", &raw mut i),
-        JsonField::boolean(c"b", &raw mut b),
-        JsonField::object(c"o", obj.as_mut_ptr(), obj.len()),
-        JsonField::array(c"a", &raw mut arr, elem.as_mut_ptr(), elem.len()),
-        JsonField::map(c"m", &raw mut map, member.as_mut_ptr(), member.len()),
+    let word = [JsonField::string(c"", |f: &mut Parsed| &mut f.w)];
+    let member = JsonField::array(c"", &word, &on_word);
+    let root = [
+        JsonField::string(c"s", |f: &mut Parsed| &mut f.s),
+        JsonField::int(c"i", |f| &mut f.i),
+        JsonField::boolean(c"b", |f| &mut f.b),
+        JsonField::object(c"o", &obj),
+        JsonField::array(c"a", &elem, &on_elem),
+        JsonField::map(c"m", &member, &on_member),
     ];
-    // SAFETY: the schema, its destinations and sinks live through the
-    // parse.
-    let _ = unsafe { parse_schema(data, root.as_mut_ptr(), root.len()) };
+    let _ = parse_schema(data, &root, &mut parsed);
     let _ = walk(data, &mut Checker);
 });

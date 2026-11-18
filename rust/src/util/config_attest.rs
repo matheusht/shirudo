@@ -19,7 +19,7 @@ use crate::util::config_update::{
     ConfigUpdate, ConfigUpdateRecord, config_update_check, config_update_events,
 };
 use crate::util::hex::{hex_decode, hex_encode};
-use crate::util::json::{JsonArray, JsonEmit, JsonField, parse_schema};
+use crate::util::json::{JsonEmit, JsonField, parse_schema};
 
 /// `CONFIG_EVIDENCE_EVENTS_MAX`.
 const EVENTS_MAX: usize = 4096;
@@ -275,43 +275,41 @@ fn emit(e: &mut JsonEmit, view: &Evidence) -> c_int {
     e.err()
 }
 
-/// What the schema of an event fills, and the view the events go to.
-struct EventParser {
-    view: *mut Evidence,
-    event_fields: *const JsonField,
-    n_fields: usize,
+/// What the schema of the `config` object fills, and the view its
+/// events go to.
+struct ConfigParser<'v> {
+    view: &'v mut Evidence,
+    schema: i64,
+    pcr: i64,
+    reset: i64,
+    restart: i64,
+    initial: [u8; 65],
     sequence: i64,
     kind: i64,
     root_hash: [u8; 65],
 }
 
-unsafe extern "C" fn on_event(opaque: *mut c_void) -> c_int {
-    let p = opaque.cast::<EventParser>();
+/// Adds the event the parser holds to its view; `fields` are the
+/// event's, every one of which it must give.
+fn on_event(p: &mut ConfigParser, fields: &[JsonField<'_, ConfigParser>]) -> Result<(), c_int> {
     let mut root_hash = [0u8; 32];
 
-    // SAFETY: the parser parse() made the array's context, read through
-    // this pointer alone as the JSON parser writes its fields through its
-    // own and is not running now; its fields and view outlive the parse.
-    unsafe {
-        let fields = core::slice::from_raw_parts((*p).event_fields, (*p).n_fields);
+    if !fields.iter().all(JsonField::seen) {
+        return Err(-EINVAL);
+    }
+    let (sequence, kind) = (p.sequence, p.kind);
 
-        if !fields.iter().all(JsonField::seen) {
-            return -EINVAL;
-        }
-        let (sequence, kind) = ((*p).sequence, (*p).kind);
-
-        if sequence <= 0
-            || (kind != i64::from(EVENT_BOOT) && kind != i64::from(EVENT_UPDATE))
-            || cstr(&(*p).root_hash).len() != 64
-            || hex_decode(
-                (&raw const (*p).root_hash).cast(),
-                root_hash.as_mut_ptr(),
-                32,
-            ) != 0
-        {
-            return -EINVAL;
-        }
-        append_event(&mut *(*p).view, &root_hash, sequence as u64, kind as c_int)
+    if sequence <= 0
+        || (kind != i64::from(EVENT_BOOT) && kind != i64::from(EVENT_UPDATE))
+        || cstr(&p.root_hash).len() != 64
+        // SAFETY: a C string the parser wrote, and room for 32 bytes.
+        || unsafe { hex_decode(p.root_hash.as_ptr().cast(), root_hash.as_mut_ptr(), 32) } != 0
+    {
+        return Err(-EINVAL);
+    }
+    match append_event(p.view, &root_hash, sequence as u64, kind as c_int) {
+        0 => Ok(()),
+        err => Err(err),
     }
 }
 
@@ -323,55 +321,50 @@ unsafe extern "C" fn on_event(opaque: *mut c_void) -> c_int {
 ///
 /// `out` points to room for a view.
 pub(crate) unsafe fn parse(evidence: &[u8], out: *mut Evidence) -> c_int {
-    let (mut schema, mut reset, mut restart, mut pcr) = (0i64, 0i64, 0i64, 0i64);
-    let mut initial = [0u8; 65];
-    let mut parser = EventParser {
-        view: out,
-        event_fields: core::ptr::null(),
-        n_fields: 0,
+    // SAFETY: the caller passes the room.
+    unsafe { zero(out) };
+    let mut parser = ConfigParser {
+        // SAFETY: the view, zeroed above.
+        view: unsafe { &mut *out },
+        schema: 0,
+        pcr: 0,
+        reset: 0,
+        restart: 0,
+        initial: [0; 65],
         sequence: 0,
         kind: 0,
         root_hash: [0; 65],
     };
-
-    // SAFETY: the caller passes the room.
-    unsafe { zero(out) };
-    let mut event_fields = [
-        JsonField::int(c"sequence", &raw mut parser.sequence),
-        JsonField::int(c"kind", &raw mut parser.kind),
-        JsonField::string(c"root_hash", (&raw mut parser.root_hash).cast(), 65),
+    let event_fields = [
+        JsonField::int(c"sequence", |p: &mut ConfigParser| &mut p.sequence),
+        JsonField::int(c"kind", |p| &mut p.kind),
+        JsonField::string(c"root_hash", |p| &mut p.root_hash),
     ];
-    // One pointer to the fields, which the parser writes and on_event()
-    // reads, and the parser whole made the array's context after.
-    let ef = event_fields.as_mut_ptr();
-    parser.event_fields = ef.cast_const();
-    parser.n_fields = event_fields.len();
-    let mut sink = JsonArray::new(on_event, (&raw mut parser).cast());
-    let mut config_fields = [
-        JsonField::int(c"schema", &raw mut schema),
-        JsonField::int(c"pcr", &raw mut pcr),
-        JsonField::int(c"reset_count", &raw mut reset),
-        JsonField::int(c"restart_count", &raw mut restart),
-        JsonField::string(c"initial_pcr", initial.as_mut_ptr(), initial.len()),
-        JsonField::array(c"events", &raw mut sink, ef, 3),
+    let take_event = |p: &mut ConfigParser| on_event(p, &event_fields);
+    let config_fields = [
+        JsonField::int(c"schema", |p: &mut ConfigParser| &mut p.schema),
+        JsonField::int(c"pcr", |p| &mut p.pcr),
+        JsonField::int(c"reset_count", |p| &mut p.reset),
+        JsonField::int(c"restart_count", |p| &mut p.restart),
+        JsonField::string(c"initial_pcr", |p| &mut p.initial),
+        JsonField::array(c"events", &event_fields, &take_event),
     ];
-    let mut top = [JsonField::object(
-        c"config",
-        config_fields.as_mut_ptr(),
-        config_fields.len(),
-    )];
-    // SAFETY: every pointer of the schema names a local of this frame or
-    // the caller's view, which outlive the parse and are touched
-    // meanwhile only through those pointers and the parser's.
-    let mut ret = unsafe { parse_schema(evidence, top.as_mut_ptr(), top.len()) };
+    let top = [JsonField::object(c"config", &config_fields)];
+    let mut ret = parse_schema(evidence, &top, &mut parser).err().unwrap_or(0);
 
     if ret == 0 {
         if !top[0].seen() {
             return 0;
         }
-        // SAFETY: the view, which the parse no longer touches.
-        let view = unsafe { &mut *out };
-
+        let ConfigParser {
+            view,
+            schema,
+            pcr,
+            reset,
+            restart,
+            initial,
+            ..
+        } = parser;
         let fields_ok = config_fields.iter().all(JsonField::seen)
             && schema == 1
             && (0..=i64::from(u32::MAX)).contains(&reset)

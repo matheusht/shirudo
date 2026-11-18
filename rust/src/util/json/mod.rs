@@ -8,7 +8,7 @@ mod emit;
 mod parse;
 
 pub(crate) use emit::JsonEmit;
-pub(crate) use parse::{JsonArray, JsonField, JsonMap, parse_schema};
+pub(crate) use parse::{JsonField, parse_schema};
 #[cfg(any(test, shirudo_fuzz))]
 pub(crate) use parse::{Visit, walk};
 

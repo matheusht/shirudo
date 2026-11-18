@@ -412,7 +412,7 @@ has it already, or should. The basics:
 | Sealed state and paths root names | `seal_open()`, `open_sealed()`, `seal_lock()`, `seal_append_line()`, `seal_write_file()`; `seal_output_create()` and `seal_output_commit()` for a report or export (`rust/src/util/seal.rs`) |
 | Bytes on the wire | `from_le_bytes()`, `to_be_bytes()` and kin; `encode()` and `decode()` for hex, and `hex_encode()`, `hex_decode()`, `hex_decode_max()` over C strings (`rust/src/util/hex.rs`) |
 | SHA-256 | `sha256()` or `sha256_into()` of a slice, or a `Sha256Ctx` through `sha256_init()`, `sha256_update()` and `sha256_final()` over pieces (`rust/src/util/crypto_openssl.rs`); `sha256_digest_encode()` and `sha256_digest_decode()` for the `sha256:<hex>` form (`rust/src/util/hex.rs`), `sha256_hex()` for its bare hex (`rust/src/util/bpm_oci/http.rs`) |
-| JSON | `rust/src/util/json/`: `parse_schema()` over a table of `JsonField`s, and `JsonEmit`, whose `str_lossy()` and `key_lossy()` write text from outside |
+| JSON | `rust/src/util/json/`: `parse_schema()` over a table of `JsonField`s into a state the caller passes, each field naming its place in it, and `JsonEmit`, whose `str_lossy()` and `key_lossy()` write text from outside |
 | Messages | `log::err()`, `warn()`, `info()`, `audit()`, and `log_c!` for a C format (`rust/src/log.rs`) |
 | A command's options | a table of `OptSpec` indexed by the command's constant for each option, an `OptParser` and a `match` over its `next()`, `number()` for a value in a range, `choice()` for one from a set of `OptName`s, `usage()` and `EXIT_USAGE` (`rust/src/util/options.rs`); `HelpSection::options()` (`rust/src/util/help.rs`) lists the same table in help, and `--list-opts` for completion; never compare an argument by hand |
 

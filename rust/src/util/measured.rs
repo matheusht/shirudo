@@ -612,7 +612,7 @@ mod verified {
     };
     use crate::util::eventlog::{self, upatches_record};
     use crate::util::hex;
-    use crate::util::json::{JsonArray, JsonField, parse_schema};
+    use crate::util::json::{JsonField, parse_schema};
     use crate::util::upatch::{NAME_MAX, PAYLOAD_HASH_LEN, member_valid};
 
     const TPM_NAME_LEN: usize = 34;
@@ -623,27 +623,35 @@ mod verified {
         *mut c_void,
     ) -> c_int;
 
+    /// What a record says of the register it was bound to.
+    struct Binding {
+        ty: [u8; 8],
+        name_hex: [u8; 2 * TPM_NAME_LEN + 1],
+        reset: i64,
+    }
+
     /// Whether `line` is an init record of the register the TPM reports
     /// now: its index's name and the TPM's reset count.
     fn init_of_live(line: &[u8], live: &ChainLive) -> bool {
-        let mut ty = [0u8; 8];
-        let mut name_hex = [0u8; 2 * TPM_NAME_LEN + 1];
-        let mut reset: i64 = -1;
-        let mut f = [
-            JsonField::string(c"type", ty.as_mut_ptr(), ty.len()),
-            JsonField::string(c"nv_name", name_hex.as_mut_ptr(), name_hex.len()),
-            JsonField::int(c"tpm_reset_count", &raw mut reset),
+        let mut b = Binding {
+            ty: [0; 8],
+            name_hex: [0; 2 * TPM_NAME_LEN + 1],
+            reset: -1,
+        };
+        let f = [
+            JsonField::string(c"type", |b: &mut Binding| &mut b.ty),
+            JsonField::string(c"nv_name", |b| &mut b.name_hex),
+            JsonField::int(c"tpm_reset_count", |b| &mut b.reset),
         ];
-        // SAFETY: the line, and fields over locals that outlive the parse.
-        if unsafe { parse_schema(line, f.as_mut_ptr(), f.len()) } != 0
-            || cstr(&ty) != b"init"
+        if parse_schema(line, &f, &mut b).is_err()
+            || cstr(&b.ty) != b"init"
             || !f[1].seen()
             || !f[2].seen()
-            || reset != i64::from(live.reset_count)
+            || b.reset != i64::from(live.reset_count)
         {
             return false;
         }
-        let text = cstr(&name_hex);
+        let text = cstr(&b.name_hex);
         let mut name = [0u8; TPM_NAME_LEN];
         text.len() == 2 * TPM_NAME_LEN && hex::decode(text, &mut name).is_ok() && name == live.name
     }
@@ -667,9 +675,7 @@ mod verified {
         tree: bool,
     }
 
-    unsafe extern "C" fn set_entry(ctx: *mut c_void) -> c_int {
-        // SAFETY: the record the parse is given.
-        let r = unsafe { &mut *ctx.cast::<Record>() };
+    fn set_entry(r: &mut Record) -> Result<(), c_int> {
         // SAFETY: the record's set of MEASURED_MAX members, its count and
         // two C strings.
         let ret = unsafe {
@@ -683,61 +689,39 @@ mod verified {
         };
         r.name[0] = 0;
         r.payload_hex[0] = 0;
-        ret
+        match ret {
+            0 => Ok(()),
+            err => Err(err),
+        }
     }
 
     fn parse(line: &[u8], r: &mut Record) -> c_int {
-        let ctx: *mut c_void = core::ptr::from_mut(r).cast();
-        let mut entry = [
-            JsonField::string(c"name", r.name.as_mut_ptr(), r.name.len()),
-            JsonField::string(
-                c"payload_sha256",
-                r.payload_hex.as_mut_ptr(),
-                r.payload_hex.len(),
-            ),
+        let entry = [
+            JsonField::string(c"name", |r: &mut Record| &mut r.name),
+            JsonField::string(c"payload_sha256", |r| &mut r.payload_hex),
         ];
-        let mut upatch = [
-            JsonField::string(c"name", r.name.as_mut_ptr(), r.name.len()),
-            JsonField::string(
-                c"payload_sha256",
-                r.payload_hex.as_mut_ptr(),
-                r.payload_hex.len(),
-            ),
+        let upatch = [
+            JsonField::string(c"name", |r: &mut Record| &mut r.name),
+            JsonField::string(c"payload_sha256", |r| &mut r.payload_hex),
         ];
-        let mut key = [JsonField::string(
-            c"cert_sha256",
-            r.key_hex.as_mut_ptr(),
-            r.key_hex.len(),
-        )];
-        let mut tree = [
-            JsonField::int(c"seq", &raw mut r.seq),
-            JsonField::string(
-                c"operation_digest",
-                r.operation.as_mut_ptr(),
-                r.operation.len(),
-            ),
+        let key = [JsonField::string(c"cert_sha256", |r: &mut Record| {
+            &mut r.key_hex
+        })];
+        let tree = [
+            JsonField::int(c"seq", |r: &mut Record| &mut r.seq),
+            JsonField::string(c"operation_digest", |r| &mut r.operation),
         ];
-        let mut set = JsonArray::new(set_entry, ctx);
-        let mut f = [
-            JsonField::string(c"type", r.ty.as_mut_ptr(), r.ty.len()),
-            JsonField::string(c"digest", r.digest_hex.as_mut_ptr(), r.digest_hex.len()),
-            JsonField::string(c"cert_sha256", r.cert_hex.as_mut_ptr(), r.cert_hex.len()),
-            JsonField::string(
-                c"tree_root",
-                r.tree_root_hex.as_mut_ptr(),
-                r.tree_root_hex.len(),
-            ),
-            JsonField::array(c"set", &raw mut set, entry.as_mut_ptr(), entry.len()),
-            JsonField::object(c"upatch", upatch.as_mut_ptr(), upatch.len()),
-            JsonField::object(c"key", key.as_mut_ptr(), key.len()),
-            JsonField::object(c"tree", tree.as_mut_ptr(), tree.len()),
+        let f = [
+            JsonField::string(c"type", |r: &mut Record| &mut r.ty),
+            JsonField::string(c"digest", |r| &mut r.digest_hex),
+            JsonField::string(c"cert_sha256", |r| &mut r.cert_hex),
+            JsonField::string(c"tree_root", |r| &mut r.tree_root_hex),
+            JsonField::array(c"set", &entry, &set_entry),
+            JsonField::object(c"upatch", &upatch),
+            JsonField::object(c"key", &key),
+            JsonField::object(c"tree", &tree),
         ];
-        // SAFETY: the line, and fields over the record and locals that
-        // outlive the parse.
-        if unsafe { parse_schema(line, f.as_mut_ptr(), f.len()) } != 0
-            || !f[0].seen()
-            || !f[1].seen()
-        {
+        if parse_schema(line, &f, r).is_err() || !f[0].seen() || !f[1].seen() {
             return -EINVAL;
         }
         r.init = f[2].seen() && f[3].seen() && f[4].seen();

@@ -1,164 +1,140 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The JSON readers. json_parse() dispatches the declared keys of a
-//! schema and parses and discards the rest, json_walk() reports every
-//! token, and both check a document through the one grammar json.h
-//! describes, so that a single parser checks every document shirudo reads.
+//! The JSON readers. parse_schema() dispatches the declared keys of a
+//! schema into the state it is given and parses and discards the rest,
+//! walk() reports every token, and both check a document through the one
+//! grammar json.h describes, so that a single parser checks every
+//! document shirudo reads.
 
 use alloc::vec::Vec;
-use core::ffi::{CStr, c_char, c_int, c_void};
-use core::ptr;
+use core::cell::Cell;
+use core::ffi::{CStr, c_int};
+use core::slice;
 
 use super::{MAX_BYTES, MAX_DEPTH, MAX_FIELDS, MAX_STRING_BYTES, utf8_width};
 use crate::errno::{E2BIG, EINVAL, ENOSPC};
 
-/// A negative errno, or the non-zero value a callback returned.
+/// A negative errno, or the error a sink returned.
 type Result<T = ()> = core::result::Result<T, c_int>;
 
-const T_STRING: c_int = 0;
-const T_INT: c_int = 1;
-const T_BOOL: c_int = 2;
-const T_OBJECT: c_int = 3;
-const T_ARRAY: c_int = 4;
-const T_MAP: c_int = 5;
+/// What an array calls with the state after each element.
+type OnElem<'a, S> = &'a dyn Fn(&mut S) -> Result;
 
-/// `struct json_field`: a declared key, where its value goes, and for an
-/// object, array or map the schema of what it holds.
-#[repr(C)]
-pub struct JsonField {
-    key: *const c_char,
-    ty: c_int,
-    dst: *mut c_void,
-    dst_cap: usize,
-    seen: c_int,
-    sub: *mut JsonField,
-    n_sub: usize,
+/// What a map calls with the state and the key after each member.
+type OnMember<'a, S> = &'a dyn Fn(&mut S, &CStr) -> Result;
+
+/// Where a declared key's value goes: a place in the state for a
+/// scalar; the fields of an object; the fields of each element of an
+/// array, or the one field of each member's value of a map, with the
+/// sink that takes each.
+enum Value<'a, S> {
+    String(fn(&mut S) -> &mut [u8]),
+    Int(fn(&mut S) -> &mut i64),
+    Bool(fn(&mut S) -> &mut bool),
+    Object(&'a [JsonField<'a, S>]),
+    Array(&'a [JsonField<'a, S>], OnElem<'a, S>),
+    Map(&'a JsonField<'a, S>, OnMember<'a, S>),
 }
 
-/// `struct json_array`: what an array field calls after each element.
-#[repr(C)]
-pub struct JsonArray {
-    on_elem: Option<unsafe extern "C" fn(ctx: *mut c_void) -> c_int>,
-    ctx: *mut c_void,
+impl<S> Clone for Value<'_, S> {
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 
-/// The fields of a schema that Rust code builds in C's layout, for the
-/// callers of json_parse() that moved to Rust before the schemas did.
-impl JsonField {
-    const fn new(key: &'static CStr, ty: c_int, dst: *mut c_void, dst_cap: usize) -> Self {
+impl<S> Copy for Value<'_, S> {}
+
+/// A declared key of a schema and where its value goes in the state of
+/// type `S` that [`parse_schema`] fills.
+pub(crate) struct JsonField<'a, S> {
+    key: Option<&'static CStr>,
+    value: Value<'a, S>,
+    seen: Cell<bool>,
+}
+
+impl<'a, S> JsonField<'a, S> {
+    const fn new(key: &'static CStr, value: Value<'a, S>) -> Self {
         JsonField {
-            key: key.as_ptr(),
-            ty,
-            dst,
-            dst_cap,
-            seen: 0,
-            sub: ptr::null_mut(),
-            n_sub: 0,
+            key: Some(key),
+            value,
+            seen: Cell::new(false),
         }
     }
 
-    /// A string, decoded into the `cap` bytes at `dst`.
+    /// A string, decoded into the buffer `dst` gives with a NUL after it:
+    /// -ENOSPC for one the buffer cannot hold with its NUL.
+    pub(crate) const fn string(key: &'static CStr, dst: fn(&mut S) -> &mut [u8]) -> Self {
+        Self::new(key, Value::String(dst))
+    }
+
+    pub(crate) const fn int(key: &'static CStr, dst: fn(&mut S) -> &mut i64) -> Self {
+        Self::new(key, Value::Int(dst))
+    }
+
+    pub(crate) const fn boolean(key: &'static CStr, dst: fn(&mut S) -> &mut bool) -> Self {
+        Self::new(key, Value::Bool(dst))
+    }
+
+    /// An object whose own declared keys are `fields`.
+    pub(crate) const fn object(key: &'static CStr, fields: &'a [JsonField<'a, S>]) -> Self {
+        Self::new(key, Value::Object(fields))
+    }
+
+    /// An array of objects with the declared keys `fields`, or of the
+    /// values the one field of `fields` with an empty key takes, each of
+    /// which `on_elem` takes from the state.
+    pub(crate) const fn array(
+        key: &'static CStr,
+        fields: &'a [JsonField<'a, S>],
+        on_elem: OnElem<'a, S>,
+    ) -> Self {
+        Self::new(key, Value::Array(fields, on_elem))
+    }
+
+    /// A map whose members' values `value` takes, each of which
+    /// `on_member` takes from the state with its key.
+    pub(crate) const fn map(
+        key: &'static CStr,
+        value: &'a JsonField<'a, S>,
+        on_member: OnMember<'a, S>,
+    ) -> Self {
+        Self::new(key, Value::Map(value, on_member))
+    }
+
     /// This field without its key, which no member of an object matches.
     pub(crate) const fn keyless(mut self) -> Self {
-        self.key = ptr::null();
+        self.key = None;
         self
     }
 
-    pub(crate) const fn string(key: &'static CStr, dst: *mut u8, cap: usize) -> Self {
-        Self::new(key, T_STRING, dst.cast(), cap)
-    }
-
-    pub(crate) const fn int(key: &'static CStr, dst: *mut i64) -> Self {
-        Self::new(key, T_INT, dst.cast(), 0)
-    }
-
-    /// A boolean, as an int of 0 or 1.
-    pub(crate) const fn boolean(key: &'static CStr, dst: *mut c_int) -> Self {
-        Self::new(key, T_BOOL, dst.cast(), 0)
-    }
-
-    /// An object whose own declared keys are the `n` fields at `sub`.
-    pub(crate) const fn object(key: &'static CStr, sub: *mut JsonField, n: usize) -> Self {
-        let mut f = Self::new(key, T_OBJECT, ptr::null_mut(), 0);
-
-        f.sub = sub;
-        f.n_sub = n;
-        f
-    }
-
-    /// An array of objects with the `n` fields at `sub`, each of which
-    /// `sink` hears about.
-    pub(crate) const fn array(
-        key: &'static CStr,
-        sink: *mut JsonArray,
-        sub: *mut JsonField,
-        n: usize,
-    ) -> Self {
-        let mut f = Self::new(key, T_ARRAY, sink.cast(), 0);
-
-        f.sub = sub;
-        f.n_sub = n;
-        f
-    }
-
-    /// A map whose members' values each take the one field at `sub`,
-    /// each of which `sink` hears about with its key.
-    pub(crate) const fn map(
-        key: &'static CStr,
-        sink: *mut JsonMap,
-        sub: *mut JsonField,
-        n: usize,
-    ) -> Self {
-        let mut f = Self::new(key, T_MAP, sink.cast(), 0);
-
-        f.sub = sub;
-        f.n_sub = n;
-        f
-    }
-
+    /// Whether the document gave the field; for one an array or a map
+    /// holds, the element or member last parsed.
     pub(crate) fn seen(&self) -> bool {
-        self.seen != 0
+        self.seen.get()
+    }
+
+    fn is_named(&self, name: &[u8]) -> bool {
+        self.key.is_some_and(|key| key.to_bytes() == name)
+    }
+
+    /// A field with no key, or an empty one, which takes each element of
+    /// an array of scalars.
+    fn is_unnamed(&self) -> bool {
+        self.key.is_none_or(CStr::is_empty)
     }
 }
 
-impl JsonArray {
-    pub(crate) const fn new(
-        on_elem: unsafe extern "C" fn(*mut c_void) -> c_int,
-        ctx: *mut c_void,
-    ) -> Self {
-        JsonArray {
-            on_elem: Some(on_elem),
-            ctx,
+/// Clears whether the document gave `fields`, and the fields they hold.
+fn reset_seen<S>(fields: &[JsonField<'_, S>]) {
+    for f in fields {
+        f.seen.set(false);
+        match f.value {
+            Value::Object(sub) | Value::Array(sub, _) => reset_seen(sub),
+            Value::Map(value, _) => reset_seen(slice::from_ref(value)),
+            Value::String(_) | Value::Int(_) | Value::Bool(_) => {}
         }
     }
-}
-
-/// `struct json_map`: what a map field calls after each member.
-#[repr(C)]
-pub struct JsonMap {
-    on_member: Option<unsafe extern "C" fn(ctx: *mut c_void, key: *const c_char) -> c_int>,
-    ctx: *mut c_void,
-}
-
-impl JsonMap {
-    pub(crate) const fn new(
-        on_member: unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int,
-        ctx: *mut c_void,
-    ) -> Self {
-        JsonMap {
-            on_member: Some(on_member),
-            ctx,
-        }
-    }
-}
-
-fn status(ret: c_int) -> Result {
-    if ret != 0 { Err(ret) } else { Ok(()) }
-}
-
-fn errno(ret: Result) -> c_int {
-    ret.err().unwrap_or(0)
 }
 
 /// What a walk reports: decoded keys and strings, numbers as their text,
@@ -171,170 +147,6 @@ pub(crate) trait Visit {
     fn string(&mut self, s: &CStr) -> Result;
     fn number(&mut self, text: &[u8], integer: bool) -> Result;
     fn literal(&mut self, value: c_int) -> Result;
-}
-
-/// One level of a C schema: `n` fields at `ptr`.
-///
-/// json_parse() takes a schema whose fields, and those their `sub`
-/// pointers name, stay valid for the parse and are touched meanwhile only
-/// by the callbacks it calls. A view reads and writes through raw
-/// pointers alone, holding no reference across a callback, so a callback
-/// may change what it points to between two reads, as in C.
-#[derive(Clone, Copy)]
-struct Fields {
-    ptr: *mut JsonField,
-    n: usize,
-}
-
-#[derive(Clone, Copy)]
-struct Field(*mut JsonField);
-
-impl Fields {
-    const NONE: Fields = Fields {
-        ptr: ptr::null_mut(),
-        n: 0,
-    };
-
-    fn get(self, i: usize) -> Field {
-        assert!(i < self.n);
-        // SAFETY: the schema holds n fields at ptr, and i < n.
-        Field(unsafe { self.ptr.add(i) })
-    }
-
-    /// The index of the first field named `key`.
-    fn find(self, key: &[u8]) -> Option<usize> {
-        (0..self.n).find(|&i| self.get(i).is_named(key))
-    }
-
-    fn reset_seen(self) {
-        for i in 0..self.n {
-            let f = self.get(i);
-
-            f.set_seen(0);
-            if matches!(f.ty(), T_OBJECT | T_ARRAY | T_MAP) {
-                f.sub().reset_seen();
-            }
-        }
-    }
-}
-
-impl Field {
-    fn ty(self) -> c_int {
-        // SAFETY: a field of the schema, which stays valid.
-        unsafe { (*self.0).ty }
-    }
-
-    fn set_seen(self, seen: c_int) {
-        // SAFETY: a field of the schema, which stays valid.
-        unsafe { (*self.0).seen = seen };
-    }
-
-    fn sub(self) -> Fields {
-        // SAFETY: a field of the schema, which stays valid; its sub
-        // fields are the schema's too.
-        unsafe {
-            Fields {
-                ptr: (*self.0).sub,
-                n: (*self.0).n_sub,
-            }
-        }
-    }
-
-    fn dst(self) -> *mut c_void {
-        // SAFETY: a field of the schema, which stays valid.
-        unsafe { (*self.0).dst }
-    }
-
-    fn key(self) -> *const c_char {
-        // SAFETY: a field of the schema, which stays valid.
-        unsafe { (*self.0).key }
-    }
-
-    fn is_named(self, name: &[u8]) -> bool {
-        let key = self.key();
-
-        // SAFETY: a key the schema names is a C string.
-        !key.is_null() && unsafe { CStr::from_ptr(key) }.to_bytes() == name
-    }
-
-    /// A field with no key, or an empty one, which takes each element of
-    /// an array of scalars.
-    fn is_unnamed(self) -> bool {
-        let key = self.key();
-
-        // SAFETY: a key the schema names is a C string.
-        key.is_null() || unsafe { *key } == 0
-    }
-
-    fn set_int(self, v: i64) {
-        let dst = self.dst().cast::<i64>();
-
-        if !dst.is_null() {
-            // SAFETY: an integer field's dst is a __s64.
-            unsafe { dst.write_unaligned(v) };
-        }
-    }
-
-    fn set_bool(self, v: c_int) {
-        let dst = self.dst().cast::<c_int>();
-
-        if !dst.is_null() {
-            // SAFETY: a bool field's dst is an int.
-            unsafe { dst.write_unaligned(v) };
-        }
-    }
-
-    /// The string field's buffer, for the decoding of one string, during
-    /// which no callback runs; none when dst is NULL, which discards it.
-    fn string_dst<'a>(self) -> Option<&'a mut [u8]> {
-        let dst = self.dst().cast::<u8>();
-
-        if dst.is_null() {
-            return None;
-        }
-        // SAFETY: a string field's dst holds dst_cap bytes, which nothing
-        // else touches while the string is decoded.
-        Some(unsafe { core::slice::from_raw_parts_mut(dst, (*self.0).dst_cap) })
-    }
-}
-
-/// Calls an array field's `on_elem`, read afresh as C reads it.
-///
-/// # Safety
-///
-/// `sink` is NULL or the array field's sink of the schema
-/// [`parse_schema`]'s caller vouched for.
-unsafe fn call_on_elem(sink: *const JsonArray) -> Result {
-    if sink.is_null() {
-        return Ok(());
-    }
-    // SAFETY: an array field's dst, when set, is a struct json_array.
-    let (on_elem, ctx) = unsafe { ((*sink).on_elem, (*sink).ctx) };
-    match on_elem {
-        // SAFETY: the callback takes the context it comes with.
-        Some(f) => status(unsafe { f(ctx) }),
-        None => Ok(()),
-    }
-}
-
-/// Calls a map field's `on_member` with the member's key.
-///
-/// # Safety
-///
-/// `sink` is NULL or the map field's sink of the schema
-/// [`parse_schema`]'s caller vouched for.
-unsafe fn call_on_member(sink: *const JsonMap, key: &CStr) -> Result {
-    if sink.is_null() {
-        return Ok(());
-    }
-    // SAFETY: a map field's dst, when set, is a struct json_map.
-    let (on_member, ctx) = unsafe { ((*sink).on_member, (*sink).ctx) };
-    match on_member {
-        // SAFETY: the callback takes the context it comes with and a C
-        // string it may not keep.
-        Some(f) => status(unsafe { f(ctx, key.as_ptr()) }),
-        None => Ok(()),
-    }
 }
 
 /// Appends a decoded byte, to `dst` when there is one, which keeps room
@@ -546,14 +358,15 @@ struct Walk<'w> {
     scratch: Vec<u8>,
 }
 
-struct Parser<'d, 'w> {
+struct Parser<'d, 'w, 'a, S> {
     cur: Cursor<'d>,
     depth: u32,
-    fields: Fields,
+    fields: &'a [JsonField<'a, S>],
+    state: &'w mut S,
     walk: Option<Walk<'w>>,
 }
 
-impl Parser<'_, '_> {
+impl<'a, S> Parser<'_, '_, 'a, S> {
     fn visit_open(&mut self, array: bool) -> Result {
         match &mut self.walk {
             Some(w) => w.visitor.open(array),
@@ -597,10 +410,11 @@ impl Parser<'_, '_> {
     }
 
     fn object(&mut self) -> Result {
+        let fields = self.fields;
         let mut buf = [0; 256];
         let mut named = 0u64;
 
-        if self.fields.n > MAX_FIELDS {
+        if fields.len() > MAX_FIELDS {
             self.depth += 1;
             return Err(-E2BIG);
         }
@@ -620,7 +434,10 @@ impl Parser<'_, '_> {
                 None => {
                     let len = self.cur.string(Some(&mut buf))?;
 
-                    self.fields.find(&buf[..len])
+                    fields
+                        .iter()
+                        .enumerate()
+                        .find(|(_, f)| f.is_named(&buf[..len]))
                 }
             };
             self.cur.skip_ws();
@@ -629,13 +446,13 @@ impl Parser<'_, '_> {
             }
             self.cur.pos += 1;
             // Readers that take the first or the last would differ.
-            if let Some(i) = found {
+            if let Some((i, _)) = found {
                 if named & (1 << i) != 0 {
                     return Err(-EINVAL);
                 }
                 named |= 1 << i;
             }
-            self.value(found.map(|i| self.fields.get(i)))?;
+            self.value(found.map(|(_, f)| f))?;
             if self.cur.next_or_end(b'}')? {
                 break;
             }
@@ -645,7 +462,7 @@ impl Parser<'_, '_> {
     }
 
     /// An object with the schema `fields` in place of the current one.
-    fn object_with(&mut self, fields: Fields) -> Result {
+    fn object_with(&mut self, fields: &'a [JsonField<'a, S>]) -> Result {
         let saved = self.fields;
 
         self.fields = fields;
@@ -671,57 +488,55 @@ impl Parser<'_, '_> {
         self.visit_close(true)
     }
 
-    fn array_into(&mut self, f: Field) -> Result {
-        let sink = f.dst().cast::<JsonArray>().cast_const();
-
+    fn array_into(
+        &mut self,
+        f: &JsonField<'a, S>,
+        fields: &'a [JsonField<'a, S>],
+        on_elem: OnElem<'a, S>,
+    ) -> Result {
         self.enter()?;
         if self.empty(b']') {
-            f.set_seen(1);
+            f.seen.set(true);
             return Ok(());
         }
         loop {
-            let sub = f.sub();
-
-            sub.reset_seen();
+            reset_seen(fields);
             self.cur.skip_ws();
             let Some(c) = self.cur.peek() else {
                 return Err(-EINVAL);
             };
-            if sub.n == 1 && sub.get(0).is_unnamed() {
-                self.value(Some(sub.get(0)))?;
-            } else if c == b'{' {
-                self.object_with(sub)?;
-            } else if sub.n == 0 {
-                self.value(None)?;
-            } else {
-                // Not an object, as the sub fields ask.
-                return Err(-EINVAL);
+            match fields {
+                [scalar] if scalar.is_unnamed() => self.value(Some(scalar))?,
+                _ if c == b'{' => self.object_with(fields)?,
+                [] => self.value(None)?,
+                // Not an object, as the fields ask.
+                _ => return Err(-EINVAL),
             }
-            // SAFETY: the array field's sink, of the schema the parse was
-            // given.
-            unsafe { call_on_elem(sink) }?;
+            on_elem(self.state)?;
             if self.cur.next_or_end(b']')? {
                 break;
             }
         }
         self.depth -= 1;
-        f.set_seen(1);
+        f.seen.set(true);
         Ok(())
     }
 
-    fn map(&mut self, f: Field) -> Result {
-        let sink = f.dst().cast::<JsonMap>().cast_const();
+    fn map(
+        &mut self,
+        f: &JsonField<'a, S>,
+        value: &'a JsonField<'a, S>,
+        on_member: OnMember<'a, S>,
+    ) -> Result {
         let mut key = [0; 256];
 
         self.enter()?;
         if self.empty(b'}') {
-            f.set_seen(1);
+            f.seen.set(true);
             return Ok(());
         }
         loop {
-            let sub = f.sub();
-
-            sub.reset_seen();
+            reset_seen(slice::from_ref(value));
             self.cur.skip_ws();
             self.cur.string(Some(&mut key))?;
             self.cur.skip_ws();
@@ -729,21 +544,18 @@ impl Parser<'_, '_> {
                 return Err(-EINVAL);
             }
             self.cur.pos += 1;
-            self.value(if sub.n != 0 { Some(sub.get(0)) } else { None })?;
-            let key = decoded(&key)?;
-            // SAFETY: the map field's sink, of the schema the parse was
-            // given.
-            unsafe { call_on_member(sink, key) }?;
+            self.value(Some(value))?;
+            on_member(self.state, decoded(&key)?)?;
             if self.cur.next_or_end(b'}')? {
                 break;
             }
         }
         self.depth -= 1;
-        f.set_seen(1);
+        f.seen.set(true);
         Ok(())
     }
 
-    fn number(&mut self, f: Option<Field>) -> Result {
+    fn number(&mut self, f: Option<&JsonField<'a, S>>) -> Result {
         let data = self.cur.data;
         let start = self.cur.pos;
         let int_end = self.cur.number()?;
@@ -755,74 +567,76 @@ impl Parser<'_, '_> {
                 None => Ok(()),
             };
         };
-        if f.ty() != T_INT || !integer {
+        let (Value::Int(dst), true) = (f.value, integer) else {
             return Err(-EINVAL);
-        }
+        };
         // An integer field takes the integer part alone, within __s64.
         let value = core::str::from_utf8(&data[start..int_end])
             .ok()
             .and_then(|text| text.parse::<i64>().ok())
             .ok_or(-EINVAL)?;
-        f.set_int(value);
-        f.set_seen(1);
+        *dst(self.state) = value;
+        f.seen.set(true);
         Ok(())
     }
 
-    fn string(&mut self, f: Option<Field>) -> Result {
-        match f {
-            Some(f) if f.ty() != T_STRING => Err(-EINVAL),
-            Some(f) => {
-                self.cur.string(f.string_dst())?;
-                f.set_seen(1);
-                Ok(())
-            }
-            None => match &mut self.walk {
+    fn string(&mut self, f: Option<&JsonField<'a, S>>) -> Result {
+        let Some(f) = f else {
+            return match &mut self.walk {
                 Some(w) => {
                     self.cur.string(Some(&mut w.scratch))?;
                     w.visitor.string(decoded(&w.scratch)?)
                 }
                 None => self.cur.string(None).map(drop),
-            },
-        }
+            };
+        };
+        let Value::String(dst) = f.value else {
+            return Err(-EINVAL);
+        };
+        self.cur.string(Some(dst(self.state)))?;
+        f.seen.set(true);
+        Ok(())
     }
 
-    fn literal(&mut self, f: Option<Field>, text: &[u8], value: c_int) -> Result {
+    fn literal(&mut self, f: Option<&JsonField<'a, S>>, text: &[u8], value: c_int) -> Result {
         self.cur.lit(text)?;
-        match f {
-            // Null is never dispatched, whatever the field's type.
-            Some(_) if value < 0 => Ok(()),
-            Some(f) if f.ty() != T_BOOL => Err(-EINVAL),
-            Some(f) => {
-                f.set_bool(value);
-                f.set_seen(1);
-                Ok(())
-            }
-            None => self.visit_literal(value),
+        let Some(f) = f else {
+            return self.visit_literal(value);
+        };
+        // Null is never dispatched, whatever the field's type.
+        if value < 0 {
+            return Ok(());
         }
+        let Value::Bool(dst) = f.value else {
+            return Err(-EINVAL);
+        };
+        *dst(self.state) = value != 0;
+        f.seen.set(true);
+        Ok(())
     }
 
-    fn value(&mut self, f: Option<Field>) -> Result {
+    fn value(&mut self, f: Option<&'a JsonField<'a, S>>) -> Result {
         self.cur.skip_ws();
         let Some(c) = self.cur.peek() else {
             return Err(-EINVAL);
         };
 
         match c {
-            b'{' => match f {
-                Some(f) if f.ty() == T_MAP => self.map(f),
-                Some(f) if f.ty() != T_OBJECT => Err(-EINVAL),
-                Some(f) => {
-                    self.object_with(f.sub())?;
-                    f.set_seen(1);
+            b'{' => match f.map(|f| (f, f.value)) {
+                Some((f, Value::Map(value, on_member))) => self.map(f, value, on_member),
+                Some((f, Value::Object(fields))) => {
+                    self.object_with(fields)?;
+                    f.seen.set(true);
                     Ok(())
                 }
+                Some(_) => Err(-EINVAL),
                 // A discarded object takes an empty schema, so that its
                 // keys cannot dispatch into the enclosing one.
-                None => self.object_with(Fields::NONE),
+                None => self.object_with(&[]),
             },
-            b'[' => match f {
-                Some(f) if f.ty() != T_ARRAY => Err(-EINVAL),
-                Some(f) => self.array_into(f),
+            b'[' => match f.map(|f| (f, f.value)) {
+                Some((f, Value::Array(fields, on_elem))) => self.array_into(f, fields, on_elem),
+                Some(_) => Err(-EINVAL),
                 None => self.array(),
             },
             b'"' => self.string(f),
@@ -834,16 +648,26 @@ impl Parser<'_, '_> {
     }
 }
 
-fn parse(data: &[u8], fields: Fields) -> Result {
+/// Parses the object `data` holds against the schema `fields`: each
+/// value they declare into its place in `state`, and each element of an
+/// array or member of a map to its sink, with the state, once parsed.
+/// What `fields` do not declare is checked and discarded. A sink's error
+/// ends the parse and is its result; the rest are negative errnos.
+pub(crate) fn parse_schema<'a, S>(
+    data: &[u8],
+    fields: &'a [JsonField<'a, S>],
+    state: &mut S,
+) -> Result {
     if data.len() > MAX_BYTES {
         return Err(-E2BIG);
     }
-    fields.reset_seen();
+    reset_seen(fields);
 
     let mut p = Parser {
         cur: Cursor { data, pos: 0 },
         depth: 0,
         fields,
+        state,
         walk: None,
     };
     p.cur.skip_ws();
@@ -874,7 +698,8 @@ pub(crate) fn walk(data: &[u8], visitor: &mut dyn Visit) -> Result {
     let mut p = Parser {
         cur: Cursor { data, pos: 0 },
         depth: 0,
-        fields: Fields::NONE,
+        fields: &[],
+        state: &mut (),
         walk: Some(Walk { visitor, scratch }),
     };
     p.value(None)?;
@@ -883,15 +708,4 @@ pub(crate) fn walk(data: &[u8], visitor: &mut dyn Visit) -> Result {
         return Err(-EINVAL);
     }
     Ok(())
-}
-
-/// json_parse() for Rust code, on a schema of C layout.
-///
-/// # Safety
-///
-/// The `n` fields at `fields`, and the sub fields, destinations and
-/// sinks they point to, are valid as json.h describes them, and nothing
-/// but the sinks' callbacks touches them during the parse.
-pub(crate) unsafe fn parse_schema(data: &[u8], fields: *mut JsonField, n: usize) -> c_int {
-    errno(parse(data, Fields { ptr: fields, n }))
 }

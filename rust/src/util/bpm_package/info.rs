@@ -84,33 +84,21 @@ fn identify(archive: &CStr, environment: &[u8], info: &mut PackageInfo) -> c_int
         version: [0; MAX_NAME],
         signer: [0; MAX_DIGEST],
     };
-    let mut package_fields = [
-        JsonField::string(c"name", (&raw mut parsed.name).cast(), MAX_NAME),
-        JsonField::string(c"version", (&raw mut parsed.version).cast(), MAX_NAME),
+    let package_fields = [
+        JsonField::string(c"name", |p: &mut Parsed| &mut p.name),
+        JsonField::string(c"version", |p| &mut p.version),
     ];
-    let mut shirudo_fields = [JsonField::string(
+    let shirudo_fields = [JsonField::string(
         c"spki_sha256_fingerprint",
-        (&raw mut parsed.signer).cast(),
-        MAX_DIGEST,
+        |p: &mut Parsed| &mut p.signer,
     )];
-    let mut root = [
-        JsonField::object(
-            c"package",
-            package_fields.as_mut_ptr(),
-            package_fields.len(),
-        ),
-        JsonField::object(
-            c"shirudo",
-            shirudo_fields.as_mut_ptr(),
-            shirudo_fields.len(),
-        ),
+    let root = [
+        JsonField::object(c"package", &package_fields),
+        JsonField::object(c"shirudo", &shirudo_fields),
     ];
-    // SAFETY: every pointer of the schema names a local of this frame,
-    // which outlives the parse and is touched meanwhile only through
-    // those pointers.
-    let ret = unsafe { parse_schema(environment, root.as_mut_ptr(), root.len()) };
+    let ret = parse_schema(environment, &root, &mut parsed);
 
-    if ret != 0
+    if ret.is_err()
         || !root[0].seen()
         || parsed.name[0] == 0
         || parsed.version[0] == 0

@@ -31,8 +31,7 @@ fn emitted(st: &[BpmStateEntry], cap: usize) -> (c_int, Vec<u8>) {
 fn parsed(doc: &[u8]) -> (c_int, Vec<BpmStateEntry>) {
     let mut out = vec![BpmStateEntry::new(); MAX_STATE as usize];
     let mut n = 0;
-    // SAFETY: room for MAX_STATE entries.
-    let ret = unsafe { parse(doc, out.as_mut_ptr(), &mut n) };
+    let ret = parse(doc, &mut out, &mut n);
 
     out.truncate(n as usize);
     (ret, out)

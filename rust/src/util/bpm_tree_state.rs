@@ -623,17 +623,11 @@ unsafe fn selector_matches(s: *const TreeSelector) -> c_int {
     1
 }
 
-/// json_parse(): the `len` bytes at `data` against the schema.
-///
-/// # Safety
-///
-/// `data` holds `len` bytes, and the fields are a valid schema.
-unsafe fn json_parse(data: *const u8, len: usize, fields: &mut [JsonField]) -> c_int {
-    if len > MAX_BYTES {
-        return -E2BIG;
-    }
-    // SAFETY: the caller's bytes and schema.
-    unsafe { parse_schema(ffi::slice(data, len), fields.as_mut_ptr(), fields.len()) }
+/// A record as its document holds it: the document's schema version
+/// apart.
+struct Versioned<'r, T> {
+    schema: i64,
+    record: &'r mut T,
 }
 
 /// Whether `hex` is exactly 64 hex digits: a SHA-256 digest.
@@ -668,19 +662,23 @@ unsafe fn pending_parse(body: *const c_char, len: usize, out: *mut TreePending) 
         out.write_bytes(0, 1);
         &mut *out
     };
-    let mut schema = 0i64;
-    let mut fields = [
-        JsonField::int(c"schema", &mut schema),
-        JsonField::int(c"seq", &mut out.seq),
-        JsonField::string(c"id", out.id.as_mut_ptr(), out.id.len()),
-        JsonField::string(
-            c"operation_digest",
-            out.operation_digest.as_mut_ptr(),
-            out.operation_digest.len(),
-        ),
+    let mut pending = Versioned {
+        schema: 0,
+        record: out,
+    };
+    let fields = [
+        JsonField::int(c"schema", |p: &mut Versioned<TreePending>| &mut p.schema),
+        JsonField::int(c"seq", |p| &mut p.record.seq),
+        JsonField::string(c"id", |p| &mut p.record.id),
+        JsonField::string(c"operation_digest", |p| &mut p.record.operation_digest),
     ];
-    // SAFETY: the caller's bytes, and a schema of the record's fields.
-    let mut ret = unsafe { json_parse(body.cast(), len, &mut fields) };
+    // SAFETY: the caller's bytes.
+    let body = unsafe { ffi::slice(body.cast(), len) };
+    let mut ret = parse_schema(body, &fields, &mut pending).err().unwrap_or(0);
+    let Versioned {
+        schema,
+        record: out,
+    } = pending;
 
     if ret == 0 {
         let mut digest = [0u8; 32];
@@ -756,37 +754,33 @@ unsafe fn state_read(path: *const c_char, out: *mut TreeState) -> c_int {
         out.write_bytes(0, 1);
         &mut *out
     };
-    let mut schema = 0i64;
     // SAFETY: the caller's C string.
     let body = match read(unsafe { CStr::from_ptr(path) }, MAX_BYTES) {
         Ok(body) => body,
         Err(err) => return err,
     };
-    let mut f = [
-        JsonField::int(c"schema", &mut schema),
-        JsonField::string(c"tree_id", out.tree_id.as_mut_ptr(), out.tree_id.len()),
-        JsonField::int(c"generation", &mut out.generation),
-        JsonField::int(c"last_seq", &mut out.last_seq),
-        JsonField::string(
-            c"projection_root",
-            out.projection_root.as_mut_ptr(),
-            out.projection_root.len(),
-        ),
-        JsonField::string(
-            c"projection_root_tpm",
-            out.projection_root_tpm.as_mut_ptr(),
-            out.projection_root_tpm.len(),
-        ),
-        JsonField::string(
-            c"manifest_digest",
-            out.manifest_digest.as_mut_ptr(),
-            out.manifest_digest.len(),
-        ),
-        JsonField::int(c"head_seq", &mut out.head_seq),
-        JsonField::int(c"segment_base_seq", &mut out.segment_base_seq),
+    let mut state = Versioned {
+        schema: 0,
+        record: out,
+    };
+    let f = [
+        JsonField::int(c"schema", |s: &mut Versioned<TreeState>| &mut s.schema),
+        JsonField::string(c"tree_id", |s| &mut s.record.tree_id),
+        JsonField::int(c"generation", |s| &mut s.record.generation),
+        JsonField::int(c"last_seq", |s| &mut s.record.last_seq),
+        JsonField::string(c"projection_root", |s| &mut s.record.projection_root),
+        JsonField::string(c"projection_root_tpm", |s| {
+            &mut s.record.projection_root_tpm
+        }),
+        JsonField::string(c"manifest_digest", |s| &mut s.record.manifest_digest),
+        JsonField::int(c"head_seq", |s| &mut s.record.head_seq),
+        JsonField::int(c"segment_base_seq", |s| &mut s.record.segment_base_seq),
     ];
-    // SAFETY: the file's bytes, and a schema of the state's fields.
-    let mut ret = unsafe { json_parse(body.as_ptr(), body.len(), &mut f) };
+    let mut ret = parse_schema(&body, &f, &mut state).err().unwrap_or(0);
+    let Versioned {
+        schema,
+        record: out,
+    } = state;
     // tree_id, last_seq, both projection roots, head and segment base.
     let required = [1, 3, 4, 5, 7, 8];
 
@@ -907,6 +901,13 @@ unsafe fn event_append(
     }
 }
 
+/// What a line of the eventlog gives.
+struct EventLine {
+    seq: i64,
+    digest: [u8; 128],
+    projection: [u8; 65],
+}
+
 /// What the eventlog's records, whole lines in order, chain to: each
 /// SHA-256 of the chain so far and the record's operation digest, which
 /// must be the projection root it recorded. Its root into `out`: 0, or
@@ -937,24 +938,26 @@ unsafe fn event_replay(path: *const c_char, out: *mut u8) -> c_int {
         .split(|&c| c == b'\n')
         .filter(|l| !l.is_empty())
     {
-        let mut digest = [0u8; 128];
-        let mut projection = [0u8; 65];
-        let mut seq = 0i64;
-        let mut f = [
-            JsonField::int(c"seq", &mut seq),
-            JsonField::string(c"digest", digest.as_mut_ptr(), digest.len()),
-            JsonField::string(
-                c"projection_root",
-                projection.as_mut_ptr(),
-                projection.len(),
-            ),
+        let mut record = EventLine {
+            seq: 0,
+            digest: [0; 128],
+            projection: [0; 65],
+        };
+        let f = [
+            JsonField::int(c"seq", |r: &mut EventLine| &mut r.seq),
+            JsonField::string(c"digest", |r| &mut r.digest),
+            JsonField::string(c"projection_root", |r| &mut r.projection),
         ];
         let mut d = [0u8; 32];
         let mut recorded = [0u8; 32];
-        // SAFETY: the line's bytes, and a schema of the record's fields.
-        let parsed = unsafe { json_parse(line.as_ptr(), line.len(), &mut f) };
+        let parsed = parse_schema(line, &f, &mut record);
+        let EventLine {
+            seq,
+            digest,
+            projection,
+        } = record;
 
-        let bad = parsed != 0
+        let bad = parsed.is_err()
             || !f[0].seen()
             || !f[1].seen()
             || !f[2].seen()
@@ -1037,25 +1040,37 @@ fn outcome_emit(line: &OutcomeLine, buf: &mut [u8; OUTCOME_LINE_MAX]) -> Result<
     }
 }
 
-fn outcome_parse(text: &[u8]) -> Result<OutcomeLine, c_int> {
-    let (mut projection, mut history) = ([0u8; 65], [0u8; 65]);
-    let mut line = OutcomeLine::default();
-    let mut schema = 0i64;
-    let mut f = [
-        JsonField::int(c"schema", &mut schema),
-        JsonField::int(c"seq", &mut line.seq),
-        JsonField::int(c"outcome", &mut line.outcome),
-        JsonField::string(
-            c"projection_root",
-            projection.as_mut_ptr(),
-            projection.len(),
-        ),
-        JsonField::string(c"history_root", history.as_mut_ptr(), history.len()),
-    ];
-    // SAFETY: the line's bytes, and a schema of its fields.
-    let parsed = unsafe { json_parse(text.as_ptr(), text.len(), &mut f) };
+/// What a line of the record gives, its roots in hex.
+struct OutcomeJson {
+    schema: i64,
+    line: OutcomeLine,
+    projection: [u8; 65],
+    history: [u8; 65],
+}
 
-    if parsed != 0
+fn outcome_parse(text: &[u8]) -> Result<OutcomeLine, c_int> {
+    let mut json = OutcomeJson {
+        schema: 0,
+        line: OutcomeLine::default(),
+        projection: [0; 65],
+        history: [0; 65],
+    };
+    let f = [
+        JsonField::int(c"schema", |j: &mut OutcomeJson| &mut j.schema),
+        JsonField::int(c"seq", |j| &mut j.line.seq),
+        JsonField::int(c"outcome", |j| &mut j.line.outcome),
+        JsonField::string(c"projection_root", |j| &mut j.projection),
+        JsonField::string(c"history_root", |j| &mut j.history),
+    ];
+    let parsed = parse_schema(text, &f, &mut json);
+    let OutcomeJson {
+        schema,
+        mut line,
+        projection,
+        history,
+    } = json;
+
+    if parsed.is_err()
         || schema != 1
         || line.seq <= 0
         || !outcome_valid(line.outcome)

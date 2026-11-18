@@ -4,13 +4,13 @@
 //! The packages bpm installed, as /var/lib/shirudo/bpm/state.json records
 //! them.
 
-use core::ffi::{CStr, c_int, c_void};
+use core::ffi::{CStr, c_int};
 
 use crate::errno::{E2BIG, EINVAL, ENOENT};
 use crate::sys::libc::PATH_MAX;
 use crate::text::{cstr, strsprintf};
 use crate::util::bpm_oci::{MAX_NAME, name_ok, version_ok};
-use crate::util::json::{JsonArray, JsonEmit, JsonField, parse_schema};
+use crate::util::json::{JsonEmit, JsonField, parse_schema};
 use crate::util::seal::{seal_mkdir_p, seal_write_file};
 
 /// `BPM_MAX_STATE`: the most packages the state records.
@@ -47,25 +47,20 @@ impl BpmStateEntry {
 }
 
 /// Where the entries go, and the scratch entry the schema fills for each
-/// before `on_state_entry()` takes it.
-struct StateSink {
-    items: *mut BpmStateEntry,
-    n: c_int,
+/// before `take_entry()` takes it.
+struct StateSink<'s> {
+    items: &'s mut [BpmStateEntry],
+    n: usize,
     scratch: BpmStateEntry,
 }
 
-unsafe extern "C" fn on_state_entry(ud: *mut c_void) -> c_int {
-    let s = ud.cast::<StateSink>();
-    let mut expected = [0u8; PATH_MAX];
-
-    // SAFETY: the sink bpm_state_parse() made the array's context, read
-    // and written through this pointer alone, as the parser writes the
-    // scratch entry through its own and is not running now.
-    unsafe {
-        if (*s).n >= MAX_STATE {
-            return -E2BIG;
-        }
-        let e = &(*s).scratch;
+impl StateSink<'_> {
+    fn take_entry(&mut self) -> Result<(), c_int> {
+        let mut expected = [0u8; PATH_MAX];
+        let Some(item) = self.items.get_mut(self.n) else {
+            return Err(-E2BIG);
+        };
+        let e = &self.scratch;
         let (name, version, source) = (cstr(&e.name), cstr(&e.version), cstr(&e.source));
 
         if name.is_empty()
@@ -74,58 +69,44 @@ unsafe extern "C" fn on_state_entry(ud: *mut c_void) -> c_int {
             || !version_ok(version)
             || !name_ok(source)
         {
-            return -EINVAL;
+            return Err(-EINVAL);
         }
         if strsprintf(&mut expected, &[PACKAGES_DIR, b"/", name, b"/", version]).is_err()
             || cstr(&expected) != cstr(&e.path)
         {
-            return -EINVAL;
+            return Err(-EINVAL);
         }
-        (*s).items.add((*s).n as usize).write((*s).scratch);
-        (*s).n += 1;
+        *item = self.scratch;
+        self.n += 1;
         // A field the next entry leaves out is not this entry's.
-        (*s).scratch = BpmStateEntry::new();
+        self.scratch = BpmStateEntry::new();
+        Ok(())
     }
-    0
 }
 
-/// The entries of a state document into `st`, which holds
-/// `BPM_MAX_STATE`, and their count into `n`: 0, -EINVAL or -E2BIG.
-///
-/// # Safety
-///
-/// `st` has room for `BPM_MAX_STATE` entries.
-unsafe fn parse(body: &[u8], st: *mut BpmStateEntry, n: &mut c_int) -> c_int {
+/// The entries of a state document into `st`, as many as it holds, and
+/// their count into `n`: 0, -EINVAL or -E2BIG.
+fn parse(body: &[u8], st: &mut [BpmStateEntry], n: &mut c_int) -> c_int {
     let mut sink = StateSink {
         items: st,
         n: 0,
         scratch: BpmStateEntry::new(),
     };
-    let mut arr = JsonArray::new(on_state_entry, (&raw mut sink).cast());
-    let mut sub = [
-        JsonField::string(c"name", (&raw mut sink.scratch.name).cast(), MAX_NAME),
-        JsonField::string(c"version", (&raw mut sink.scratch.version).cast(), MAX_NAME),
-        JsonField::string(c"source", (&raw mut sink.scratch.source).cast(), MAX_NAME),
-        JsonField::string(c"path", (&raw mut sink.scratch.path).cast(), PATH_MAX),
+    let sub = [
+        JsonField::string(c"name", |s: &mut StateSink| &mut s.scratch.name),
+        JsonField::string(c"version", |s| &mut s.scratch.version),
+        JsonField::string(c"source", |s| &mut s.scratch.source),
+        JsonField::string(c"path", |s| &mut s.scratch.path),
     ];
-    let mut root = [JsonField::array(
-        c"packages",
-        &raw mut arr,
-        sub.as_mut_ptr(),
-        sub.len(),
-    )];
-    // SAFETY: every pointer of the schema names a local of this frame,
-    // which outlives the parse and is touched meanwhile only through
-    // those pointers and the sink's.
-    let ret = unsafe { parse_schema(body, root.as_mut_ptr(), root.len()) };
+    let root = [JsonField::array(c"packages", &sub, &StateSink::take_entry)];
 
-    if ret != 0 {
-        return ret;
+    if let Err(err) = parse_schema(body, &root, &mut sink) {
+        return err;
     }
     if !root[0].seen() {
         return -EINVAL;
     }
-    *n = sink.n;
+    *n = sink.n as c_int;
     0
 }
 
@@ -154,12 +135,9 @@ fn emit(st: &[BpmStateEntry], buf: &mut [u8], len: &mut usize) -> c_int {
     0
 }
 
-/// The recorded entries; none when there is no state yet.
-///
-/// # Safety
-///
-/// `st` has room for `BPM_MAX_STATE` entries.
-unsafe fn read(st: *mut BpmStateEntry, n: &mut c_int) -> c_int {
+/// The recorded entries, as many as `st` holds; none when there is no
+/// state yet.
+fn read(st: &mut [BpmStateEntry], n: &mut c_int) -> c_int {
     let body = match crate::util::io::read(STATE_PATH, STATE_FILE_MAX) {
         Ok(body) => body,
         Err(err) if err == -ENOENT => {
@@ -168,8 +146,7 @@ unsafe fn read(st: *mut BpmStateEntry, n: &mut c_int) -> c_int {
         }
         Err(err) => return err,
     };
-    // SAFETY: the caller's room.
-    unsafe { parse(&body, st, n) }
+    parse(&body, st, n)
 }
 
 /// The packages the state records.
@@ -177,8 +154,7 @@ pub(crate) fn read_all() -> Result<Vec<BpmStateEntry>, c_int> {
     let mut st = vec![BpmStateEntry::new(); MAX_STATE as usize];
     let mut n = 0;
 
-    // SAFETY: room for MAX_STATE entries.
-    match unsafe { read(st.as_mut_ptr(), &mut n) } {
+    match read(&mut st, &mut n) {
         0 => {
             st.truncate(usize::try_from(n).unwrap_or(0));
             Ok(st)

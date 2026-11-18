@@ -10,7 +10,7 @@
 //! so that a target never meets an operation its own tree sync would
 //! reject or fail.
 
-use core::ffi::{CStr, c_int, c_void};
+use core::ffi::{CStr, c_int};
 use core::ptr;
 
 use super::beefile::{MAX_ENTRIES, MAX_FIXES, Spec, Upatch as BuildUpatch, fix_id_ok, parse};
@@ -40,7 +40,7 @@ use crate::util::bpm_tree::{
 use crate::util::bpm_tree_overlap::{add_live, add_withdrawn, selectors_disjoint};
 use crate::util::help::{Help, HelpSection, is_help, print_help};
 use crate::util::hex::{self, sha256_digest_encode};
-use crate::util::json::{JsonArray, JsonEmit, JsonField, parse_schema};
+use crate::util::json::{JsonEmit, JsonField, parse_schema};
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptName, OptParser, OptSpec};
 use crate::util::paths::{key_file, keys_dir};
 use crate::util::upatch::{self, ProgSpec, specs_free, specs_parse, specs_xdp_classes};
@@ -616,7 +616,6 @@ fn new_id(tree_id: Option<&[u8]>, package: &[u8], reference: &[u8], out: &mut [u
 struct FixesReader<'a> {
     ops: &'a [TreeOperation],
     fixes: Vec<Vec<Vec<u8>>>,
-    fixes_field: *const JsonField,
     seq: i64,
     ids: Vec<Vec<u8>>,
     id: [u8; STRING_MAX],
@@ -626,75 +625,60 @@ fn fixes_valid(ids: &[Vec<u8>]) -> bool {
     !ids.is_empty() && ids.iter().all(|id| fix_id_ok(id)) && ids.windows(2).all(|w| w[0] < w[1])
 }
 
-unsafe extern "C" fn take_fix(ctx: *mut c_void) -> c_int {
-    // SAFETY: the reader the parse is given.
-    let r = unsafe { &mut *ctx.cast::<FixesReader<'_>>() };
-
+fn take_fix(r: &mut FixesReader) -> Result<(), c_int> {
     if r.ids.len() >= MAX_FIXES {
-        return -E2BIG;
+        return Err(-E2BIG);
     }
     r.ids.push(cstr(&r.id).to_vec());
-    0
+    Ok(())
 }
 
-unsafe extern "C" fn take_fixes_operation(ctx: *mut c_void) -> c_int {
-    // SAFETY: the reader the parse is given.
-    let r = unsafe { &mut *ctx.cast::<FixesReader<'_>>() };
+/// Keeps the fixes of the operation just read, in order; `fixes_field`
+/// says whether it gave any.
+fn take_fixes_operation(
+    r: &mut FixesReader,
+    fixes_field: &JsonField<'_, FixesReader>,
+) -> Result<(), c_int> {
     let n = r.fixes.len();
 
     let Some(op) = r.ops.get(n) else {
-        return -EINVAL;
+        return Err(-EINVAL);
     };
     if r.seq != op.seq {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
-    // SAFETY: the fixes field of the schema, which outlives the parse.
-    let seen = unsafe { (*r.fixes_field).seen() };
-    if seen && (cstr(&op.op) != b"add" || !fixes_valid(&r.ids)) {
-        return -EINVAL;
+    if fixes_field.seen() && (cstr(&op.op) != b"add" || !fixes_valid(&r.ids)) {
+        return Err(-EINVAL);
     }
     let ids = core::mem::take(&mut r.ids);
     r.fixes.push(ids);
     r.seq = 0;
-    0
+    Ok(())
 }
 
 /// The fixes of each operation of `p` from its document's bytes.
 fn read_fixes(document: &[u8], p: &TreePublication) -> Result<Vec<Vec<Vec<u8>>>, c_int> {
-    let mut r = Box::new(FixesReader {
+    let mut r = FixesReader {
         // SAFETY: the publication's operations.
         ops: unsafe { p.operations() },
         fixes: Vec::new(),
-        fixes_field: ptr::null(),
         seq: 0,
         ids: Vec::new(),
         id: [0; STRING_MAX],
-    });
-    let ctx: *mut c_void = ptr::from_mut(&mut *r).cast();
-    let mut id_sink = JsonArray::new(take_fix, ctx);
-    let mut operation_sink = JsonArray::new(take_fixes_operation, ctx);
-    let mut id = [JsonField::string(c"", r.id.as_mut_ptr(), STRING_MAX)];
-    let mut operation = [
-        JsonField::int(c"seq", &raw mut r.seq),
-        JsonField::array(c"fixes", &raw mut id_sink, id.as_mut_ptr(), id.len()),
+    };
+    let id = [JsonField::string(c"", |r: &mut FixesReader| &mut r.id)];
+    let operation = [
+        JsonField::int(c"seq", |r: &mut FixesReader| &mut r.seq),
+        JsonField::array(c"fixes", &id, &take_fix),
     ];
-    r.fixes_field = &raw const operation[1];
-    let mut root = [JsonField::array(
-        c"operations",
-        &raw mut operation_sink,
-        operation.as_mut_ptr(),
-        operation.len(),
-    )];
-    // SAFETY: the document's bytes, and a schema whose fields and sinks
-    // point into the reader and the arrays here, which outlive the parse.
-    let ret = unsafe { parse_schema(document, root.as_mut_ptr(), root.len()) };
-    if ret != 0 {
-        return Err(ret);
-    }
+    let take_operation = |r: &mut FixesReader| take_fixes_operation(r, &operation[1]);
+    let root = [JsonField::array(c"operations", &operation, &take_operation)];
+
+    parse_schema(document, &root, &mut r)?;
     if r.fixes.len() != p.n_operations as usize {
         return Err(-EINVAL);
     }
-    Ok(core::mem::take(&mut r.fixes))
+    Ok(r.fixes)
 }
 
 /// One bpm tree append, filled in by its steps in turn.

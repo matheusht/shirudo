@@ -309,7 +309,7 @@ reader of :src:`rust/src/util/upatch.rs` and its ``.rodata`` reader of
 :src:`rust/src/util/upatch_rodata.rs`, and the tree publications of
 :src:`rust/src/util/bpm_tree.rs`, whose CBMC proofs went with the C
 they proved when the modules moved to Rust; and how
-``json_parse()`` dispatches objects, arrays and maps to their schemas,
+``parse_schema()`` dispatches objects, arrays and maps to their schemas,
 the OTLP headers a configuration adds, the registry references and URLs,
 the kernel configuration the tree selectors read, the tree log, the
 evidence document beyond its PCRs, the config update record, the site

@@ -467,6 +467,14 @@ pub(super) fn retry_after(value: &[u8], now: i64) -> Result<u64, c_int> {
     Err(-EINVAL)
 }
 
+/// What a partial success holds: the rejected count, as a string or as
+/// a number, and the message.
+struct Partial {
+    text: [u8; 32],
+    rejected: i64,
+    error: [u8; 256],
+}
+
 /// The proto3 JSON mapping lets a receiver send the rejected count as a
 /// string or a number, and the message is advisory: one that does not
 /// fit is left out rather than failing an export the collector took.
@@ -479,42 +487,42 @@ pub(super) fn check_partial_success(signal: c_int, body: &[u8]) -> c_int {
     } else {
         c"rejectedDataPoints"
     };
-    let mut text = [0u8; 32];
-    let mut rejected: i64 = 0;
-    let mut partial = [JsonField::string(count, text.as_mut_ptr(), text.len())];
-    let mut root = [JsonField::object(
-        c"partialSuccess",
-        partial.as_mut_ptr(),
-        1,
-    )];
-    // SAFETY: the schema and its destinations, which outlive the parse.
-    if unsafe { parse_schema(body, root.as_mut_ptr(), 1) } != 0 {
-        partial[0] = JsonField::int(count, &mut rejected);
-        root[0] = JsonField::object(c"partialSuccess", partial.as_mut_ptr(), 1);
-        // SAFETY: as above.
-        if unsafe { parse_schema(body, root.as_mut_ptr(), 1) } != 0 {
+    let mut partial = Partial {
+        text: [0; 32],
+        rejected: 0,
+        error: [0; 256],
+    };
+    let as_text = [JsonField::string(count, |p: &mut Partial| &mut p.text)];
+    let as_number = [JsonField::int(count, |p: &mut Partial| &mut p.rejected)];
+    let message = [JsonField::string(c"errorMessage", |p: &mut Partial| {
+        &mut p.error
+    })];
+    let root = [JsonField::object(c"partialSuccess", &as_text)];
+
+    if parse_schema(body, &root, &mut partial).is_err() {
+        let root = [JsonField::object(c"partialSuccess", &as_number)];
+
+        if parse_schema(body, &root, &mut partial).is_err() {
             return -EBADMSG;
         }
-    } else if partial[0].seen() {
-        match parse_s64(crate::text::cstr(&text), 0, i64::MAX) {
-            Ok(v) => rejected = v,
+    } else if as_text[0].seen() {
+        match parse_s64(crate::text::cstr(&partial.text), 0, i64::MAX) {
+            Ok(v) => partial.rejected = v,
             Err(_) => return -EBADMSG,
         }
     }
+    let rejected = partial.rejected;
     if rejected < 0 {
         return -EBADMSG;
     }
     if rejected == 0 {
         return 0;
     }
-    let mut error = [0u8; 256];
-    partial[0] = JsonField::string(c"errorMessage", error.as_mut_ptr(), error.len());
-    root[0] = JsonField::object(c"partialSuccess", partial.as_mut_ptr(), 1);
-    // SAFETY: as above.
-    if unsafe { parse_schema(body, root.as_mut_ptr(), 1) } != 0 {
-        error[0] = 0;
+    let root = [JsonField::object(c"partialSuccess", &message)];
+    if parse_schema(body, &root, &mut partial).is_err() {
+        partial.error[0] = 0;
     }
-    let error = crate::text::cstr(&error);
+    let error = crate::text::cstr(&partial.error);
     let what = if signal == LOG {
         "log record(s)"
     } else {

@@ -4,48 +4,49 @@
 //! Manifests: the layers of one as a registry wrote them, and a
 //! descriptor as shirudo writes one.
 
-use core::ffi::{c_int, c_void};
+use core::ffi::c_int;
 
-use super::{Descriptor, MAX_DIGEST, MAX_MEDIA, MAX_NAME, PATH_MAX, copy_string, cstr};
+use super::{Descriptor, MAX_NAME, copy_string, cstr};
 use crate::errno::{E2BIG, EINVAL};
 use crate::util::hex::sha256_digest_decode;
-use crate::util::json::{JsonArray, JsonEmit, JsonField, parse_schema};
+use crate::util::json::{JsonEmit, JsonField, parse_schema};
 
-/// Where the layers go, and the scratch descriptor the schema fills for
-/// each before `on_descriptor()` takes it.
-struct DescSink {
-    items: *mut Descriptor,
+/// What a manifest's schema fills: its schema version, where the layers
+/// go, the scratch descriptor the schema fills for each before
+/// `take_descriptor()` takes it, and the package name.
+struct DescSink<'l> {
+    schema: i64,
+    items: &'l mut [Descriptor],
     n: c_int,
     max: c_int,
     scratch: Descriptor,
     package_name: [u8; MAX_NAME],
 }
 
-unsafe extern "C" fn on_descriptor(ud: *mut c_void) -> c_int {
-    let s = ud.cast::<DescSink>();
-    let mut digest = [0u8; 32];
+impl DescSink<'_> {
+    fn take_descriptor(&mut self) -> Result<(), c_int> {
+        let mut digest = [0u8; 32];
 
-    // SAFETY: the sink parse_manifest() made the array's context, read
-    // and written through this pointer alone, as the parser writes the
-    // scratch descriptor through its own and is not running now.
-    unsafe {
-        if (*s).n >= (*s).max {
-            return -E2BIG;
+        if self.n >= self.max {
+            return Err(-E2BIG);
         }
         // The registry wrote this: a layer is all three or none.
-        if (*s).scratch.media[0] == 0
-            || (*s).scratch.size < 0
-            || sha256_digest_decode((&raw const (*s).scratch.digest).cast(), digest.as_mut_ptr())
-                != 0
+        if self.scratch.media[0] == 0
+            || self.scratch.size < 0
+            // SAFETY: a C string the parser wrote, and room for a digest.
+            || unsafe {
+                sha256_digest_decode(self.scratch.digest.as_ptr().cast(), digest.as_mut_ptr())
+            } != 0
         {
-            return -EINVAL;
+            return Err(-EINVAL);
         }
-        (*s).items.add((*s).n as usize).write((*s).scratch);
-        (*s).n += 1;
-        (*s).scratch = Descriptor::new();
-        (*s).scratch.size = -1;
+        // n is below max, which the layers hold.
+        self.items[self.n as usize] = self.scratch;
+        self.n += 1;
+        self.scratch = Descriptor::new();
+        self.scratch.size = -1;
+        Ok(())
     }
-    0
 }
 
 /// The layers of an image manifest of schema 2, as many as `layers`
@@ -57,55 +58,37 @@ pub(crate) fn parse_manifest(
     package_name: Option<&mut [u8]>,
 ) -> c_int {
     let mut sink = DescSink {
-        items: layers.as_mut_ptr(),
-        n: 0,
+        schema: 0,
         max: c_int::try_from(layers.len()).unwrap_or(c_int::MAX),
+        items: layers,
+        n: 0,
         scratch: Descriptor::new(),
         package_name: [0; MAX_NAME],
     };
-    let mut schema = 0i64;
 
     sink.scratch.size = -1;
-    let mut arr = JsonArray::new(on_descriptor, (&raw mut sink).cast());
-    let mut layer_annotations = [JsonField::string(
+    let layer_annotations = [JsonField::string(
         c"org.opencontainers.image.title",
-        (&raw mut sink.scratch.title).cast(),
-        PATH_MAX,
+        |s: &mut DescSink| &mut s.scratch.title,
     )];
-    let mut sub = [
-        JsonField::string(
-            c"mediaType",
-            (&raw mut sink.scratch.media).cast(),
-            MAX_MEDIA,
-        ),
-        JsonField::string(c"digest", (&raw mut sink.scratch.digest).cast(), MAX_DIGEST),
-        JsonField::int(c"size", &raw mut sink.scratch.size),
-        JsonField::object(
-            c"annotations",
-            layer_annotations.as_mut_ptr(),
-            layer_annotations.len(),
-        ),
+    let sub = [
+        JsonField::string(c"mediaType", |s: &mut DescSink| &mut s.scratch.media),
+        JsonField::string(c"digest", |s| &mut s.scratch.digest),
+        JsonField::int(c"size", |s| &mut s.scratch.size),
+        JsonField::object(c"annotations", &layer_annotations),
     ];
-    let mut manifest_annotations = [JsonField::string(
+    let manifest_annotations = [JsonField::string(
         c"dev.shirudo.bpm.package.name",
-        (&raw mut sink.package_name).cast(),
-        MAX_NAME,
+        |s: &mut DescSink| &mut s.package_name,
     )];
-    let mut root = [
-        JsonField::int(c"schemaVersion", &raw mut schema),
-        JsonField::array(c"layers", &raw mut arr, sub.as_mut_ptr(), sub.len()),
-        JsonField::object(
-            c"annotations",
-            manifest_annotations.as_mut_ptr(),
-            manifest_annotations.len(),
-        ),
+    let root = [
+        JsonField::int(c"schemaVersion", |s: &mut DescSink| &mut s.schema),
+        JsonField::array(c"layers", &sub, &DescSink::take_descriptor),
+        JsonField::object(c"annotations", &manifest_annotations),
     ];
-    // SAFETY: every pointer of the schema names a local of this frame,
-    // which outlives the parse and is touched meanwhile only through
-    // those pointers and the sink's.
-    let ret = unsafe { parse_schema(body, root.as_mut_ptr(), root.len()) };
+    let ret = parse_schema(body, &root, &mut sink);
 
-    if ret != 0 || !root[0].seen() || schema != 2 || !root[1].seen() {
+    if ret.is_err() || !root[0].seen() || sink.schema != 2 || !root[1].seen() {
         return -EINVAL;
     }
     *n_layers = sink.n;

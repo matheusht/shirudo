@@ -295,6 +295,12 @@ fn each_line(buf: &mut [u8], mut f: impl FnMut(&CStr) -> c_int) -> c_int {
 /// What a walk calls with each line and whether it is an init record.
 type Walk<'a> = &'a mut dyn FnMut(&CStr, bool) -> c_int;
 
+/// What a walk reads of each line: the boot that wrote it and its type.
+struct LineHead {
+    boot_id: [u8; 64],
+    ty: [u8; 32],
+}
+
 /// This boot's records from its last init line on, or with `all` every
 /// record; the callback learns which line is an init record so that a
 /// replay can start over. -ENOENT for a boot without an init record.
@@ -305,20 +311,21 @@ fn walk_lines(buf: &mut [u8], all: bool, cb: Walk<'_>) -> c_int {
     read_boot_id(&mut boot_id);
     let boot = cstr(&boot_id);
     let ret = each_line(buf, |line| {
-        let mut line_boot = [0u8; 64];
-        let mut ty = [0u8; 32];
-        let mut f = [
-            JsonField::string(c"boot_id", line_boot.as_mut_ptr(), line_boot.len()),
-            JsonField::string(c"type", ty.as_mut_ptr(), ty.len()),
+        let mut head = LineHead {
+            boot_id: [0; 64],
+            ty: [0; 32],
+        };
+        let f = [
+            JsonField::string(c"boot_id", |h: &mut LineHead| &mut h.boot_id),
+            JsonField::string(c"type", |h| &mut h.ty),
         ];
-        // SAFETY: the schema names locals of this call.
-        if unsafe { parse_schema(line.to_bytes(), f.as_mut_ptr(), f.len()) } != 0 {
+        if parse_schema(line.to_bytes(), &f, &mut head).is_err() {
             return -EINVAL;
         }
-        if !all && (!f[0].seen() || boot.is_empty() || cstr(&line_boot) != boot) {
+        if !all && (!f[0].seen() || boot.is_empty() || cstr(&head.boot_id) != boot) {
             return 0;
         }
-        let is_init = f[1].seen() && cstr(&ty) == b"init";
+        let is_init = f[1].seen() && cstr(&head.ty) == b"init";
         if is_init {
             in_boot = true;
         }

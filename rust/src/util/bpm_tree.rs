@@ -6,7 +6,7 @@
 //! digests that publisher and target share, and what a sync checks
 //! before it applies anything.
 
-use core::ffi::{CStr, c_char, c_int, c_void};
+use core::ffi::{CStr, c_int};
 use core::{mem, ptr};
 
 use crate::errno::{E2BIG, EINVAL, EIO, EKEYREJECTED, ENOMEM, ERANGE};
@@ -17,7 +17,7 @@ use crate::util::bpm_oci::package_name_ok;
 use crate::util::chain::history_step;
 use crate::util::crypto_openssl::sha256_into;
 use crate::util::hex::{self, sha256_digest_encode};
-use crate::util::json::{JsonArray, JsonEmit, JsonField, JsonMap, MAX_BYTES, parse_schema};
+use crate::util::json::{JsonEmit, JsonField, MAX_BYTES, parse_schema};
 use crate::util::upatch;
 
 /// `TREE_MAX_OPS`: the most operations a publication holds.
@@ -452,143 +452,123 @@ unsafe fn publication_append(p: &mut TreePublication, op: *const TreeOperation) 
     0
 }
 
-/// What tree_parse() reads into before the publication takes it: the
-/// operation in hand, the string just read and the values of a pair.
-struct Reader {
-    publication: *mut TreePublication,
+/// What tree_parse() reads into: the publication, its schema version,
+/// and before the publication takes it the operation in hand, the string
+/// just read and the values of a pair.
+struct Reader<'p> {
+    publication: &'p mut TreePublication,
+    schema: i64,
     op: TreeOperation,
     value: Text,
     pair: [Text; MAX_VALUES],
     n_pair: c_int,
-    /// The selector's three lists, whose seen flags say which ones an
-    /// operation gave.
-    lists: *const JsonField,
 }
 
-/// A list the string just read joins.
-struct List {
-    reader: *mut Reader,
-    values: *mut Text,
-    n: *mut c_int,
+/// The string just read joins the list of `n` `values`.
+fn list_add(values: &mut [Text; MAX_VALUES], n: &mut c_int, value: &Text) -> Result<(), c_int> {
+    let held = count(*n, MAX_VALUES);
+
+    if *n >= MAX_VALUES as c_int {
+        return Err(-E2BIG);
+    }
+    let _ = strscpy(&mut values[held], cstr(value));
+    *n += 1;
+    Ok(())
 }
 
-/// A map of pairs each member joins, of at most `max`.
+/// A map of a selector: where its pairs and their count are, and the
+/// most it holds.
 struct Map {
-    reader: *mut Reader,
-    kvs: *mut *mut TreeSelectorKv,
-    n: *mut c_int,
+    pairs: fn(&mut TreeSelector) -> (&mut *mut TreeSelectorKv, &mut c_int),
     max: c_int,
 }
 
-/// # Safety
-///
-/// `ctx` is a List of a live reader.
-unsafe extern "C" fn list_value(ctx: *mut c_void) -> c_int {
-    // SAFETY: tree_parse() passes a List, whose values hold MAX_VALUES.
-    unsafe {
-        let l = &*ctx.cast::<List>();
-        let held = count(*l.n, MAX_VALUES);
+const KCONFIG: Map = Map {
+    pairs: |s| (&mut s.kconfig, &mut s.n_kconfig),
+    max: MAX_KCONFIG as c_int,
+};
 
-        if *l.n >= MAX_VALUES as c_int {
-            return -E2BIG;
-        }
-        let value = cstr(&(*l.reader).value);
-        let _ = strscpy(&mut *l.values.add(held), value);
-        *l.n += 1;
-    }
-    0
-}
+const LABELS: Map = Map {
+    pairs: |s| (&mut s.labels, &mut s.n_labels),
+    max: MAX_LABELS as c_int,
+};
 
 /// Each key of a kconfig or labels map once, with a list of one value or
 /// more: a key twice would leave its order in the canonical form to the
 /// sort.
-///
-/// # Safety
-///
-/// `ctx` is a Map of a live reader, and `key` a C string.
-unsafe extern "C" fn map_pair(ctx: *mut c_void, key: *const c_char) -> c_int {
-    // SAFETY: tree_parse() passes a Map and the member's key; no
-    // reference outlives a statement, as the map's pairs are the
-    // reader's.
-    unsafe {
-        let m = &*ctx.cast::<Map>();
-        let key = ffi::c_str(key);
-        let r = m.reader;
+fn map_pair(r: &mut Reader, map: &Map, key: &CStr) -> Result<(), c_int> {
+    let key = key.to_bytes();
+    let (kvs, n) = (map.pairs)(&mut r.op.selector);
 
-        if (*r).n_pair == 0 {
-            return -EINVAL;
-        }
-        if pairs(*m.kvs, *m.n, usize::MAX)
-            .iter()
-            .any(|kv| cstr(&kv.key) == key)
-        {
-            return -EINVAL;
-        }
-        let kv = match kv_add(m.kvs, m.n, m.max) {
-            Ok(kv) => kv,
-            Err(err) => return err,
-        };
-        let _ = strscpy(&mut (*kv).key, key);
-        (*kv).values = (*r).pair;
-        (*kv).n_values = (*r).n_pair;
-        (*r).n_pair = 0;
+    if r.n_pair == 0 {
+        return Err(-EINVAL);
     }
-    0
+    // SAFETY: the selector's pairs, as many as its count says.
+    if unsafe { pairs(*kvs, *n, usize::MAX) }
+        .iter()
+        .any(|kv| cstr(&kv.key) == key)
+    {
+        return Err(-EINVAL);
+    }
+    // SAFETY: the selector's pairs, from the xmalloc family.
+    let kv = unsafe { kv_add(kvs, n, map.max) }?;
+    // SAFETY: the pair kv_add() added, zeroed, which the selector holds.
+    let kv = unsafe { &mut *kv };
+    let _ = strscpy(&mut kv.key, key);
+    kv.values = r.pair;
+    kv.n_values = r.n_pair;
+    r.n_pair = 0;
+    Ok(())
 }
 
-/// The publication takes the operation once it is whole, with its pairs.
-///
-/// # Safety
-///
-/// `ctx` is a live reader.
-unsafe extern "C" fn take_operation(ctx: *mut c_void) -> c_int {
-    let r = ctx.cast::<Reader>();
-
-    // SAFETY: tree_parse() passes its reader, whose lists are the three
-    // fields at the start of the selector's.
+/// The publication takes the operation once it is whole, with its pairs;
+/// `lists` are the selector's three lists, whose seen flags say which
+/// ones the operation gave.
+fn take_operation(r: &mut Reader, lists: &[JsonField<'_, Reader>]) -> Result<(), c_int> {
+    let o = &r.op;
+    let a = &o.artifact;
+    let s = &o.selector;
+    let whole = o.seq > 0
+        && [
+            &o.id[..],
+            &o.op,
+            &o.operation_digest,
+            &a.repository,
+            &a.manifest_digest,
+            &a.layer_digest,
+            &a.payload_sha256,
+        ]
+        .iter()
+        .all(|text| text[0] != 0);
+    if !whole {
+        return Err(-EINVAL);
+    }
+    // A selector list is one value or more, never [].
+    let counts = [
+        s.n_kernel_release_prefix,
+        s.n_kernel_build_id,
+        s.n_architecture,
+    ];
+    for (n, list) in counts.into_iter().zip(lists) {
+        if list.seen() && n == 0 {
+            return Err(-EINVAL);
+        }
+    }
+    let p = &mut *r.publication;
+    operations_reserve(p)?;
+    // SAFETY: the slot past the operations, which operations_reserve()
+    // made room for; the operation moves there with its pairs.
     unsafe {
-        let o = &(*r).op;
-        let a = &o.artifact;
-        let s = &o.selector;
-        let whole = o.seq > 0
-            && [
-                &o.id[..],
-                &o.op,
-                &o.operation_digest,
-                &a.repository,
-                &a.manifest_digest,
-                &a.layer_digest,
-                &a.payload_sha256,
-            ]
-            .iter()
-            .all(|text| text[0] != 0);
-        if !whole {
-            return -EINVAL;
-        }
-        // A selector list is one value or more, never [].
-        let counts = [
-            s.n_kernel_release_prefix,
-            s.n_kernel_build_id,
-            s.n_architecture,
-        ];
-        for (i, n) in counts.into_iter().enumerate() {
-            if (*(*r).lists.add(i)).seen() && n == 0 {
-                return -EINVAL;
-            }
-        }
-        let p = &mut *(*r).publication;
-        if let Err(err) = operations_reserve(p) {
-            return err;
-        }
         ptr::copy_nonoverlapping(
-            &raw const (*r).op,
+            &raw const r.op,
             p.operations.add(count(p.n_operations, usize::MAX)),
             1,
-        );
-        p.n_operations += 1;
-        ptr::write_bytes(&raw mut (*r).op, 0, 1);
-    }
-    0
+        )
+    };
+    p.n_operations += 1;
+    // SAFETY: an all-zero operation holds nothing.
+    unsafe { ptr::write_bytes(&raw mut r.op, 0, 1) };
+    Ok(())
 }
 
 /// The publication the JSON at `body` describes, into `out`.
@@ -597,129 +577,97 @@ unsafe extern "C" fn take_operation(ctx: *mut c_void) -> c_int {
 ///
 /// `out` is room for a publication, which the parse owns.
 unsafe fn parse(body: &[u8], out: *mut TreePublication) -> c_int {
-    // SAFETY: an all-zero reader holds nothing.
-    let mut reader: Box<Reader> = Box::new(unsafe { mem::zeroed() });
-    let r: *mut Reader = &mut *reader;
-    let mut schema: i64 = 0;
-    let mut ret;
+    // SAFETY: the caller's room for a publication.
+    let p = unsafe { &mut *out };
+    let mut reader = Box::new(Reader {
+        publication: &mut *p,
+        schema: 0,
+        // SAFETY: an all-zero operation holds nothing.
+        op: unsafe { mem::zeroed() },
+        value: [0; STRING_MAX],
+        pair: [[0; STRING_MAX]; MAX_VALUES],
+        n_pair: 0,
+    });
+    let value = [JsonField::string(c"", |r: &mut Reader| &mut r.value)];
+    let add_pair_value = |r: &mut Reader| list_add(&mut r.pair, &mut r.n_pair, &r.value);
+    let pair_value = JsonField::array(c"", &value, &add_pair_value);
+    let add_release = |r: &mut Reader| {
+        let s = &mut r.op.selector;
+        list_add(
+            &mut s.kernel_release_prefix,
+            &mut s.n_kernel_release_prefix,
+            &r.value,
+        )
+    };
+    let add_build_id = |r: &mut Reader| {
+        let s = &mut r.op.selector;
+        list_add(&mut s.kernel_build_id, &mut s.n_kernel_build_id, &r.value)
+    };
+    let add_architecture = |r: &mut Reader| {
+        let s = &mut r.op.selector;
+        list_add(&mut s.architecture, &mut s.n_architecture, &r.value)
+    };
+    let kconfig_pair = |r: &mut Reader, key: &CStr| map_pair(r, &KCONFIG, key);
+    let label_pair = |r: &mut Reader, key: &CStr| map_pair(r, &LABELS, key);
+    let selector = [
+        JsonField::array(c"kernel_release_prefix", &value, &add_release),
+        JsonField::array(c"kernel_build_id", &value, &add_build_id),
+        JsonField::array(c"architecture", &value, &add_architecture),
+        JsonField::map(c"kconfig", &pair_value, &kconfig_pair),
+        JsonField::map(c"kernel_config", &pair_value, &kconfig_pair),
+        JsonField::map(c"labels", &pair_value, &label_pair),
+    ];
+    let artifact = [
+        JsonField::string(c"repository", |r: &mut Reader| {
+            &mut r.op.artifact.repository
+        }),
+        JsonField::string(c"manifest_digest", |r| &mut r.op.artifact.manifest_digest),
+        JsonField::string(c"layer_digest", |r| &mut r.op.artifact.layer_digest),
+        JsonField::string(c"payload_sha256", |r| &mut r.op.artifact.payload_sha256),
+    ];
+    let operation = [
+        JsonField::int(c"seq", |r: &mut Reader| &mut r.op.seq),
+        JsonField::string(c"op", |r| &mut r.op.op),
+        JsonField::string(c"id", |r| &mut r.op.id),
+        JsonField::object(c"selector", &selector),
+        JsonField::object(c"artifact", &artifact),
+        JsonField::string(c"operation_digest", |r| &mut r.op.operation_digest),
+    ];
+    let take = |r: &mut Reader| take_operation(r, &selector[..3]);
+    let base = [
+        JsonField::int(c"seq", |r: &mut Reader| &mut r.publication.base_seq),
+        JsonField::string(c"segment_manifest_digest", |r| {
+            &mut r.publication.segment_manifest_digest
+        }),
+        JsonField::string(c"history_root", |r| &mut r.publication.history_root),
+    ];
+    let head = [JsonField::int(c"seq", |r: &mut Reader| {
+        &mut r.publication.head_seq
+    })];
+    let root = [
+        JsonField::int(c"schema", |r: &mut Reader| &mut r.schema),
+        JsonField::string(c"tree_id", |r| &mut r.publication.tree_id),
+        JsonField::int(c"generation", |r| &mut r.publication.generation),
+        JsonField::string(c"parent_manifest_digest", |r| {
+            &mut r.publication.parent_manifest_digest
+        }),
+        JsonField::object(c"base", &base),
+        JsonField::array(c"operations", &operation, &take),
+        JsonField::object(c"head", &head),
+    ];
 
-    // SAFETY: every field and sink points into the reader or out, which
-    // outlive the parse; the callbacks take what their sinks name.
-    unsafe {
-        (*r).publication = out;
-        let o = &raw mut (*r).op;
-        let sel = &raw mut (*o).selector;
-        let art = &raw mut (*o).artifact;
-        let mut release = List {
-            reader: r,
-            values: (&raw mut (*sel).kernel_release_prefix).cast(),
-            n: &raw mut (*sel).n_kernel_release_prefix,
-        };
-        let mut build_id = List {
-            reader: r,
-            values: (&raw mut (*sel).kernel_build_id).cast(),
-            n: &raw mut (*sel).n_kernel_build_id,
-        };
-        let mut arch = List {
-            reader: r,
-            values: (&raw mut (*sel).architecture).cast(),
-            n: &raw mut (*sel).n_architecture,
-        };
-        let mut pair = List {
-            reader: r,
-            values: (&raw mut (*r).pair).cast(),
-            n: &raw mut (*r).n_pair,
-        };
-        let mut kconfig = Map {
-            reader: r,
-            kvs: &raw mut (*sel).kconfig,
-            n: &raw mut (*sel).n_kconfig,
-            max: MAX_KCONFIG as c_int,
-        };
-        let mut labels = Map {
-            reader: r,
-            kvs: &raw mut (*sel).labels,
-            n: &raw mut (*sel).n_labels,
-            max: MAX_LABELS as c_int,
-        };
-        let mut release_sink = JsonArray::new(list_value, (&raw mut release).cast());
-        let mut build_id_sink = JsonArray::new(list_value, (&raw mut build_id).cast());
-        let mut arch_sink = JsonArray::new(list_value, (&raw mut arch).cast());
-        let mut pair_sink = JsonArray::new(list_value, (&raw mut pair).cast());
-        let mut kconfig_map = JsonMap::new(map_pair, (&raw mut kconfig).cast());
-        let mut labels_map = JsonMap::new(map_pair, (&raw mut labels).cast());
-        let mut operations = JsonArray::new(take_operation, r.cast());
-        let mut value = [JsonField::string(
-            c"",
-            (&raw mut (*r).value).cast(),
-            STRING_MAX,
-        )];
-        let v = value.as_mut_ptr();
-        let mut pair_value = [JsonField::array(c"", &raw mut pair_sink, v, 1)];
-        let pv = pair_value.as_mut_ptr();
-        let mut selector = [
-            JsonField::array(c"kernel_release_prefix", &raw mut release_sink, v, 1),
-            JsonField::array(c"kernel_build_id", &raw mut build_id_sink, v, 1),
-            JsonField::array(c"architecture", &raw mut arch_sink, v, 1),
-            JsonField::map(c"kconfig", &raw mut kconfig_map, pv, 1),
-            JsonField::map(c"kernel_config", &raw mut kconfig_map, pv, 1),
-            JsonField::map(c"labels", &raw mut labels_map, pv, 1),
-        ];
-        let mut artifact = [
-            text_field(c"repository", &raw mut (*art).repository),
-            text_field(c"manifest_digest", &raw mut (*art).manifest_digest),
-            text_field(c"layer_digest", &raw mut (*art).layer_digest),
-            text_field(c"payload_sha256", &raw mut (*art).payload_sha256),
-        ];
-        let mut operation = [
-            JsonField::int(c"seq", &raw mut (*o).seq),
-            text_field(c"op", &raw mut (*o).op),
-            text_field(c"id", &raw mut (*o).id),
-            JsonField::object(c"selector", selector.as_mut_ptr(), selector.len()),
-            JsonField::object(c"artifact", artifact.as_mut_ptr(), artifact.len()),
-            text_field(c"operation_digest", &raw mut (*o).operation_digest),
-        ];
-        let mut base = [
-            JsonField::int(c"seq", &raw mut (*out).base_seq),
-            text_field(
-                c"segment_manifest_digest",
-                &raw mut (*out).segment_manifest_digest,
-            ),
-            text_field(c"history_root", &raw mut (*out).history_root),
-        ];
-        let mut head = [JsonField::int(c"seq", &raw mut (*out).head_seq)];
-        let mut root = [
-            JsonField::int(c"schema", &raw mut schema),
-            text_field(c"tree_id", &raw mut (*out).tree_id),
-            JsonField::int(c"generation", &raw mut (*out).generation),
-            text_field(
-                c"parent_manifest_digest",
-                &raw mut (*out).parent_manifest_digest,
-            ),
-            JsonField::object(c"base", base.as_mut_ptr(), base.len()),
-            JsonField::array(
-                c"operations",
-                &raw mut operations,
-                operation.as_mut_ptr(),
-                operation.len(),
-            ),
-            JsonField::object(c"head", head.as_mut_ptr(), head.len()),
-        ];
-
-        (*r).lists = selector.as_ptr();
-        ret = parse_schema(body, root.as_mut_ptr(), root.len());
-        let required = [
-            &root[0], &root[2], &root[4], &base[0], &root[5], &root[6], &head[0],
-        ];
-        if ret == 0 && !required.iter().all(|f| f.seen()) {
-            ret = -EINVAL;
-        }
+    let mut ret = parse_schema(body, &root, &mut *reader).err().unwrap_or(0);
+    let required = [
+        &root[0], &root[2], &root[4], &base[0], &root[5], &root[6], &head[0],
+    ];
+    if ret == 0 && !required.iter().all(|f| f.seen()) {
+        ret = -EINVAL;
     }
+    let schema = reader.schema;
+    selector_free(&mut reader.op.selector);
     if ret != 0 && ret != -E2BIG && ret != -ENOMEM {
         ret = -EINVAL;
     }
-    // SAFETY: the parse is over; nothing else points into out.
-    let p = unsafe { &mut *out };
     if ret == 0
         && (schema != 1
             || p.tree_id[0] == 0
@@ -738,16 +686,10 @@ unsafe fn parse(body: &[u8], out: *mut TreePublication) -> c_int {
     if ret == 0 && ops.windows(2).any(|w| w[1].seq - 1 != w[0].seq) {
         ret = -EINVAL;
     }
-    selector_free(&mut reader.op.selector);
     if ret != 0 {
         publication_free(p);
     }
     ret
-}
-
-/// A string field into the array at `dst`.
-fn text_field<const N: usize>(key: &'static CStr, dst: *mut [u8; N]) -> JsonField {
-    JsonField::string(key, dst.cast(), N)
 }
 
 /// A tree string holds no control character: the node cannot compute the

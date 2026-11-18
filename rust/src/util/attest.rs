@@ -43,9 +43,7 @@ use crate::util::eventlog::{
 };
 use crate::util::hex::{hex_decode, hex_decode_max, hex_encode, sha256_digest_decode};
 use crate::util::io::read_file;
-use crate::util::json::{
-    JsonArray, JsonEmit, JsonField, MAX_BYTES as JSON_MAX_BYTES, parse_schema,
-};
+use crate::util::json::{JsonEmit, JsonField, MAX_BYTES as JSON_MAX_BYTES, parse_schema};
 use crate::util::tpm::{
     ATTEST_MAX, EK_ATTRS, PUBLIC_MAX, REGISTER_ATTRS, SIGNATURE_MAX, Tpm, TpmAttestation, TpmKey,
     TpmNvInfo, tpm_activate_credential, tpm_ak_create, tpm_close, tpm_ek_certificate,
@@ -789,21 +787,14 @@ unsafe fn evidence(
 /* ---- verification ---------------------------------------------------- */
 
 /// What the array of PCRs calls with each: its value, under its index.
-///
-/// # Safety
-///
-/// `ctx` is the parse.
-unsafe extern "C" fn on_pcr(ctx: *mut c_void) -> c_int {
-    // SAFETY: the parse the schema's sink was given.
-    let p = unsafe { &mut *ctx.cast::<Parse>() };
-
+fn on_pcr(p: &mut Parse) -> Result<(), c_int> {
     if !(0..24).contains(&p.pcr_index)
         || !hex_into(&p.pcr_value_hex, &mut p.pcrs[p.pcr_index as usize])
     {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
     p.pcr_have |= 1u32 << p.pcr_index;
-    0
+    Ok(())
 }
 
 /// Whether the report may print `s` as it stands. The report prints a
@@ -821,26 +812,19 @@ fn hex_into(hex: &[u8], out: &mut [u8]) -> bool {
 }
 
 /// What the eventlog's array calls with each record.
-///
-/// # Safety
-///
-/// `ctx` is the parse.
-unsafe extern "C" fn on_record(ctx: *mut c_void) -> c_int {
-    // SAFETY: the parse the schema's sink was given.
-    let p = unsafe { &mut *ctx.cast::<Parse>() };
-
+fn on_record(p: &mut Parse) -> Result<(), c_int> {
     if p.n_recs >= RECORDS_MAX {
-        return -E2BIG;
+        return Err(-E2BIG);
     }
     if !record_word(cstr(&p.ty)) {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
     // SAFETY: a record of the parse's RECORDS_MAX, apart from the parse.
     let mut r = unsafe { &mut *p.recs.add(p.n_recs) };
     *r = zeroed();
     let _ = strscpy(&mut r.ty, cstr(&p.ty));
     if !hex_into(&p.digest_hex, &mut r.digest) {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
     let ty = cstr(&p.ty);
     if ty == b"init" {
@@ -862,7 +846,7 @@ unsafe extern "C" fn on_record(ctx: *mut c_void) -> c_int {
             || !hex_into(&p.chain_hex, &mut inr.chain)
             || !hex_into(&p.writer_public_hex, &mut inr.writer_public)
         {
-            return -EINVAL;
+            return Err(-EINVAL);
         }
         inr.digest = r.digest;
         inr.pcr = p.rec_pcr as u32;
@@ -899,7 +883,7 @@ unsafe extern "C" fn on_record(ctx: *mut c_void) -> c_int {
 
         // SAFETY: a C string the parser wrote.
         if !unsafe { upatch_name_valid(p.upatch_name.as_ptr().cast()) } {
-            return -EINVAL;
+            return Err(-EINVAL);
         }
         let _ = strscpy(&mut r.label, cstr(&p.upatch_name));
         if hex_into(&p.upatch_payload_hex, &mut payload)
@@ -931,7 +915,7 @@ unsafe extern "C" fn on_record(ctx: *mut c_void) -> c_int {
             )
         } < 0
         {
-            return -E2BIG;
+            return Err(-E2BIG);
         }
         if p.tree_seq > 0
             // SAFETY: a C string the parser wrote, and room for a digest.
@@ -954,7 +938,7 @@ unsafe extern "C" fn on_record(ctx: *mut c_void) -> c_int {
                 )
             } < 0
             {
-                return -E2BIG;
+                return Err(-E2BIG);
             }
         }
     } else if ty == b"key_revoke" {
@@ -981,7 +965,7 @@ unsafe extern "C" fn on_record(ctx: *mut c_void) -> c_int {
                 )
             } < 0
             {
-                return -E2BIG;
+                return Err(-E2BIG);
             }
         }
     }
@@ -1002,7 +986,7 @@ unsafe extern "C" fn on_record(ctx: *mut c_void) -> c_int {
     p.rec_pcr = -1;
     p.rec_phase_pcr = -1;
     p.rec_reset = -1;
-    0
+    Ok(())
 }
 
 /// `struct reporter`: the caller's report, its room, what it holds, and
@@ -1157,109 +1141,83 @@ fn check_signed(
     0
 }
 
-/// A string field of a schema, decoded into the whole array at `dst`.
-const fn text<const N: usize>(key: &'static CStr, dst: *mut [u8; N]) -> JsonField {
-    JsonField::string(key, dst.cast(), N)
-}
-
-/// json_parse() of the evidence into the parse: whether it carries an
+/// parse_schema() of the evidence into the parse: whether it carries an
 /// endorsement key and a credential, or -EINVAL.
-///
-/// # Safety
-///
-/// `p` is the parse, which nothing else touches during the call.
-unsafe fn parse_evidence(p: *mut Parse, evidence: &[u8]) -> Result<(bool, bool), c_int> {
-    // SAFETY: the parse's fields, which the schema and the sinks name for
-    // the parse alone.
-    unsafe {
-        let mut pcr_sink = JsonArray::new(on_pcr, p.cast());
-        let mut rec_sink = JsonArray::new(on_record, p.cast());
-        let mut pcr_sub = [
-            JsonField::int(c"index", &raw mut (*p).pcr_index),
-            text(c"value", &raw mut (*p).pcr_value_hex),
-        ];
-        let mut ak_sub = [
-            text(c"public", &raw mut (*p).ak_public_hex),
-            text(c"name", &raw mut (*p).ak_name_hex),
-        ];
-        let mut quote_sub = [
-            text(c"attest", &raw mut (*p).quote_attest_hex),
-            text(c"signature", &raw mut (*p).quote_sig_hex),
-        ];
-        let mut ek_sub = [
-            text(c"type", &raw mut (*p).ek_type),
-            text(c"public", &raw mut (*p).ek_public_hex),
-            text(c"name", &raw mut (*p).ek_name_hex),
-        ];
-        let mut cred_sub = [text(c"value", &raw mut (*p).cred_hex)];
-        let mut reg_sub = [
-            text(c"nv_index", &raw mut (*p).reg_index),
-            JsonField::int(c"pcr", &raw mut (*p).reg_pcr),
-            text(c"name", &raw mut (*p).reg_name_hex),
-            text(c"value", &raw mut (*p).reg_value_hex),
-            text(c"attest", &raw mut (*p).reg_attest_hex),
-            text(c"signature", &raw mut (*p).reg_sig_hex),
-        ];
-        let mut upatch_sub = [
-            text(c"name", &raw mut (*p).upatch_name),
-            text(c"payload_sha256", &raw mut (*p).upatch_payload_hex),
-        ];
-        let mut key_sub = [
-            text(c"fingerprint", &raw mut (*p).key_fingerprint),
-            text(c"cert_sha256", &raw mut (*p).key_sha_hex),
-        ];
-        let mut tree_sub = [
-            JsonField::int(c"seq", &raw mut (*p).tree_seq),
-            text(c"op", &raw mut (*p).tree_op),
-            text(c"id", &raw mut (*p).tree_id),
-            text(c"operation_digest", &raw mut (*p).tree_digest_hex),
-        ];
-        let mut rec_sub = [
-            text(c"type", &raw mut (*p).ty),
-            text(c"digest", &raw mut (*p).digest_hex),
-            JsonField::int(c"pcr", &raw mut (*p).rec_pcr),
-            JsonField::int(c"tpm_reset_count", &raw mut (*p).rec_reset),
-            text(c"pcr_before", &raw mut (*p).pcr_before_hex),
-            JsonField::int(c"phase_pcr", &raw mut (*p).rec_phase_pcr),
-            text(c"phase_before", &raw mut (*p).phase_before_hex),
-            text(c"bound_in", &raw mut (*p).bound_in),
-            text(c"nv_name", &raw mut (*p).nv_name_hex),
-            text(c"nv_writer_public", &raw mut (*p).writer_public_hex),
-            text(c"anchor", &raw mut (*p).anchor),
-            text(c"anchor_digest", &raw mut (*p).anchor_digest_hex),
-            text(c"chain", &raw mut (*p).chain_hex),
-            JsonField::object(c"upatch", upatch_sub.as_mut_ptr(), upatch_sub.len()),
-            JsonField::object(c"tree", tree_sub.as_mut_ptr(), tree_sub.len()),
-            JsonField::object(c"key", key_sub.as_mut_ptr(), key_sub.len()),
-        ];
-        let mut top = [
-            text(c"nonce", &raw mut (*p).nonce_hex),
-            JsonField::int(c"pcr_mask", &raw mut (*p).pcr_mask),
-            JsonField::array(
-                c"pcrs",
-                &raw mut pcr_sink,
-                pcr_sub.as_mut_ptr(),
-                pcr_sub.len(),
-            ),
-            JsonField::object(c"ak", ak_sub.as_mut_ptr(), ak_sub.len()),
-            JsonField::object(c"quote", quote_sub.as_mut_ptr(), quote_sub.len()),
-            JsonField::object(c"register", reg_sub.as_mut_ptr(), reg_sub.len()),
-            JsonField::array(
-                c"eventlog",
-                &raw mut rec_sink,
-                rec_sub.as_mut_ptr(),
-                rec_sub.len(),
-            ),
-            JsonField::object(c"ek", ek_sub.as_mut_ptr(), ek_sub.len()),
-            JsonField::object(c"credential", cred_sub.as_mut_ptr(), cred_sub.len()),
-        ];
+fn parse_evidence(p: &mut Parse, evidence: &[u8]) -> Result<(bool, bool), c_int> {
+    let pcr_sub = [
+        JsonField::int(c"index", |p: &mut Parse| &mut p.pcr_index),
+        JsonField::string(c"value", |p| &mut p.pcr_value_hex),
+    ];
+    let ak_sub = [
+        JsonField::string(c"public", |p: &mut Parse| &mut p.ak_public_hex),
+        JsonField::string(c"name", |p| &mut p.ak_name_hex),
+    ];
+    let quote_sub = [
+        JsonField::string(c"attest", |p: &mut Parse| &mut p.quote_attest_hex),
+        JsonField::string(c"signature", |p| &mut p.quote_sig_hex),
+    ];
+    let ek_sub = [
+        JsonField::string(c"type", |p: &mut Parse| &mut p.ek_type),
+        JsonField::string(c"public", |p| &mut p.ek_public_hex),
+        JsonField::string(c"name", |p| &mut p.ek_name_hex),
+    ];
+    let cred_sub = [JsonField::string(c"value", |p: &mut Parse| &mut p.cred_hex)];
+    let reg_sub = [
+        JsonField::string(c"nv_index", |p: &mut Parse| &mut p.reg_index),
+        JsonField::int(c"pcr", |p| &mut p.reg_pcr),
+        JsonField::string(c"name", |p| &mut p.reg_name_hex),
+        JsonField::string(c"value", |p| &mut p.reg_value_hex),
+        JsonField::string(c"attest", |p| &mut p.reg_attest_hex),
+        JsonField::string(c"signature", |p| &mut p.reg_sig_hex),
+    ];
+    let upatch_sub = [
+        JsonField::string(c"name", |p: &mut Parse| &mut p.upatch_name),
+        JsonField::string(c"payload_sha256", |p| &mut p.upatch_payload_hex),
+    ];
+    let key_sub = [
+        JsonField::string(c"fingerprint", |p: &mut Parse| &mut p.key_fingerprint),
+        JsonField::string(c"cert_sha256", |p| &mut p.key_sha_hex),
+    ];
+    let tree_sub = [
+        JsonField::int(c"seq", |p: &mut Parse| &mut p.tree_seq),
+        JsonField::string(c"op", |p| &mut p.tree_op),
+        JsonField::string(c"id", |p| &mut p.tree_id),
+        JsonField::string(c"operation_digest", |p| &mut p.tree_digest_hex),
+    ];
+    let rec_sub = [
+        JsonField::string(c"type", |p: &mut Parse| &mut p.ty),
+        JsonField::string(c"digest", |p| &mut p.digest_hex),
+        JsonField::int(c"pcr", |p| &mut p.rec_pcr),
+        JsonField::int(c"tpm_reset_count", |p| &mut p.rec_reset),
+        JsonField::string(c"pcr_before", |p| &mut p.pcr_before_hex),
+        JsonField::int(c"phase_pcr", |p| &mut p.rec_phase_pcr),
+        JsonField::string(c"phase_before", |p| &mut p.phase_before_hex),
+        JsonField::string(c"bound_in", |p| &mut p.bound_in),
+        JsonField::string(c"nv_name", |p| &mut p.nv_name_hex),
+        JsonField::string(c"nv_writer_public", |p| &mut p.writer_public_hex),
+        JsonField::string(c"anchor", |p| &mut p.anchor),
+        JsonField::string(c"anchor_digest", |p| &mut p.anchor_digest_hex),
+        JsonField::string(c"chain", |p| &mut p.chain_hex),
+        JsonField::object(c"upatch", &upatch_sub),
+        JsonField::object(c"tree", &tree_sub),
+        JsonField::object(c"key", &key_sub),
+    ];
+    let top = [
+        JsonField::string(c"nonce", |p: &mut Parse| &mut p.nonce_hex),
+        JsonField::int(c"pcr_mask", |p| &mut p.pcr_mask),
+        JsonField::array(c"pcrs", &pcr_sub, &on_pcr),
+        JsonField::object(c"ak", &ak_sub),
+        JsonField::object(c"quote", &quote_sub),
+        JsonField::object(c"register", &reg_sub),
+        JsonField::array(c"eventlog", &rec_sub, &on_record),
+        JsonField::object(c"ek", &ek_sub),
+        JsonField::object(c"credential", &cred_sub),
+    ];
 
-        let ret = parse_schema(evidence, top.as_mut_ptr(), top.len());
-        if ret != 0 || !top[..7].iter().all(JsonField::seen) {
-            return Err(-EINVAL);
-        }
-        Ok((ek_sub.iter().all(JsonField::seen), cred_sub[0].seen()))
+    if parse_schema(evidence, &top, p).is_err() || !top[..7].iter().all(JsonField::seen) {
+        return Err(-EINVAL);
     }
+    Ok((ek_sub.iter().all(JsonField::seen), cred_sub[0].seen()))
 }
 
 /// attest_verify(): the evidence checked against what the operator
@@ -1355,12 +1313,11 @@ unsafe fn verify_parsed(
     let mut replayed = true;
 
     // SAFETY: the caller's parse, which nothing else touches.
-    let (have_ek, have_cred) = match unsafe { parse_evidence(p, doc) } {
+    let p = unsafe { &mut *p };
+    let (have_ek, have_cred) = match parse_evidence(p, doc) {
         Ok(found) => found,
         Err(ret) => return ret,
     };
-    // SAFETY: the parse, done with.
-    let p = unsafe { &mut *p };
 
     // SAFETY: the caller's evidence, and the view.
     let ret = unsafe { config_evidence_parse(evidence, doc.len(), config) };
@@ -1929,6 +1886,15 @@ unsafe fn verify_parsed(
     if rep.failed != 0 { -EKEYREJECTED } else { 0 }
 }
 
+/// What a challenge's document gives, in hex.
+struct ChallengeJson {
+    blob_hex: [u8; 2 * ID_OBJECT_LEN + 1],
+    secret_hex: [u8; 2 * 256 + 1],
+    ak_hex: [u8; 2 * NAME_LEN + 1],
+    kind: [u8; 32],
+    ty: [u8; 8],
+}
+
 /// attest_challenge_read(): the challenge an operator made, from the
 /// file at `path`.
 ///
@@ -1936,18 +1902,22 @@ unsafe fn verify_parsed(
 ///
 /// `path` is a C string and `out` room for a challenge.
 unsafe fn challenge_read(path: *const c_char, out: *mut AttestChallenge) -> c_int {
-    let mut blob_hex = [0u8; 2 * ID_OBJECT_LEN + 1];
-    let mut secret_hex = [0u8; 2 * 256 + 1];
-    let mut ak_hex = [0u8; 2 * NAME_LEN + 1];
-    let mut kind = [0u8; 32];
-    let mut ty = [0u8; 8];
-    let mut ek_sub = [text(c"type", &raw mut ty)];
-    let mut top = [
-        text(c"kind", &raw mut kind),
-        JsonField::object(c"ek", ek_sub.as_mut_ptr(), ek_sub.len()),
-        text(c"ak_name", &raw mut ak_hex),
-        text(c"credential_blob", &raw mut blob_hex),
-        text(c"secret", &raw mut secret_hex),
+    let mut challenge = ChallengeJson {
+        blob_hex: [0; 2 * ID_OBJECT_LEN + 1],
+        secret_hex: [0; 2 * 256 + 1],
+        ak_hex: [0; 2 * NAME_LEN + 1],
+        kind: [0; 32],
+        ty: [0; 8],
+    };
+    let ek_sub = [JsonField::string(c"type", |c: &mut ChallengeJson| {
+        &mut c.ty
+    })];
+    let top = [
+        JsonField::string(c"kind", |c: &mut ChallengeJson| &mut c.kind),
+        JsonField::object(c"ek", &ek_sub),
+        JsonField::string(c"ak_name", |c| &mut c.ak_hex),
+        JsonField::string(c"credential_blob", |c| &mut c.blob_hex),
+        JsonField::string(c"secret", |c| &mut c.secret_hex),
     ];
     let mut doc: *mut c_char = ptr::null_mut();
     let mut len = 0usize;
@@ -1962,15 +1932,18 @@ unsafe fn challenge_read(path: *const c_char, out: *mut AttestChallenge) -> c_in
     if ret != 0 {
         return ret;
     }
-    // SAFETY: the document's len bytes, the schema of locals of this
-    // call, and the document freed once by its size.
-    let ret = unsafe {
-        let ret = parse_schema(ffi::slice(doc.cast(), len), top.as_mut_ptr(), top.len());
-
-        xfree(doc.cast(), len + 1);
-        ret
-    };
-    if ret != 0
+    // SAFETY: the document's len bytes.
+    let parsed = parse_schema(unsafe { ffi::slice(doc.cast(), len) }, &top, &mut challenge);
+    // SAFETY: the document, freed once by its size.
+    unsafe { xfree(doc.cast(), len + 1) };
+    let ChallengeJson {
+        blob_hex,
+        secret_hex,
+        ak_hex,
+        kind,
+        ty,
+    } = challenge;
+    if parsed.is_err()
         || !top[0].seen()
         || cstr(&kind) != b"shirudo-credential"
         || !ek_sub[0].seen()
@@ -2115,6 +2088,16 @@ unsafe fn challenge_make(
     ret
 }
 
+/// What the evidence gives of its keys, in hex, and its EK certificate
+/// into the allocation for it.
+struct KeysJson<'c> {
+    ek_public_hex: [u8; 2 * PUBLIC_MAX + 1],
+    ak_hex: [u8; 2 * NAME_LEN + 1],
+    ek_type: [u8; 8],
+    ek_name_hex: [u8; 2 * NAME_LEN + 1],
+    cert_b64: &'c mut [u8],
+}
+
 /// The steps of attest_challenge_make() once its buffer is allocated.
 ///
 /// # Safety
@@ -2133,11 +2116,7 @@ unsafe fn make(
     cap: &mut usize,
 ) -> c_int {
     let vouched = !pol.ek_name.is_null() || pol.trust_presented;
-    let mut ek_public_hex = [0u8; 2 * PUBLIC_MAX + 1];
     let mut hex = [0u8; 2 * 256 + 1];
-    let mut ak_hex = [0u8; 2 * NAME_LEN + 1];
-    let mut ek_type = [0u8; 8];
-    let mut ek_name_hex = [0u8; 2 * NAME_LEN + 1];
     let mut ak_name = [0u8; NAME_LEN];
     let mut ek_name = [0u8; NAME_LEN];
     let mut ek_public = [0u8; PUBLIC_MAX];
@@ -2152,29 +2131,39 @@ unsafe fn make(
     let mut secret_len = 0usize;
     let mut der_len = 0usize;
     let mut reason: *const c_char = c"".as_ptr();
-    let mut ak_sub = [text(c"name", &raw mut ak_hex)];
-    let mut ek_sub = [
-        text(c"type", &raw mut ek_type),
-        text(c"public", &raw mut ek_public_hex),
-        text(c"name", &raw mut ek_name_hex),
+    let ak_sub = [JsonField::string(c"name", |k: &mut KeysJson| &mut k.ak_hex)];
+    let ek_sub = [
+        JsonField::string(c"type", |k: &mut KeysJson| &mut k.ek_type),
+        JsonField::string(c"public", |k| &mut k.ek_public_hex),
+        JsonField::string(c"name", |k| &mut k.ek_name_hex),
     ];
-    let mut top = [
-        JsonField::object(c"ak", ak_sub.as_mut_ptr(), ak_sub.len()),
-        JsonField::object(c"ek", ek_sub.as_mut_ptr(), ek_sub.len()),
-        JsonField::string(c"ek_certificate", s.cert_b64.cast(), EK_CERT_B64_MAX),
+    let top = [
+        JsonField::object(c"ak", &ak_sub),
+        JsonField::object(c"ek", &ek_sub),
+        JsonField::string(c"ek_certificate", |k: &mut KeysJson| &mut *k.cert_b64),
     ];
 
     // SAFETY: the allocation's first byte.
     unsafe { *s.cert_b64 = 0 };
-    // SAFETY: the caller's evidence, and the schema of locals of this
-    // call and the allocation, which the parser fills with C strings.
-    if unsafe {
-        parse_schema(
-            ffi::slice(evidence.cast(), len),
-            top.as_mut_ptr(),
-            top.len(),
-        )
-    } != 0
+    let mut keys = KeysJson {
+        ek_public_hex: [0; 2 * PUBLIC_MAX + 1],
+        ak_hex: [0; 2 * NAME_LEN + 1],
+        ek_type: [0; 8],
+        ek_name_hex: [0; 2 * NAME_LEN + 1],
+        // SAFETY: the allocation of EK_CERT_B64_MAX bytes, which only the
+        // parse touches until it ends.
+        cert_b64: unsafe { ffi::bytes_mut(s.cert_b64.cast(), EK_CERT_B64_MAX) },
+    };
+    // SAFETY: the caller's evidence.
+    let parsed = parse_schema(unsafe { ffi::slice(evidence.cast(), len) }, &top, &mut keys);
+    let KeysJson {
+        ek_public_hex,
+        ak_hex,
+        ek_type,
+        ek_name_hex,
+        ..
+    } = keys;
+    if parsed.is_err()
         || !ak_sub[0].seen()
         || !ek_sub[0].seen()
         || !ek_sub[1].seen()

@@ -93,62 +93,6 @@ pub unsafe extern "C" fn eventlog_upatches(cb: Option<UpatchFn>, ctx: *mut c_voi
     records::upatches(true, cb, ctx)
 }
 
-/// # Safety
-///
-/// line points to len bytes. The callback can use ctx during this call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn eventlog_upatches_record(
-    line: *const c_char,
-    len: usize,
-    is_init: bool,
-    cb: Option<UpatchFn>,
-    ctx: *mut c_void,
-) -> c_int {
-    // SAFETY: the C caller supplied len readable bytes.
-    records::upatches_record(unsafe { ffi::slice(line.cast(), len) }, is_init, cb, ctx)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn eventlog_upatch_record(ty: u32, load: bool) -> *const c_char {
-    match (ty, load) {
-        (1, true) => c"upatch_load".as_ptr(),
-        (1, false) => c"upatch_unload".as_ptr(),
-        (2, true) => c"java_load".as_ptr(),
-        (2, false) => c"java_unload".as_ptr(),
-        _ => core::ptr::null(),
-    }
-}
-
-/// # Safety
-///
-/// record is a C string; ty and load are writable outputs.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn eventlog_upatch_record_parse(
-    record: *const c_char,
-    ty: *mut u32,
-    load: *mut bool,
-) -> bool {
-    // SAFETY: the caller passes a terminated record.
-    let record = unsafe { CStr::from_ptr(record) }.to_bytes();
-    let found = match record {
-        b"upatch_load" => Some((1, true)),
-        b"upatch_unload" => Some((1, false)),
-        b"java_load" => Some((2, true)),
-        b"java_unload" => Some((2, false)),
-        _ => None,
-    };
-    if let Some((kind, direction)) = found {
-        // SAFETY: the caller passes both output rooms.
-        unsafe {
-            ty.write(kind);
-            load.write(direction);
-        }
-        true
-    } else {
-        false
-    }
-}
-
 pub extern "C" fn eventlog_would_exceed(max_bytes: u64) -> c_int {
     super::would_exceed(max_bytes)
 }
