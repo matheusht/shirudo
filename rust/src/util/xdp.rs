@@ -874,6 +874,58 @@ fn devices_read_once() -> Result<Vec<XdpDevice>, c_int> {
     Ok(devices)
 }
 
+/// The driver-mode XDP program of `ifindex`, by its id, or 0 for none,
+/// read through a dump of the links as libbpf's bpf_xdp_query_id() does.
+#[cfg(feature = "test-helpers")]
+pub(crate) fn drv_prog_id(ifindex: u32) -> Result<u32, c_int> {
+    let mut req = Request::new(
+        RTM_GETLINK,
+        NLM_F_REQUEST | NLM_F_DUMP,
+        &[0u8; IFINFOMSG_LEN],
+    );
+    let mut id = None;
+    let ret = exchange(NETLINK_ROUTE, &mut req, &mut |data| {
+        let dev = device_parse(data)?;
+        if dev.ifindex == ifindex {
+            id = Some(dev.xdp_drv_id);
+        }
+        Ok(())
+    });
+    match (ret, id) {
+        (0, Some(id)) => Ok(id),
+        (0, None) => Err(-ENODEV),
+        (err, _) => Err(err),
+    }
+}
+
+/// The driver-mode XDP program of `ifindex` taken off through netlink,
+/// as libbpf's bpf_xdp_detach() takes it: what the kernel answers.
+#[cfg(feature = "test-helpers")]
+pub(crate) fn drv_detach(ifindex: u32) -> c_int {
+    const RTM_SETLINK: u16 = 19;
+    const NLM_F_ACK: u16 = 4;
+    const NLA_F_NESTED: u16 = 0x8000;
+    const IFLA_XDP_FD: u16 = 1;
+    const IFLA_XDP_FLAGS: u16 = 3;
+    const XDP_FLAGS_DRV_MODE: u32 = 4;
+    let mut ifi = [0u8; IFINFOMSG_LEN];
+    ifi[4..8].copy_from_slice(&(ifindex as i32).to_ne_bytes());
+    let mut xdp = Vec::new();
+    for (ty, value) in [
+        (IFLA_XDP_FD, (-1i32).to_ne_bytes()),
+        (IFLA_XDP_FLAGS, XDP_FLAGS_DRV_MODE.to_ne_bytes()),
+    ] {
+        xdp.extend_from_slice(&((NLA_HDRLEN + value.len()) as u16).to_ne_bytes());
+        xdp.extend_from_slice(&ty.to_ne_bytes());
+        xdp.extend_from_slice(&value);
+    }
+    let mut req = Request::new(RTM_SETLINK, NLM_F_REQUEST | NLM_F_ACK, &ifi);
+    if let Err(err) = req.put(IFLA_XDP | NLA_F_NESTED, &xdp) {
+        return err;
+    }
+    exchange(NETLINK_ROUTE, &mut req, &mut |_| Ok(()))
+}
+
 /// A device whose facts cannot be read sits out, unresolved, rather than
 /// failing the read: it need not be one any upatch selects.
 pub(crate) fn devices_read() -> Result<Vec<XdpDevice>, c_int> {

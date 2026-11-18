@@ -946,13 +946,13 @@ testing/helper/test-bpm-source: $(HELPER_MAIN_DIR)/test-bpm-source.o \
 	@printf '  LD      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(RUST_TEST_LDLIBS)
 
-testing/helper/test-bpf-load: testing/helper/test-bpf-load.c
-	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) -o $@ $^
+testing/helper/test-bpf-load: $(HELPER_MAIN_DIR)/test-bpf-load.o $(RUST_HELPER_LIB)
+	@printf '  LD      $@\n'
+	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(RUST_TEST_LDLIBS)
 
-testing/helper/test-bpf-cmd: testing/helper/test-bpf-cmd.c
-	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) -o $@ $^
+testing/helper/test-bpf-cmd: $(HELPER_MAIN_DIR)/test-bpf-cmd.o $(RUST_HELPER_LIB)
+	@printf '  LD      $@\n'
+	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(RUST_TEST_LDLIBS)
 
 testing/helper/test-exec-fail: $(HELPER_MAIN_DIR)/test-exec-fail.o $(RUST_HELPER_LIB)
 	@printf '  LD      $@\n'
@@ -970,13 +970,13 @@ testing/helper/test-perf-attach: testing/helper/test-perf-attach.c util/string.o
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -I$(BPF_UAPI_INCLUDE) -o $@ $^
 
-testing/helper/test-upatch-link-lockdown: testing/helper/test-upatch-link-lockdown.c
-	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) -I$(BPF_UAPI_INCLUDE) -o $@ $^
+testing/helper/test-upatch-link-lockdown: $(HELPER_MAIN_DIR)/test-upatch-link-lockdown.o $(RUST_HELPER_LIB)
+	@printf '  LD      $@\n'
+	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(RUST_TEST_LDLIBS)
 
-testing/helper/test-xdp: testing/helper/test-xdp.c $(LIBBPF_A)
-	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(LIBELF_LIBS) $(ZLIB_LIBS)
+testing/helper/test-xdp: $(HELPER_MAIN_DIR)/test-xdp.o $(RUST_HELPER_LIB)
+	@printf '  LD      $@\n'
+	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(RUST_TEST_LDLIBS)
 
 # Needs the vendored uapi bpf.h (excl_prog_hash / fd_array_cnt / keyring_id
 # are newer than a stock system header) and libcrypto for SHA-256.

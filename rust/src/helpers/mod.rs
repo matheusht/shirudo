@@ -10,6 +10,8 @@ use core::ffi::{CStr, c_char, c_int};
 
 use crate::sys::libc::{fwrite, stderr, stdout};
 
+mod bpf_cmd;
+mod bpf_load;
 mod bpm_source;
 mod conditions;
 mod config;
@@ -40,9 +42,11 @@ mod tpm_preopened;
 mod tpm_session;
 mod tpm_wire;
 mod upatch_decode;
+mod upatch_link_lockdown;
 mod upatch_map_types;
 mod upatch_prog_metadata;
 mod upatch_serializer_pages;
+mod xdp;
 mod xfs_attrmulti;
 
 /// The arguments the C runtime gave main(), as C strings.

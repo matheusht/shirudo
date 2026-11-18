@@ -65,7 +65,7 @@ impl Attr {
         self.u64(off, p as u64)
     }
 
-    fn u32_at(&self, off: usize) -> u32 {
+    pub(crate) fn u32_at(&self, off: usize) -> u32 {
         let mut v = [0; 4];
         v.copy_from_slice(&self.0[off..off + 4]);
         u32::from_ne_bytes(v)
@@ -74,7 +74,7 @@ impl Attr {
     /// bpf() command `cmd` on the attribute, which the kernel may write
     /// back into, whose pointers the caller keeps live: what it returns,
     /// or the errno.
-    fn call(&mut self, cmd: c_long) -> Result<c_int, c_int> {
+    pub(crate) fn call(&mut self, cmd: c_long) -> Result<c_int, c_int> {
         // SAFETY: an attribute of the size the kernel takes, its
         // pointers to what the caller keeps live across the call.
         let ret = unsafe { syscall(SYS_BPF, cmd, self.0.as_mut_ptr(), Self::SIZE as c_long) };
