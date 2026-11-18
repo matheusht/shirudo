@@ -14,30 +14,28 @@ use core::cell::Cell;
 use core::ffi::{CStr, c_int, c_void};
 use core::ptr;
 use std::ffi::CString;
+use std::os::fd::AsRawFd;
 
 use crate::errno::{E2BIG, EINVAL, ENAMETOOLONG, ENODATA, ENOENT, ENOMEM, ERANGE, ESTALE, text};
-use crate::sys::libc::{close, explicit_bzero, snprintf};
+use crate::sys::libc::{explicit_bzero, snprintf};
 use crate::sys::luajit::{
-    LUA_MASKCOUNT, LUA_REGISTRYINDEX, LUA_TBOOLEAN, LUA_TFUNCTION, LUA_TNIL, LUA_TNUMBER,
-    LUA_TSTRING, LUA_TTABLE, LUAJIT_MODE_ENGINE, LUAJIT_MODE_OFF, LuaAlloc, LuaDebug, LuaState,
-    lua_call, lua_close, lua_getallocf, lua_getfield, lua_getglobal, lua_gettop, lua_newstate,
-    lua_newtable, lua_newuserdata, lua_next, lua_objlen, lua_pcall, lua_pop, lua_pushboolean,
-    lua_pushcclosure, lua_pushcfunction, lua_pushinteger, lua_pushlightuserdata, lua_pushlstring,
-    lua_pushnil, lua_pushnumber, lua_pushstring, lua_pushvalue, lua_rawgeti, lua_rawseti,
-    lua_remove, lua_setfield, lua_setglobal, lua_sethook, lua_setmetatable, lua_toboolean,
-    lua_tolstring, lua_tonumber, lua_touserdata, lua_type, lua_upvalueindex, luaJIT_setmode,
-    luaL_argerror, luaL_checkinteger, luaL_checklstring, luaL_checktype, luaL_checkudata,
-    luaL_error, luaL_loadbufferx, luaL_newmetatable, luaL_newstate, luaL_openlibs,
-    lual_getmetatable,
+    Allocator, LUA_MASKCOUNT, LUA_REGISTRYINDEX, LUA_TBOOLEAN, LUA_TFUNCTION, LUA_TNIL,
+    LUA_TNUMBER, LUA_TSTRING, LUA_TTABLE, LUAJIT_MODE_ENGINE, LUAJIT_MODE_OFF, Lua, LuaDebug,
+    LuaState, lua_call, lua_getfield, lua_getglobal, lua_gettop, lua_newtable, lua_newuserdata,
+    lua_next, lua_objlen, lua_pcall, lua_pop, lua_pushboolean, lua_pushcclosure, lua_pushcfunction,
+    lua_pushinteger, lua_pushlightuserdata, lua_pushlstring, lua_pushnil, lua_pushnumber,
+    lua_pushstring, lua_pushvalue, lua_rawgeti, lua_rawseti, lua_remove, lua_setfield,
+    lua_setglobal, lua_sethook, lua_setmetatable, lua_toboolean, lua_tolstring, lua_tonumber,
+    lua_touserdata, lua_type, lua_upvalueindex, luaJIT_setmode, luaL_argerror, luaL_checkinteger,
+    luaL_checklstring, luaL_checktype, luaL_checkudata, luaL_error, luaL_loadbufferx,
+    luaL_newmetatable, luaL_openlibs, lual_getmetatable,
 };
 use crate::sys::upatch_maps::MapView;
 use crate::text::cstr;
 use crate::util::chain::memneq_explicit;
 use crate::util::json::JsonEmit;
-use crate::util::seal::seal_open_read;
-use crate::util::upatch::{
-    self, DecoderView, Upatch, upatch_close, upatch_decoder_view, upatch_open, upatch_open_fd,
-};
+use crate::util::seal;
+use crate::util::upatch::{self, DecoderView, Opened, upatch_decoder_view};
 use crate::util::upatch_verify::payload_digest;
 
 const INSN_LIMIT: c_int = 1_000_000;
@@ -107,26 +105,29 @@ unsafe fn to_bytes<'a>(l: *mut LuaState, idx: c_int) -> Option<&'a [u8]> {
 }
 
 /// What the decoder's memory has used, against its limit.
-struct Memory {
-    inner: Option<LuaAlloc>,
-    inner_ud: *mut c_void,
+struct Memory<'a> {
+    inner: Option<Allocator<'a>>,
     used: usize,
-    limit: usize,
 }
 
 /// The decoder's allocator: LuaJIT's own, as a GC64 state must live
 /// below 2^47, which LuaJIT's allocator guarantees and a PIE's heap on
 /// arm64 does not meet; held to the limit, and what is freed scrubbed
 /// first.
+///
+/// # Safety
+///
+/// `ud` holds this state's memory record. A non-null `p` is a block
+/// of `old` bytes from its allocator.
 unsafe extern "C" fn limited_alloc(
     ud: *mut c_void,
     p: *mut c_void,
     old: usize,
     new: usize,
 ) -> *mut c_void {
-    // SAFETY: the memory record the state was made with.
-    let m = unsafe { &mut *ud.cast::<Memory>() };
-    let Some(inner) = m.inner else {
+    // SAFETY: the caller passes the live, exclusive memory record.
+    let m = unsafe { &mut *ud.cast::<Memory<'_>>() };
+    let Some(inner) = &m.inner else {
         return ptr::null_mut();
     };
     let base = if !p.is_null() && m.used >= old {
@@ -136,31 +137,31 @@ unsafe extern "C" fn limited_alloc(
     };
     if new == 0 {
         if !p.is_null() {
-            // SAFETY: the block of old bytes, scrubbed and handed back.
-            unsafe {
-                explicit_bzero(p, old);
-                inner(m.inner_ud, p, old, 0);
-            }
+            // SAFETY: p is writable for the old allocation's full size.
+            unsafe { explicit_bzero(p, old) };
+            // SAFETY: p is the allocator's live block of old bytes.
+            unsafe { inner.resize(p, old, 0) };
             m.used = base;
         }
         return ptr::null_mut();
     }
-    let Some(total) = base.checked_add(new).filter(|&t| t <= m.limit) else {
+    let Some(total) = base.checked_add(new).filter(|&t| t <= MEMORY_LIMIT) else {
         return ptr::null_mut();
     };
-    // SAFETY: a new block from the inner allocator.
-    let next = unsafe { inner(m.inner_ud, ptr::null_mut(), 0, new) };
+    // SAFETY: a null pointer requests a fresh block.
+    let next = unsafe { inner.resize(ptr::null_mut(), 0, new) };
     if next.is_null() {
         return ptr::null_mut();
     }
-    // SAFETY: the new block of `new` bytes, and the old one of `old`.
-    unsafe {
-        next.cast::<u8>().write_bytes(0, new);
-        if !p.is_null() {
-            ptr::copy_nonoverlapping(p.cast::<u8>(), next.cast::<u8>(), old.min(new));
-            explicit_bzero(p, old);
-            inner(m.inner_ud, p, old, 0);
-        }
+    // SAFETY: the allocator gave us a writable block of new bytes.
+    unsafe { next.cast::<u8>().write_bytes(0, new) };
+    if !p.is_null() {
+        // SAFETY: the old and new allocations are disjoint and this fits both.
+        unsafe { ptr::copy_nonoverlapping(p.cast::<u8>(), next.cast::<u8>(), old.min(new)) };
+        // SAFETY: p is writable for the old allocation's full size.
+        unsafe { explicit_bzero(p, old) };
+        // SAFETY: p is the allocator's live block of old bytes.
+        unsafe { inner.resize(p, old, 0) };
     }
     m.used = total;
     next
@@ -1178,25 +1179,20 @@ unsafe fn install_host_api(l: *mut LuaState) {
     }
 }
 
-/// Two states: one that owns LuaJIT's own allocator, and the decoder's
-/// over it, closed in that order when they go. Restoring the native
-/// allocator before close would let finalizers bypass the limit and the
-/// scrubbing.
-struct States {
-    allocator: *mut LuaState,
-    l: *mut LuaState,
+/// Disables the hook before the decoder state closes.
+struct Decoder<'a>(Lua<'a>);
+
+impl Drop for Decoder<'_> {
+    fn drop(&mut self) {
+        // SAFETY: the decoder's state lives until the field is dropped.
+        unsafe { lua_sethook(self.0.as_ptr(), None, 0, 0) };
+    }
 }
 
-impl Drop for States {
+struct ResetBudget;
+
+impl Drop for ResetBudget {
     fn drop(&mut self) {
-        // SAFETY: the states, closed once, the decoder's first.
-        unsafe {
-            if !self.l.is_null() {
-                lua_sethook(self.l, None, 0, 0);
-                lua_close(self.l);
-            }
-            lua_close(self.allocator);
-        }
         BUDGET.with(|b| b.set(0));
     }
 }
@@ -1204,30 +1200,18 @@ impl Drop for States {
 /// Runs the decoder on the view: the JSON, or the AnyValue with `otel`,
 /// of what it returns, at most `max` bytes.
 pub(crate) fn run(d: &DecoderView, v: &MapView, otel: bool, max: usize) -> Result<Vec<u8>, c_int> {
+    let _budget;
+    let allocator = Lua::new().ok_or(-ENOMEM)?;
+    _budget = ResetBudget;
     let mut memory = Memory {
-        inner: None,
-        inner_ud: ptr::null_mut(),
+        inner: allocator.allocator(),
         used: 0,
-        limit: MEMORY_LIMIT,
     };
-    // SAFETY: a new state.
-    let allocator = unsafe { luaL_newstate() };
-    if allocator.is_null() {
-        return Err(-ENOMEM);
-    }
-    let mut states = States {
-        allocator,
-        l: ptr::null_mut(),
-    };
-    // SAFETY: the allocator state and room for its allocator's data.
-    memory.inner = unsafe { lua_getallocf(allocator, &mut memory.inner_ud) };
-    // SAFETY: the limited allocator over the memory record, which
-    // outlives the state.
-    let l = unsafe { lua_newstate(limited_alloc, (&raw mut memory).cast()) };
-    if l.is_null() {
-        return Err(-ENOMEM);
-    }
-    states.l = l;
+    // SAFETY: limited_alloc receives this memory record. It borrows the
+    // native allocator, so both outlive the decoder through lua_close.
+    let lua = unsafe { Lua::with_allocator(limited_alloc, &mut memory) }.ok_or(-ENOMEM)?;
+    let decoder = Decoder(lua);
+    let l = decoder.0.as_ptr();
     let mut e = JsonEmit::growing(max);
     let source_name = CString::new(cstr(&d.source_name)).unwrap_or_default();
     let entrypoint = CString::new(cstr(&d.entrypoint)).unwrap_or_default();
@@ -1291,9 +1275,7 @@ pub(crate) fn run(d: &DecoderView, v: &MapView, otel: bool, max: usize) -> Resul
     if ret != 0 {
         return Err(ret);
     }
-    let out = e.finish();
-    drop(states);
-    out
+    e.finish()
 }
 
 /// Whether the decoder is a Lua one of API 1 on map input, exporting a
@@ -1307,47 +1289,22 @@ fn matches(d: &DecoderView, v: &MapView) -> bool {
         && cstr(&d.map) == cstr(&v.name)
 }
 
-/// An upatch container, closed when it goes.
-struct Opened(Box<Upatch>);
-
-impl Drop for Opened {
-    fn drop(&mut self) {
-        // SAFETY: the container, closed once.
-        unsafe { upatch_close(&mut *self.0) };
-    }
-}
-
 /// The artifact the decoders come from, opened as sealed state when it
 /// is the archive's: an entry there that is not shirudo's own is refused
 /// rather than run, signed or not, and so is an archive whose bytes are
 /// not the payload the pin directory says was loaded.
 fn open_artifact(path: &CStr, archived: bool, v: &MapView) -> Result<Opened, c_int> {
-    // SAFETY: an all-zero container is a closed one.
-    let mut u = Opened(Box::new(unsafe { core::mem::zeroed() }));
-    let ret = if !archived {
-        // SAFETY: a C string and the container to fill.
-        unsafe { upatch_open(path.as_ptr(), &mut *u.0) }
+    let u = if archived {
+        let fd = seal::open_read(path.to_bytes())?;
+        Opened::open_fd(fd.as_raw_fd())?
     } else {
-        // SAFETY: a C string.
-        let fd = unsafe { seal_open_read(path.as_ptr()) };
-        if fd < 0 {
-            return Err(fd);
-        }
-        // SAFETY: the open file and the container to fill.
-        let ret = unsafe { upatch_open_fd(fd, &mut *u.0) };
-        // SAFETY: the descriptor, closed once.
-        unsafe { close(fd) };
-        ret
+        Opened::open(path)?
     };
-    if ret != 0 {
-        core::mem::forget(u);
-        return Err(ret);
-    }
     if archived {
-        let loaded = payload_digest(&u.0).map(|digest| {
+        let loaded = payload_digest(&u).map(|digest| {
             v.has_payload
                 && !memneq_explicit(&digest, &v.payload)
-                && !memneq_explicit(&u.0.hdr.payload_sha256, &v.payload)
+                && !memneq_explicit(&u.hdr.payload_sha256, &v.payload)
         })?;
         if !loaded {
             log_err(
@@ -1367,11 +1324,11 @@ fn open_artifact(path: &CStr, archived: bool, v: &MapView) -> Result<Opened, c_i
 /// The decoders of the open artifact, each as a view, the bad ones left
 /// out.
 fn decoders(u: &Opened) -> impl Iterator<Item = DecoderView> + '_ {
-    (0..u.0.nr_decoders).filter_map(move |i| {
+    (0..u.nr_decoders).filter_map(move |i| {
         // SAFETY: an all-zero view, which the call fills.
         let mut d: DecoderView = unsafe { core::mem::zeroed() };
         // SAFETY: the container and room for the view.
-        (unsafe { upatch_decoder_view(&*u.0, i, &mut d) } == 0).then_some(d)
+        (unsafe { upatch_decoder_view(&**u, i, &mut d) } == 0).then_some(d)
     })
 }
 

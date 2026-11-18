@@ -9,6 +9,8 @@
 //! the unwind may cross holds nothing that must be dropped.
 
 use core::ffi::{c_char, c_int, c_void};
+use core::marker::PhantomData;
+use core::ptr::{self, NonNull};
 
 /// `lua_State`.
 pub enum LuaState {}
@@ -96,6 +98,78 @@ unsafe extern "C-unwind" {
     pub fn luaL_checktype(l: *mut LuaState, narg: c_int, t: c_int);
     pub fn luaL_checkudata(l: *mut LuaState, ud: c_int, tname: *const c_char) -> *mut c_void;
     pub fn luaL_newmetatable(l: *mut LuaState, tname: *const c_char) -> c_int;
+}
+
+/// Owns a Lua state and borrows any allocator data it depends on.
+pub(crate) struct Lua<'a> {
+    state: NonNull<LuaState>,
+    data: PhantomData<&'a mut ()>,
+}
+
+impl Lua<'static> {
+    pub(crate) fn new() -> Option<Self> {
+        // SAFETY: this creates an independent state with LuaJIT's allocator.
+        let state = NonNull::new(unsafe { luaL_newstate() })?;
+        Some(Self {
+            state,
+            data: PhantomData,
+        })
+    }
+}
+
+impl<'a> Lua<'a> {
+    /// # Safety
+    ///
+    /// `allocate` must implement Lua's allocator contract and accept a
+    /// pointer to `data` as its context.
+    pub(crate) unsafe fn with_allocator<T>(allocate: LuaAlloc, data: &'a mut T) -> Option<Self> {
+        // SAFETY: the caller supplies a matching allocator and context.
+        let state = NonNull::new(unsafe { lua_newstate(allocate, ptr::from_mut(data).cast()) })?;
+        Some(Self {
+            state,
+            data: PhantomData,
+        })
+    }
+
+    pub(crate) fn as_ptr(&self) -> *mut LuaState {
+        self.state.as_ptr()
+    }
+
+    pub(crate) fn allocator(&self) -> Option<Allocator<'_>> {
+        let mut context = ptr::null_mut();
+        // SAFETY: the state is live and context can hold the allocator data.
+        let allocate = unsafe { lua_getallocf(self.as_ptr(), &mut context) }?;
+        Some(Allocator {
+            allocate,
+            context,
+            owner: PhantomData,
+        })
+    }
+}
+
+impl Drop for Lua<'_> {
+    fn drop(&mut self) {
+        // SAFETY: this owner closes the live state once, before its allocator goes.
+        unsafe { lua_close(self.as_ptr()) };
+    }
+}
+
+/// Borrows the allocator of a live Lua state.
+pub(crate) struct Allocator<'a> {
+    allocate: LuaAlloc,
+    context: *mut c_void,
+    owner: PhantomData<&'a Lua<'a>>,
+}
+
+impl Allocator<'_> {
+    /// # Safety
+    ///
+    /// `block` is null for a new allocation, or this allocator's live
+    /// allocation of `old` bytes. A size of zero releases it.
+    pub(crate) unsafe fn resize(&self, block: *mut c_void, old: usize, new: usize) -> *mut c_void {
+        // SAFETY: the caller supplies the block as the Lua allocator requires.
+        unsafe { (self.allocate)(self.context, block, old, new) }
+    }
 }
 
 /// lua_upvalueindex().

@@ -5,7 +5,7 @@
 //! latches in `err`, after which every call does nothing, so a caller
 //! checks it once after the final close.
 
-use core::ffi::{c_char, c_int};
+use core::ffi::c_int;
 
 use super::{EMIT_MAX_DEPTH, utf8_width};
 use crate::errno::{E2BIG, EILSEQ, ENOMEM, ENOSPC};
@@ -68,21 +68,6 @@ fn format_s64(v: i64, buf: &mut [u8; 21]) -> &[u8] {
     &buf[pos..]
 }
 
-/// The decimal digits of a full unsigned 64-bit value.
-fn format_u64_full(mut n: u64, buf: &mut [u8; 20]) -> &[u8] {
-    let mut pos = buf.len();
-
-    loop {
-        pos -= 1;
-        buf[pos] = b'0' + (n % 10) as u8;
-        n /= 10;
-        if n == 0 {
-            break;
-        }
-    }
-    &buf[pos..]
-}
-
 impl<'a> JsonEmit<'a> {
     fn new(room: Room<'a>) -> Self {
         JsonEmit {
@@ -98,19 +83,6 @@ impl<'a> JsonEmit<'a> {
     /// An emitter into `buf`, which it does not grow.
     pub(crate) fn fixed(buf: &'a mut [u8]) -> Self {
         Self::new(Room::Fixed(buf))
-    }
-
-    /// An emitter into a C caller's fixed buffer.
-    ///
-    /// # Safety
-    ///
-    /// `buf` is writable for `cap` bytes while the emitter exists.
-    pub(crate) unsafe fn fixed_raw(buf: *mut c_char, cap: usize) -> Self {
-        if buf.is_null() || cap == 0 {
-            return Self::fixed(&mut []);
-        }
-        // SAFETY: the caller lends the entire buffer to this emitter.
-        Self::fixed(unsafe { core::slice::from_raw_parts_mut(buf.cast::<u8>(), cap) })
     }
 
     /// An emitter that grows its own buffer while the document and a NUL
@@ -364,10 +336,12 @@ impl<'a> JsonEmit<'a> {
         self.put_raw(digits);
     }
 
+    /// All 64 bits of an unsigned number, as a value.
     pub(crate) fn u64_value(&mut self, val: u64) {
-        let mut buf = [0; 20];
-        let digits = format_u64_full(val, &mut buf);
-        self.raw_value(digits);
+        let mut buf = [0; 21];
+        let pos = format_u64(val, &mut buf);
+
+        self.raw_value(&buf[pos..]);
     }
 
     pub(crate) fn kv_u64(&mut self, key: &[u8], val: u64) {

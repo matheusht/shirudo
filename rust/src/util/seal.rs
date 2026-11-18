@@ -782,7 +782,7 @@ pub(crate) fn write_file(path: &[u8], data: &[u8], mode: u32) -> Result<(), c_in
     placed
 }
 
-/// Entry points still used by the Rust decoder and C Java agent.
+/// Entry points still used by the C Java agent.
 mod capi {
     use core::ffi::{CStr, c_char, c_int};
     use std::os::fd::IntoRawFd;
@@ -824,5 +824,3 @@ mod capi {
             .unwrap_or(0)
     }
 }
-
-pub(crate) use capi::seal_open_read;
