@@ -22,7 +22,6 @@ use crate::sys::libc::{
 };
 use crate::sys::tss2::NV_WRITTEN;
 use crate::sys::version::shirudo_version_id;
-use crate::text::capi::strscpy as c_strscpy;
 use crate::text::{cstr, digits, parse_u64, parse_x64};
 use crate::util::bpm_tree::digest_bytes;
 use crate::util::chain::{
@@ -38,8 +37,8 @@ use crate::util::crypto_openssl::{
 use crate::util::eventlog::{
     NV_INDEX, eventlog_boot_id, eventlog_boot_lines, eventlog_path, eventlog_timestamp,
 };
-use crate::util::hex::{decode, decode_max, hex_decode_max, hex_encode};
-use crate::util::io::read_file;
+use crate::util::hex::{decode, decode_max, encode, hex_encode};
+use crate::util::io;
 use crate::util::json::{JsonEmit, JsonField, MAX_BYTES as JSON_MAX_BYTES, parse_schema};
 use crate::util::tpm::{
     ATTEST_MAX, EK_ATTRS, PUBLIC_MAX, REGISTER_ATTRS, SIGNATURE_MAX, Tpm, TpmAttestation, TpmKey,
@@ -71,37 +70,33 @@ pub(crate) const NONCE_MAX: usize = 64;
 pub(crate) const PCR_DEFAULT: u32 = 0x0000_FAFF;
 /// The longest challenge.
 const CHALLENGE_MAX: usize = 16 * 1024;
+/// The longest challenge made.
+const CHALLENGE_DOC_MAX: usize = 4096;
+/// The longest secret of a challenge, an RSA-2048 key's OAEP.
+const SECRET_MAX: usize = 256;
 /// The label of a credential's seed, which the TPM takes with its NUL.
 const IDENTITY: &CStr = c"IDENTITY";
 
-/// `struct attest_challenge`: the blob and the encrypted seed
+/// A credential challenge: the blob and the encrypted seed
 /// TPM2_ActivateCredential takes, for the attestation key of a name under
 /// the endorsement key of a type.
-#[repr(C)]
-pub struct AttestChallenge {
+pub(crate) struct AttestChallenge {
     ek_rsa: bool,
     ak_name: [u8; NAME_LEN],
     blob: [u8; ID_OBJECT_LEN],
-    blob_len: usize,
-    secret: [u8; 256],
-    secret_len: usize,
+    secret: Vec<u8>,
 }
 
-/// `struct attest_challenge_policy`: what the operator vouches for.
-#[repr(C)]
-pub struct AttestChallengePolicy {
-    /// Issuer bundle, or NULL.
-    pub(crate) ek_ca: *const c_char,
-    /// Pinned attestation key, or NULL.
-    pub(crate) ak_name: *const u8,
-    /// Pinned endorsement key, or NULL.
-    pub(crate) ek_name: *const u8,
+/// What the operator vouches for when making a challenge.
+#[derive(Default)]
+pub(crate) struct AttestChallengePolicy<'a> {
+    /// The issuer bundle the EK certificate must chain to.
+    pub(crate) ek_ca: Option<&'a CStr>,
+    pub(crate) ak_name: Option<[u8; NAME_LEN]>,
+    pub(crate) ek_name: Option<[u8; NAME_LEN]>,
     /// Accept an unvouched endorsement key.
     pub(crate) trust_presented: bool,
 }
-
-const _: () = assert!(size_of::<AttestChallenge>() == 376);
-const _: () = assert!(size_of::<AttestChallengePolicy>() == 32);
 
 /// What the operator expects the evidence to show.
 #[derive(Default)]
@@ -666,9 +661,9 @@ unsafe fn evidence(
                 &s.ak,
                 &s.ek,
                 c.blob.as_ptr(),
-                c.blob_len,
+                c.blob.len(),
                 c.secret.as_ptr(),
-                c.secret_len,
+                c.secret.len(),
                 s.cred.as_mut_ptr(),
                 s.cred.len(),
                 &mut s.cred_len,
@@ -1085,89 +1080,6 @@ impl Report {
     fn note(&mut self, text: &[u8]) {
         self.line(TAG_NOTE, text);
     }
-}
-
-/// `struct reporter`: the caller's report, its room, what it holds, and
-/// how many checks failed.
-struct Reporter {
-    buf: *mut c_char,
-    cap: usize,
-    len: usize,
-    failed: c_int,
-}
-
-impl Reporter {
-    /// A report into the `cap` bytes at `buf`.
-    fn new(buf: *mut c_char, cap: usize) -> Self {
-        Reporter {
-            buf,
-            cap,
-            len: 0,
-            failed: 0,
-        }
-    }
-
-    /// A line of the report: its tag, then what `text` writes into the
-    /// room left and says it wrote, then a line feed, all as room allows.
-    fn line(&mut self, tag: &CStr, text: impl FnOnce(*mut c_char, usize) -> c_int) {
-        if self.len + 8 >= self.cap {
-            return;
-        }
-        // SAFETY: the room left in the caller's report, and a C string.
-        let n = unsafe { c_strscpy(self.buf.add(self.len), tag.as_ptr(), self.cap - self.len) };
-        if n > 0 {
-            self.len += n as usize;
-        }
-        // SAFETY: as above.
-        let n = text(unsafe { self.buf.add(self.len) }, self.cap - self.len);
-        if n > 0 {
-            self.len += n as usize;
-        }
-        if self.len + 1 < self.cap {
-            // SAFETY: two bytes within the caller's report.
-            unsafe {
-                *self.buf.add(self.len) = b'\n' as c_char;
-                self.len += 1;
-                *self.buf.add(self.len) = 0;
-            }
-        }
-    }
-
-    /// say(): a check, which counts when it failed.
-    fn say(&mut self, ok: bool, text: impl FnOnce(*mut c_char, usize) -> c_int) {
-        if !ok {
-            self.failed += 1;
-        }
-        self.line(if ok { c"  OK    " } else { c"  FAIL  " }, text);
-    }
-
-    /// note(): a remark, which is no check.
-    fn note(&mut self, text: impl FnOnce(*mut c_char, usize) -> c_int) {
-        self.line(c"  NOTE  ", text);
-    }
-}
-
-/// A check of the report, in a format of the C's with the arguments it
-/// takes, which strsprintf() formats as the C's say() did.
-macro_rules! say {
-    ($rep:expr, $ok:expr, $fmt:expr $(, $arg:expr)* $(,)?) => {
-        $rep.say($ok, |buf, room| {
-            // SAFETY: the room left in the report, and a format with the
-            // arguments it converts.
-            unsafe { crate::text::csprintf!(buf, room, $fmt.as_ptr() $(, $arg)*) }
-        })
-    };
-}
-
-/// A remark of the report, likewise.
-macro_rules! note {
-    ($rep:expr, $fmt:expr $(, $arg:expr)* $(,)?) => {
-        $rep.note(|buf, room| {
-            // SAFETY: the room left in the report, and a format with the
-            // arguments it converts.
-            unsafe { crate::text::csprintf!(buf, room, $fmt.as_ptr() $(, $arg)*) }
-        })
-    };
 }
 
 /// The attestation key that signs the evidence's attestations, its name,
@@ -1892,22 +1804,18 @@ fn check_state(rep: &mut Report, p: &Parse, expect: &AttestExpect, value: &[u8; 
 /// What a challenge's document gives, in hex.
 struct ChallengeJson {
     blob_hex: [u8; 2 * ID_OBJECT_LEN + 1],
-    secret_hex: [u8; 2 * 256 + 1],
+    secret_hex: [u8; 2 * SECRET_MAX + 1],
     ak_hex: [u8; 2 * NAME_LEN + 1],
     kind: [u8; 32],
     ty: [u8; 8],
 }
 
-/// attest_challenge_read(): the challenge an operator made, from the
-/// file at `path`.
-///
-/// # Safety
-///
-/// `path` is a C string and `out` room for a challenge.
-unsafe fn challenge_read(path: *const c_char, out: *mut AttestChallenge) -> c_int {
-    let mut challenge = ChallengeJson {
+/// The challenge an operator made, from the file at `path`: -EINVAL for
+/// a document that is not one, or the error of reading it.
+pub(crate) fn challenge_read(path: &CStr) -> Result<AttestChallenge, c_int> {
+    let mut json = ChallengeJson {
         blob_hex: [0; 2 * ID_OBJECT_LEN + 1],
-        secret_hex: [0; 2 * 256 + 1],
+        secret_hex: [0; 2 * SECRET_MAX + 1],
         ak_hex: [0; 2 * NAME_LEN + 1],
         kind: [0; 32],
         ty: [0; 8],
@@ -1922,71 +1830,42 @@ unsafe fn challenge_read(path: *const c_char, out: *mut AttestChallenge) -> c_in
         JsonField::string(c"credential_blob", |c| &mut c.blob_hex),
         JsonField::string(c"secret", |c| &mut c.secret_hex),
     ];
-    let mut doc: *mut c_char = ptr::null_mut();
-    let mut len = 0usize;
+    let mut secret = [0u8; SECRET_MAX];
 
-    // SAFETY: the caller's room, padding too, as memset() zeroes it.
-    let out = unsafe {
-        out.write_bytes(0, 1);
-        &mut *out
-    };
-    // SAFETY: the caller's C string, and where the document goes.
-    let ret = unsafe { read_file(path, CHALLENGE_MAX, (&raw mut doc).cast(), &mut len) };
-    if ret != 0 {
-        return ret;
-    }
-    // SAFETY: the document's len bytes.
-    let parsed = parse_schema(unsafe { ffi::slice(doc.cast(), len) }, &top, &mut challenge);
-    // SAFETY: the document, freed once by its size.
-    unsafe { xfree(doc.cast(), len + 1) };
-    let ChallengeJson {
-        blob_hex,
-        secret_hex,
-        ak_hex,
-        kind,
-        ty,
-    } = challenge;
+    let doc = io::read(path, CHALLENGE_MAX)?;
+    let parsed = parse_schema(&doc, &top, &mut json);
     if parsed.is_err()
         || !top[0].seen()
-        || cstr(&kind) != b"shirudo-credential"
+        || cstr(&json.kind) != b"shirudo-credential"
         || !ek_sub[0].seen()
         || !top[2].seen()
         || !top[3].seen()
         || !top[4].seen()
     {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
-    match cstr(&ty) {
-        b"rsa" => out.ek_rsa = true,
-        b"ecc" => {}
-        _ => return -EINVAL,
-    }
-    if !hex_into(&ak_hex, &mut out.ak_name)
-        // SAFETY: a C string the parser wrote, and the challenge's room
-        // with its size.
-        || unsafe {
-            hex_decode_max(
-                blob_hex.as_ptr().cast(),
-                out.blob.as_mut_ptr(),
-                out.blob.len(),
-                &mut out.blob_len,
-            )
-        } != 0
-        || out.blob_len != ID_OBJECT_LEN
-        // SAFETY: as above.
-        || unsafe {
-            hex_decode_max(
-                secret_hex.as_ptr().cast(),
-                out.secret.as_mut_ptr(),
-                out.secret.len(),
-                &mut out.secret_len,
-            )
-        } != 0
-        || out.secret_len == 0
+    let ek_rsa = match cstr(&json.ty) {
+        b"rsa" => true,
+        b"ecc" => false,
+        _ => return Err(-EINVAL),
+    };
+    let mut challenge = AttestChallenge {
+        ek_rsa,
+        ak_name: [0; NAME_LEN],
+        blob: [0; ID_OBJECT_LEN],
+        secret: Vec::new(),
+    };
+    if !hex_into(&json.ak_hex, &mut challenge.ak_name)
+        || !hex_into(&json.blob_hex, &mut challenge.blob)
     {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
-    0
+    let secret = hex_text(&json.secret_hex, &mut secret)?;
+    if secret.is_empty() {
+        return Err(-EINVAL);
+    }
+    challenge.secret = secret.to_vec();
+    Ok(challenge)
 }
 
 /// Whether the certificate's key is the endorsement key of the evidence.
@@ -2003,137 +1882,62 @@ fn cert_describes(key: &CertPubkey, public: &TpmPublic) -> bool {
             65537
         };
 
-        return key.n_len == public.n_len
-            && !memneq_explicit(&key.n[..public.n_len], &public.n[..public.n_len])
-            && key.e == e;
+        let (Some(key_n), Some(public_n)) = (key.n.get(..key.n_len), public.n.get(..public.n_len))
+        else {
+            return false;
+        };
+        return key.n_len == public.n_len && !memneq_explicit(key_n, public_n) && key.e == e;
     }
     !memneq_explicit(&key.x, &public.x) && !memneq_explicit(&key.y, &public.y)
 }
 
-/// What attest_challenge_make() holds across its steps, freed and wiped
-/// after them.
-struct Making {
+/// A challenge made: the document that carries it, and the credential
+/// the target recovers with it, on the heap so that it is scrubbed when
+/// it goes.
+pub(crate) struct MadeChallenge {
+    pub(crate) document: Vec<u8>,
+    pub(crate) credential: Box<[u8; CREDENTIAL_LEN]>,
+}
+
+/// The seed a credential is protected under, and the ECDH secret it is
+/// derived from, on the heap so that they are scrubbed when they go.
+struct Seed {
     seed: [u8; 32],
     z: [u8; 32],
-    cert: Cert,
-    der: *mut u8,
-    cert_b64: *mut c_char,
 }
 
-/// attest_challenge_make(): after the checks the policy asks for, into
-/// the report, a credential the target recovers only with the
-/// attestation key the evidence names under its endorsement key, and the
-/// challenge that carries it, into `*out`, xmalloc'd to `*cap` bytes.
-///
-/// # Safety
-///
-/// `evidence` holds `len` bytes, `credential` has room for a credential
-/// and `report` for `report_cap` bytes.
-#[allow(clippy::too_many_arguments)]
-unsafe fn challenge_make(
-    evidence: *const c_char,
-    len: usize,
-    pol: &AttestChallengePolicy,
-    credential: *mut u8,
-    out: &mut *mut c_char,
-    out_len: &mut usize,
-    cap: &mut usize,
-    report: *mut c_char,
-    report_cap: usize,
-) -> c_int {
-    let mut rep = Reporter::new(report, report_cap);
-    let mut s = Making {
-        seed: [0; 32],
-        z: [0; 32],
-        cert: Cert::new(),
-        der: ptr::null_mut(),
-        // SAFETY: an allocation, freed below by its size.
-        cert_b64: unsafe { xmalloc(EK_CERT_B64_MAX) }.cast(),
-    };
-
-    *out = ptr::null_mut();
-    *out_len = 0;
-    *cap = 0;
-    if report_cap != 0 {
-        // SAFETY: the caller's report.
-        unsafe { *report = 0 };
-    }
-    if s.cert_b64.is_null() {
-        return -ENOMEM;
-    }
-    // SAFETY: the caller's evidence and credential's room.
-    let ret = unsafe {
-        make(
-            &mut rep, &mut s, evidence, len, pol, credential, out, out_len, cap,
-        )
-    };
-
-    scrub(&mut s.seed);
-    scrub(&mut s.z);
-    // SAFETY: the certificate, and the allocations by their sizes, each
-    // freed once.
-    unsafe {
-        cert_free(&mut s.cert);
-        let der_size = if s.der.is_null() { 0 } else { EK_CERT_MAX };
-        xfree(s.der.cast(), der_size);
-        xfree(s.cert_b64.cast(), EK_CERT_B64_MAX);
-    }
-    if ret != 0 {
-        // SAFETY: the caller's room for the credential.
-        unsafe { explicit_bzero(credential.cast(), CREDENTIAL_LEN) };
-        if !(*out).is_null() {
-            // SAFETY: the challenge, by its size.
-            unsafe { xfree((*out).cast(), *cap) };
-            *out = ptr::null_mut();
-            *cap = 0;
-        }
-    }
-    ret
-}
-
-/// What the evidence gives of its keys, in hex, and its EK certificate
-/// into the allocation for it.
-struct KeysJson<'c> {
+/// What the evidence gives of its keys, in hex, and of its EK certificate
+/// in base64.
+struct KeysJson {
     ek_public_hex: [u8; 2 * PUBLIC_MAX + 1],
     ak_hex: [u8; 2 * NAME_LEN + 1],
     ek_type: [u8; 8],
     ek_name_hex: [u8; 2 * NAME_LEN + 1],
-    cert_b64: &'c mut [u8],
+    cert_b64: Vec<u8>,
 }
 
-/// The steps of attest_challenge_make() once its buffer is allocated.
-///
-/// # Safety
-///
-/// As challenge_make().
-#[allow(clippy::too_many_arguments)]
-unsafe fn make(
-    rep: &mut Reporter,
-    s: &mut Making,
-    evidence: *const c_char,
-    len: usize,
-    pol: &AttestChallengePolicy,
-    credential: *mut u8,
-    out: &mut *mut c_char,
-    out_len: &mut usize,
-    cap: &mut usize,
-) -> c_int {
-    let vouched = !pol.ek_name.is_null() || pol.trust_presented;
-    let mut hex = [0u8; 2 * 256 + 1];
-    let mut ak_name = [0u8; NAME_LEN];
-    let mut ek_name = [0u8; NAME_LEN];
-    let mut ek_public = [0u8; PUBLIC_MAX];
-    let mut computed = [0u8; NAME_LEN];
-    let mut eph_x = [0u8; 32];
-    let mut eph_y = [0u8; 32];
-    let mut secret = [0u8; 256];
-    let mut blob = [0u8; ID_OBJECT_LEN];
-    let mut cert_key: CertPubkey = zeroed();
-    let mut public = TpmPublic::zeroed();
-    let mut ek_public_len = 0usize;
-    let mut secret_len = 0usize;
-    let mut der_len = 0usize;
-    let mut reason: *const c_char = c"".as_ptr();
+/// The keys of the evidence a challenge is made for.
+struct ChallengeKeys {
+    json: Box<KeysJson>,
+    rsa: bool,
+    ak_name: [u8; NAME_LEN],
+    ek_name: [u8; NAME_LEN],
+    ek_public: Vec<u8>,
+    public: TpmPublic,
+    /// The evidence carries an EK certificate.
+    have_cert: bool,
+}
+
+/// The keys the evidence names: -EINVAL for a document without them
+/// whole, or with an endorsement key not of the type it names.
+fn challenge_keys(evidence: &[u8]) -> Result<ChallengeKeys, c_int> {
+    let mut json = Box::new(KeysJson {
+        ek_public_hex: [0; 2 * PUBLIC_MAX + 1],
+        ak_hex: [0; 2 * NAME_LEN + 1],
+        ek_type: [0; 8],
+        ek_name_hex: [0; 2 * NAME_LEN + 1],
+        cert_b64: vec![0; EK_CERT_B64_MAX],
+    });
     let ak_sub = [JsonField::string(c"name", |k: &mut KeysJson| &mut k.ak_hex)];
     let ek_sub = [
         JsonField::string(c"type", |k: &mut KeysJson| &mut k.ek_type),
@@ -2143,262 +1947,317 @@ unsafe fn make(
     let top = [
         JsonField::object(c"ak", &ak_sub),
         JsonField::object(c"ek", &ek_sub),
-        JsonField::string(c"ek_certificate", |k: &mut KeysJson| &mut *k.cert_b64),
+        JsonField::string(c"ek_certificate", |k: &mut KeysJson| {
+            k.cert_b64.as_mut_slice()
+        }),
     ];
+    let mut ak_name = [0u8; NAME_LEN];
+    let mut ek_name = [0u8; NAME_LEN];
+    let mut ek_public = [0u8; PUBLIC_MAX];
+    let mut public = TpmPublic::zeroed();
 
-    // SAFETY: the allocation's first byte.
-    unsafe { *s.cert_b64 = 0 };
-    let mut keys = KeysJson {
-        ek_public_hex: [0; 2 * PUBLIC_MAX + 1],
-        ak_hex: [0; 2 * NAME_LEN + 1],
-        ek_type: [0; 8],
-        ek_name_hex: [0; 2 * NAME_LEN + 1],
-        // SAFETY: the allocation of EK_CERT_B64_MAX bytes, which only the
-        // parse touches until it ends.
-        cert_b64: unsafe { ffi::bytes_mut(s.cert_b64.cast(), EK_CERT_B64_MAX) },
-    };
-    // SAFETY: the caller's evidence.
-    let parsed = parse_schema(unsafe { ffi::slice(evidence.cast(), len) }, &top, &mut keys);
-    let KeysJson {
-        ek_public_hex,
-        ak_hex,
-        ek_type,
-        ek_name_hex,
-        ..
-    } = keys;
+    let parsed = parse_schema(evidence, &top, &mut *json);
     if parsed.is_err()
         || !ak_sub[0].seen()
         || !ek_sub[0].seen()
         || !ek_sub[1].seen()
         || !ek_sub[2].seen()
-        || !hex_into(&ak_hex, &mut ak_name)
-        // SAFETY: a C string the parser wrote, and the room with its size.
-        || unsafe {
-            hex_decode_max(
-                ek_public_hex.as_ptr().cast(),
-                ek_public.as_mut_ptr(),
-                ek_public.len(),
-                &mut ek_public_len,
-            )
-        } != 0
-        || !hex_into(&ek_name_hex, &mut ek_name)
+        || !hex_into(&json.ak_hex, &mut ak_name)
     {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
-    let rsa = match cstr(&ek_type) {
+    let ek_public = hex_text(&json.ek_public_hex, &mut ek_public)?;
+    if !hex_into(&json.ek_name_hex, &mut ek_name) {
+        return Err(-EINVAL);
+    }
+    let rsa = match cstr(&json.ek_type) {
         b"rsa" => true,
         b"ecc" => false,
-        _ => return -EINVAL,
+        _ => return Err(-EINVAL),
     };
-    let ek_public = &ek_public[..ek_public_len];
     if public_parse(ek_public, &mut public) != 0 || public.ty != if rsa { ALG_RSA } else { ALG_ECC }
     {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
+    Ok(ChallengeKeys {
+        rsa,
+        ak_name,
+        ek_name,
+        ek_public: ek_public.to_vec(),
+        public,
+        have_cert: top[2].seen(),
+        json,
+    })
+}
 
+/// A certificate cert_read_der() reads into, freed when it goes.
+struct HeldCert(Cert);
+
+impl Drop for HeldCert {
+    fn drop(&mut self) {
+        // SAFETY: the certificate the guard holds, or none, freed once.
+        unsafe { cert_free(&mut self.0) };
+    }
+}
+
+/// The certificate in the base64 `b64` and its key: none when it does
+/// not decode, parse or hold a key of the kinds a TPM's endorsement key
+/// has.
+fn ek_certificate(b64: &[u8]) -> Option<(HeldCert, CertPubkey)> {
+    let mut der = vec![0u8; EK_CERT_MAX];
+    let mut der_len = 0usize;
+    let mut cert = HeldCert(Cert::new());
+    let mut key = CertPubkey {
+        rsa: false,
+        n: [0; 512],
+        n_len: 0,
+        e: 0,
+        x: [0; 32],
+        y: [0; 32],
+    };
+
+    // SAFETY: the base64's bytes, room for the DER and for its length.
+    let ret = unsafe {
+        base64_decode(
+            b64.as_ptr().cast(),
+            b64.len(),
+            der.as_mut_ptr(),
+            der.len(),
+            &mut der_len,
+        )
+    };
+    let der = der.get(..der_len).filter(|_| ret == 0)?;
+    // SAFETY: the DER's bytes, and the certificate to read them into.
+    if unsafe { cert_read_der(der.as_ptr(), der.len(), &mut cert.0) } != 0 {
+        return None;
+    }
+    // SAFETY: the certificate read above, and room for its key.
+    if unsafe { cert_pubkey(&cert.0, &mut key) } != 0 {
+        return None;
+    }
+    Some((cert, key))
+}
+
+/// Whether the certificate chains to the issuer bundle at `bundle`: 0,
+/// -EKEYREJECTED with libcrypto's reason, or -EINVAL for a bundle that
+/// cannot be loaded.
+fn cert_chains(cert: &HeldCert, bundle: &CStr) -> (c_int, &'static [u8]) {
+    let mut reason: *const c_char = c"".as_ptr();
+
+    // SAFETY: the certificate, the bundle's path, a C string, and where
+    // the reason goes.
+    let ret = unsafe { cert_verify_chain(&cert.0, bundle.as_ptr(), &mut reason) };
+    // SAFETY: a static C string of libcrypto's, or the empty one above.
+    (ret, unsafe { ffi::c_str(reason) })
+}
+
+/// The checks of the EK certificate the evidence carries, if any, into
+/// the report.
+fn check_ek_certificate(rep: &mut Report, pol: &AttestChallengePolicy, keys: &ChallengeKeys) {
+    let vouched = pol.ek_name.is_some() || pol.trust_presented;
+
+    if !keys.have_cert {
+        if vouched {
+            rep.note(b"no endorsement certificate: the endorsement key is trusted as presented");
+        } else {
+            rep.check(
+                false,
+                b"no endorsement certificate: pin the key with --ek-name or waive with --trust-presented-ek",
+            );
+        }
+        return;
+    }
+    let Some((cert, key)) = ek_certificate(cstr(&keys.json.cert_b64)) else {
+        rep.check(
+            false,
+            b"endorsement certificate: parseable with a P-256 or RSA-2048 key",
+        );
+        return;
+    };
+    rep.check(
+        cert_describes(&key, &keys.public),
+        b"endorsement certificate: describes the endorsement key",
+    );
+    let Some(bundle) = pol.ek_ca else {
+        if vouched {
+            rep.note(b"endorsement certificate: not checked against an issuer bundle (--ek-ca)");
+        } else {
+            rep.check(
+                false,
+                b"endorsement certificate: not checked against an issuer bundle; pass --ek-ca, pin the key with --ek-name or waive with --trust-presented-ek",
+            );
+        }
+        return;
+    };
+    let (ret, reason) = cert_chains(&cert, bundle);
+    if ret == -EINVAL {
+        rep.check(
+            false,
+            &[
+                b"endorsement certificate: issuer bundle ",
+                bundle.to_bytes(),
+                b" unreadable",
+            ]
+            .concat(),
+        );
+        return;
+    }
+    let (sep, why): (&[u8], &[u8]) = if ret != 0 {
+        (b": ", reason)
+    } else {
+        (b"", b"")
+    };
+    rep.check(
+        ret == 0,
+        &[
+            b"endorsement certificate: chains to ",
+            bundle.to_bytes(),
+            sep,
+            why,
+        ]
+        .concat(),
+    );
+}
+
+/// `buf` filled from the kernel's random source: -EIO where it gives
+/// less.
+fn random(buf: &mut [u8]) -> Result<(), c_int> {
+    // SAFETY: the room of buf, of its length.
+    let got = unsafe { getrandom(buf.as_mut_ptr().cast(), buf.len(), 0) };
+    if usize::try_from(got) != Ok(buf.len()) {
+        return Err(-EIO);
+    }
+    Ok(())
+}
+
+/// The secret that carries the seed to the endorsement key `public`,
+/// the seed into `seed`: RSA-OAEP of a random seed, or the ephemeral
+/// point of an ECDH whose secret the seed derives from.
+fn seal_seed(rsa: bool, public: &TpmPublic, seed: &mut Seed) -> Result<Vec<u8>, c_int> {
+    let mut secret = [0u8; 256];
+    let mut secret_len = 0usize;
+
+    if rsa {
+        random(&mut seed.seed)?;
+        // SAFETY: the key's modulus, the label with its NUL, the seed,
+        // and room for the secret and its length.
+        let ret = unsafe {
+            rsa_oaep_encrypt(
+                public.n.as_ptr(),
+                public.n_len,
+                public.rsa_exponent,
+                IDENTITY.as_ptr().cast(),
+                IDENTITY.to_bytes_with_nul().len(),
+                seed.seed.as_ptr(),
+                seed.seed.len(),
+                secret.as_mut_ptr(),
+                secret.len(),
+                &mut secret_len,
+            )
+        };
+        if ret != 0 {
+            return Err(-EIO);
+        }
+        return secret.get(..secret_len).map(<[u8]>::to_vec).ok_or(-EIO);
+    }
+    let (mut eph_x, mut eph_y) = ([0u8; 32], [0u8; 32]);
+    if ecdh_p256_ephemeral(&public.x, &public.y, &mut eph_x, &mut eph_y, &mut seed.z) != 0
+        || kdfe(
+            &seed.z,
+            IDENTITY.to_bytes(),
+            &eph_x,
+            &public.x,
+            &mut seed.seed,
+        ) != 0
+    {
+        return Err(-EIO);
+    }
+    Ok([&[0, 32][..], &eph_x, &[0, 32], &eph_y].concat())
+}
+
+/// attest challenge: after the checks the policy asks for, into the
+/// report, a credential the target recovers only with the attestation
+/// key the evidence names under its endorsement key, and the challenge
+/// that carries it: -EKEYREJECTED when a check failed, -EINVAL for
+/// evidence without the keys.
+pub(crate) fn challenge_make(
+    evidence: &[u8],
+    pol: &AttestChallengePolicy,
+    rep: &mut Report,
+) -> Result<MadeChallenge, c_int> {
+    let mut computed = [0u8; NAME_LEN];
+    let mut blob = [0u8; ID_OBJECT_LEN];
+    let mut credential = Box::new([0u8; CREDENTIAL_LEN]);
+    let mut seed = Box::new(Seed {
+        seed: [0; 32],
+        z: [0; 32],
+    });
+
+    let keys = challenge_keys(evidence)?;
     // The operator's pins come first: the challenge is for the key the
     // operator enrolled, not for whatever the document names.
-    if !pol.ak_name.is_null() {
-        // SAFETY: the caller's pinned name.
-        let pinned = unsafe { ffi::slice(pol.ak_name, NAME_LEN) };
-
-        say!(
-            rep,
-            !memneq_explicit(&ak_name, pinned),
-            c"attestation key: the pinned key"
+    if let Some(pinned) = &pol.ak_name {
+        rep.check(
+            !memneq_explicit(&keys.ak_name, pinned),
+            b"attestation key: the pinned key",
         );
     }
-    if !pol.ek_name.is_null() {
-        // SAFETY: the caller's pinned name.
-        let pinned = unsafe { ffi::slice(pol.ek_name, NAME_LEN) };
-
-        say!(
-            rep,
-            !memneq_explicit(&ek_name, pinned),
-            c"endorsement key: the pinned key"
+    if let Some(pinned) = &pol.ek_name {
+        rep.check(
+            !memneq_explicit(&keys.ek_name, pinned),
+            b"endorsement key: the pinned key",
         );
     }
 
     // The key must be an endorsement key, not any decryption key.
-    let named = object_name(ek_public, &mut computed) == 0;
-    say!(
-        rep,
-        named && !memneq_explicit(&computed, &ek_name),
-        c"endorsement key: name matches its public area"
+    let named = object_name(&keys.ek_public, &mut computed) == 0;
+    rep.check(
+        named && !memneq_explicit(&computed, &keys.ek_name),
+        b"endorsement key: name matches its public area",
     );
-    say!(
-        rep,
-        public.attrs == EK_ATTRS
-            && public.policy_len == 32
-            && !memneq_explicit(&public.policy, &EK_POLICY),
-        c"endorsement key: TCG default template under the endorsement policy"
+    rep.check(
+        endorsement_template(&keys.public),
+        b"endorsement key: TCG default template under the endorsement policy",
     );
-    if top[2].seen() {
-        // SAFETY: an allocation, which the caller frees by its size.
-        s.der = unsafe { xmalloc(EK_CERT_MAX) }.cast();
-        if s.der.is_null() {
-            return -ENOMEM;
-        }
-        // SAFETY: the certificate's base64, a C string, room for its DER,
-        // and the certificate and key to fill.
-        let unreadable = unsafe {
-            base64_decode(
-                s.cert_b64,
-                ffi::c_str(s.cert_b64).len(),
-                s.der,
-                EK_CERT_MAX,
-                &mut der_len,
-            ) != 0
-                || cert_read_der(s.der, der_len, &mut s.cert) != 0
-                || cert_pubkey(&s.cert, &mut cert_key) != 0
-        };
-        if unreadable {
-            say!(
-                rep,
-                false,
-                c"endorsement certificate: parseable with a P-256 or RSA-2048 key"
-            );
-        } else {
-            say!(
-                rep,
-                cert_describes(&cert_key, &public),
-                c"endorsement certificate: describes the endorsement key"
-            );
-            if !pol.ek_ca.is_null() {
-                // SAFETY: the certificate, the caller's bundle path, and
-                // where the reason goes.
-                let vrc = unsafe { cert_verify_chain(&s.cert, pol.ek_ca, &mut reason) };
-
-                if vrc == -EINVAL {
-                    say!(
-                        rep,
-                        false,
-                        c"endorsement certificate: issuer bundle %s unreadable",
-                        pol.ek_ca
-                    );
-                } else {
-                    let (sep, why) = if vrc != 0 {
-                        (c": ".as_ptr(), reason)
-                    } else {
-                        (c"".as_ptr(), c"".as_ptr())
-                    };
-
-                    say!(
-                        rep,
-                        vrc == 0,
-                        c"endorsement certificate: chains to %s%s%s",
-                        pol.ek_ca,
-                        sep,
-                        why
-                    );
-                }
-            } else if vouched {
-                note!(
-                    rep,
-                    c"endorsement certificate: not checked against an issuer bundle (--ek-ca)"
-                );
-            } else {
-                say!(
-                    rep,
-                    false,
-                    c"endorsement certificate: not checked against an issuer bundle; pass --ek-ca, pin the key with --ek-name or waive with --trust-presented-ek"
-                );
-            }
-        }
-    } else if vouched {
-        note!(
-            rep,
-            c"no endorsement certificate: the endorsement key is trusted as presented"
-        );
-    } else {
-        say!(
-            rep,
-            false,
-            c"no endorsement certificate: pin the key with --ek-name or waive with --trust-presented-ek"
-        );
-    }
+    check_ek_certificate(rep, pol, &keys);
     if rep.failed != 0 {
-        return -EKEYREJECTED;
+        return Err(-EKEYREJECTED);
     }
 
-    // SAFETY: the caller's room for the credential.
-    if unsafe { getrandom(credential.cast(), CREDENTIAL_LEN, 0) } != CREDENTIAL_LEN as isize {
-        return -EIO;
+    random(&mut credential[..])?;
+    let secret = seal_seed(keys.rsa, &keys.public, &mut seed)?;
+    if credential_protect(&seed.seed, &keys.ak_name, &credential, &mut blob) != 0 {
+        return Err(-EIO);
     }
-    if rsa {
-        // SAFETY: room for the seed.
-        if unsafe { getrandom(s.seed.as_mut_ptr().cast(), s.seed.len(), 0) }
-            != s.seed.len() as isize
-            // SAFETY: the key's modulus, the label with its NUL, the
-            // seed, and room for the secret.
-            || unsafe {
-                rsa_oaep_encrypt(
-                    public.n.as_ptr(),
-                    public.n_len,
-                    public.rsa_exponent,
-                    IDENTITY.as_ptr().cast(),
-                    IDENTITY.to_bytes_with_nul().len(),
-                    s.seed.as_ptr(),
-                    s.seed.len(),
-                    secret.as_mut_ptr(),
-                    secret.len(),
-                    &mut secret_len,
-                )
-            } != 0
-        {
-            return -EIO;
-        }
-    } else {
-        if ecdh_p256_ephemeral(&public.x, &public.y, &mut eph_x, &mut eph_y, &mut s.z) != 0
-            || kdfe(&s.z, IDENTITY.to_bytes(), &eph_x, &public.x, &mut s.seed) != 0
-        {
-            return -EIO;
-        }
-        secret[0] = 0;
-        secret[1] = 32;
-        secret[2..34].copy_from_slice(&eph_x);
-        secret[34] = 0;
-        secret[35] = 32;
-        secret[36..68].copy_from_slice(&eph_y);
-        secret_len = 68;
-    }
-    // SAFETY: the caller's room, which getrandom() filled above.
-    let credential = unsafe { &*credential.cast::<[u8; CREDENTIAL_LEN]>() };
-    if credential_protect(&s.seed, &ak_name, credential, &mut blob) != 0 {
-        return -EIO;
-    }
+    let document = challenge_document(&keys, &blob, &secret)?;
+    Ok(MadeChallenge {
+        document,
+        credential,
+    })
+}
 
-    *cap = 4096;
-    // SAFETY: an allocation, which the caller frees by its size.
-    *out = unsafe { xmalloc(*cap) }.cast();
-    if (*out).is_null() {
-        return -ENOMEM;
-    }
-    // SAFETY: the *cap bytes xmalloc() gave at *out, which nothing else
-    // touches until the emitter is done.
-    let mut e = unsafe { JsonEmit::fixed_raw(*out, *cap) };
+/// The challenge's document: the keys as the evidence named them, the
+/// credential's blob and the secret.
+fn challenge_document(
+    keys: &ChallengeKeys,
+    blob: &[u8; ID_OBJECT_LEN],
+    secret: &[u8],
+) -> Result<Vec<u8>, c_int> {
+    let mut room = [0u8; CHALLENGE_DOC_MAX];
+    let mut e = JsonEmit::fixed(&mut room);
+
     e.obj_open();
     e.kv_int(b"schema", 1);
     e.kv_string(b"kind", b"shirudo-credential");
     e.obj_open_key(b"ek");
-    e.kv_string(b"type", if rsa { b"rsa" } else { b"ecc" });
-    e.kv_string(b"name", cstr(&ek_name_hex));
+    e.kv_string(b"type", if keys.rsa { b"rsa" } else { b"ecc" });
+    e.kv_string(b"name", cstr(&keys.json.ek_name_hex));
     e.obj_close();
-    e.kv_string(b"ak_name", cstr(&ak_hex));
-    // SAFETY: the blob, and room for its hex and a NUL.
-    unsafe { hex_encode(blob.as_ptr(), blob.len(), hex.as_mut_ptr().cast()) };
-    e.kv_string(b"credential_blob", cstr(&hex));
-    // SAFETY: the secret, and room for its hex and a NUL.
-    unsafe { hex_encode(secret.as_ptr(), secret_len, hex.as_mut_ptr().cast()) };
-    e.kv_string(b"secret", cstr(&hex));
+    e.kv_string(b"ak_name", cstr(&keys.json.ak_hex));
+    e.kv_string(b"credential_blob", &encode(blob));
+    e.kv_string(b"secret", &encode(secret));
     e.obj_close();
-    if e.err() != 0 {
-        return e.err();
-    }
-    // SAFETY: the challenge's room, past what the emitter wrote.
-    unsafe { *(*out).add(e.written()) = 0 };
-    *out_len = e.written();
-    0
+    e.finish()
 }
 
 /// `--pcrs`: PCRs 0 to 23 apart by commas, as a mask; -EINVAL for
@@ -2452,7 +2311,7 @@ pub(crate) fn parse_name_digest(spec: &[u8]) -> Result<(&[u8], [u8; 32]), c_int>
     Ok((name, digest))
 }
 
-pub(crate) use capi::{attest_challenge_make, attest_challenge_read, attest_evidence_config};
+pub(crate) use capi::attest_evidence_config;
 
 #[cfg(shirudo_fuzz)]
 mod fuzz;
@@ -2462,19 +2321,8 @@ mod tests;
 mod capi {
     use core::ffi::{c_char, c_int};
 
-    use super::{AttestChallenge, AttestChallengePolicy};
+    use super::AttestChallenge;
     use crate::util::config_update::ConfigUpdate;
-
-    /// # Safety
-    ///
-    /// `path` is a C string and `out` room for a challenge.
-    pub unsafe extern "C" fn attest_challenge_read(
-        path: *const c_char,
-        out: *mut AttestChallenge,
-    ) -> c_int {
-        // SAFETY: the caller passes a C string and the room.
-        unsafe { super::challenge_read(path, out) }
-    }
 
     /// # Safety
     ///
@@ -2496,40 +2344,6 @@ mod capi {
         unsafe {
             super::evidence_config(
                 nonce, nonce_len, pcr_mask, c, update, &mut *out, &mut *len, &mut *cap,
-            )
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `evidence` holds `len` bytes, `pol` is a policy, `credential` room
-    /// for a credential, `out`, `out_len` and `cap` rooms, and `report`
-    /// room for `report_cap` bytes.
-    #[allow(clippy::too_many_arguments)]
-    pub unsafe extern "C" fn attest_challenge_make(
-        evidence: *const c_char,
-        len: usize,
-        pol: *const AttestChallengePolicy,
-        credential: *mut u8,
-        out: *mut *mut c_char,
-        out_len: *mut usize,
-        cap: *mut usize,
-        report: *mut c_char,
-        report_cap: usize,
-    ) -> c_int {
-        // SAFETY: the caller passes the evidence, the policy and the
-        // rooms.
-        unsafe {
-            super::challenge_make(
-                evidence,
-                len,
-                &*pol,
-                credential,
-                &mut *out,
-                &mut *out_len,
-                &mut *cap,
-                report,
-                report_cap,
             )
         }
     }

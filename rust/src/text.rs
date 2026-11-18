@@ -360,6 +360,7 @@ pub(crate) mod capi {
     ///
     /// `dst` is room for `size` bytes, and `src` a C string or `size`
     /// readable bytes.
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn strscpy(dst: *mut c_char, src: *const c_char, size: usize) -> isize {
         if size == 0 {
             return -(E2BIG as isize);

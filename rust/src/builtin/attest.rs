@@ -16,8 +16,8 @@ use crate::sys::libc::{fwrite, stdout, strerror};
 use crate::sys::tss2::NV_WRITTEN;
 use crate::text::{cstr, parse_u64};
 use crate::util::attest::{
-    self, AttestChallenge, AttestChallengePolicy, AttestExpect, NONCE_MAX, PCR_DEFAULT, Report,
-    attest_challenge_make, attest_challenge_read, attest_evidence_config, parse_name_digest,
+    self, AttestChallenge, AttestChallengePolicy, AttestExpect, MadeChallenge, NONCE_MAX,
+    PCR_DEFAULT, Report, attest_evidence_config, challenge_read, parse_name_digest,
     parse_pcr_value, parse_pcrs,
 };
 use crate::util::chain::{
@@ -32,7 +32,7 @@ use crate::util::help::{
 };
 use crate::util::hex;
 use crate::util::image_runtime;
-use crate::util::io::read_file;
+use crate::util::io;
 use crate::util::json::{JsonEmit, MAX_BYTES};
 use crate::util::keys::{self, KEYS_MAX};
 use crate::util::measured::{measured_set_add, measured_upatch_of};
@@ -41,9 +41,7 @@ use crate::util::options::{
 };
 use crate::util::seal::{SealOutput, seal_output_commit, seal_output_create};
 use crate::util::tpm::REGISTER_ATTRS;
-use crate::util::tpm_wire::{
-    CREDENTIAL_LEN, NAME_LEN, NV_RSA_BYTES, RegisterPolicy, nv_name, register_policy,
-};
+use crate::util::tpm_wire::{NAME_LEN, NV_RSA_BYTES, RegisterPolicy, nv_name, register_policy};
 use crate::util::upatch::{Upatch, upatch_close, upatch_open};
 
 const MEMBERS_MAX: usize = 256;
@@ -554,45 +552,17 @@ impl Members {
     }
 }
 
-/// A buffer read_file() filled, freed when it goes.
-struct File(*mut u8, usize);
-
-impl File {
-    fn bytes(&self) -> &[u8] {
-        if self.0.is_null() {
-            return &[];
-        }
-        // SAFETY: the len bytes read.
-        unsafe { core::slice::from_raw_parts(self.0, self.1) }
-    }
-}
-
-impl Drop for File {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            // SAFETY: read_file()'s buffer of len + 1 bytes.
-            unsafe { xfree(self.0.cast(), self.1 + 1) };
-        }
-    }
-}
-
-fn read(path: &[u8], max: usize) -> Result<File, c_int> {
-    let mut f = File(ptr::null_mut(), 0);
-    let p = message(&[path]);
-
-    // SAFETY: a C string and room for the buffer and its length.
-    match unsafe { read_file(p.as_ptr(), max, (&raw mut f.0).cast(), &mut f.1) } {
-        0 => Ok(f),
-        err => Err(err),
-    }
+/// The file at `path`, of at most `max` bytes.
+fn read(path: &[u8], max: usize) -> Result<Vec<u8>, c_int> {
+    io::read(&message(&[path]), max)
 }
 
 /// What the init event counts of a certificate: the SHA-256 of its DER.
 fn cert_digest(path: &[u8]) -> Result<[u8; 32], c_int> {
     let mut out = [0; 32];
     let ret = match read(path, KEYS_DER_MAX) {
-        Ok(der) if der.bytes().is_empty() => -ENODATA,
-        Ok(der) => sha256_into(der.bytes(), &mut out),
+        Ok(der) if der.is_empty() => -ENODATA,
+        Ok(der) => sha256_into(&der, &mut out),
         Err(err) => err,
     };
 
@@ -892,9 +862,9 @@ fn report_json(report: &[u8], verdict: &[u8]) -> c_int {
     0
 }
 
-fn read_evidence(path: &[u8]) -> Result<File, c_int> {
+fn read_evidence(path: &[u8]) -> Result<Vec<u8>, c_int> {
     let ret = match read(path, MAX_BYTES) {
-        Ok(f) if f.bytes().is_empty() => Err(-ENODATA),
+        Ok(f) if f.is_empty() => Err(-ENODATA),
         r => r,
     };
 
@@ -1024,7 +994,7 @@ fn verify_against(args: &[&CStr], x: &mut AttestExpect) -> Result<c_int, c_int> 
     }
     let evidence = read_evidence(evidence_path)?;
     let mut report = Report::new(REPORT_MAX);
-    let err = match attest::verify(evidence.bytes(), x, &mut report) {
+    let err = match attest::verify(&evidence, x, &mut report) {
         Ok(()) => 0,
         Err(err) => err,
     };
@@ -1051,20 +1021,8 @@ fn verify_against(args: &[&CStr], x: &mut AttestExpect) -> Result<c_int, c_int> 
 }
 
 fn challenge(args: &[&CStr]) -> c_int {
-    let mut credential = [0u8; CREDENTIAL_LEN];
-    let ret = challenge_into(args, &mut credential).unwrap_or_else(|code| code);
-
-    // SAFETY: the credential's bytes, scrubbed before they go.
-    unsafe { ptr::write_volatile(&mut credential, [0; CREDENTIAL_LEN]) };
-    ret
-}
-
-/// attest challenge, the credential it makes into `credential`.
-fn challenge_into(args: &[&CStr], credential: &mut [u8; CREDENTIAL_LEN]) -> Result<c_int, c_int> {
     let mut p = OptParser::new(c"attest challenge", &CHALLENGE_OPTS, Some(&HELP), args, 2);
-    let (mut ak_name, mut ek_name) = ([0u8; NAME_LEN], [0u8; NAME_LEN]);
-    let (mut have_ak, mut have_ek, mut trust_presented) = (false, false, false);
-    let mut ek_ca: Option<&CStr> = None;
+    let mut pol = AttestChallengePolicy::default();
     let (mut evidence_path, mut out_path) = (None, None);
 
     loop {
@@ -1073,104 +1031,81 @@ fn challenge_into(args: &[&CStr], credential: &mut [u8; CREDENTIAL_LEN]) -> Resu
         match opt {
             OPT_END => break,
             CHALLENGE_EVIDENCE => evidence_path = Some(v),
-            CHALLENGE_EK_CA => ek_ca = p.value(),
-            CHALLENGE_AK_NAME => {
-                ak_name = name_of(&p, "--ak-name", v)?;
-                have_ak = true;
-            }
-            CHALLENGE_EK_NAME => {
-                ek_name = name_of(&p, "--ek-name", v)?;
-                have_ek = true;
-            }
-            CHALLENGE_TRUST_PRESENTED_EK => trust_presented = true,
+            CHALLENGE_EK_CA => pol.ek_ca = p.value(),
+            CHALLENGE_AK_NAME => match name_of(&p, "--ak-name", v) {
+                Ok(name) => pol.ak_name = Some(name),
+                Err(code) => return code,
+            },
+            CHALLENGE_EK_NAME => match name_of(&p, "--ek-name", v) {
+                Ok(name) => pol.ek_name = Some(name),
+                Err(code) => return code,
+            },
+            CHALLENGE_TRUST_PRESENTED_EK => pol.trust_presented = true,
             CHALLENGE_OUTPUT => out_path = Some(v),
             OPT_ARG => {
                 p.usage_arg(b"unexpected argument ");
-                return Err(EXIT_USAGE);
+                return EXIT_USAGE;
             }
-            OPT_DONE => return Ok(0),
-            _ => return Err(EXIT_USAGE),
+            OPT_DONE => return 0,
+            _ => return EXIT_USAGE,
         }
     }
     let (Some(evidence_path), Some(out_path)) = (evidence_path, out_path) else {
-        return Err(usage(&p, "--evidence and --output are required"));
+        return usage(&p, "--evidence and --output are required");
     };
-    let evidence = read_evidence(evidence_path)?;
-    let pol = AttestChallengePolicy {
-        ek_ca: ek_ca.map_or(ptr::null(), CStr::as_ptr),
-        ak_name: if have_ak {
-            ak_name.as_ptr()
-        } else {
-            ptr::null()
-        },
-        ek_name: if have_ek {
-            ek_name.as_ptr()
-        } else {
-            ptr::null()
-        },
-        trust_presented,
+    let evidence = match read_evidence(evidence_path) {
+        Ok(evidence) => evidence,
+        Err(code) => return code,
     };
-    let mut report = vec![0u8; REPORT_MAX];
-    let (mut doc, mut len, mut cap): (*mut c_char, usize, usize) = (ptr::null_mut(), 0, 0);
-    let ev = evidence.bytes();
-    // SAFETY: the evidence, the policy, and rooms for the credential, the
-    // document and the report.
-    let err = unsafe {
-        attest_challenge_make(
-            ev.as_ptr().cast(),
-            ev.len(),
-            &pol,
-            credential.as_mut_ptr(),
-            &mut doc,
-            &mut len,
-            &mut cap,
-            report.as_mut_ptr().cast(),
-            report.len(),
-        )
-    };
-    print(cstr(&report));
-    let ret = (|| {
-        if err == -EINVAL {
+    let mut report = Report::new(REPORT_MAX);
+    let made = attest::challenge_make(&evidence, &pol, &mut report);
+    print(report.text());
+    match made {
+        Ok(made) => challenge_write(out_path, &made),
+        Err(err) if err == -EINVAL => {
             error(&[
                 b"attest challenge: ",
                 evidence_path,
                 b" carries no endorsement key",
             ]);
-            return EXIT_USAGE;
+            EXIT_USAGE
         }
-        if err != 0 {
+        Err(_) => {
             print(b"verdict: fail\n");
-            return 1;
+            1
         }
-        let path = message(&[out_path]);
-        let mut out = SealOutput::closed();
-        // SAFETY: the output to create and a C string.
-        let e = unsafe { seal_output_create(&mut out, path.as_ptr(), 0o600) };
-        if e != 0 {
-            error(&[b"attest challenge: open ", out_path, b": ", strerr(-e)]);
-            return 1;
-        }
-        // SAFETY: the output created above and the document's bytes.
-        let e = unsafe { seal_output_commit(&mut out, doc.cast(), len) };
-        if e != 0 {
-            error(&[b"attest challenge: write ", out_path, b": ", strerr(-e)]);
-            return 1;
-        }
-        print(
-            &[
-                b"challenge: ",
-                out_path,
-                b"\ncredential: ",
-                &hex::encode(&credential[..]),
-                b"\n",
-            ]
-            .concat(),
-        );
-        0
-    })();
-    // SAFETY: the document's buffer of cap bytes, or NULL.
-    unsafe { xfree(doc.cast(), cap) };
-    Ok(ret)
+    }
+}
+
+/// The challenge made into the file at `out_path`, and the credential it
+/// carries printed.
+fn challenge_write(out_path: &[u8], made: &MadeChallenge) -> c_int {
+    let path = message(&[out_path]);
+    let mut out = SealOutput::closed();
+    // SAFETY: the output to create and a C string.
+    let e = unsafe { seal_output_create(&mut out, path.as_ptr(), 0o600) };
+    if e != 0 {
+        error(&[b"attest challenge: open ", out_path, b": ", strerr(-e)]);
+        return 1;
+    }
+    let doc = &made.document;
+    // SAFETY: the output created above and the document's bytes.
+    let e = unsafe { seal_output_commit(&mut out, doc.as_ptr().cast(), doc.len()) };
+    if e != 0 {
+        error(&[b"attest challenge: write ", out_path, b": ", strerr(-e)]);
+        return 1;
+    }
+    print(
+        &[
+            b"challenge: ",
+            out_path,
+            b"\ncredential: ",
+            &hex::encode(&made.credential[..]),
+            b"\n",
+        ]
+        .concat(),
+    );
+    0
 }
 
 fn evidence(args: &[&CStr]) -> c_int {
@@ -1206,21 +1141,17 @@ fn evidence(args: &[&CStr]) -> c_int {
     if nonce_len == 0 {
         warn(&[b"attest: no --nonce; the evidence proves no freshness"]);
     }
-    // SAFETY: an all-zero challenge is an empty one.
-    let mut challenge: Box<AttestChallenge> = Box::new(unsafe { core::mem::zeroed() });
+    let mut challenge = None;
     if let Some(path) = challenge_path {
-        let pc = message(&[path]);
-        // SAFETY: a C string and room for the challenge.
-        if unsafe { attest_challenge_read(pc.as_ptr(), &mut *challenge) } != 0 {
-            error(&[b"attest: ", path, b" is not a shirudo credential challenge"]);
-            return 2;
+        match challenge_read(&message(&[path])) {
+            Ok(read) => challenge = Some(read),
+            Err(_) => {
+                error(&[b"attest: ", path, b" is not a shirudo credential challenge"]);
+                return 2;
+            }
         }
     }
-    let request: *const AttestChallenge = if challenge_path.is_some() {
-        &*challenge
-    } else {
-        ptr::null()
-    };
+    let request: *const AttestChallenge = challenge.as_ref().map_or(ptr::null(), ptr::from_ref);
     let (mut doc, mut len, mut cap): (*mut c_char, usize, usize) = (ptr::null_mut(), 0, 0);
     // SAFETY: the nonce, the challenge or NULL, the runtime's journal and
     // rooms for the document.

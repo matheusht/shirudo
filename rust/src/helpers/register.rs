@@ -25,9 +25,7 @@ use super::{err, helper_main, out, out_bytes, perror, strerror};
 use crate::heap::xfree;
 use crate::sys::identity::Identity;
 use crate::sys::version::shirudo_version_id;
-use crate::util::attest::{
-    AttestChallenge, PCR_DEFAULT, attest_challenge_read, attest_evidence_config,
-};
+use crate::util::attest::{AttestChallenge, PCR_DEFAULT, attest_evidence_config, challenge_read};
 use crate::util::bpf_sys::{
     Attr, BPF_ANY, BPF_MAP_CREATE, bpf_map_freeze, bpf_map_update_elem, bpf_obj_pin,
 };
@@ -695,20 +693,19 @@ fn evidence(args: &[&CStr]) -> c_int {
     if nonce_len > nonce.len() || decode(nonce_hex, &mut nonce[..nonce_len]).is_err() {
         return 2;
     }
-    // SAFETY: a challenge of nothing, for which zeros are the value.
-    let mut challenge: Box<AttestChallenge> = Box::new(unsafe { core::mem::zeroed() });
+    let mut challenge = None;
     if let Some(path) = args.get(3) {
-        // SAFETY: a C string and room for the challenge.
-        if unsafe { attest_challenge_read(path.as_ptr(), &mut *challenge) } != 0 {
-            err("evidence: bad challenge\n");
-            return 2;
+        match challenge_read(path) {
+            Ok(read) => challenge = Some(read),
+            Err(_) => {
+                err("evidence: bad challenge\n");
+                return 2;
+            }
         }
     }
-    let c: *const AttestChallenge = if args.len() == 4 {
-        &*challenge
-    } else {
-        core::ptr::null()
-    };
+    let c: *const AttestChallenge = challenge
+        .as_ref()
+        .map_or(core::ptr::null(), core::ptr::from_ref);
     let (mut doc, mut len, mut cap): (*mut c_char, usize, usize) = (core::ptr::null_mut(), 0, 0);
     // SAFETY: the nonce, the challenge or NULL, no journal, and rooms for
     // the document, freed after.
