@@ -1710,11 +1710,17 @@ A case tests what the code it covers does, through the functions the
 crate calls, and documents each ``unsafe`` block as the crate does.
 cargo builds every case into ``build/unit/shirudo-unit``, unoptimized
 and with the debug assertions on, and runs them on threads of one
-process.
+process: a case that writes files does so in a ``testutil::TempDir`` of
+its own, reads the tree's fixtures through ``testutil::testing_path()``,
+and one that changes what every thread sees, its standard streams say,
+holds ``testutil::serial()`` meanwhile. A module that reads a fixed path,
+as the event log and the tree state do, takes it in a test build from a
+thread-local each case sets for its own thread.
 
-The suites still in C, ``testing/unit/<m>.c``, check with the macros of
-``unit.h`` and run each case in a child process; they go to Rust one by
-one.
+Two suites stay in C, ``testing/unit/overflow.c`` and
+``testing/unit/string.c``: they test the macros and inline helpers of
+:src:`include/shirudo/` the C still in the tree uses, with the macros of
+``unit.h``, each case in a child process, and go with that C.
 
 Write a shell test
 ~~~~~~~~~~~~~~~~~~
