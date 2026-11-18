@@ -323,7 +323,7 @@ unsafe fn tree_event(seq: i64, operation: *const u8, event: *mut u8) -> c_int {
 /// # Safety
 ///
 /// `chain` and `event` are digests, which may be the same.
-unsafe fn fold(chain: *mut u8, event: *const u8) -> c_int {
+pub(crate) unsafe fn fold(chain: *mut u8, event: *const u8) -> c_int {
     let mut cat = [0u8; 2 * DIGEST_LEN];
 
     // SAFETY: the caller's two digests, copied before the result

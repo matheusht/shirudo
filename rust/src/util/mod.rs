@@ -19,7 +19,7 @@ pub(crate) mod config;
 mod config_attest;
 pub(crate) mod config_image;
 pub(crate) mod config_measure;
-mod config_update;
+pub(crate) mod config_update;
 pub(crate) mod crypto_openssl;
 pub(crate) mod curl;
 pub(crate) mod decode;

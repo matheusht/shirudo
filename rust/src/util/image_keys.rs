@@ -268,7 +268,7 @@ pub(crate) fn validate_set(primary: &CStr, root_fd: c_int, set: &mut TrustedSet)
 /// it does not, or its error. A key set takes effect only at boot, when
 /// the kernel enrols its certificates, so a live update can only use the
 /// signers the kernel already holds.
-fn check_set_with(set: &TrustedSet, mut holds: impl FnMut(&[u8]) -> c_int) -> c_int {
+pub(crate) fn check_set_with(set: &TrustedSet, mut holds: impl FnMut(&[u8]) -> c_int) -> c_int {
     for cert in members(set) {
         let (mut der, mut size) = (core::ptr::null(), 0usize);
         // SAFETY: a certificate of the set and rooms for its bytes.
