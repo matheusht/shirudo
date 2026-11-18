@@ -471,10 +471,11 @@ valgrind: build-unit
 # so with isolation off.
 MIRI_CARGO ?= cargo
 MIRI_TOOLCHAIN ?= nightly
-MIRI_SUITES := util::attest util::bpm_oci util::bpm_state \
-	util::bpm_tree_overlap util::hex util::integrity util::json \
-	util::kernel_build_id util::kernel_release util::sysinfo \
-	util::tamper util::upatch util::upatch_resolve
+MIRI_SUITES := errno util::attest util::bpm_oci util::bpm_state \
+	util::bpm_tree_overlap util::hex util::image_bootstrap \
+	util::integrity util::json util::kernel_build_id \
+	util::kernel_release util::paths util::sysinfo util::tamper \
+	util::upatch util::upatch_resolve
 
 miri: build-unit
 	$(Q)cd "$${TMPDIR:-/tmp}" && $(MIRI_CARGO) +$(MIRI_TOOLCHAIN) miri setup
