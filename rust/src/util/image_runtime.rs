@@ -996,9 +996,8 @@ fn boot_target(target: &mut ConfigUpdateTarget) -> c_int {
         if ret == 0 {
             // SAFETY: the open journal, the record read and room for the
             // staged target.
-            ret = with_journal(|j| unsafe {
-                config_update_staged(j, &previous, reset, restart, &mut staged)
-            });
+            ret =
+                with_journal(|j| unsafe { config_update_staged(j, &previous, reset, &mut staged) });
         }
         if ret < 0 {
             return ret;

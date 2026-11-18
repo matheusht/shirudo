@@ -74,7 +74,7 @@ fn pcr_selection(mask: u32) -> [u8; PCR_SELECTION_LEN] {
     out
 }
 
-pub(super) fn policy_pcr(prev: &Digest, mask: u32, pcr_digest: &Digest, out: &mut Digest) -> c_int {
+pub(crate) fn policy_pcr(prev: &Digest, mask: u32, pcr_digest: &Digest, out: &mut Digest) -> c_int {
     policy_hash(prev, CC_POLICY_PCR, &pcr_selection(mask), pcr_digest, out)
 }
 
@@ -123,7 +123,7 @@ pub(crate) fn writer_auth_hash(nonce: &[u8], cphash: &Digest, out: &mut Digest) 
     sha256(&bytes[..n + 4 + DIGEST_LEN + NV_POLICY_REF.len()], out)
 }
 
-pub(super) fn policy_signed(
+pub(crate) fn policy_signed(
     prev: &Digest,
     modulus: &[u8; NV_RSA_BYTES],
     out: &mut Digest,
@@ -146,7 +146,7 @@ pub(super) fn policy_signed(
     sha256(&bytes, out)
 }
 
-pub(super) fn policy_command_code(prev: &Digest, command_code: u32, out: &mut Digest) -> c_int {
+pub(crate) fn policy_command_code(prev: &Digest, command_code: u32, out: &mut Digest) -> c_int {
     policy_hash(
         prev,
         CC_POLICY_COMMAND_CODE,
@@ -180,7 +180,7 @@ pub(crate) fn register_policy_final(
 }
 
 /// The digests of `register_policy()`, which writes them in this order.
-pub(super) struct RegisterPolicy<'a> {
+pub(crate) struct RegisterPolicy<'a> {
     pub branch_written: &'a mut Digest,
     pub branch_init: &'a mut Digest,
     pub policy: &'a mut Digest,
@@ -188,7 +188,7 @@ pub(super) struct RegisterPolicy<'a> {
 
 /// The register's write policy from the `pcr_values` the binding PCRs of
 /// `mask` held, which `pcr_values_len` bytes of SHA-256 cover.
-pub(super) fn register_policy(
+pub(crate) fn register_policy(
     mask: u32,
     pcr_values: *const u8,
     pcr_values_len: usize,
@@ -218,7 +218,7 @@ pub(super) fn register_policy(
 }
 
 /// The name of an NV index: nameAlg || SHA-256(TPMS_NV_PUBLIC).
-pub(super) fn nv_name(
+pub(crate) fn nv_name(
     index: u32,
     attrs: u32,
     policy: &Digest,

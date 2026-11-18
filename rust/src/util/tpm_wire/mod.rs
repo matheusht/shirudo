@@ -20,6 +20,16 @@ pub(crate) use policy::{
     nv_extend_cphash, object_name, policy_nv_written, policy_or, register_policy_final,
     writer_auth_hash, writer_public,
 };
+/// The rest of what test-tpm-wire drives.
+#[cfg(feature = "test-helpers")]
+pub(crate) use {
+    kdf::{HmacKey, credential_protect, kdfa, kdfe},
+    parse::{ecc_public_parse, ecdsa_signature_parse},
+    policy::{
+        RegisterPolicy, nv_name, policy_command_code, policy_nv_written, policy_or, policy_pcr,
+        policy_signed, register_policy,
+    },
+};
 
 use core::ffi::c_int;
 
@@ -31,7 +41,7 @@ pub(crate) const DIGEST_LEN: usize = 32;
 /// nameAlg and a SHA-256.
 pub(crate) const NAME_LEN: usize = 2 + DIGEST_LEN;
 pub(crate) const NV_RSA_BYTES: usize = 384;
-const NV_RSA_PUBLIC_AREA_LEN: usize = 24 + NV_RSA_BYTES;
+pub(crate) const NV_RSA_PUBLIC_AREA_LEN: usize = 24 + NV_RSA_BYTES;
 pub(crate) const CREDENTIAL_LEN: usize = 32;
 pub(crate) const ID_OBJECT_LEN: usize = 2 + 32 + 2 + CREDENTIAL_LEN;
 

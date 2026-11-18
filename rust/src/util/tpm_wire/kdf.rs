@@ -17,14 +17,14 @@ const KDFA_MAX: usize = 4096;
 
 /// The HMAC key of a KDFa, as the caller holds it: NULL is not an empty
 /// key to OpenSSL.
-pub(super) struct HmacKey {
+pub(crate) struct HmacKey {
     pub ptr: *const u8,
     pub len: usize,
 }
 
 /// KDFa: SP800-108 in counter mode with HMAC-SHA-256, `out.len()` bytes
 /// of it.
-pub(super) fn kdfa(key: &HmacKey, label: &[u8], u: &[u8], v: &[u8], out: &mut [u8]) -> c_int {
+pub(crate) fn kdfa(key: &HmacKey, label: &[u8], u: &[u8], v: &[u8], out: &mut [u8]) -> c_int {
     let mut buf = [0u8; 4 + 64 + 1 + 2 * NAME_LEN + 4];
     let mut block = [0u8; DIGEST_LEN];
     let mut done = 0;
@@ -68,7 +68,7 @@ pub(super) fn kdfa(key: &HmacKey, label: &[u8], u: &[u8], v: &[u8], out: &mut [u
 }
 
 /// KDFe: SP800-56A one-step with SHA-256, one block.
-pub(super) fn kdfe(
+pub(crate) fn kdfe(
     z: &[u8; DIGEST_LEN],
     label: &[u8],
     u: &[u8],
@@ -95,7 +95,7 @@ pub(super) fn kdfe(
 /// contents TPM2_ActivateCredential takes for the object named `name`:
 /// the integrity HMAC, then the credential encrypted, under keys both
 /// derived from the seed and the name.
-pub(super) fn credential_protect(
+pub(crate) fn credential_protect(
     seed: &[u8; DIGEST_LEN],
     name: &[u8; NAME_LEN],
     credential: &[u8; CREDENTIAL_LEN],

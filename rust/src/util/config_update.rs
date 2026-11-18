@@ -655,7 +655,7 @@ fn state_save(u: &ConfigUpdate, record: &ConfigUpdateRecord, inject: bool) -> c_
 }
 
 fn same_boot(a: &ConfigUpdateRecord, b: &ConfigUpdateRecord) -> bool {
-    a.reset_count == b.reset_count && a.restart_count == b.restart_count
+    a.reset_count == b.reset_count
 }
 
 fn same_target(a: &ConfigUpdateTarget, b: &ConfigUpdateTarget) -> bool {
@@ -966,7 +966,7 @@ fn check_record(u: &ConfigUpdate, record: &ConfigUpdateRecord) -> c_int {
     if ret == 0 {
         ret = live_read(u, record.pcr, &mut reset, &mut restart, &mut value);
     }
-    if ret == 0 && (reset != record.reset_count || restart != record.restart_count) {
+    if ret == 0 && reset != record.reset_count {
         ret = -ESTALE;
     }
     if ret == 0 && value != expected {
@@ -1186,7 +1186,6 @@ fn staged(
     u: &ConfigUpdate,
     previous: &ConfigUpdateRecord,
     reset: u32,
-    restart: u32,
     target: &mut ConfigUpdateTarget,
 ) -> c_int {
     let mut staged = ConfigUpdateRecord::zeroed();
@@ -1198,7 +1197,7 @@ fn staged(
     if staged.pending {
         return -EBADMSG;
     }
-    if staged.reset_count == reset && staged.restart_count == restart {
+    if staged.reset_count == reset {
         return 0;
     }
     if same_target(&staged.target, &previous.target) {
@@ -1307,8 +1306,7 @@ unsafe fn boot(update: *mut ConfigUpdate, t: *const ConfigUpdateTarget, pcr: u32
     if ret != 0 {
         return ret;
     }
-    if previous.sequence != 0 && previous.reset_count == reset && previous.restart_count == restart
-    {
+    if previous.sequence != 0 && previous.reset_count == reset {
         if previous.pending {
             return -EINPROGRESS;
         }
@@ -1319,7 +1317,7 @@ unsafe fn boot(update: *mut ConfigUpdate, t: *const ConfigUpdateTarget, pcr: u32
     }
     if previous.sequence != 0 && !same_target(target, &previous.target) {
         let mut next = ConfigUpdateTarget::zeroed();
-        let ret = staged(u, &previous, reset, restart, &mut next);
+        let ret = staged(u, &previous, reset, &mut next);
 
         if ret < 0 {
             return ret;
@@ -1477,7 +1475,6 @@ mod capi {
         update: *mut ConfigUpdate,
         previous: *const ConfigUpdateRecord,
         reset: u32,
-        restart: u32,
         target: *mut ConfigUpdateTarget,
     ) -> c_int {
         // SAFETY: the caller's journal, record and room, or NULL.
@@ -1488,7 +1485,7 @@ mod capi {
         ) else {
             return -super::EINVAL;
         };
-        super::staged(u, previous, reset, restart, target)
+        super::staged(u, previous, reset, target)
     }
 
     /// # Safety

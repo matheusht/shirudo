@@ -141,7 +141,7 @@ pub(crate) fn public_marshal(public: &TpmPublic, out: &mut [u8], len: &mut usize
 }
 
 /// An ECDSA P-256 signing key with SHA-256 and no symmetric protector.
-pub(super) fn ecc_public_parse(buf: &[u8], out: &mut TpmEccPublic) -> c_int {
+pub(crate) fn ecc_public_parse(buf: &[u8], out: &mut TpmEccPublic) -> c_int {
     let mut public = TpmPublic::zeroed();
     let ret = public_parse(buf, &mut public);
 
@@ -162,7 +162,7 @@ pub(super) fn ecc_public_parse(buf: &[u8], out: &mut TpmEccPublic) -> c_int {
 
 /// A TPMT_SIGNATURE of ECDSA with SHA-256: its r into `r_out`, then its
 /// s into `s_out`.
-pub(super) fn ecdsa_signature_parse(
+pub(crate) fn ecdsa_signature_parse(
     buf: &[u8],
     r_out: &mut [u8; 32],
     s_out: &mut [u8; 32],

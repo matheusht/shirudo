@@ -15,6 +15,7 @@ mod conditions;
 mod config;
 mod config_attest;
 mod config_image;
+mod config_update;
 mod eventlog;
 mod exec_churn;
 mod harden;
@@ -30,8 +31,10 @@ mod nv_writer;
 mod register_cli;
 mod seal;
 mod seal_output;
+mod tpm_wire;
 mod upatch_decode;
 mod upatch_map_types;
+mod upatch_prog_metadata;
 mod upatch_serializer_pages;
 
 /// The arguments the C runtime gave main(), as C strings.

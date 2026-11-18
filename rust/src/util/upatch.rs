@@ -54,7 +54,7 @@ pub(crate) const PROG_MAP_MAX: usize = 16;
 pub(crate) const UPROBE_TARGET_MAGIC: u32 = 0x5455_5055;
 pub(crate) const UPROBE_TARGET_VERSION: u32 = 1;
 pub(crate) const UPROBE_PATH_MAX: u32 = 4096;
-const BUILD_ID_MAX: usize = 64;
+pub(crate) const BUILD_ID_MAX: usize = 64;
 const UPROBE_OFFSETS_MAX: u32 = 1 << 20;
 
 pub(crate) const ATTACH_RAW_TRACEPOINT: u32 = 0;

@@ -903,10 +903,9 @@ testing/helper/test-eventlog: $(HELPER_MAIN_DIR)/test-eventlog.o $(VERSION_OBJ) 
 	@printf '  LD      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(REGISTER_LIBS)
 
-testing/helper/test-tpm-wire: testing/helper/test-tpm-wire.c  \
-                          util/malloc.o util/log.o \
-                        util/string.o $(RUST_LIB)
-	@printf '  CC      $@\n'
+testing/helper/test-tpm-wire: $(HELPER_MAIN_DIR)/test-tpm-wire.o \
+                         $(RUST_HELPER_LIB)
+	@printf '  LD      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ -lcrypto -lssl $(ZLIB_LIBS) $(RUST_TEST_LDLIBS)
 
 testing/helper/test-register: testing/helper/test-register.c  \
@@ -1003,17 +1002,14 @@ testing/helper/test-upatch-map-types: $(HELPER_MAIN_DIR)/test-upatch-map-types.o
 	@printf '  LD      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(RUST_TEST_LDLIBS)
 
-testing/helper/test-upatch-prog-metadata: testing/helper/test-upatch-prog-metadata.c \
-                                     util/malloc.o util/string.o \
-                                    util/log.o $(RUST_LIB)
-	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) -o $@ $^ \
-		$(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
+testing/helper/test-upatch-prog-metadata: $(HELPER_MAIN_DIR)/test-upatch-prog-metadata.o \
+                                    $(RUST_HELPER_LIB)
+	@printf '  LD      $@\n'
+	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(RUST_TEST_LDLIBS)
 
 testing/helper/test-upatch-serializer-pages: $(HELPER_MAIN_DIR)/test-upatch-serializer-pages.o \
                                         $(RUST_HELPER_LIB)
 	@printf '  LD      $@\n'
-
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
 testing/helper/test-upatch-rodata: testing/helper/test-upatch-rodata.c \
@@ -1046,9 +1042,9 @@ testing/helper/test-config-image: $(HELPER_MAIN_DIR)/test-config-image.o \
 	@printf '  LD      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ -lcrypto -lssl $(ZLIB_LIBS) $(RUST_TEST_LDLIBS)
 
-testing/helper/test-config-update: testing/helper/test-config-update.c \
-		$(REGISTER_OBJS)
-	@printf '  CC      $@\n'
+testing/helper/test-config-update: $(HELPER_MAIN_DIR)/test-config-update.o \
+		$(VERSION_OBJ) $(LIBBPF_A) $(RUST_HELPER_LIB)
+	@printf '  LD      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(REGISTER_LIBS)
 
 testing/helper/test-tpm-command: testing/helper/test-tpm-command.c include/shirudo/tpm_command.h
@@ -1058,7 +1054,6 @@ testing/helper/test-tpm-command: testing/helper/test-tpm-command.c include/shiru
 testing/helper/test-config-attest: $(HELPER_MAIN_DIR)/test-config-attest.o \
 		$(VERSION_OBJ) $(LIBBPF_A) $(RUST_HELPER_LIB)
 	@printf '  LD      $@\n'
-
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(REGISTER_LIBS)
 
 testing/helper/test-image-keys: $(HELPER_MAIN_DIR)/test-image-keys.o \
