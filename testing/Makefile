@@ -119,6 +119,11 @@ TEST_VM_BUNDLE_SOURCES := $(sort $(wildcard \
 	$(ROOT)/upatches/kernel-obs/*.c $(ROOT)/upatches/kernel-obs/*.h $(ROOT)/upatches/kernel-obs/*.list \
 		$(ROOT)/upatches/kernel-obs/*.py $(ROOT)/upatches/kernel-obs/Beefile \
 	$(ROOT)/upatches/kernel-obs/decoders/*))
+# The Rust library and the tools written in Rust, which wildcard() cannot
+# reach at every depth.
+TEST_VM_BUNDLE_SOURCES += $(sort $(shell find $(ROOT)/rust/src -name '*.rs') \
+	$(ROOT)/rust/Cargo.toml $(ROOT)/rust/Cargo.lock \
+	$(wildcard $(ROOT)/tools/*/*.rs))
 # The host's util/version_id.c is no input: every build of the host's
 # writes it, and the bundle's build writes its own.
 TEST_VM_BUNDLE_SOURCES := $(filter-out $(ROOT)/util/version_id.c,$(TEST_VM_BUNDLE_SOURCES))

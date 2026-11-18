@@ -3,7 +3,10 @@
 
 //! `shirudo bpm tree sync`: the signed upatch tree applied on a target,
 //! each operation measured into the register and logged in the tree
-//! eventlog before the cursor moves past it.
+//! eventlog before the cursor moves past it, and its outcome recorded
+//! with the history root after it. A node behind the segment the tag
+//! names walks back through the sealed segments to the one its cursor
+//! lies in, and then forwards through them, oldest first.
 
 use core::ffi::c_int;
 
@@ -11,29 +14,36 @@ use super::{
     Result, TREE_PENDING_PATH, TREE_STATUS_DIR, TREE_USAGE, curl_ready, eprint, error, fail,
     finish, lock, message, path, print, remove, status, warn,
 };
-use crate::errno::{EINVAL, EIO, EKEYREJECTED, ENOENT, ERANGE};
+use crate::errno::{EINVAL, EIO, EKEYREJECTED, ENOENT, ENOMEM, ERANGE};
 use crate::sys::upatch::UPATCH_INSTALL_TARGET_MISSING;
 use crate::text::{cstr, strscpy};
-use crate::util::bpm_oci::{MAX_DIGEST, package_name_ok};
+use crate::util::bpm_oci::{Client, MAX_DIGEST};
+use crate::util::bpm_package::fetch_publication;
 use crate::util::bpm_tree::{
-    Publication, TreeOperation, TreePending, TreePublication, TreeState, digest_bytes,
-    operation_validate, publication_check, publication_follows,
+    MAX_JOIN_OPS, MAX_WALK_OPS, Publication, TreeOperation, TreePending, TreePublication,
+    TreeState, digest_bytes, history_at, publication_follows, publication_verify, segment_precedes,
+    walk_within,
 };
 use crate::util::bpm_tree_state::{
-    tree_configured, tree_event_append, tree_event_replay, tree_pending_read, tree_pending_write,
-    tree_selector_matches, tree_state_read, tree_state_write,
+    OUTCOME_APPLIED, OUTCOME_MODULE_ABSENT, OUTCOME_UNMATCHED, outcome_append, outcome_roots,
+    outcomes_resume, tree_configured, tree_event_append, tree_event_replay, tree_pending_read,
+    tree_pending_write, tree_selector_matches, tree_state_read, tree_state_write,
 };
-use crate::util::chain::{chain_bound, chain_extend, chain_tree_event, memneq_explicit, sha256_2};
+use crate::util::chain::{
+    chain_bound, chain_extend, chain_tree_event, history_step, memneq_explicit, sha256_2,
+};
 use crate::util::eventlog::{
     eventlog_append, eventlog_lock, eventlog_record_open, eventlog_tree_op_measured,
     eventlog_unlock,
 };
 use crate::util::help::is_help;
+use crate::util::hex::sha256_digest_encode;
 use crate::util::json::JsonEmit;
+use crate::util::keys::{TrustedSet, keys_load_image_root};
 use crate::util::seal::{
     SealOutput, seal_mkdir_p, seal_output_commit, seal_output_create, seal_write_file,
 };
-use crate::util::upatch;
+use crate::util::{image_config, image_keys, initrd, upatch, upatch_pins};
 
 /// The lowercase hex of `bytes` into `out`, NUL-terminated.
 fn hex_into(bytes: &[u8; 32], out: &mut [u8; 65]) {
@@ -78,6 +88,10 @@ fn hash2(a: &[u8; 32], b: &[u8; 32]) -> Result<[u8; 32]> {
     Ok(out)
 }
 
+fn lossy(b: &[u8]) -> String {
+    String::from_utf8_lossy(b).into_owned()
+}
+
 /// A sync's failure in its log, with the operation it was at.
 fn report_error(phase: &[u8], op: Option<&TreeOperation>, ret: c_int) {
     let rc = ret.to_string();
@@ -117,6 +131,13 @@ fn report_error(phase: &[u8], op: Option<&TreeOperation>, ret: c_int) {
         why,
         b")",
     ]);
+}
+
+/// A failure in the log, said in words, then by phase.
+fn refuse(text: String, phase: &[u8], ret: c_int) -> c_int {
+    error(&[b"bpm tree sync: ", text.as_bytes()]);
+    report_error(phase, None, ret);
+    ret
 }
 
 /// Event = SHA256("shirudo-tree\0" || seq || operation_digest), extended
@@ -187,11 +208,55 @@ fn status_clear(id: &[u8]) {
     }
 }
 
+/// The status file of an operation: one whose module was absent says
+/// so, any other has none.
+fn status_update(id: &[u8], module_absent: bool) -> Result {
+    if module_absent {
+        return status_write(id, b"skipped: module not loaded");
+    }
+    status_clear(id);
+    Ok(())
+}
+
+/// The outcome of the operation at `seq` recorded, with the history
+/// root moved past it.
+fn outcome_record(
+    seq: i64,
+    digest: &[u8; 32],
+    outcome: i64,
+    projection_root: &[u8; 32],
+    history_root: &mut [u8; 32],
+) -> Result {
+    *history_root = history_step(history_root, digest)?;
+    status(outcome_append(seq, outcome, projection_root, history_root))
+}
+
+fn outcome_unmatched(
+    op: &TreeOperation,
+    projection_root: &[u8; 32],
+    history_root: &mut [u8; 32],
+) -> Result {
+    let digest = digest_bytes(&op.operation_digest).ok_or(-EINVAL)?;
+    outcome_record(
+        op.seq,
+        &digest,
+        OUTCOME_UNMATCHED,
+        projection_root,
+        history_root,
+    )
+}
+
 /// Completes the only non-idempotent window: the process may have
 /// measured the operation, or appended its tree event too, before the
 /// sealed cursor was committed. Applying it again would extend the
-/// register with it a second time this boot.
-fn recover_pending(p: &TreePublication, state: &mut TreeState) -> Result {
+/// register with it a second time this boot. The install's answer went
+/// with the process, so an add whose upatch is not loaded is one whose
+/// module was absent.
+fn recover_pending(
+    p: &TreePublication,
+    state: &mut TreeState,
+    history_root: &mut [u8; 32],
+) -> Result {
     // SAFETY: an all-zero record is an empty one.
     let mut pending: TreePending = unsafe { core::mem::zeroed() };
 
@@ -249,13 +314,190 @@ fn recover_pending(p: &TreePublication, state: &mut TreeState) -> Result {
             tree_event_append(op.seq, op.operation_digest.as_ptr().cast(), next.as_ptr())
         })?;
     }
+    // The operations between the cursor and the pending one had no
+    // match in the sync that stopped: it would have committed the cursor
+    // at one that had.
+    for passed in ops
+        .iter()
+        .filter(|o| o.seq > state.last_seq && o.seq < op.seq)
+    {
+        outcome_unmatched(passed, &previous, history_root)?;
+    }
+    let absent = cstr(&op.op) == b"add" && !upatch_pins::loaded_pins(cstr(&op.id));
+    let outcome = if absent {
+        OUTCOME_MODULE_ABSENT
+    } else {
+        OUTCOME_APPLIED
+    };
+    outcome_record(op.seq, &digest, outcome, &next, history_root)?;
     hex_into(&next, &mut state.projection_root);
     hex_into(&next, &mut state.projection_root_tpm);
     state.last_seq = op.seq;
     // SAFETY: the state.
     status(unsafe { tree_state_write(state) })?;
+    status_update(cstr(&op.id), absent)?;
     remove(TREE_PENDING_PATH);
     Ok(())
+}
+
+/// Where the tree is published, and what its publications are checked
+/// against: the config image's signing set, loaded once for every
+/// segment a walk fetches, or the node's certificate without an image.
+struct Source {
+    c: Client,
+    repository: Vec<u8>,
+    trusted: Option<Box<TrustedSet>>,
+}
+
+impl Source {
+    fn open(cfg: &super::source::TreeConfig) -> Result<Self> {
+        let mut c = Client::new();
+        let repository = c.parse_tree_repo(cstr(&cfg.endpoint))?;
+        let mut src = Source {
+            c,
+            repository,
+            trusted: None,
+        };
+
+        if !image_config::active() {
+            return Ok(src);
+        }
+        // SAFETY: an all-zero set is an empty one.
+        let mut set: Box<TrustedSet> = Box::new(unsafe { core::mem::zeroed() });
+        // SAFETY: a C string and room for a set.
+        let mut ret = unsafe {
+            keys_load_image_root(
+                initrd::cert_path().as_ptr(),
+                image_config::root_fd(),
+                true,
+                &mut *set,
+            )
+        };
+        if ret == 0 && (set.len() == 0 || set.n_unvouched() != 0) {
+            ret = -EKEYREJECTED;
+        }
+        if ret == 0 {
+            ret = image_keys::check_set(&set);
+        }
+        status(ret)?;
+        src.trusted = Some(set);
+        Ok(src)
+    }
+
+    /// The publication `reference` names, a tag or a manifest digest,
+    /// signed and with what tree sync checks before it applies anything,
+    /// and its manifest's digest.
+    fn fetch_checked(&mut self, reference: &[u8], p: &mut TreePublication) -> Result<Vec<u8>> {
+        let mut digest = [0u8; MAX_DIGEST];
+
+        status(fetch_publication(
+            &mut self.c,
+            &self.repository,
+            reference,
+            initrd::cert_path(),
+            self.trusted.as_deref(),
+            p,
+            &mut digest,
+        ))?;
+        // SAFETY: the publication the fetch filled.
+        match unsafe { publication_verify(p) } {
+            Ok(()) => Ok(cstr(&digest).to_vec()),
+            Err((ret, bad)) => {
+                if let Some(i) = bad {
+                    // SAFETY: as above.
+                    let op = unsafe { &p.operations()[i] };
+                    report_error(b"operation_validate", Some(op), ret);
+                }
+                Err(ret)
+            }
+        }
+    }
+}
+
+/// A segment the walk back passed: the forward pass fetches it again by
+/// its manifest digest, which names the same bytes, so only this is
+/// kept and not the document.
+struct Segment {
+    manifest_digest: [u8; 32],
+    head_seq: i64,
+}
+
+fn segment(p: &TreePublication, manifest_digest: &[u8]) -> Result<Segment> {
+    Ok(Segment {
+        manifest_digest: digest_bytes(manifest_digest).ok_or(-EINVAL)?,
+        head_seq: p.head_seq,
+    })
+}
+
+/// Back from the publication the tag names to the segment the cursor
+/// `last_seq` lies in, each sealed segment fetched by the digest its
+/// successor names and checked as the one it names: the segments,
+/// newest first. Nothing is applied before the whole chain is known,
+/// and a gap, a fork or a walk past its limit refuses the sync.
+fn walk_back(
+    src: &mut Source,
+    tag: &TreePublication,
+    tag_digest: &[u8],
+    last_seq: i64,
+) -> Result<Vec<Segment>> {
+    let mut walk = Vec::new();
+    let mut fetched: Option<Publication> = None;
+
+    walk.try_reserve(1).map_err(|_| -ENOMEM)?;
+    walk.push(segment(tag, tag_digest)?);
+    loop {
+        let succ = fetched.as_ref().map_or(tag, Publication::get);
+        if succ.base_seq <= last_seq {
+            return Ok(walk);
+        }
+        let within = walk_within(succ.base_seq, last_seq);
+        if within != 0 {
+            let limit = if last_seq != 0 {
+                MAX_WALK_OPS
+            } else {
+                MAX_JOIN_OPS
+            };
+            return Err(refuse(
+                format!(
+                    "the segment that starts after seq {} is more than {limit} operations past seq {last_seq}, where this node is",
+                    succ.base_seq
+                ),
+                b"segment_walk",
+                within,
+            ));
+        }
+        let named = lossy(cstr(&succ.segment_manifest_digest));
+        let mut pred = Publication::new();
+        let digest = match src.fetch_checked(cstr(&succ.segment_manifest_digest), pred.get_mut()) {
+            Ok(d) => d,
+            Err(err) => {
+                return Err(refuse(
+                    format!(
+                        "the sealed segment {named}, which ends at seq {}, cannot be fetched or does not verify",
+                        succ.base_seq
+                    ),
+                    b"segment_fetch",
+                    err,
+                ));
+            }
+        };
+        match segment_precedes(pred.get(), &digest, succ) {
+            0 => {}
+            err => {
+                return Err(refuse(
+                    format!(
+                        "the sealed segment {named} is not the one before the segment that starts after seq {}",
+                        succ.base_seq
+                    ),
+                    b"segment_chain",
+                    err,
+                ));
+            }
+        }
+        walk.try_reserve(1).map_err(|_| -ENOMEM)?;
+        walk.push(segment(pred.get(), &digest)?);
+        fetched = Some(pred);
+    }
 }
 
 /// What a sync counts.
@@ -267,96 +509,296 @@ struct Counts {
     module_skipped: i64,
 }
 
-/// Applies one selected operation: recorded as pending, its artifact
-/// fetched and checked, installed or removed, measured, logged in the
-/// tree eventlog, and the cursor committed past it.
-fn apply(op: &TreeOperation, state: &mut TreeState, counts: &mut Counts) -> Result {
-    let failed = |phase: &[u8], ret: c_int| {
-        report_error(phase, Some(op), ret);
-        Err(ret)
-    };
-    let id = cstr(&op.id);
+/// One sync: the node's state as it goes, and the history root at its
+/// cursor.
+struct Sync {
+    state: TreeState,
+    have_state: bool,
+    history_root: [u8; 32],
+    dry_run: bool,
+    /// The cursor a dry run reports, which it moves in memory alone.
+    dry_seq: i64,
+    counts: Counts,
+}
 
-    let Some(digest) = digest_bytes(&op.operation_digest) else {
-        report_error(b"operation_digest_parse", Some(op), -EINVAL);
-        return Err(-EINVAL);
-    };
-    // SAFETY: the operation.
-    let ret = unsafe { tree_pending_write(op) };
-    if ret != 0 {
-        return failed(b"pending_write", ret);
-    }
-    let artifact = match super::fetch::tree_artifact(op) {
-        Ok(artifact) => artifact,
-        Err(err) => return failed(b"artifact_fetch_or_verify", err),
-    };
-    let add = cstr(&op.op) == b"add";
-    let mut ret = match cstr(&op.op) {
-        b"add" => crate::builtin::upatch::install(&artifact),
-        b"delete" => crate::builtin::upatch::remove(&artifact),
-        _ => return Err(-EINVAL),
-    };
-    let skipped_module = add && ret == UPATCH_INSTALL_TARGET_MISSING;
-    if skipped_module {
-        ret = 0;
-        counts.module_skipped += 1;
-        warn(&[b"bpm tree: skipped ", id, b": module not loaded"]);
-    }
-    if ret != 0 {
-        return failed(b"upatch_install", ret);
-    }
-    let Some(previous) = hex32(&state.projection_root) else {
-        return failed(b"projection_root_decode", -EINVAL);
-    };
-    let next = match hash2(&previous, &digest) {
-        Ok(next) => next,
-        Err(err) => return failed(b"projection_root_hash", err),
-    };
-    if let Err(err) = measure(op, &digest) {
-        return failed(b"register_extend", err);
-    }
-    hex_into(&next, &mut state.projection_root);
-    hex_into(&next, &mut state.projection_root_tpm);
-    // SAFETY: the operation's NUL-terminated digest and the root.
-    let ret =
-        unsafe { tree_event_append(op.seq, op.operation_digest.as_ptr().cast(), next.as_ptr()) };
-    if ret != 0 {
-        return failed(b"tree_event_append", ret);
-    }
-    state.last_seq = op.seq;
-    counts.applied += 1;
-    // SAFETY: the state.
-    let ret = unsafe { tree_state_write(state) };
-    if ret != 0 {
-        return failed(b"tree_state_commit", ret);
-    }
-    let written = if skipped_module {
-        status_write(id, b"skipped: module not loaded")
-    } else {
-        status_clear(id);
+impl Sync {
+    /// Acceptance steps 4 and 5: the segment starts where this node's
+    /// history was at its base, and its operations up to the cursor are
+    /// the ones the node processed, so a registry that serves another
+    /// history than the one the node went through is refused, inside a
+    /// segment as at its base.
+    fn history_check(&self, p: &TreePublication) -> Result {
+        let last_seq = self.state.last_seq;
+        let mut doc = [0u8; 32];
+        let node = if p.base_seq == last_seq {
+            Ok(self.history_root)
+        } else {
+            outcome_roots(p.base_seq).map(|(_, history)| history)
+        };
+        let ret = match node {
+            // SAFETY: the publication the fetch filled.
+            Ok(node) => match unsafe { history_at(p, p.base_seq, &mut doc) } {
+                0 if memneq_explicit(&node, &doc) => -EKEYREJECTED,
+                ret => ret,
+            },
+            Err(err) => err,
+        };
+        if ret != 0 {
+            return Err(refuse(
+                format!(
+                    "the segment that starts after seq {} does not start from this node's history there",
+                    p.base_seq
+                ),
+                b"history_base",
+                ret,
+            ));
+        }
+        // SAFETY: as above.
+        let ret = match unsafe { history_at(p, last_seq, &mut doc) } {
+            0 if memneq_explicit(&self.history_root, &doc) => -EKEYREJECTED,
+            ret => ret,
+        };
+        if ret != 0 {
+            return Err(refuse(
+                format!(
+                    "the operations of the publication up to seq {last_seq} are not the ones this node processed"
+                ),
+                b"history_prefix",
+                ret,
+            ));
+        }
         Ok(())
-    };
-    if let Err(err) = written {
-        return failed(b"tree_status_write", err);
     }
-    remove(TREE_PENDING_PATH);
-    Ok(())
+
+    /// Recorded before its first operation is processed, so that a sync
+    /// that stops among them leaves the cursor within the publication
+    /// the state names.
+    fn record(&mut self, p: &TreePublication, manifest_digest: &[u8]) -> Result {
+        let st = &mut self.state;
+
+        st.generation = p.generation;
+        let _ = strscpy(&mut st.manifest_digest, manifest_digest);
+        st.head_seq = p.head_seq;
+        st.segment_base_seq = p.base_seq;
+        self.have_state = true;
+        if self.dry_run {
+            return Ok(());
+        }
+        // SAFETY: the state.
+        match unsafe { tree_state_write(st) } {
+            0 => Ok(()),
+            ret => {
+                report_error(b"tree_state_commit_accept", None, ret);
+                Err(ret)
+            }
+        }
+    }
+
+    /// Applies one selected operation: recorded as pending, its artifact
+    /// fetched and checked, installed or removed, measured, logged in
+    /// the tree eventlog, its outcome recorded, and the cursor committed
+    /// past it. `root` is the projection root at the cursor.
+    fn apply(&mut self, op: &TreeOperation, root: &mut [u8; 32]) -> Result {
+        let failed = |phase: &[u8], ret: c_int| {
+            report_error(phase, Some(op), ret);
+            Err(ret)
+        };
+        let id = cstr(&op.id);
+
+        let Some(digest) = digest_bytes(&op.operation_digest) else {
+            return failed(b"operation_digest_parse", -EINVAL);
+        };
+        // SAFETY: the operation.
+        let ret = unsafe { tree_pending_write(op) };
+        if ret != 0 {
+            return failed(b"pending_write", ret);
+        }
+        let artifact = match super::fetch::tree_artifact(op) {
+            Ok(artifact) => artifact,
+            Err(err) => return failed(b"artifact_fetch_or_verify", err),
+        };
+        let add = cstr(&op.op) == b"add";
+        let mut ret = match cstr(&op.op) {
+            b"add" => crate::builtin::upatch::install(&artifact),
+            b"delete" => crate::builtin::upatch::remove(&artifact),
+            _ => return Err(-EINVAL),
+        };
+        let skipped_module = add && ret == UPATCH_INSTALL_TARGET_MISSING;
+        if skipped_module {
+            ret = 0;
+            self.counts.module_skipped += 1;
+            warn(&[b"bpm tree: skipped ", id, b": module not loaded"]);
+        }
+        if ret != 0 {
+            return failed(b"upatch_install", ret);
+        }
+        let next = match hash2(root, &digest) {
+            Ok(next) => next,
+            Err(err) => return failed(b"projection_root_hash", err),
+        };
+        if let Err(err) = measure(op, &digest) {
+            return failed(b"register_extend", err);
+        }
+        *root = next;
+        let st = &mut self.state;
+        hex_into(&next, &mut st.projection_root);
+        hex_into(&next, &mut st.projection_root_tpm);
+        // SAFETY: the operation's NUL-terminated digest and the root.
+        let ret = unsafe {
+            tree_event_append(op.seq, op.operation_digest.as_ptr().cast(), next.as_ptr())
+        };
+        if ret != 0 {
+            return failed(b"tree_event_append", ret);
+        }
+        let outcome = if skipped_module {
+            OUTCOME_MODULE_ABSENT
+        } else {
+            OUTCOME_APPLIED
+        };
+        if let Err(err) = outcome_record(op.seq, &digest, outcome, &next, &mut self.history_root) {
+            return failed(b"tree_outcome_append", err);
+        }
+        st.last_seq = op.seq;
+        self.counts.applied += 1;
+        // SAFETY: the state.
+        let ret = unsafe { tree_state_write(st) };
+        if ret != 0 {
+            return failed(b"tree_state_commit", ret);
+        }
+        if let Err(err) = status_update(id, skipped_module) {
+            return failed(b"tree_status_write", err);
+        }
+        remove(TREE_PENDING_PATH);
+        Ok(())
+    }
+
+    fn apply_operations(&mut self, p: &TreePublication) -> Result {
+        let Some(mut root) = hex32(&self.state.projection_root) else {
+            report_error(b"projection_root_decode", None, -EINVAL);
+            return Err(-EINVAL);
+        };
+
+        // SAFETY: the publication the fetch filled.
+        for op in unsafe { p.operations() } {
+            if op.seq <= self.state.last_seq {
+                continue;
+            }
+            // SAFETY: the selector the parse filled.
+            let matched = unsafe { tree_selector_matches(&op.selector) };
+            if matched < 0 {
+                report_error(b"selector_evaluate", Some(op), matched);
+                return Err(matched);
+            }
+            if matched != 0 {
+                self.counts.selected += 1;
+            } else {
+                self.counts.skipped += 1;
+            }
+            if self.dry_run {
+                // A dry run moves its cursor in memory alone, for a
+                // walk to go on.
+                let digest = digest_bytes(&op.operation_digest).ok_or(-EINVAL)?;
+                self.state.last_seq = op.seq;
+                self.history_root = history_step(&self.history_root, &digest)?;
+                continue;
+            }
+            if matched == 0 {
+                if let Err(err) = outcome_unmatched(op, &root, &mut self.history_root) {
+                    report_error(b"tree_outcome_append", Some(op), err);
+                    return Err(err);
+                }
+                self.state.last_seq = op.seq;
+                continue;
+            }
+            self.apply(op, &mut root)?;
+        }
+        Ok(())
+    }
+
+    /// Acceptance steps 4 to 6 and the operations of one segment, the
+    /// oldest of a walk first, or of the one publication without a walk.
+    /// Only the oldest has an operation left pending: the node records a
+    /// segment before it processes any, so the state names the segment
+    /// that operation is in, and the walk starts from that one.
+    fn apply_segment(
+        &mut self,
+        p: &TreePublication,
+        manifest_digest: &[u8],
+        oldest: bool,
+    ) -> Result {
+        let follows =
+            publication_follows(p, self.have_state.then_some(&self.state), manifest_digest);
+        if follows != 0 {
+            return Err(refuse(
+                format!(
+                    "the segment {} does not follow seq {}, where this node is",
+                    lossy(manifest_digest),
+                    self.state.last_seq
+                ),
+                b"segment_chain",
+                if follows < 0 { follows } else { -ERANGE },
+            ));
+        }
+        self.history_check(p)?;
+        if oldest {
+            if let Err(err) = recover_pending(p, &mut self.state, &mut self.history_root) {
+                report_error(b"pending_recovery", None, err);
+                return Err(err);
+            }
+            self.dry_seq = self.state.last_seq;
+        }
+        self.record(p, manifest_digest)?;
+        self.apply_operations(p)
+    }
+
+    /// The walk forwards, oldest segment first: each sealed one fetched
+    /// again by its digest and checked as before, and the tag's
+    /// document, which the walk holds, last.
+    fn walk_forward(
+        &mut self,
+        src: &mut Source,
+        walk: &[Segment],
+        tag: &TreePublication,
+        tag_digest: &[u8],
+    ) -> Result {
+        let n = walk.len();
+
+        for (i, seg) in walk.iter().enumerate().skip(1).rev() {
+            let want = sha256_digest_encode(&seg.manifest_digest);
+            let want = cstr(&want);
+            let mut p = Publication::new();
+            let fetched =
+                src.fetch_checked(want, p.get_mut())
+                    .and_then(|d| match digest_bytes(&d) {
+                        Some(got) if got == seg.manifest_digest => Ok(d),
+                        _ => Err(-ERANGE),
+                    });
+            let digest = fetched.map_err(|err| {
+                refuse(
+                    format!(
+                        "the sealed segment {}, which ends at seq {}, cannot be fetched again or has changed",
+                        lossy(want),
+                        seg.head_seq
+                    ),
+                    b"segment_fetch",
+                    err,
+                )
+            })?;
+            self.apply_segment(p.get(), &digest, i == n - 1)?;
+        }
+        self.apply_segment(tag, tag_digest, n == 1)
+    }
 }
 
 /// The sync's report: to `path`, sealed, or else to stdout.
-fn write_report(
-    path: Option<&[u8]>,
-    s: &TreeState,
-    counts: &Counts,
-    dry_run: bool,
-    tpm: bool,
-) -> Result {
+fn write_report(path: Option<&[u8]>, sync: &Sync, tpm: bool) -> Result {
+    let (s, counts) = (&sync.state, &sync.counts);
     let mut buf = [0u8; 4096];
     let mut e = JsonEmit::fixed(buf.as_mut_ptr().cast(), buf.len());
 
     e.obj_open();
     e.kv_int(b"schema", 1);
-    e.kv_bool(b"dry_run", dry_run);
+    e.kv_bool(b"dry_run", sync.dry_run);
     e.kv_int(b"selected", counts.selected);
     e.kv_int(b"skipped", counts.skipped);
     e.kv_int(b"applied", counts.applied);
@@ -430,94 +872,56 @@ fn sync(args: &[&[u8]]) -> Result {
         Err(err) if err == -ENOENT => return Ok(()),
         cfg => cfg?,
     };
-    // SAFETY: an all-zero state is an empty one.
-    let mut state: TreeState = unsafe { core::mem::zeroed() };
-    // SAFETY: room for the state.
-    let have_state = match unsafe { tree_state_read(&mut state) } {
-        0 => true,
-        err if err == -ENOENT => false,
-        err => return Err(err),
+    let mut sync = Sync {
+        state: TreeState::zeroed(),
+        have_state: false,
+        history_root: [0; 32],
+        dry_run,
+        dry_seq: 0,
+        counts: Counts::default(),
     };
-    let mut publication = Publication::new();
-    let mut manifest_digest = [0u8; MAX_DIGEST];
-    super::fetch::tree_publication(&cfg, publication.get_mut(), &mut manifest_digest)?;
-    let p = publication.get();
-    // The node records the tree ID in its state, which takes names
-    // alone: one that is not would be applied, measured and logged and
-    // then never recorded, failing every later sync.
-    if !package_name_ok(cstr(&p.tree_id)) {
-        return Err(-EINVAL);
+    // SAFETY: room for the state.
+    match unsafe { tree_state_read(&mut sync.state) } {
+        0 => sync.have_state = true,
+        err if err == -ENOENT => {}
+        err => return Err(err),
     }
-    // SAFETY: the publication the parse filled.
-    let ops = unsafe { p.operations() };
-    // SAFETY: as above.
-    status(unsafe { publication_check(p) })?;
-    for op in ops {
-        // SAFETY: an operation the parse filled.
-        let ret = unsafe { operation_validate(op) };
-        if ret != 0 {
-            report_error(b"operation_validate", Some(op), ret);
-            return Err(ret);
-        }
+    let mut src = Source::open(&cfg)?;
+    let mut tag = Publication::new();
+    let tag_digest = src.fetch_checked(cstr(&cfg.reference), tag.get_mut())?;
+    let p = tag.get();
+    let follows = publication_follows(p, sync.have_state.then_some(&sync.state), &tag_digest);
+    if follows < 0 {
+        return Err(follows);
     }
-    // A base past the cursor is refused, until bpm tree sync walks back
-    // through the sealed segments.
-    match publication_follows(p, have_state.then_some(&state), cstr(&manifest_digest)) {
-        crate::util::bpm_tree::FOLLOWS_WALK => return Err(-ERANGE),
-        ret => status(ret)?,
+    if !sync.have_state {
+        let st = &mut sync.state;
+        st.schema = 1;
+        let _ = strscpy(&mut st.tree_id, cstr(&p.tree_id));
+        st.projection_root[..64].fill(b'0');
+        st.projection_root[64] = 0;
+        st.projection_root_tpm[..64].fill(b'0');
+        st.projection_root_tpm[64] = 0;
     }
-    if !have_state {
-        state.schema = 1;
-        let _ = strscpy(&mut state.tree_id, cstr(&p.tree_id));
-        state.projection_root[..64].fill(b'0');
-        state.projection_root[64] = 0;
-        state.projection_root_tpm[..64].fill(b'0');
-        state.projection_root_tpm[64] = 0;
-    }
-    if let Err(err) = recover_pending(p, &mut state) {
-        report_error(b"pending_recovery", None, err);
-        return Err(err);
-    }
-    let tpm = chain_bound();
-    let mut counts = Counts::default();
-    for op in ops {
-        if op.seq <= state.last_seq {
-            continue;
-        }
-        // SAFETY: the selector the parse filled.
-        let matched = unsafe { tree_selector_matches(&op.selector) };
-        if matched < 0 {
-            report_error(b"selector_evaluate", Some(op), matched);
-            return Err(matched);
-        }
-        if matched == 0 {
-            counts.skipped += 1;
-            if !dry_run {
-                state.last_seq = op.seq;
-            }
-            continue;
-        }
-        counts.selected += 1;
-        if !dry_run {
-            apply(op, &mut state, &mut counts)?;
-        }
-    }
+    sync.history_root = outcomes_resume(sync.state.last_seq).inspect_err(|&err| {
+        report_error(b"outcomes_check", None, err);
+    })?;
+    let walk = walk_back(&mut src, p, &tag_digest, sync.state.last_seq)?;
+    sync.walk_forward(&mut src, &walk, p, &tag_digest)?;
+    // A run of operations without a match at the end moved the cursor.
     if !dry_run {
-        state.generation = p.generation;
-        let _ = strscpy(&mut state.manifest_digest, cstr(&manifest_digest));
-        if state.tree_id[0] == 0 {
-            let _ = strscpy(&mut state.tree_id, cstr(&p.tree_id));
-        }
         // SAFETY: the state.
-        let ret = unsafe { tree_state_write(&state) };
+        let ret = unsafe { tree_state_write(&sync.state) };
         if ret != 0 {
             report_error(b"tree_state_commit_final", None, ret);
             return Err(ret);
         }
+    } else {
+        sync.state.last_seq = sync.dry_seq;
     }
     // "-" is standard output, where the report goes without --report.
     let to = (!report.is_empty() && report != b"-").then_some(report);
-    write_report(to, &state, &counts, dry_run, tpm)
+    write_report(to, &sync, chain_bound())
 }
 
 /// `shirudo bpm tree sync`, which takes the bpm lock only once a tree is

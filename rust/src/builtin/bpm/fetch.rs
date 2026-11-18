@@ -11,7 +11,7 @@ use std::io::Read;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 
-use super::source::{self, Source, TreeConfig};
+use super::source::{self, Source};
 use super::{
     INDEX_MEDIA, INDEX_SIG_MEDIA, INDEX_TAG, PACKAGE_MEDIA, REPOS_DIR, Result, TREE_ARTIFACTS_DIR,
     UPATCH_MEDIA, curl_ready, fail, finish, lock, os_err, path, remove, status,
@@ -23,12 +23,11 @@ use crate::util::bpm_oci::{
     Buffer, Client, Descriptor, MANIFEST_MEDIA, MAX_ENTRIES, MAX_NAME, digest_matches,
     manifest_layers, name_ok, package_name_ok, sha256_hex, trim,
 };
-use crate::util::bpm_package::{IndexEntry, fetch_publication, index_parse, semver_compare};
-use crate::util::bpm_tree::{TreeOperation, TreePublication};
+use crate::util::bpm_package::{IndexEntry, index_parse, semver_compare};
+use crate::util::bpm_tree::TreeOperation;
 use crate::util::crypto_openssl::{
     Sha256Ctx, sha256_final, sha256_free, sha256_init, sha256_update,
 };
-use crate::util::initrd;
 use crate::util::io::read_file;
 use crate::util::seal::{seal_mkdir_p, seal_output_open, seal_write_file};
 use crate::util::upatch::{self, Upatch, is_unload, upatch_close, upatch_open};
@@ -364,27 +363,6 @@ pub(super) fn find_entry(
         }
     }
     found.copied().ok_or(-ENOENT)
-}
-
-/// The tree publication the configuration names, verified against the
-/// node's trust anchor, with its manifest's digest.
-pub(super) fn tree_publication(
-    cfg: &TreeConfig,
-    out: &mut TreePublication,
-    manifest_digest: &mut [u8],
-) -> Result {
-    let mut c = Client::new();
-    let repository = c.parse_tree_repo(cstr(&cfg.endpoint))?;
-
-    status(fetch_publication(
-        &mut c,
-        &repository,
-        cstr(&cfg.reference),
-        initrd::cert_path(),
-        None,
-        out,
-        manifest_digest,
-    ))
 }
 
 /// That the upatch at `path` carries the expected payload digest, the

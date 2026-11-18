@@ -1237,6 +1237,16 @@ fn outcomes_read(
     read.err().unwrap_or(0)
 }
 
+/// The projection and history roots the record holds at `seq`.
+pub(crate) fn outcome_roots(seq: i64) -> Result<([u8; 32], [u8; 32]), c_int> {
+    let (mut codes, mut roots) = (Vec::new(), None);
+
+    match outcomes_read(seq, seq, &mut codes, &mut roots) {
+        0 => roots.ok_or(-EINVAL),
+        err => Err(err),
+    }
+}
+
 /// The history root at `last_seq`, the lines past it dropped, which a
 /// sync that stopped left: under the bpm lock and the record's own.
 pub(crate) fn outcomes_resume(last_seq: i64) -> Result<[u8; 32], c_int> {
