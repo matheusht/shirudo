@@ -22,9 +22,9 @@ cd "$(dirname "$0")"
 seconds=${1:?usage: run.sh <seconds> [<target>...]}
 shift
 if [ $# -eq 0 ]; then
-	for c in fuzz-*.c; do
-		t=${c#fuzz-}
-		set -- "$@" "${t%.c}"
+	for c in corpus/*/; do
+		t=${c#corpus/}
+		set -- "$@" "${t%/}"
 	done
 fi
 

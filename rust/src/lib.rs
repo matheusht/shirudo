@@ -12,6 +12,8 @@ mod btf_builder;
 mod builtin;
 mod errno;
 mod ffi;
+#[cfg(shirudo_fuzz)]
+mod fuzzing;
 mod heap;
 #[cfg(feature = "test-helpers")]
 mod helpers;

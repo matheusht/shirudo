@@ -1230,26 +1230,14 @@ $(FUZZ_OUT)/fuzz-tpm-command: testing/fuzz/fuzz-tpm-command.c $(FUZZ_BASE) \
 $(FUZZ_OUT)/fuzz-json: testing/fuzz/fuzz-json.c $(FUZZ_BASE)
 $(FUZZ_OUT)/fuzz-oci-manifest: testing/fuzz/fuzz-oci-manifest.c \
                                 $(FUZZ_BASE) $(FUZZ_OCI)
-$(FUZZ_OUT)/fuzz-bpm-index: testing/fuzz/fuzz-bpm-index.c \
-                             $(FUZZ_BASE) $(FUZZ_PACKAGE)
 $(FUZZ_OUT)/fuzz-tree: testing/fuzz/fuzz-tree.c $(FUZZ_BASE) \
                           \
                          $(FUZZ_OCI)
-$(FUZZ_OUT)/fuzz-upatch: testing/fuzz/fuzz-upatch.c $(FUZZ_BASE) \
-
-$(FUZZ_OUT)/fuzz-prog-metadata: testing/fuzz/fuzz-prog-metadata.c \
-                                 $(FUZZ_BASE)
 $(FUZZ_OUT)/fuzz-rodata: testing/fuzz/fuzz-rodata.c $(FUZZ_BASE) \
                             \
                            $(FUZZ_SEAL) $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-rodata: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-rodata: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS) $(ZLIB_LIBS)
-$(FUZZ_OUT)/fuzz-beefile: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
-$(FUZZ_OUT)/fuzz-beefile: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS) $(ZLIB_LIBS)
-$(FUZZ_OUT)/fuzz-bpm-tar: testing/fuzz/fuzz-bpm-tar.c $(FUZZ_BASE) \
-                           $(FUZZ_PACKAGE)
-$(FUZZ_OUT)/fuzz-bpm-package: testing/fuzz/fuzz-bpm-package.c $(FUZZ_BASE) \
-                               $(FUZZ_PACKAGE)
 $(FUZZ_OUT)/fuzz-tpm-wire: testing/fuzz/fuzz-tpm-wire.c $(FUZZ_BASE) \
                              \
                             $(FUZZ_SEAL)
@@ -1267,10 +1255,6 @@ $(FUZZ_OUT)/fuzz-eventlog: testing/fuzz/fuzz-eventlog.c $(FUZZ_BASE) \
                              $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-eventlog: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-eventlog: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS) $(ZLIB_LIBS)
-$(FUZZ_OUT)/fuzz-kernel: testing/fuzz/fuzz-kernel.c $(FUZZ_BASE)
-$(FUZZ_OUT)/fuzz-elf: testing/fuzz/fuzz-elf.c $(FUZZ_BASE) $(LIBBPF_A)
-$(FUZZ_OUT)/fuzz-elf: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
-$(FUZZ_OUT)/fuzz-elf: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS)
 $(FUZZ_OUT)/fuzz-serializer: testing/fuzz/fuzz-serializer.c $(FUZZ_BASE) \
                                 \
                                $(FUZZ_SEAL)  util/paths.c \
@@ -1288,8 +1272,6 @@ $(FUZZ_OUT)/fuzz-decoder: FUZZ_CFLAGS += $(LUAJIT_CFLAGS) -DHAVE_LUAJIT \
 $(FUZZ_OUT)/fuzz-decoder: FUZZ_LIBS += $(LUAJIT_LIBS)
 $(FUZZ_OUT)/fuzz-otel: testing/fuzz/fuzz-otel.c $(FUZZ_BASE) \
                         $(VERSION_OBJ)
-$(FUZZ_OUT)/fuzz-beefile: testing/fuzz/fuzz-beefile.c $(FUZZ_BASE) \
-                           $(VERSION_OBJ)
 $(FUZZ_OUT)/fuzz-oci-http: testing/fuzz/fuzz-oci-http.c $(FUZZ_BASE) \
                             $(FUZZ_OCI)
 $(FUZZ_OUT)/fuzz-oci-ref: testing/fuzz/fuzz-oci-ref.c $(FUZZ_BASE) \
@@ -1298,17 +1280,12 @@ $(FUZZ_OUT)/fuzz-registry-auth: testing/fuzz/fuzz-registry-auth.c \
                                  $(FUZZ_BASE) $(FUZZ_OCI)
 $(FUZZ_OUT)/fuzz-config: testing/fuzz/fuzz-config.c $(FUZZ_BASE) \
 
-$(FUZZ_OUT)/fuzz-image: testing/fuzz/fuzz-image.c $(FUZZ_BASE) \
-                          util/paths.c \
-                         $(FUZZ_SEAL)
 $(FUZZ_OUT)/fuzz-config-update: testing/fuzz/fuzz-config-update.c \
                                  $(FUZZ_BASE) \
                                   $(FUZZ_SEAL)
 FUZZ_TREE_STATE :=  \
                      $(FUZZ_OCI) \
                    util/kconfig.c
-$(FUZZ_OUT)/fuzz-tree-state: testing/fuzz/fuzz-tree-state.c $(FUZZ_BASE) \
-                              $(FUZZ_TREE_STATE)
 $(FUZZ_OUT)/fuzz-kconfig: testing/fuzz/fuzz-kconfig.c $(FUZZ_BASE) \
                            $(FUZZ_TREE_STATE)
 $(FUZZ_OUT)/fuzz-quote-check: testing/fuzz/fuzz-quote-check.c $(FUZZ_BASE)
@@ -1388,7 +1365,25 @@ $(FUZZ_TARGETS): $(FUZZ_HEADERS) $(FUZZ_STAMP) $(RUST_FUZZ_LIB)
 	$(Q)$(FUZZ_CC) $(FUZZ_CFLAGS) $(LDFLAGS) -o $@ \
 		$(filter-out $(FUZZ_INCLUDED),$(filter %.c %.o,$^)) $(FUZZ_LIBS)
 
-fuzz-targets: $(FUZZ_TARGETS)
+# The targets written in Rust: functions of the fuzz build of the library,
+# each run by an entry object made from testing/fuzz/target.rs.in.
+FUZZ_RUST := kernel beefile elf tree-state image prog-metadata upatch \
+	     bpm-tar bpm-index bpm-package
+FUZZ_MAIN_DIR := build/fuzz-main
+FUZZ_RUST_TARGETS := $(addprefix $(FUZZ_OUT)/fuzz-,$(FUZZ_RUST))
+
+$(FUZZ_MAIN_DIR)/%.o: testing/fuzz/target.rs.in
+	@printf '  RUSTC   $@\n'
+	$(Q)mkdir -p $(dir $@)
+	$(Q)sed 's/@TARGET@/$(subst -,_,$*)/g' $< > $(FUZZ_MAIN_DIR)/$*.rs
+	$(Q)$(RUSTC_OBJ) --crate-name fuzz_$(subst -,_,$*)_main -o $@ \
+	    $(FUZZ_MAIN_DIR)/$*.rs
+
+$(FUZZ_RUST_TARGETS): $(FUZZ_OUT)/fuzz-%: $(FUZZ_MAIN_DIR)/%.o $(RUST_FUZZ_LIB)
+	@printf '  FUZZ    $@\n'
+	$(Q)$(FUZZ_CC) $(FUZZ_CFLAGS) -o $@ $(filter %.o,$^) $(FUZZ_LIBS)
+
+fuzz-targets: $(FUZZ_TARGETS) $(FUZZ_RUST_TARGETS)
 
 # ----- clean ------------------------------------------------------
 
@@ -1399,7 +1394,8 @@ clean:
 	          $(BUILD_OBJS) $(QUOTE_CHECK_MAIN_OBJ) $(VERSION_OBJ) $(VERSION_RS)
 	$(Q)rm -rf build/target build/unit build/fuzz-afl \
 	    build/fuzz-afl-cmplog $(RUST_TARGET) $(RUST_TEST_TARGET) \
-	    $(RUST_HELPER_TARGET) $(HELPER_MAIN_DIR) $(RUST_FUZZ_TARGET)
+	    $(RUST_HELPER_TARGET) $(HELPER_MAIN_DIR) $(RUST_FUZZ_TARGET) \
+	    $(FUZZ_MAIN_DIR)
 	$(Q)rm -f $(DEPS) testing/helper/*.d
 	$(Q)rm -f $(BPF_OBJS) $(BPF_LSKELS) $(BPF_SKEL_RS) $(BPF_LSKEL_TOOL) $(VMLINUX_H) \
 	    systemd/shirudo.service \

@@ -400,6 +400,9 @@ pub(crate) fn resolve_func(path: &[u8], func: Option<&[u8]>, offset: u64) -> Res
     }
 }
 
+#[cfg(shirudo_fuzz)]
+mod fuzz;
+
 mod capi {
     use core::ffi::c_int;
     use std::fs::File;

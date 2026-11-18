@@ -77,6 +77,7 @@
 # libFuzzer targets and the inputs that crashed them
 /testing/fuzz/fuzz-*
 !/testing/fuzz/fuzz-*.c
+!/testing/fuzz/target.rs.in
 /testing/fuzz/.fuzz-flags
 /testing/fuzz/crash-*
 

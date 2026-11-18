@@ -18,6 +18,5 @@
 int shirudo_build_main(int argc, char **argv);
 
 /* Whether the len bytes at body are a Beefile bpm build takes: 0 or -errno. */
-int bpm_build_parse_beefile(const __u8 *body, size_t len);
 
 #endif /* SHIRUDO_BUILD_BPM_H */

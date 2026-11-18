@@ -808,38 +808,5 @@ pub(super) fn parse(body: &[u8], spec: &mut Spec) -> c_int {
     finish(spec)
 }
 
-mod capi {
-    use core::ffi::c_int;
-
-    /// Whether the `len` bytes at `body` are a Beefile `bpm build` takes:
-    /// 0 or -errno. For the fuzzer, which reaches the reader through it:
-    /// of a Beefile taken, each tree entry's fixes are what the publisher
-    /// may emit, valid IDs in byte order, each once, or the process
-    /// aborts.
-    ///
-    /// # Safety
-    ///
-    /// `body` holds `len` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn bpm_build_parse_beefile(body: *const u8, len: usize) -> c_int {
-        if body.is_null() {
-            return -crate::errno::EINVAL;
-        }
-        // SAFETY: the caller's bytes.
-        let body = unsafe { crate::ffi::slice(body, len) };
-        let mut spec = super::Spec::default();
-        let ret = super::parse(body, &mut spec);
-        if ret == 0 {
-            for u in &spec.upatches {
-                let fixes = &u.tree.fixes;
-                if fixes.len() > super::MAX_FIXES
-                    || !fixes.iter().all(|id| super::fix_id_ok(id))
-                    || !fixes.windows(2).all(|w| w[0] < w[1])
-                {
-                    std::process::abort();
-                }
-            }
-        }
-        ret
-    }
-}
+#[cfg(shirudo_fuzz)]
+mod fuzz;

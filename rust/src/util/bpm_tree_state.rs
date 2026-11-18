@@ -1446,6 +1446,9 @@ pub(crate) fn tree_status_path(name: &[u8]) -> CString {
 #[cfg(test)]
 mod tests;
 
+#[cfg(shirudo_fuzz)]
+mod fuzz;
+
 mod capi {
     use core::ffi::{c_char, c_int};
 

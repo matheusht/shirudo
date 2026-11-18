@@ -1,0 +1,31 @@
+// SPDX-License-Identifier: BSD-2-Clause
+// Copyright (c) 2026 Authors of shirudo
+
+//! A libFuzzer target's entry points, which make makes for each target
+//! of the Rust library, putting its name for @TARGET@: libFuzzer's main
+//! calls them, and they the target's functions in the library.
+
+#![no_std]
+
+unsafe extern "C" {
+    fn shirudo_fuzz_@TARGET@(data: *const u8, size: usize) -> i32;
+    fn shirudo_fuzz_@TARGET@_init() -> i32;
+}
+
+/// # Safety
+///
+/// libFuzzer's input of `size` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn LLVMFuzzerTestOneInput(data: *const u8, size: usize) -> i32 {
+    // SAFETY: libFuzzer's input, handed on.
+    unsafe { shirudo_fuzz_@TARGET@(data, size) }
+}
+
+/// # Safety
+///
+/// libFuzzer's arguments, which no target takes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn LLVMFuzzerInitialize(_argc: *mut i32, _argv: *mut *mut *mut u8) -> i32 {
+    // SAFETY: the target's setup.
+    unsafe { shirudo_fuzz_@TARGET@_init() }
+}

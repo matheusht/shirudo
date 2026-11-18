@@ -78,5 +78,7 @@ impl IndexEntry {
     }
 }
 
+#[cfg(shirudo_fuzz)]
+mod fuzz;
 #[cfg(test)]
 mod tests;
