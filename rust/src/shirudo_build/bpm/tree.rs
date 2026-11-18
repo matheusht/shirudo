@@ -138,6 +138,10 @@ static APPEND_HELP: Help = Help::new(
 /// Indexed by what each stands for, so that a value names itself.
 static OPS: [OptName; 2] = [OptName::new(c"add", 0), OptName::new(c"delete", 1)];
 
+fn status(ret: c_int) -> Result<(), c_int> {
+    if ret == 0 { Ok(()) } else { Err(ret) }
+}
+
 fn err(msg: String) {
     error(msg.as_bytes());
 }
@@ -215,7 +219,7 @@ impl Drop for Operation {
 struct Later(Vec<TreeOperation>);
 
 impl Later {
-    fn take(&mut self, p: &TreePublication) -> c_int {
+    fn take(&mut self, p: &TreePublication) -> Result<(), c_int> {
         // SAFETY: the publication's operations.
         for op in unsafe { p.operations() } {
             if cstr(&op.op) != b"delete" {
@@ -226,13 +230,13 @@ impl Later {
             d.seq = op.seq;
             // SAFETY: the empty selector and the operation's.
             if unsafe { tree_selector_copy(&mut d.selector, &op.selector) } != 0 {
-                return -ENOMEM;
+                return Err(-ENOMEM);
             }
             copy(&mut d.op, cstr(&op.op));
             copy(&mut d.id, cstr(&op.id));
             self.0.push(d);
         }
-        0
+        Ok(())
     }
 }
 
@@ -355,20 +359,24 @@ fn refuse_shared_xdp_class(
     seen: &mut Seen,
     op: &TreeOperation,
     classes: u32,
-) -> c_int {
+) -> Result<(), c_int> {
     if classes == 0 {
-        return 0;
+        return Ok(());
     }
     // SAFETY: the publication's operations.
     let ops = unsafe { p.operations() };
     for (i, other) in ops.iter().enumerate() {
-        // SAFETY: the operations and their selectors.
-        let skip = cstr(&other.op) != b"add"
+        if cstr(&other.op) != b"add"
             || cstr(&other.id) == cstr(&op.id)
+            // SAFETY: i indexes the publication's operation slice.
             || !unsafe { add_live(p, i) }
-            || later.is_some_and(|l| unsafe { add_withdrawn(other, &l.0) })
-            || unsafe { selectors_disjoint(&other.selector, &op.selector) };
-        if skip {
+            || later.is_some_and(|l| {
+                // SAFETY: other and the copied deletes own their selectors.
+                unsafe { add_withdrawn(other, &l.0) }
+            })
+            // SAFETY: both operations own their selectors.
+            || unsafe { selectors_disjoint(&other.selector, &op.selector) }
+        {
             continue;
         }
         let theirs = match seen.0[i] {
@@ -384,7 +392,7 @@ fn refuse_shared_xdp_class(
                         lossy(cstr(&other.id)),
                         other.seq
                     ));
-                    return e;
+                    return Err(e);
                 }
             },
         };
@@ -398,9 +406,9 @@ fn refuse_shared_xdp_class(
             other.seq,
             theirs & classes
         ));
-        return -EBUSY;
+        return Err(-EBUSY);
     }
-    0
+    Ok(())
 }
 
 /// The shared class check of an add over the sealed segments before
@@ -417,20 +425,20 @@ fn refuse_sealed_xdp_class(
     sealed: Option<&TreePublication>,
     op: &TreeOperation,
     classes: u32,
-) -> c_int {
+) -> Result<(), c_int> {
     let within = walk_within(cur.base_seq, 0);
     if within != 0 {
         err(format!(
             "bpm tree append: a joining node walks back {} operations, past the limit of {MAX_JOIN_OPS}, so the XDP device classes of the sealed segments cannot be checked",
             cur.base_seq
         ));
-        return within;
+        return Err(within);
     }
     let mut later = Later::default();
-    let mut ret = later.take(cur);
+    later.take(cur)?;
     let mut succ = Segment::Borrowed(cur);
     let mut given = sealed;
-    while ret == 0 {
+    loop {
         let segment = match given.take() {
             Some(s) => Segment::Borrowed(s),
             None => {
@@ -450,13 +458,13 @@ fn refuse_sealed_xdp_class(
                         lossy(cstr(&succ.get().segment_manifest_digest)),
                         succ.get().base_seq
                     ));
-                    return e;
+                    return Err(e);
                 }
                 Segment::Owned(pred)
             }
         };
         let mut seen = Seen::new();
-        ret = refuse_shared_xdp_class(
+        refuse_shared_xdp_class(
             c,
             repository,
             repo_ref,
@@ -465,13 +473,11 @@ fn refuse_sealed_xdp_class(
             &mut seen,
             op,
             classes,
-        );
-        if ret == 0 {
-            ret = later.take(segment.get());
-        }
+        )?;
+        later.take(segment.get())?;
         succ = segment;
     }
-    ret
+    Ok(())
 }
 
 /// A segment of a walk back: one the caller holds, or one fetched.
@@ -542,7 +548,7 @@ fn next_segment_tag(c: &mut Client, repository: &[u8], sealed_digest: &[u8]) -> 
 /// The sealed manifest tagged segment-<k>, so that registry garbage
 /// collection keeps it; nodes walk back to it by digest and never read
 /// the tag.
-fn tag_sealed(c: &mut Client, repository: &[u8], sealed_digest: &[u8]) -> c_int {
+fn tag_sealed(c: &mut Client, repository: &[u8], sealed_digest: &[u8]) -> Result<(), c_int> {
     let run = (|| -> Result<(), c_int> {
         let k = next_segment_tag(c, repository, sealed_digest)?;
         if k == 0 {
@@ -558,21 +564,21 @@ fn tag_sealed(c: &mut Client, repository: &[u8], sealed_digest: &[u8]) -> c_int 
         }
         put_manifest(c, repository, &segment_tag(k), manifest.bytes()).map(|_| ())
     })();
-    match run {
-        Ok(()) => 0,
-        Err(e) => {
-            err(format!(
-                "bpm tree append: cannot tag the sealed segment {}",
-                lossy(sealed_digest)
-            ));
-            e
-        }
-    }
+    run.inspect_err(|_| {
+        err(format!(
+            "bpm tree append: cannot tag the sealed segment {}",
+            lossy(sealed_digest)
+        ));
+    })
 }
 
 /// The segment after `sealed`, whose manifest is `sealed_digest`, as it
 /// starts: at the sealed head, with the history root there.
-fn start_segment(sealed: &TreePublication, sealed_digest: &[u8], p: &mut TreePublication) -> c_int {
+fn start_segment(
+    sealed: &TreePublication,
+    sealed_digest: &[u8],
+    p: &mut TreePublication,
+) -> Result<(), c_int> {
     p.schema = 1;
     p.generation = sealed.generation;
     p.base_seq = sealed.head_seq;
@@ -582,43 +588,34 @@ fn start_segment(sealed: &TreePublication, sealed_digest: &[u8], p: &mut TreePub
     let mut root = [0u8; 32];
     // SAFETY: the sealed publication's operations.
     let ret = unsafe { history_at(sealed, sealed.head_seq, &mut root) };
-    if ret == 0 {
-        copy(&mut p.history_root, &hex::encode(&root));
-    }
-    ret
+    status(ret)?;
+    copy(&mut p.history_root, &hex::encode(&root));
+    Ok(())
 }
 
 /// A new tree's id: the one --tree-id gives, else the package's at stable
 /// and the package's with the reference elsewhere, so that a canary tree
 /// one key publishes beside stable does not take stable's id, which an
 /// append checks to tell the two apart.
-fn new_id(tree_id: Option<&[u8]>, package: &[u8], reference: &[u8], out: &mut [u8]) -> c_int {
-    let fits = |id: &[u8], out: &mut [u8]| {
-        if id.len() < out.len() {
-            copy(out, id);
-            0
+fn new_id(tree_id: Option<&[u8]>, package: &[u8], reference: &[u8]) -> Result<Vec<u8>, c_int> {
+    let explicit = tree_id.or_else(|| (reference == b"stable").then_some(package));
+    if let Some(id) = explicit {
+        return if id.len() < STRING_MAX {
+            Ok(id.to_vec())
         } else {
-            -E2BIG
-        }
-    };
-
-    if let Some(t) = tree_id {
-        return fits(t, out);
-    }
-    if reference == b"stable" {
-        return fits(package, out);
+            Err(-E2BIG)
+        };
     }
     let id = [package, b"-", reference].concat();
-    if id.len() < out.len() && package_name_ok(&id) {
-        copy(out, &id);
-        return 0;
+    if id.len() < STRING_MAX && package_name_ok(&id) {
+        return Ok(id);
     }
     err(format!(
         "bpm tree append: {}-{} is no tree id; name the tree with --tree-id",
         lossy(package),
         lossy(reference)
     ));
-    -EINVAL
+    Err(-EINVAL)
 }
 
 /// A tree's fixes as the previous publication carried them: each
@@ -827,85 +824,69 @@ impl Append<'_> {
         self.previous_cert.as_deref().unwrap_or_else(|| self.cert())
     }
 
-    fn signing_keys(&mut self) -> c_int {
+    fn signing_keys(&mut self) -> Result<(), c_int> {
         if self.key.is_none() || self.cert.is_none() {
             let dir = keys_dir(self.keys_dir_arg).to_bytes();
             if self.key.is_none() {
-                match key_file(dir, c"signing_key.pem") {
-                    Ok(k) => self.key = Some(k),
-                    Err(_) => return -EINVAL,
-                }
+                self.key = Some(key_file(dir, c"signing_key.pem").map_err(|_| -EINVAL)?);
             }
             if self.cert.is_none() {
-                match key_file(dir, c"cert.der") {
-                    Ok(c) => self.cert = Some(c),
-                    Err(_) => return -EINVAL,
-                }
+                self.cert = Some(key_file(dir, c"cert.der").map_err(|_| -EINVAL)?);
             }
         }
         if check_keys(self.key(), self.cert()) != 0 {
-            return -EACCES;
+            return Err(-EACCES);
         }
-        0
+        Ok(())
     }
 
-    fn trim_repository(&mut self) -> c_int {
+    fn trim_repository(&mut self) -> Result<(), c_int> {
         let mut out = [0u8; super::MAX_ENDPOINT];
         if trim(self.raw_repository.to_bytes(), &mut out).is_err() {
             err(format!(
                 "bpm tree append: repository is longer than {} bytes",
                 super::MAX_ENDPOINT - 1
             ));
-            return -ENAMETOOLONG;
+            return Err(-ENAMETOOLONG);
         }
         self.repo_ref = cstr(&out).to_vec();
-        0
+        Ok(())
     }
 
-    fn read_package(&mut self) -> c_int {
-        match Info::load(self.package) {
-            Ok(i) => self.info = Some(i),
-            Err(e) => return e,
-        }
+    fn read_package(&mut self) -> Result<(), c_int> {
+        self.info = Some(Info::load(self.package)?);
         let mut dir = [0u8; 101];
-        let beefile =
-            match read_member_in(self.package, b"Beefile", None, Some(&mut dir), BEEFILE_MAX) {
-                Ok(m) => m,
-                Err(e) => {
-                    err(format!(
-                        "bpm tree append: package {} does not include Beefile",
-                        lossy(self.package.to_bytes())
-                    ));
-                    return e;
-                }
-            };
+        let beefile = read_member_in(self.package, b"Beefile", None, Some(&mut dir), BEEFILE_MAX)
+            .inspect_err(|_| {
+            err(format!(
+                "bpm tree append: package {} does not include Beefile",
+                lossy(self.package.to_bytes())
+            ));
+        })?;
         self.package_dir = cstr(&dir).to_vec();
-        self.spec = match parse(beefile.bytes()) {
-            Ok(spec) => spec,
-            Err(ret) => {
-                err(format!(
-                    "bpm tree append: cannot parse the Beefile of {}",
-                    lossy(self.package.to_bytes())
-                ));
-                return ret;
-            }
-        };
+        self.spec = parse(beefile.bytes()).inspect_err(|_| {
+            err(format!(
+                "bpm tree append: cannot parse the Beefile of {}",
+                lossy(self.package.to_bytes())
+            ));
+        })?;
         self.entries = self.spec.upatches.iter().filter(|u| u.tree.present).count();
-        0
+        Ok(())
     }
 
-    fn seal_if_full(&mut self) -> c_int {
-        let n = i64::from(self.publication.get().n_operations);
-        if n >= self.segment_ops || n as usize + self.entries > MAX_OPS {
+    fn seal_if_full(&mut self) -> Result<(), c_int> {
+        let n = self.publication.get().n_operations;
+        let count = usize::try_from(n).map_err(|_| -EOVERFLOW)?;
+        if i64::from(n) >= self.segment_ops || count + self.entries > MAX_OPS {
             let sealed = core::mem::replace(&mut self.publication, Publication::new());
             let ret = start_segment(sealed.get(), &self.parent, self.publication.get_mut());
             self.sealed = Some(sealed);
             return ret;
         }
-        0
+        Ok(())
     }
 
-    fn extend(&mut self) -> c_int {
+    fn extend(&mut self) -> Result<(), c_int> {
         let pub_id = lossy(cstr(&self.publication.get().tree_id));
         // The registry chooses what the reference holds, another tree the
         // key signs among it: only the operator can say which tree the
@@ -916,7 +897,7 @@ impl Append<'_> {
                 lossy(&self.repo_ref),
                 lossy(self.reference)
             ));
-            return -EINVAL;
+            return Err(-EINVAL);
         };
         if cstr(&self.publication.get().tree_id) != tree_id {
             err(format!(
@@ -925,7 +906,7 @@ impl Append<'_> {
                 lossy(self.reference),
                 lossy(tree_id)
             ));
-            return -EINVAL;
+            return Err(-EINVAL);
         }
         // SAFETY: the publication the parse filled.
         if let Err((e, _)) = unsafe { publication_verify(self.publication.get()) } {
@@ -934,99 +915,84 @@ impl Append<'_> {
                 lossy(&self.repo_ref),
                 lossy(self.reference)
             ));
-            return e;
+            return Err(e);
         }
-        let ret = self.seal_if_full();
-        if ret != 0 {
-            return ret;
-        }
+        self.seal_if_full()?;
         let p = self.publication.get_mut();
         match p.generation.checked_add(1).filter(|&g| g != i64::MAX) {
             Some(g) => p.generation = g,
             None => {
                 err("bpm tree append: the tree's generation is exhausted".into());
-                return -EOVERFLOW;
+                return Err(-EOVERFLOW);
             }
         }
-        0
+        Ok(())
     }
 
     /// The next generation of the tree at the reference, or a new tree's
     /// first.
-    fn head(&mut self) -> c_int {
-        self.repository = match self.c.parse_push_repo(&self.repo_ref) {
-            Ok(r) => r,
-            Err(e) => {
-                err("bpm tree append: the repository must be oci://registry/repository".into());
-                return e;
-            }
-        };
+    fn head(&mut self) -> Result<(), c_int> {
+        self.repository = self.c.parse_push_repo(&self.repo_ref).inspect_err(|_| {
+            err("bpm tree append: the repository must be oci://registry/repository".into());
+        })?;
         let previous_cert = self.previous_cert().to_owned();
-        let fetched = fetch_document(
+        let read = fetch_document(
             &mut self.c,
             &self.repository,
             self.reference,
             Some(previous_cert.as_c_str()),
             None,
-        );
-        let mut ret = match fetched {
-            Ok((doc, digest)) => {
-                self.parent = digest;
-                // SAFETY: the document's bytes, and the publication.
-                let r = unsafe {
-                    tree_parse(doc.as_ptr().cast(), doc.len(), self.publication.get_mut())
-                };
-                self.previous = Some(doc);
-                r
+        )
+        .and_then(|(doc, digest)| {
+            self.parent = digest;
+            // SAFETY: the document's bytes and the publication to fill.
+            let ret =
+                unsafe { tree_parse(doc.as_ptr().cast(), doc.len(), self.publication.get_mut()) };
+            self.previous = Some(doc);
+            status(ret)
+        });
+        match read {
+            Ok(()) => self.extend()?,
+            Err(e) if e == -ENOENT => {
+                self.publication = Publication::new();
+                let p = self.publication.get_mut();
+                p.schema = 1;
+                p.generation = 1;
+                self.parent.clear();
+                let name = self.info.as_ref().map_or(&[][..], |i| cstr(&i.0.name));
+                copy(&mut p.tree_id, &new_id(self.tree_id, name, self.reference)?);
             }
-            Err(e) => e,
-        };
-        if ret == -ENOENT {
-            self.publication = Publication::new();
-            let p = self.publication.get_mut();
-            p.schema = 1;
-            p.generation = 1;
-            self.parent.clear();
-            let name = self
-                .info
-                .as_ref()
-                .map(|i| cstr(&i.0.name).to_vec())
-                .unwrap_or_default();
-            ret = new_id(self.tree_id, &name, self.reference, &mut p.tree_id);
-        } else if ret != 0 {
-            err(format!(
-                "bpm tree append: cannot read the publication at {}:{}",
-                lossy(&self.repo_ref),
-                lossy(self.reference)
-            ));
-        } else {
-            ret = self.extend();
-        }
-        if ret != 0 {
-            return ret;
+            Err(e) => {
+                err(format!(
+                    "bpm tree append: cannot read the publication at {}:{}",
+                    lossy(&self.repo_ref),
+                    lossy(self.reference)
+                ));
+                return Err(e);
+            }
         }
         let p = self.publication.get_mut();
         p.schema = 1;
         copy(&mut p.parent_manifest_digest, &self.parent);
-        0
+        Ok(())
     }
 
-    fn carry_fixes(&mut self) -> c_int {
-        let n = (self.publication.get().n_operations as usize + self.spec.upatches.len())
-            .clamp(1, MAX_OPS);
+    fn carry_fixes(&mut self) -> Result<(), c_int> {
+        let count = usize::try_from(self.publication.get().n_operations).map_err(|_| -EOVERFLOW)?;
+        let n = (count + self.spec.upatches.len()).clamp(1, MAX_OPS);
         self.fixes = vec![Vec::new(); n];
         if self.sealed.is_some() {
-            return 0;
+            return Ok(());
         }
         let Some(doc) = &self.previous else {
-            return 0;
+            return Ok(());
         };
         match read_fixes(doc, self.publication.get()) {
             Ok(carried) => {
                 for (slot, ids) in self.fixes.iter_mut().zip(carried) {
                     *slot = ids;
                 }
-                0
+                Ok(())
             }
             Err(_) => {
                 err(format!(
@@ -1034,12 +1000,12 @@ impl Append<'_> {
                     lossy(&self.repo_ref),
                     lossy(self.reference)
                 ));
-                -EINVAL
+                Err(-EINVAL)
             }
         }
     }
 
-    fn operation_start(&mut self, u: &BuildUpatch, seq: i64) -> c_int {
+    fn operation_start(&mut self, u: &BuildUpatch, seq: i64) -> Result<(), c_int> {
         self.op.reset(seq);
         let op = &mut self.op.0;
         copy(&mut op.op, if self.unload { b"delete" } else { b"add" });
@@ -1047,12 +1013,10 @@ impl Append<'_> {
         if let Some(sel) = &u.tree.selector {
             // SAFETY: the operation's empty selector and the Beefile's.
             let ret = unsafe { tree_selector_copy(&mut op.selector, &*sel.0) };
-            if ret != 0 {
-                return ret;
-            }
+            status(ret)?;
         }
         canonicalize(&mut op.selector);
-        0
+        Ok(())
     }
 
     fn refuse_xdp_classes(&mut self, id: &[u8], body: &[u8]) -> Result<u32, c_int> {
@@ -1062,7 +1026,7 @@ impl Append<'_> {
                 lossy(id)
             ));
         })?;
-        let ret = refuse_shared_xdp_class(
+        refuse_shared_xdp_class(
             &mut self.c,
             &self.repository,
             &self.repo_ref,
@@ -1071,13 +1035,10 @@ impl Append<'_> {
             &mut self.seen,
             &self.op.0,
             classes,
-        );
-        if ret != 0 {
-            return Err(ret);
-        }
+        )?;
         if classes != 0 {
             let cert = self.previous_cert().to_owned();
-            let ret = refuse_sealed_xdp_class(
+            refuse_sealed_xdp_class(
                 &mut self.c,
                 &self.repository,
                 &self.repo_ref,
@@ -1086,10 +1047,7 @@ impl Append<'_> {
                 self.sealed.as_ref().map(Publication::get),
                 &self.op.0,
                 classes,
-            );
-            if ret != 0 {
-                return Err(ret);
-            }
+            )?;
         }
         Ok(classes)
     }
@@ -1128,7 +1086,7 @@ impl Append<'_> {
         let layer = Descriptor::of(
             UPATCH_MEDIA.to_bytes(),
             &sha256_digest(&body)?,
-            body.len() as i64,
+            i64::try_from(body.len()).map_err(|_| -E2BIG)?,
         );
         let config = Descriptor::of(EMPTY_CONFIG_MEDIA.to_bytes(), &sha256_digest(b"{}")?, 2);
         let mut buf = vec![0u8; MANIFEST_CAP];
@@ -1162,41 +1120,36 @@ impl Append<'_> {
         })
     }
 
-    fn commit(&mut self, u: &BuildUpatch, classes: u32) -> c_int {
+    fn commit(&mut self, u: &BuildUpatch, classes: u32) -> Result<(), c_int> {
         let op = &mut self.op.0;
-        // SAFETY: the operation, its selector as its counts say.
+        // SAFETY: op holds its selector and its counts match the arrays.
         let digest = unsafe { operation_digest(op) };
-        let ret = match digest {
-            Ok(d) => {
-                copy(&mut op.operation_digest, cstr(&d));
-                // SAFETY: as above.
-                unsafe { operation_validate(op) }
-            }
-            Err(e) => e,
-        };
-        if ret != 0 {
-            err(format!(
-                "bpm tree append: the tree entry of {} makes an operation no target takes",
-                lossy(&u.tree.id)
-            ));
-            return ret;
-        }
+        digest
+            .and_then(|digest| {
+                copy(&mut op.operation_digest, cstr(&digest));
+                // SAFETY: op holds its selector and its counts match the arrays.
+                status(unsafe { operation_validate(op) })
+            })
+            .inspect_err(|_| {
+                err(format!(
+                    "bpm tree append: the tree entry of {} makes an operation no target takes",
+                    lossy(&u.tree.id)
+                ));
+            })?;
         let p = self.publication.get_mut();
-        // SAFETY: the publication and the operation, which it copies.
+        // SAFETY: p is a live publication and op holds the selector it copies.
         let ret = unsafe { tree_publication_append(p, &*self.op.0) };
-        if ret != 0 {
-            return ret;
-        }
-        let n = p.n_operations as usize - 1;
+        status(ret)?;
+        let n = usize::try_from(p.n_operations).map_err(|_| -EOVERFLOW)? - 1;
         self.seen.0[n] = Some(classes);
         if !self.unload {
             self.fixes[n].clone_from(&u.tree.fixes);
         }
         p.head_seq = self.op.0.seq;
-        0
+        Ok(())
     }
 
-    fn entry(&mut self, u: &BuildUpatch) -> c_int {
+    fn entry(&mut self, u: &BuildUpatch) -> Result<(), c_int> {
         let Some(seq) = self
             .publication
             .get()
@@ -1205,71 +1158,59 @@ impl Append<'_> {
             .filter(|&s| s != i64::MAX)
         else {
             err("bpm tree append: the tree's sequence is exhausted".into());
-            return -EOVERFLOW;
+            return Err(-EOVERFLOW);
         };
         let member = if self.unload {
             &u.tree.unload_artifact
         } else {
             &u.tree.load_artifact
         };
-        let body = match read_member_in(
+        let member_data = read_member_in(
             self.package,
             member,
             Some(&self.package_dir),
             None,
             upatch::FILE_MAX,
-        ) {
-            Ok(m) => m.bytes().to_vec(),
-            Err(e) => {
-                err(format!(
-                    "bpm tree append: package entry {} not found",
-                    lossy(member)
-                ));
-                return e;
-            }
+        )
+        .inspect_err(|_| {
+            err(format!(
+                "bpm tree append: package entry {} not found",
+                lossy(member)
+            ));
+        })?;
+        let body = member_data.bytes().to_vec();
+        drop(member_data);
+        self.operation_start(u, seq)?;
+        let classes = if self.unload {
+            0
+        } else {
+            self.refuse_xdp_classes(&u.tree.id, &body)?
         };
-        let mut ret = self.operation_start(u, seq);
-        let mut classes = 0;
-        if ret == 0 && !self.unload {
-            match self.refuse_xdp_classes(&u.tree.id, &body) {
-                Ok(c) => classes = c,
-                Err(e) => ret = e,
-            }
-        }
-        if ret != 0 {
-            return ret;
-        }
-        match self.describe_artifact(body, &u.tree.id) {
-            Ok(up) => self.uploads.push(up),
-            Err(e) => return e,
-        }
+        let upload = self.describe_artifact(body, &u.tree.id)?;
+        self.uploads.push(upload);
         self.commit(u, classes)
     }
 
-    fn operations(&mut self) -> c_int {
+    fn operations(&mut self) -> Result<(), c_int> {
         let spec = core::mem::take(&mut self.spec);
-        let mut ret = 0;
-        for u in spec.upatches.iter().filter(|u| u.tree.present) {
-            ret = self.entry(u);
-            if ret != 0 {
-                break;
-            }
-        }
+        let ret = spec
+            .upatches
+            .iter()
+            .filter(|u| u.tree.present)
+            .try_for_each(|u| self.entry(u));
         self.spec = spec;
-        if ret != 0 {
-            return ret;
-        }
+        ret?;
         if self.uploads.is_empty() {
             err(format!(
                 "bpm tree append: {} has no [upatches.tree] entries",
                 lossy(self.package.to_bytes())
             ));
-            return -ENOENT;
+            return Err(-ENOENT);
         }
-        0
+        Ok(())
     }
 
-    fn sign(&mut self) -> c_int {
+    fn sign(&mut self) -> Result<(), c_int> {
         let fixes = &self.fixes;
         let mut emit_fixes = |e: &mut JsonEmit, index: usize| {
             if let Some(ids) = fixes.get(index).filter(|ids| !ids.is_empty()) {
@@ -1284,103 +1225,62 @@ impl Append<'_> {
         let extra: Extra<'_> = &mut emit_fixes;
         // SAFETY: the publication, its operations and their pairs.
         let emitted = unsafe { emit_publication(self.publication.get(), Some(extra)) };
-        self.payload = match emitted {
-            Ok(doc) => doc,
-            Err(e) => return e,
-        };
-        match sign_detached(&self.payload, (self.key(), self.cert())) {
-            Ok(sig) => {
-                self.sig = sig;
-                0
-            }
-            Err(e) => e,
-        }
+        self.payload = emitted?;
+        self.sig = sign_detached(&self.payload, (self.key(), self.cert()))?;
+        Ok(())
     }
 
-    fn upload_artifacts(&mut self) -> c_int {
+    fn upload_artifacts(&mut self) -> Result<(), c_int> {
         for up in &self.uploads {
-            let run = (|| {
-                push_blob(&mut self.c, &self.repository, &up.body, UPATCH_MEDIA)?;
-                push_blob(&mut self.c, &self.repository, b"{}", EMPTY_CONFIG_MEDIA)?;
-                put_manifest(&mut self.c, &self.repository, &up.tag, &up.manifest)
-            })();
-            if let Err(e) = run {
-                return e;
-            }
-        }
-        0
-    }
-
-    fn push_document(&mut self) -> c_int {
-        let run = (|| {
+            push_blob(&mut self.c, &self.repository, &up.body, UPATCH_MEDIA)?;
             push_blob(&mut self.c, &self.repository, b"{}", EMPTY_CONFIG_MEDIA)?;
-            let payload = push_blob(&mut self.c, &self.repository, &self.payload, TREE_MEDIA)?;
-            let sig = push_blob(&mut self.c, &self.repository, &self.sig, TREE_SIG_MEDIA)?;
-            let manifest = tree_manifest(&payload, &sig)?;
-            if self.sealed.is_some() {
-                match tag_sealed(&mut self.c, &self.repository, &self.parent) {
-                    0 => {}
-                    e => return Err(e),
-                }
-            }
-            put_manifest(&mut self.c, &self.repository, self.reference, &manifest)
-        })();
-        match run {
-            Ok(digest) => {
-                let line = [
-                    b"oci://",
-                    self.c.registry(),
-                    b"/",
-                    &self.repository,
-                    b":",
-                    self.reference,
-                    b" ",
-                    &digest,
-                    b"\n",
-                ]
-                .concat();
-                print(true, &line);
-                0
-            }
-            Err(e) => e,
+            put_manifest(&mut self.c, &self.repository, &up.tag, &up.manifest)?;
         }
+        Ok(())
     }
 
-    fn publish(&mut self) -> c_int {
-        let ret = self.sign();
-        if ret != 0 {
-            return ret;
+    fn push_document(&mut self) -> Result<(), c_int> {
+        push_blob(&mut self.c, &self.repository, b"{}", EMPTY_CONFIG_MEDIA)?;
+        let payload = push_blob(&mut self.c, &self.repository, &self.payload, TREE_MEDIA)?;
+        let sig = push_blob(&mut self.c, &self.repository, &self.sig, TREE_SIG_MEDIA)?;
+        let manifest = tree_manifest(&payload, &sig)?;
+        if self.sealed.is_some() {
+            tag_sealed(&mut self.c, &self.repository, &self.parent)?;
         }
+        let digest = put_manifest(&mut self.c, &self.repository, self.reference, &manifest)?;
+        let line = [
+            b"oci://",
+            self.c.registry(),
+            b"/",
+            &self.repository,
+            b":",
+            self.reference,
+            b" ",
+            &digest,
+            b"\n",
+        ]
+        .concat();
+        print(true, &line);
+        Ok(())
+    }
+
+    fn run(&mut self) -> Result<(), c_int> {
+        self.signing_keys()?;
+        self.trim_repository()?;
+        self.read_package()?;
+        self.head()?;
+        self.carry_fixes()?;
+        self.operations()?;
         // Nothing is uploaded before all of it is known to be publishable.
-        let ret = self.upload_artifacts();
-        if ret != 0 {
-            return ret;
-        }
+        self.sign()?;
+        self.upload_artifacts()?;
         self.push_document()
-    }
-
-    fn run(&mut self) -> c_int {
-        for step in [
-            Self::signing_keys,
-            Self::trim_repository,
-            Self::read_package,
-            Self::head,
-            Self::carry_fixes,
-            Self::operations,
-            Self::publish,
-        ] {
-            let ret = step(self);
-            if ret != 0 {
-                return ret;
-            }
-        }
-        0
     }
 }
 
 fn append(args: &[&CStr]) -> c_int {
     match parse_options(args) {
-        Ok(mut a) => a.run(),
+        Ok(mut a) => a.run().err().unwrap_or(0),
         Err(OPT_DONE) => 0,
         Err(e) => e,
     }
