@@ -86,6 +86,15 @@ fn both_value_forms_give_the_same() {
 }
 
 #[test]
+fn a_value_after_equals_is_the_rest_of_the_argument() {
+    assert_eq!(parsed(&[c"--cert=a=b"])[0], v(T_CERT, "a=b"));
+    assert_eq!(
+        parsed(&[c"--output==", c"x"]),
+        [v(T_OUTPUT, "="), v(OPT_ARG, "x"), bare(OPT_END)]
+    );
+}
+
+#[test]
 fn a_value_must_be_there_and_not_empty() {
     assert_eq!(parsed(&[c"--cert"]).last().unwrap().0, OPT_USAGE);
     assert_eq!(parsed(&[c"--cert="]).last().unwrap().0, OPT_USAGE);

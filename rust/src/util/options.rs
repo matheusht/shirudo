@@ -6,7 +6,6 @@
 //! and the parser holds each to the same rules.
 
 use core::ffi::{CStr, c_char, c_int};
-use core::marker::PhantomData;
 use core::ptr;
 
 use crate::ffi;
@@ -104,24 +103,22 @@ impl OptName {
     }
 }
 
-/// `struct opt_parser`: the arguments from `next` on, against the
-/// `n_specs` options of `specs`, whose index is the command's enum of
-/// them. It borrows the command, its table, help and arguments for `'a`.
+/// A parse of a command's arguments from `next` on, against the options
+/// of `specs`, whose index is the command's enum of them. It borrows the
+/// command, its table, help and arguments for `'a`.
 pub struct OptParser<'a> {
-    pub(crate) command: *const c_char,
-    pub(crate) specs: *const OptSpec,
-    pub(crate) n_specs: usize,
-    pub(crate) help: *const Help,
+    command: &'a CStr,
+    specs: &'a [OptSpec],
+    help: Option<&'a Help>,
     args: &'a [&'a CStr],
     next: usize,
-    pub(crate) checked: bool,
+    checked: bool,
     /// After "--".
-    pub(crate) args_only: bool,
-    pub(crate) given: u64,
+    args_only: bool,
+    given: u64,
     /// The option last returned.
-    pub(crate) opt: c_int,
-    pub(crate) value: *const c_char,
-    pub(crate) borrow: PhantomData<&'a ()>,
+    opt: Option<usize>,
+    value: Option<&'a CStr>,
 }
 
 impl<'a> OptParser<'a> {
@@ -135,37 +132,23 @@ impl<'a> OptParser<'a> {
         first: usize,
     ) -> Self {
         OptParser {
-            command: command.as_ptr(),
-            specs: specs.as_ptr(),
-            n_specs: specs.len(),
-            help: help.map_or(ptr::null(), ptr::from_ref),
+            command,
+            specs,
+            help,
             args,
             next: first,
             checked: false,
             args_only: false,
             given: 0,
-            opt: OPT_END,
-            value: ptr::null(),
-            borrow: PhantomData,
+            opt: None,
+            value: None,
         }
-    }
-
-    fn specs(&self) -> &[OptSpec] {
-        // SAFETY: the table the parser was made with, of n_specs specs.
-        unsafe { ffi::slice(self.specs, self.n_specs) }
-    }
-
-    fn command(&self) -> &[u8] {
-        // SAFETY: the parser's command, a C string.
-        unsafe { ffi::c_str(self.command) }
     }
 
     /// The value of the option or argument last returned, None for an
     /// option that takes none or an optional one given without.
     pub(crate) fn value(&self) -> Option<&'a CStr> {
-        // SAFETY: the value points into an argument, a C string, or is
-        // NULL.
-        (!self.value.is_null()).then(|| unsafe { CStr::from_ptr(self.value) })
+        self.value
     }
 
     /// Whether the option of index `opt` was given.
@@ -176,13 +159,13 @@ impl<'a> OptParser<'a> {
     /// Reports a usage error the command finds, as "<command>:
     /// <message>"; the caller returns OPT_USAGE or EXIT_USAGE.
     pub(crate) fn usage(&self, message: &[u8]) {
-        crate::log::err(&[self.command(), b": ", message].concat());
+        crate::log::err(&[self.command.to_bytes(), b": ", message].concat());
     }
 
     /// Reports the argument last returned, a usage error, as
     /// "<command>: <before>'<argument>'".
     pub(crate) fn usage_arg(&self, before: &[u8]) {
-        let value = self.value().map_or(&b""[..], CStr::to_bytes);
+        let value = self.value.map_or(&b""[..], CStr::to_bytes);
 
         self.usage(&[before, b"'", value, b"'"].concat());
     }
@@ -193,13 +176,13 @@ impl<'a> OptParser<'a> {
     /// usage errors. --list-opts prints the options, for completion, and
     /// --list-cmds the subcommands, which are none.
     pub(crate) fn next(&mut self) -> c_int {
-        if !self.checked && !specs_valid(self.specs()) {
+        if !self.checked && !specs_valid(self.specs) {
             self.usage(b"the table of its options is malformed");
             return OPT_USAGE;
         }
         self.checked = true;
-        self.value = ptr::null();
-        self.opt = OPT_END;
+        self.value = None;
+        self.opt = None;
         let arg = loop {
             let Some(&arg) = self.args.get(self.next) else {
                 return OPT_END;
@@ -207,7 +190,7 @@ impl<'a> OptParser<'a> {
             self.next += 1;
             let bytes = arg.to_bytes();
             if self.args_only || bytes.first() != Some(&b'-') || bytes.len() == 1 {
-                self.value = arg.as_ptr();
+                self.value = Some(arg);
                 return OPT_ARG;
             }
             if bytes != b"--" {
@@ -217,8 +200,7 @@ impl<'a> OptParser<'a> {
         };
         let bytes = arg.to_bytes();
         if bytes == b"-h" || bytes == b"--help" {
-            // SAFETY: the help the command gave, or NULL.
-            if let Some(h) = unsafe { self.help.as_ref() } {
+            if let Some(h) = self.help {
                 // SAFETY: a command's help, of C strings.
                 unsafe { print_help(h) };
             }
@@ -231,70 +213,59 @@ impl<'a> OptParser<'a> {
         if is_list_cmds(Some(bytes)) {
             return OPT_DONE;
         }
-        let Some((opt, eq)) = self.find(arg.as_ptr()) else {
-            return self.unknown(bytes);
+        let Some((opt, eq)) = self.find(arg) else {
+            return self.unknown(arg);
         };
-        let s = &self.specs()[opt];
-        let (flags, name) = (s.flags, s.name);
-        if self.given(opt as c_int) && flags & OPT_REPEAT == 0 {
-            // SAFETY: the spec's name, a C string.
-            let name = unsafe { ffi::c_str(name) };
-            self.usage(&[name, b" given twice"].concat());
+        // A table that passed specs_valid() has at most OPT_MAX options.
+        let index = opt as c_int;
+        if self.given(index) && self.specs[opt].flags & OPT_REPEAT == 0 {
+            self.usage(&[self.opt_name(opt), b" given twice"].concat());
             return OPT_USAGE;
         }
         if self.take_value(opt, eq) != 0 {
             return OPT_USAGE;
         }
         self.given |= 1u64 << opt;
-        self.opt = opt as c_int;
-        opt as c_int
+        self.opt = Some(opt);
+        index
     }
 
     /// The index of the option `arg` names, and what follows its `=`
     /// where it has one. A short option stands alone: -o, never -ovalue
     /// or -fo.
-    fn find(&self, arg: *const c_char) -> Option<(usize, *const c_char)> {
-        // SAFETY: an argument, a C string.
-        let bytes = unsafe { ffi::c_str(arg) };
-        if bytes[1] != b'-' {
-            if bytes.len() != 2 {
-                return None;
+    fn find(&self, arg: &'a CStr) -> Option<(usize, Option<&'a CStr>)> {
+        match arg.to_bytes() {
+            [b'-', b'-', ..] => {
+                let (name, value) = long_parts(arg);
+                self.specs
+                    .iter()
+                    // SAFETY: a table that passed specs_valid(), whose
+                    // names are C strings.
+                    .position(|s| unsafe { s.name_bytes() } == Some(name))
+                    .map(|i| (i, value))
             }
-            return self
-                .specs()
+            &[b'-', short] => self
+                .specs
                 .iter()
-                .position(|s| s.short_name as u8 == bytes[1])
-                .map(|i| (i, ptr::null()));
+                .position(|s| s.short_name as u8 == short)
+                .map(|i| (i, None)),
+            _ => None,
         }
-        let len = bytes.iter().position(|&c| c == b'=').unwrap_or(bytes.len());
-        let eq = if len < bytes.len() {
-            // SAFETY: the byte past the =, within the argument, its NUL at
-            // the last.
-            unsafe { arg.add(len + 1) }
-        } else {
-            ptr::null()
-        };
-        self.specs()
-            .iter()
-            // SAFETY: a table that passed specs_valid(), whose names are
-            // C strings.
-            .position(|s| unsafe { s.name_bytes() } == Some(&bytes[..len]))
-            .map(|i| (i, eq))
     }
 
-    fn unknown(&self, arg: &[u8]) -> c_int {
-        let len = if arg[1] == b'-' {
-            arg.iter().position(|&c| c == b'=').unwrap_or(arg.len())
+    fn unknown(&self, arg: &CStr) -> c_int {
+        let typed = if arg.to_bytes().starts_with(b"--") {
+            long_parts(arg).0
         } else {
-            arg.len()
+            arg.to_bytes()
         };
-        crate::log::err(&[self.command(), b": unknown option '", &arg[..len], b"'"].concat());
-        if len > SIMILAR_MAX_LEN {
+        crate::log::err(&[self.command.to_bytes(), b": unknown option '", typed, b"'"].concat());
+        if typed.len() > SIMILAR_MAX_LEN {
             return OPT_USAGE;
         }
-        let mut bad = arg[..len].to_vec();
+        let mut bad = typed.to_vec();
         bad.push(0);
-        let names: Vec<*const c_char> = self.specs().iter().map(|s| s.name).collect();
+        let names: Vec<*const c_char> = self.specs.iter().map(|s| s.name).collect();
         // SAFETY: a C string, and the names of the specs, C strings.
         unsafe { help_suggest(bad.as_ptr().cast(), &names) };
         OPT_USAGE
@@ -303,7 +274,7 @@ impl<'a> OptParser<'a> {
     /// What bash completion reads: "--json=\t<path>", "--cert\t<path>",
     /// "-o".
     fn list(&self) -> c_int {
-        for s in self.specs() {
+        for s in self.specs {
             let eq = if s.flags & OPT_OPTIONAL != 0 {
                 c"="
             } else {
@@ -335,47 +306,47 @@ impl<'a> OptParser<'a> {
         OPT_DONE
     }
 
-    fn take_value(&mut self, opt: usize, eq: *const c_char) -> c_int {
-        let s = &self.specs()[opt];
+    fn take_value(&mut self, opt: usize, eq: Option<&'a CStr>) -> c_int {
+        let s = &self.specs[opt];
         let (flags, metavar) = (s.flags, s.metavar);
-        // SAFETY: the spec's name, a C string.
-        let name = unsafe { ffi::c_str(s.name) };
+        let name = self.opt_name(opt);
 
         if metavar.is_null() {
-            if eq.is_null() {
+            if eq.is_none() {
                 return 0;
             }
             self.usage(&[name, b" takes no value"].concat());
             return OPT_USAGE;
         }
-        if !eq.is_null() {
+        if eq.is_some() {
             self.value = eq;
         } else if flags & OPT_OPTIONAL != 0 {
             return 0;
         } else if let Some(&arg) = self.args.get(self.next) {
-            self.value = arg.as_ptr();
+            self.value = Some(arg);
             self.next += 1;
         } else {
             self.usage(&[name, b" takes a value"].concat());
             return OPT_USAGE;
         }
-        // SAFETY: the value, a C string.
-        if unsafe { *self.value } == 0 && flags & OPT_EMPTY == 0 {
+        if self.value.is_some_and(CStr::is_empty) && flags & OPT_EMPTY == 0 {
             self.usage(&[name, b" takes a value, not an empty one"].concat());
             return OPT_USAGE;
         }
         0
     }
 
-    fn opt_name(&self) -> &[u8] {
-        // SAFETY: the option last returned, whose name is a C string.
-        unsafe { ffi::c_str(self.specs()[self.opt as usize].name) }
+    /// The name of the option of index `opt`.
+    fn opt_name(&self, opt: usize) -> &'a [u8] {
+        // SAFETY: an option of a table that passed specs_valid(), whose
+        // name is a C string.
+        unsafe { ffi::c_str(self.specs[opt].name) }
     }
 
     /// The value of the option last returned as a number from `min` to
     /// `max`, or OPT_USAGE, reported.
     pub(crate) fn number(&self, min: u64, max: u64) -> Result<u64, c_int> {
-        let Some(value) = self.value().filter(|_| self.opt >= 0) else {
+        let (Some(opt), Some(value)) = (self.opt, self.value) else {
             self.usage(b"no option value to read as a number");
             return Err(OPT_USAGE);
         };
@@ -384,7 +355,7 @@ impl<'a> OptParser<'a> {
             _ => {
                 self.usage(
                     &[
-                        self.opt_name(),
+                        self.opt_name(opt),
                         format!(" takes a number from {min} to {max}").as_bytes(),
                     ]
                     .concat(),
@@ -397,7 +368,7 @@ impl<'a> OptParser<'a> {
     /// The value of the name the option last returned was given, from
     /// `names`, or OPT_USAGE, reported with the names it takes.
     pub(crate) fn choice(&self, names: &[OptName]) -> Result<c_int, c_int> {
-        let Some(value) = self.value().filter(|_| self.opt >= 0) else {
+        let (Some(opt), Some(value)) = (self.opt, self.value) else {
             self.usage(b"no option value to read as a name");
             return Err(OPT_USAGE);
         };
@@ -423,8 +394,24 @@ impl<'a> OptParser<'a> {
             list.extend_from_slice(sep);
             list.extend_from_slice(name(n));
         }
-        self.usage(&[self.opt_name(), b" takes ", &list[..]].concat());
+        self.usage(&[self.opt_name(opt), b" takes ", &list[..]].concat());
         Err(OPT_USAGE)
+    }
+}
+
+/// A long option's name, up to its first `=`, and what follows that `=`,
+/// a C string of its own.
+fn long_parts(arg: &CStr) -> (&[u8], Option<&CStr>) {
+    let bytes = arg.to_bytes_with_nul();
+    match bytes.iter().position(|&c| c == b'=') {
+        Some(eq) => {
+            let (name, value) = bytes.split_at(eq);
+            let value = value
+                .get(1..)
+                .and_then(|v| CStr::from_bytes_with_nul(v).ok());
+            (name, value)
+        }
+        None => (arg.to_bytes(), None),
     }
 }
 
