@@ -11,7 +11,6 @@ use core::ptr;
 use std::ffi::CString;
 use std::os::fd::{FromRawFd, IntoRawFd};
 use std::os::unix::fs::FileExt;
-use std::sync::Mutex;
 
 use crate::errno::{E2BIG, EBADMSG, EINTR, EINVAL, EIO, ENAMETOOLONG, ENOENT, ENOMEM, ENOSPC};
 use crate::ffi;
@@ -57,13 +56,19 @@ const EVENTLOG: &[u8] = b"tree-eventlog";
 const OUTCOMES: &[u8] = b"outcomes";
 const PENDING: &[u8] = b"pending.json";
 
-/// The directory the unit test keeps the tree's files in, in place of
-/// TREE_VAR_DIR: the C test reached them by redefining the paths.
-static TEST_DIR: Mutex<Option<CString>> = Mutex::new(None);
+#[cfg(test)]
+std::thread_local! {
+    /// The directory a test keeps the tree's files in, in place of
+    /// TREE_VAR_DIR, for the test's own thread.
+    static TEST_DIR: core::cell::RefCell<Option<CString>> = const { core::cell::RefCell::new(None) };
+}
 
 /// The tree's directory, or the file `name` in it.
 fn tree_path(name: &[u8]) -> CString {
-    let dir = TEST_DIR.lock().ok().and_then(|d| d.clone());
+    #[cfg(test)]
+    let dir = TEST_DIR.with_borrow(Clone::clone);
+    #[cfg(not(test))]
+    let dir: Option<CString> = None;
     let mut path = dir.as_deref().unwrap_or(TREE_VAR_DIR).to_bytes().to_vec();
 
     if !name.is_empty() {
@@ -1438,10 +1443,11 @@ pub(crate) fn tree_status_path(name: &[u8]) -> CString {
     tree_path(&[&b"status/"[..], name].concat())
 }
 
+#[cfg(test)]
+mod tests;
+
 mod capi {
     use core::ffi::{c_char, c_int};
-
-    use std::ffi::CString;
 
     use super::{TreeKv, TreeOperation, TreePending, TreeSelector, TreeState};
     use crate::util::json::JsonEmit;
@@ -1458,46 +1464,10 @@ mod capi {
         super::fuzz(unsafe { core::ffi::CStr::from_ptr(path) }, fd, size)
     }
 
-    /// For the unit test: the directory of the tree's state, eventlog,
-    /// outcomes and pending record in place of the node's, or the node's
-    /// again for NULL.
-    ///
-    /// # Safety
-    ///
-    /// `dir` is NULL or a C string.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn tree_var_dir_set(dir: *const c_char) -> c_int {
-        // SAFETY: the caller's C string, or NULL.
-        let dir =
-            (!dir.is_null()).then(|| CString::from(unsafe { core::ffi::CStr::from_ptr(dir) }));
-        match super::TEST_DIR.lock() {
-            Ok(mut d) => {
-                *d = dir;
-                0
-            }
-            Err(_) => -crate::errno::EIO,
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `projection_root` and `history_root` hold 32 bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn tree_outcome_append(
-        seq: i64,
-        outcome: c_int,
-        projection_root: *const [u8; 32],
-        history_root: *const [u8; 32],
-    ) -> c_int {
-        // SAFETY: the caller's roots.
-        unsafe { super::outcome_append(seq, i64::from(outcome), &*projection_root, &*history_root) }
-    }
-
     /// # Safety
     ///
     /// `codes` has room for `to` - `from` outcomes, and the roots for 32
     /// bytes each.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn tree_outcomes_read(
         from: i64,
         to: i64,
@@ -1518,49 +1488,6 @@ mod capi {
         ret
     }
 
-    /// # Safety
-    ///
-    /// `history_root` has room for 32 bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn tree_outcomes_resume(
-        last_seq: i64,
-        history_root: *mut [u8; 32],
-    ) -> c_int {
-        match super::outcomes_resume(last_seq) {
-            Ok(root) => {
-                // SAFETY: the caller's room.
-                unsafe { *history_root = root };
-                0
-            }
-            Err(err) => err,
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `s` is a state, `replay` room for 32 bytes and `matches` for a
-    /// bool, which keep what they held on an error.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn tree_eventlog_matches(
-        s: *const TreeState,
-        state_rc: c_int,
-        replay: *mut [u8; 32],
-        matches: *mut bool,
-    ) -> c_int {
-        // SAFETY: the caller's state.
-        match super::eventlog_matches(unsafe { &*s }, state_rc) {
-            Ok((root, m)) => {
-                // SAFETY: the caller's rooms.
-                unsafe {
-                    *replay = root;
-                    *matches = m;
-                }
-                0
-            }
-            Err(err) => err,
-        }
-    }
-
     pub extern "C" fn tree_configured() -> bool {
         super::configured()
     }
@@ -1572,19 +1499,6 @@ mod capi {
     pub unsafe extern "C" fn tree_selector_matches(selector: *const TreeSelector) -> c_int {
         // SAFETY: the caller passes a selector.
         unsafe { super::selector_matches(selector) }
-    }
-
-    /// # Safety
-    ///
-    /// `body` holds `len` bytes, and `out` is room for a record.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn tree_pending_parse(
-        body: *const c_char,
-        len: usize,
-        out: *mut TreePending,
-    ) -> c_int {
-        // SAFETY: the caller passes len bytes and room for a record.
-        unsafe { super::pending_parse(body, len, out) }
     }
 
     /// # Safety
@@ -1606,7 +1520,6 @@ mod capi {
     /// # Safety
     ///
     /// `out` is room for a state.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn tree_state_read(out: *mut TreeState) -> c_int {
         // SAFETY: a C string, and the caller's room.
         unsafe { super::state_read(super::tree_path(super::STATE).as_ptr(), out) }
@@ -1615,7 +1528,6 @@ mod capi {
     /// # Safety
     ///
     /// `state` is a state.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn tree_state_write(state: *const TreeState) -> c_int {
         // SAFETY: the caller passes a state.
         super::state_write(unsafe { &*state })
@@ -1625,7 +1537,6 @@ mod capi {
     ///
     /// `operation_digest` is NULL or a C string, and `projection_root` 32
     /// bytes.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn tree_event_append(
         seq: i64,
         operation_digest: *const c_char,
