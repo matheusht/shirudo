@@ -30,6 +30,7 @@ use crate::util::hex::hex_encode;
 use crate::util::image_config;
 use crate::util::io::{check_trusted, open_beneath, read_fd};
 use crate::util::seal::{seal_mkdir_p, seal_write_file};
+use std::os::fd::{AsRawFd, IntoRawFd};
 
 /// `KEYS_MAX`: the most certificates a set holds.
 pub(crate) const KEYS_MAX: usize = 16;
@@ -163,19 +164,14 @@ unsafe fn read_der_at(
     out: &mut *mut u8,
     out_sz: &mut usize,
 ) -> c_int {
-    // SAFETY: the caller's fd and C string, and flags.
-    let fd = unsafe { open_beneath(dirfd, name, O_RDONLY) };
-
-    if fd < 0 {
-        return fd;
-    }
-    // SAFETY: the fd opened above, read and closed once.
-    unsafe {
-        let ret = read_der_fd(fd, out, out_sz);
-
-        close(fd);
-        ret
-    }
+    // SAFETY: the caller's C string.
+    let name = unsafe { CStr::from_ptr(name) };
+    let fd = match open_beneath(dirfd, name, O_RDONLY) {
+        Ok(fd) => fd,
+        Err(err) => return err,
+    };
+    // SAFETY: the fd opened above.
+    unsafe { read_der_fd(fd.as_raw_fd(), out, out_sz) }
 }
 
 /// [`read_der`] into a vector of its bytes.
@@ -978,8 +974,8 @@ unsafe fn scan_trusted_at(
     let mut names: *mut *mut Dirent = ptr::null_mut();
     let mut ret = 0;
 
-    // SAFETY: the caller's fd, a C string, and flags.
-    *trusted_fd = unsafe { open_beneath(keys_fd, c"trusted".as_ptr(), O_RDONLY | O_DIRECTORY) };
+    *trusted_fd = open_beneath(keys_fd, c"trusted", O_RDONLY | O_DIRECTORY)
+        .map_or_else(|err| err, IntoRawFd::into_raw_fd);
     if *trusted_fd == -ENOENT {
         return 0;
     }
@@ -1198,8 +1194,8 @@ unsafe fn load_set_at(
     if keys_fd == -ENOENT {
         return 0;
     }
-    // SAFETY: the caller's fd, a C string, and flags.
-    let revoked_fd = unsafe { open_beneath(keys_fd, c"revoked".as_ptr(), O_RDONLY | O_DIRECTORY) };
+    let revoked_fd = open_beneath(keys_fd, c"revoked", O_RDONLY | O_DIRECTORY)
+        .map_or_else(|err| err, IntoRawFd::into_raw_fd);
 
     set.n_revoked = count_der_at(revoked_fd);
     let ret = 'out: {
@@ -1267,8 +1263,8 @@ unsafe fn load_image_root(
     with_trusted: bool,
     set: *mut TrustedSet,
 ) -> c_int {
-    // SAFETY: the caller's fd, a C string, and flags.
-    let keys_fd = unsafe { open_beneath(root_fd, c"keys".as_ptr(), O_RDONLY | O_DIRECTORY) };
+    let keys_fd = open_beneath(root_fd, c"keys", O_RDONLY | O_DIRECTORY)
+        .map_or_else(|err| err, IntoRawFd::into_raw_fd);
 
     if keys_fd < 0 && keys_fd != -ENOENT {
         crate::log::err(

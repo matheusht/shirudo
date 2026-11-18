@@ -190,33 +190,32 @@ pub(crate) fn append_line(fd: c_int, path: &CStr, line: &[u8]) -> c_int {
 
 /// `rel` opened beneath the directory open as `dirfd`, with `flags` and
 /// close-on-exec, through no symlink, no magic link and nothing outside
-/// it: an fd, or -errno.
-///
-/// # Safety
-///
-/// `rel` is NULL or a C string.
-pub(crate) unsafe fn open_beneath(dirfd: c_int, rel: *const c_char, flags: c_int) -> c_int {
+/// it: -EINVAL for an empty or absolute `rel`, or -errno.
+pub(crate) fn open_beneath(dirfd: c_int, rel: &CStr, flags: c_int) -> Result<OwnedFd, c_int> {
     let how = OpenHow {
         flags: flags as u64 | O_CLOEXEC as u64,
         mode: 0,
         resolve: RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS,
     };
 
-    // SAFETY: the caller's C string or NULL.
-    if dirfd < 0 || rel.is_null() || matches!(unsafe { *rel } as u8, 0 | b'/') {
-        return -EINVAL;
+    if dirfd < 0 || matches!(rel.to_bytes().first(), None | Some(b'/')) {
+        return Err(-EINVAL);
     }
     // SAFETY: the caller's fd and C string, and the open_how and its size.
     let fd = unsafe {
         syscall(
             SYS_OPENAT2,
             dirfd,
-            rel,
+            rel.as_ptr(),
             &raw const how,
             size_of::<OpenHow>(),
         )
     };
-    if fd < 0 { -errno() } else { fd as c_int }
+    if fd < 0 {
+        return Err(-errno());
+    }
+    // SAFETY: the fd openat2() just gave, owned from here.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd as c_int) })
 }
 
 /// The whole regular file behind `fd`, from its start, of at most `max`

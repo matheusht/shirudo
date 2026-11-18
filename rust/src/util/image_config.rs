@@ -21,6 +21,7 @@ use crate::sys::libc::{
 use crate::text::parse_u64;
 use crate::util::config::{Config, Scrubbed, load_fd};
 use crate::util::io::open_beneath;
+use std::os::fd::{AsRawFd, IntoRawFd};
 
 /// `enum image_path`: the entries of the image, by their paths under its
 /// root.
@@ -73,8 +74,7 @@ pub(crate) fn open(which: c_uint, flags: c_int) -> c_int {
     if which as usize >= RELATIVE.len() || fd < 0 {
         return -ENOENT;
     }
-    // SAFETY: the root, a relative path and the caller's flags.
-    unsafe { open_beneath(fd, RELATIVE[which as usize].as_ptr(), flags) }
+    open_beneath(fd, RELATIVE[which as usize], flags).map_or_else(|err| err, IntoRawFd::into_raw_fd)
 }
 
 /// `path`, relative to the image's root and never above it, open with
@@ -86,8 +86,7 @@ pub(crate) fn open_relative(path: &CStr, flags: c_int) -> c_int {
     if fd < 0 || rel.first() == Some(&b'/') || rel.windows(2).any(|w| w == b"..") {
         return -EINVAL;
     }
-    // SAFETY: the root, the relative path and flags.
-    unsafe { open_beneath(fd, path.as_ptr(), flags) }
+    open_beneath(fd, path, flags).map_or_else(|err| err, IntoRawFd::into_raw_fd)
 }
 
 pub(crate) fn root_fd() -> c_int {
@@ -110,15 +109,10 @@ pub(crate) fn get(out: &mut Config) -> c_int {
 
 /// The image's shirudo.conf into `cfg`, read through its root.
 fn load_root(cfg: &mut Config, root_fd: c_int) -> c_int {
-    // SAFETY: the root's fd, a relative path and flags.
-    let fd = unsafe { open_beneath(root_fd, SHIRUDO_CONF.as_ptr(), O_RDONLY) };
-    if fd < 0 {
-        return fd;
+    match open_beneath(root_fd, SHIRUDO_CONF, O_RDONLY) {
+        Ok(fd) => load_fd(cfg, fd.as_raw_fd(), c"config image shirudo.conf"),
+        Err(err) => err,
     }
-    let ret = load_fd(cfg, fd, c"config image shirudo.conf");
-    // SAFETY: the fd open_beneath() gave, closed once.
-    unsafe { close(fd) };
-    ret
 }
 
 /// A device as statx() gives it.
