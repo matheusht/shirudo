@@ -179,6 +179,8 @@ pub unsafe extern "C" fn bpm_pkg_visit_members_fd(
 ) -> c_int {
     // SAFETY: the caller passes NULL or a C string.
     let package_dir = unsafe { opt_bytes(package_dir) };
+    // SAFETY: the caller lends an open descriptor for this call.
+    let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
 
     match visit {
         Some(visit) => {
@@ -253,6 +255,8 @@ pub unsafe extern "C" fn bpm_pkg_read_member_fd(
             dir: (!found_dir.is_null()).then(|| ffi::bytes_mut(found_dir.cast(), found_dir_sz)),
         };
 
+        // SAFETY: the caller lends an open descriptor for this call.
+        let fd = std::os::fd::BorrowedFd::borrow_raw(fd);
         archive::read_member_fd(
             fd,
             opt_bytes(member),

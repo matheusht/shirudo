@@ -295,7 +295,7 @@ fn stage_and_load(
     staging.extracted = true;
     status(extract(&archive, &package_dir))?;
     let cert = path(&[package_dir.to_bytes(), b"/cert.der"])?;
-    if !super::key::matches_active(&cert) {
+    if !super::key::file_matches_active(&cert) {
         return Err(-EKEYREJECTED);
     }
     let loads = loads(&package_dir)?;

@@ -24,7 +24,7 @@ use crate::heap::libc_free;
 use crate::sys::curl::{CURL_GLOBAL_DEFAULT, CURLE_OK, curl_global_cleanup, curl_global_init};
 use crate::sys::libc::{
     Dir, File, LOCK_UN, PATH_MAX, closedir, errno, fclose, fdopen, fdopendir, flock, fopen, fwrite,
-    mkstemp, opendir, readdir, stderr, stdout, strerror, unlink,
+    opendir, readdir, stderr, stdout, strerror, unlink,
 };
 use crate::util::help::{
     Help, HelpItem, HelpSection, is_help, is_list_cmds, print_help, print_subcmd_list,
@@ -170,20 +170,6 @@ fn finish(lock: Option<Lock>, ret: Result, action: &[u8]) -> c_int {
 fn curl_ready() -> bool {
     // SAFETY: curl's global set-up, which a command runs once.
     unsafe { curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK }
-}
-
-/// A new file named after `template`, its X's made unique.
-fn temporary(template: &CStr) -> Result<(CString, OwnedFd)> {
-    let mut name = template.to_bytes_with_nul().to_vec();
-
-    // SAFETY: a writable C string of the template.
-    let fd = unsafe { mkstemp(name.as_mut_ptr().cast()) };
-    if fd < 0 {
-        return Err(last_err());
-    }
-    // SAFETY: mkstemp() hands over the fd of the file it made.
-    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-    Ok((CString::from_vec_with_nul(name).map_err(|_| -EINVAL)?, fd))
 }
 
 fn remove(path: &CStr) {

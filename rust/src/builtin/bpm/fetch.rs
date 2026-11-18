@@ -7,8 +7,7 @@
 use core::ffi::{CStr, c_int};
 use std::ffi::{CString, OsStr};
 use std::fs;
-use std::io::Read;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 
 use super::source::{self, Source};
@@ -17,7 +16,7 @@ use super::{
     UPATCH_MEDIA, curl_ready, fail, finish, lock, os_err, path, remove, status,
 };
 use crate::errno::{EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT};
-use crate::sys::libc::{O_CREAT, O_EXCL, O_WRONLY, R_OK, access};
+use crate::sys::libc::{O_CREAT, O_EXCL, O_RDWR, R_OK, access, pread};
 use crate::text::{cstr, strscpy};
 use crate::util::bpm_oci::{
     Buffer, Client, Descriptor, MANIFEST_MEDIA, MAX_ENTRIES, MAX_NAME, digest_matches,
@@ -28,15 +27,16 @@ use crate::util::bpm_tree::TreeOperation;
 use crate::util::crypto_openssl::{
     Sha256Ctx, sha256_final, sha256_free, sha256_init, sha256_update,
 };
-use crate::util::io::read_file;
+use crate::util::io::{memfd, read_file};
 use crate::util::seal::{seal_mkdir_p, seal_output_open, seal_write_file};
 use crate::util::upatch::{self, Upatch, is_unload, upatch_close, upatch_open};
 
 /// The most layers a package manifest names that bpm reads.
 const LAYERS_MAX: usize = 8;
 
-/// The hex SHA-256 of what is at `path`.
-pub(super) fn sha256_file(path: &CStr) -> Result<[u8; 64]> {
+/// The hex SHA-256 of the bytes of `fd` from its start, whatever its
+/// offset.
+pub(super) fn sha256_fd(fd: BorrowedFd<'_>) -> Result<[u8; 64]> {
     let mut ctx = Sha256Ctx::new();
     let mut digest = [0; 32];
     let mut hex = [0; 65];
@@ -46,18 +46,23 @@ pub(super) fn sha256_file(path: &CStr) -> Result<[u8; 64]> {
         return Err(-EINVAL);
     }
     let ret = (|| {
-        let mut file = fs::File::open(OsStr::from_bytes(path.to_bytes())).map_err(os_err)?;
         let mut buf = vec![0u8; 65536];
+        let mut at = 0i64;
 
         loop {
-            let n = file.read(&mut buf).map_err(|_| -EIO)?;
+            // SAFETY: the caller's descriptor and room for the bytes.
+            let n = unsafe { pread(fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), at) };
+            if n < 0 {
+                return Err(-EIO);
+            }
             if n == 0 {
                 break;
             }
             // SAFETY: the context and n bytes read.
-            if unsafe { sha256_update(&mut ctx, buf.as_ptr().cast(), n) } != 0 {
+            if unsafe { sha256_update(&mut ctx, buf.as_ptr().cast(), n as usize) } != 0 {
                 return Err(-EIO);
             }
+            at += n as i64;
         }
         // SAFETY: the context and room for the digest.
         if unsafe { sha256_final(&mut ctx, digest.as_mut_ptr()) } != 0 {
@@ -72,6 +77,13 @@ pub(super) fn sha256_file(path: &CStr) -> Result<[u8; 64]> {
     let mut out = [0; 64];
     out.copy_from_slice(&hex[..64]);
     Ok(out)
+}
+
+/// The hex SHA-256 of what is at `path`.
+pub(super) fn sha256_file(path: &CStr) -> Result<[u8; 64]> {
+    let file = fs::File::open(OsStr::from_bytes(path.to_bytes())).map_err(os_err)?;
+
+    sha256_fd(file.as_fd())
 }
 
 /// The lowercase hex of `digest`, NUL-terminated.
@@ -117,12 +129,34 @@ fn base(repository: &[u8]) -> &[u8] {
         .map_or(repository, |slash| &repository[slash + 1..])
 }
 
-/// The package of the OCI reference `raw`, into the file open at
-/// `destination` when given, or else into a new file in the working
-/// directory named after the package. The registry picks that name, so
-/// it is created, never an existing file replaced, and opened as output
-/// root may ask for: never a sealed file nor one reached through a link.
-pub(super) fn download(raw: &[u8], destination: Option<(&CStr, c_int)>) -> Result {
+/// The layer's title, else <package>-<tag>.bee.
+fn pull_filename(
+    repository: &[u8],
+    tag: &[u8],
+    package_name: &[u8],
+    title: &[u8],
+) -> Result<CString> {
+    if bee_title_ok(title) {
+        return Ok(super::message(&[title]));
+    }
+    let base = if package_name.is_empty() {
+        base(repository)
+    } else {
+        package_name
+    };
+    if !package_name_ok(base) {
+        return Err(-EINVAL);
+    }
+    path(&[base, b"-", tag, b".bee"])
+}
+
+/// The package of the OCI reference `raw`, into `into` when given, or
+/// else into a new file in the working directory named after the
+/// package, and checked as written, read back from the descriptor that
+/// wrote it. The registry picks that name, so it is created, never an
+/// existing file replaced, and opened as output root may ask for: never
+/// a sealed file nor one reached through a link.
+pub(super) fn download(raw: &[u8], into: Option<BorrowedFd<'_>>) -> Result {
     let mut c = Client::new();
     let (repository, tag) = c.parse_pull_ref(raw)?;
     let body = manifest(&mut c, &repository, &tag)?;
@@ -143,55 +177,60 @@ pub(super) fn download(raw: &[u8], destination: Option<(&CStr, c_int)>) -> Resul
     if trim(layer.title(), &mut title).is_err() {
         title[0] = 0;
     }
-    let filename = match destination {
-        Some((path, _)) => path.to_owned(),
-        None if bee_title_ok(cstr(&title)) => super::message(&[cstr(&title)]),
-        None => {
-            let base = if package_name.is_empty() {
-                base(&repository)
-            } else {
-                package_name
-            };
-            if !package_name_ok(base) {
-                return Err(-EINVAL);
-            }
-            path(&[base, b"-", &tag, b".bee"])?
-        }
-    };
-    let made = match destination {
+    let made = match into {
         Some(_) => None,
         None => {
+            let filename = pull_filename(&repository, &tag, package_name, cstr(&title))?;
             // SAFETY: a C string.
             let fd =
-                unsafe { seal_output_open(filename.as_ptr(), O_WRONLY | O_CREAT | O_EXCL, 0o644) };
+                unsafe { seal_output_open(filename.as_ptr(), O_RDWR | O_CREAT | O_EXCL, 0o644) };
             if fd < 0 {
                 return Err(fd);
             }
             // SAFETY: the fd seal_output_open() opened.
-            Some(unsafe { OwnedFd::from_raw_fd(fd) })
+            Some((filename, unsafe { OwnedFd::from_raw_fd(fd) }))
         }
     };
-    let fd = destination.map_or_else(|| made.as_ref().map_or(-1, |f| f.as_raw_fd()), |(_, fd)| fd);
-    let mut ret = c.get_file(&url, PACKAGE_MEDIA, fd, layer.size());
-    drop(made);
-    if ret.is_ok() && !checked(&filename, layer) {
+    let fd = into.unwrap_or_else(|| made.as_ref().map(|(_, f)| f.as_fd()).expect("made"));
+    let mut ret = c.get_file(&url, PACKAGE_MEDIA, fd.as_raw_fd(), layer.size());
+    if ret.is_ok() && !checked(fd, layer) {
         ret = Err(-EKEYREJECTED);
     }
-    if ret.is_err() && destination.is_none() {
-        remove(&filename);
+    if let Some((filename, file)) = made {
+        drop(file);
+        if ret.is_err() {
+            remove(&filename);
+        }
     }
     ret
 }
 
-/// Whether the file at `path` is the blob `layer` describes: its digest,
-/// and its size when the layer gives one.
-fn checked(path: &CStr, layer: &Descriptor) -> bool {
-    let digest_ok = sha256_file(path).is_ok_and(|hex| digest_matches(layer.digest(), &hex));
+/// Whether the bytes of `fd` are the blob `layer` describes: its
+/// digest, and its size when the layer gives one.
+fn checked(fd: BorrowedFd<'_>, layer: &Descriptor) -> bool {
+    let digest_ok = sha256_fd(fd).is_ok_and(|hex| digest_matches(layer.digest(), &hex));
+    let size_ok = || {
+        fd.try_clone_to_owned()
+            .map(fs::File::from)
+            .and_then(|f| f.metadata())
+            .is_ok_and(|m| i64::try_from(m.len()) == Ok(layer.size()))
+    };
 
-    digest_ok
-        && (layer.size() < 0
-            || fs::metadata(OsStr::from_bytes(path.to_bytes()))
-                .is_ok_and(|m| i64::try_from(m.len()) == Ok(layer.size())))
+    digest_ok && (layer.size() < 0 || size_ok())
+}
+
+/// A package the operator names, open for reading: the local file, or
+/// the download in memory. Never a file of /tmp, which root can bind to
+/// a sealed directory for shirudo to create a labeled file in.
+pub(super) fn package_source_open(source: &[u8]) -> Result<OwnedFd> {
+    if !source.starts_with(b"oci://") {
+        return fs::File::open(OsStr::from_bytes(source))
+            .map(OwnedFd::from)
+            .map_err(os_err);
+    }
+    let fd = memfd(c"shirudo-bpm-package")?;
+    download(source, Some(fd.as_fd()))?;
+    Ok(fd)
 }
 
 /// The source and index entry a direct OCI reference installs.

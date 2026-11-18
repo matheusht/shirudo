@@ -659,3 +659,17 @@ mod capi {
         unsafe { super::bpffs_mounted_at(path) }
     }
 }
+
+/// An anonymous file in memory, named `name` where /proc shows its
+/// descriptors, closed on exec: what a download is kept in rather than a
+/// file of /tmp.
+pub(crate) fn memfd(name: &core::ffi::CStr) -> Result<std::os::fd::OwnedFd, core::ffi::c_int> {
+    // SAFETY: a C string and flags.
+    let fd =
+        unsafe { crate::sys::libc::memfd_create(name.as_ptr(), crate::sys::libc::MFD_CLOEXEC) };
+    if fd < 0 {
+        return Err(-crate::sys::libc::errno());
+    }
+    // SAFETY: the descriptor memfd_create() gave, owned from here.
+    Ok(unsafe { std::os::fd::FromRawFd::from_raw_fd(fd) })
+}

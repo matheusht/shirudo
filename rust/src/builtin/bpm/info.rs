@@ -5,16 +5,15 @@
 //! `.rodata` initial data of one of them, from a local file or an OCI
 //! reference.
 
-use core::ffi::{CStr, c_char, c_int};
-use std::ffi::CString;
-use std::os::fd::AsRawFd;
+use core::ffi::{c_char, c_int};
+use std::os::fd::{AsFd, OwnedFd};
 
-use super::{Result, curl_ready, eprint, error, fail, finish, message, remove, status, temporary};
+use super::{Result, curl_ready, eprint, error, fail, finish, message, status};
 use crate::errno::{E2BIG, EINVAL, EIO, ENODATA, ENOENT, EOPNOTSUPP};
 use crate::sys::libc::STDOUT_FILENO;
 use crate::text::{cstr, sanitize};
 use crate::util::bpm_package::{
-    UpatchMember, archive_rel_ok, read_member_in, upatch_member, visit_members,
+    Member, UpatchMember, archive_rel_ok, read_member_fd, upatch_member, visit_members_fd,
 };
 use crate::util::help::is_help;
 use crate::util::io::write_complete;
@@ -39,46 +38,23 @@ Package may be a local .bee file or an oci:// reference.\n";
 /// The most a Beefile takes.
 const BEEFILE_MAX: usize = 4 << 20;
 
-/// A package to read: a local file, or an OCI reference fetched into a
-/// temporary file that goes with it.
-struct Archive {
-    path: CString,
-    temporary: bool,
-}
+/// A package to read: a local file, or an OCI reference downloaded into
+/// memory.
+struct Archive(OwnedFd);
 
 impl Archive {
-    fn open(source: &[u8], template: &CStr) -> Result<Archive> {
-        if !source.starts_with(b"oci://") {
-            return Ok(Archive {
-                path: message(&[source]),
-                temporary: false,
-            });
-        }
-        let (path, fd) = temporary(template)?;
-        let fetched = super::fetch::download(source, Some((&path, fd.as_raw_fd())));
-        drop(fd);
-        if let Err(err) = fetched {
-            remove(&path);
-            return Err(err);
-        }
-        Ok(Archive {
-            path,
-            temporary: true,
-        })
+    fn open(source: &[u8]) -> Result<Archive> {
+        super::fetch::package_source_open(source).map(Archive)
     }
 
     /// The package's Beefile, which says that it is one, and the
     /// directory it is in.
     fn beefile(&self, dir: &mut [u8; 101]) -> Result<crate::util::bpm_package::Member> {
-        read_member_in(&self.path, b"Beefile", None, Some(dir), BEEFILE_MAX)
+        read_member_fd(self.0.as_fd(), b"Beefile", None, Some(dir), BEEFILE_MAX)
     }
-}
 
-impl Drop for Archive {
-    fn drop(&mut self) {
-        if self.temporary {
-            remove(&self.path);
-        }
+    fn member(&self, member: &[u8], dir: &[u8; 101], max: usize) -> Result<Member> {
+        read_member_fd(self.0.as_fd(), member, Some(cstr(dir)), None, max)
     }
 }
 
@@ -88,7 +64,7 @@ fn stdout_write(bytes: &[u8]) -> Result {
 }
 
 fn readme(source: &[u8]) -> Result {
-    let archive = Archive::open(source, c"/tmp/shirudo-bpm-info-XXXXXX")?;
+    let archive = Archive::open(source)?;
     let mut dir = [0; 101];
 
     if let Err(err) = archive.beefile(&mut dir) {
@@ -97,13 +73,7 @@ fn readme(source: &[u8]) -> Result {
         }
         return Err(err);
     }
-    let mut readme = match read_member_in(
-        &archive.path,
-        b"README.md",
-        Some(cstr(&dir)),
-        None,
-        BEEFILE_MAX,
-    ) {
+    let mut readme = match archive.member(b"README.md", &dir, BEEFILE_MAX) {
         Ok(readme) => readme,
         Err(err) => {
             if err == -ENOENT {
@@ -147,12 +117,12 @@ fn listed(list: &mut Vec<u8>, member: &[u8], ty: c_char, all: bool) -> Result {
 }
 
 fn upatches(source: &[u8], all: bool) -> Result {
-    let archive = Archive::open(source, c"/tmp/shirudo-bpm-upatches-XXXXXX")?;
+    let archive = Archive::open(source)?;
     let mut dir = [0; 101];
     let mut list = Vec::new();
     let ret = archive.beefile(&mut dir).and_then(|_beefile| {
-        status(visit_members(
-            &archive.path,
+        status(visit_members_fd(
+            archive.0.as_fd(),
             Some(cstr(&dir)),
             &mut |member, ty| match listed(&mut list, member.to_bytes(), ty, all) {
                 Ok(()) => 0,
@@ -187,7 +157,7 @@ fn data(source: &[u8], member: &[u8], json: bool) -> Result {
     {
         return Err(-EINVAL);
     }
-    let archive = Archive::open(source, c"/tmp/shirudo-bpm-data-XXXXXX")?;
+    let archive = Archive::open(source)?;
     let mut dir = [0; 101];
     if let Err(err) = archive.beefile(&mut dir) {
         if err == -ENOENT {
@@ -199,13 +169,7 @@ fn data(source: &[u8], member: &[u8], json: bool) -> Result {
         }
         return Err(err);
     }
-    let bytes = match read_member_in(
-        &archive.path,
-        member,
-        Some(cstr(&dir)),
-        None,
-        UPATCH_FILE_MAX,
-    ) {
+    let bytes = match archive.member(member, &dir, UPATCH_FILE_MAX) {
         Ok(bytes) => bytes,
         Err(err) => {
             if err == -ENOENT {

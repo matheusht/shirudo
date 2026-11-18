@@ -9,7 +9,6 @@ use core::ffi::{CStr, c_char, c_int, c_long, c_void};
 use std::ffi::CString;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::fd::FromRawFd;
 use std::os::unix::ffi::OsStringExt;
 
 use super::http::{
@@ -27,7 +26,6 @@ use crate::sys::curl::{
     CURLOPT_URL, CURLOPT_WRITEDATA, CURLOPT_WRITEFUNCTION, Curl, CurlCode, curl_easy_cleanup,
     curl_easy_getinfo, curl_easy_init, curl_easy_perform, set_callback, set_long, set_off, set_ptr,
 };
-use crate::sys::libc::{fchmod, mkstemp, unlink};
 use crate::util::crypto_openssl::{
     Sha256Ctx, base64_encode, sha256_final, sha256_free, sha256_init, sha256_update,
 };
@@ -43,7 +41,6 @@ const REGION_MAX: usize = 64;
 const KEY_MAX: usize = 1024;
 const HOST_MAX: usize = 256;
 const DECODER_JSON_MAX: usize = 64 * 1024 * 1024;
-const PATH_MAX: usize = 4096;
 
 const CURLOPT_UPLOAD: c_int = 46;
 const CURLOPT_READDATA: c_int = 10009;
@@ -62,8 +59,8 @@ fn shown(b: &[u8]) -> std::borrow::Cow<'_, str> {
     String::from_utf8_lossy(b)
 }
 
-/// A map's snapshot as it goes to S3: gzipped in an unlinked temporary
-/// file, and the sizes and SHA-256 of the object.
+/// A map's snapshot as it goes to S3: gzipped in a file in memory,
+/// and the sizes and SHA-256 of the object.
 pub(super) struct Snapshot {
     file: File,
     pub(super) json_bytes: u64,
@@ -72,41 +69,10 @@ pub(super) struct Snapshot {
     sha256_b64: String,
 }
 
-/// A temporary file no one else can open: made 0600 and unlinked.
+/// In memory: a file under TMPDIR, which root sets, could be created in
+/// a sealed directory, labeled.
 fn temp_file() -> Result<File, c_int> {
-    let dir = env("TMPDIR").unwrap_or_else(|| b"/tmp".to_vec());
-    let path = [&dir[..], b"/shirudo-map-snapshot.XXXXXX"].concat();
-    if path.len() >= PATH_MAX {
-        return Err(-ENAMETOOLONG);
-    }
-    let mut path = CString::new(path)
-        .map_err(|_| -EINVAL)?
-        .into_bytes_with_nul();
-    // SAFETY: the template, which mkstemp() fills in.
-    let fd = unsafe { mkstemp(path.as_mut_ptr().cast()) };
-    if fd < 0 {
-        return Err(-errno());
-    }
-    // SAFETY: the descriptor mkstemp() opened, the file's from here.
-    let file = unsafe { File::from_raw_fd(fd) };
-    // SAFETY: the open file.
-    if unsafe { fchmod(fd, 0o600) } != 0 {
-        let err = -errno();
-        // SAFETY: the template's path, a C string.
-        unsafe { unlink(path.as_ptr().cast()) };
-        return Err(err);
-    }
-    // SAFETY: as above.
-    if unsafe { unlink(path.as_ptr().cast()) } != 0 {
-        return Err(-errno());
-    }
-    Ok(file)
-}
-
-fn errno() -> c_int {
-    std::io::Error::last_os_error()
-        .raw_os_error()
-        .unwrap_or(EIO)
+    crate::util::io::memfd(c"shirudo-map-snapshot").map(File::from)
 }
 
 /// Where a snapshot's gzip stream goes: its file, hashed and counted.

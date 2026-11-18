@@ -4,7 +4,7 @@
 //! Signed payloads: a detached CMS signature checked against a
 //! certificate, and the signed tree publication a registry holds.
 
-use core::ffi::{CStr, c_char, c_int, c_void};
+use core::ffi::{CStr, c_char, c_int};
 use core::ptr;
 
 use crate::errno::{EBADMSG, EINVAL, ENAMETOOLONG, ENOMEM};

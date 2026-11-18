@@ -17,8 +17,8 @@ mod tar;
 
 pub(crate) use capi::{bpm_pkg_load_info, bpm_pkg_read_member, bpm_semver_valid};
 pub(crate) use facade::{
-    Member, extract, fetch_document, fetch_publication, index_parse, read_member_in, verify_cms,
-    verify_cms_fd, visit_members,
+    Member, extract, fetch_document, fetch_publication, index_parse, read_member_fd,
+    read_member_in, verify_cms, verify_cms_fd, visit_members_fd,
 };
 pub(crate) use publication::tree_manifest;
 pub(crate) use semver::compare as semver_compare;

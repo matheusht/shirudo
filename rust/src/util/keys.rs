@@ -31,7 +31,7 @@ use crate::util::seal::{seal_mkdir_p, seal_write_file};
 /// `KEYS_MAX`: the most certificates a set holds.
 pub(crate) const KEYS_MAX: usize = 16;
 /// `KEYS_DER_MAX`: the largest certificate or vouch read.
-const DER_MAX: usize = 1024 * 1024;
+pub(crate) const DER_MAX: usize = 1024 * 1024;
 /// `KEYS_VOUCH_PREFIX` with the NUL sizeof() counts, which the payload
 /// of a vouch starts with.
 const VOUCH_PREFIX: &[u8] = b"shirudo-key-vouch\0";
@@ -172,6 +172,24 @@ unsafe fn read_der_at(
 
         close(fd);
         ret
+    }
+}
+
+/// [`read_der`] into a vector of its bytes.
+pub(crate) fn read_der_bytes(path: &CStr) -> Result<Vec<u8>, c_int> {
+    let (mut der, mut len) = (ptr::null_mut(), 0);
+
+    // SAFETY: a C string and where the bytes and their count go.
+    match unsafe { read_der(path.as_ptr(), &mut der, &mut len) } {
+        0 => {
+            // SAFETY: the len bytes read_der() allocated, copied and then
+            // freed once.
+            let bytes = unsafe { ffi::slice(der, len) }.to_vec();
+            // SAFETY: as above.
+            unsafe { xfree(der.cast(), len) };
+            Ok(bytes)
+        }
+        err => Err(err),
     }
 }
 

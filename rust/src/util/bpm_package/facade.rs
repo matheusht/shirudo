@@ -76,14 +76,39 @@ pub(crate) fn read_member_in(
     }
 }
 
-/// Calls `visit` with the name and tar type of each member of the
-/// package in `package_dir`.
-pub(crate) fn visit_members(
-    archive: &CStr,
+/// [`read_member_in`] of the package from the start of `fd`, which it
+/// leaves open.
+pub(crate) fn read_member_fd(
+    fd: std::os::fd::BorrowedFd<'_>,
+    member: &[u8],
+    package_dir: Option<&[u8]>,
+    found_dir: Option<&mut [u8]>,
+    max: usize,
+) -> Result<Member> {
+    let mut read = Member {
+        data: ptr::null_mut(),
+        len: 0,
+    };
+    let mut found = Found {
+        out: &mut read.data,
+        out_len: &mut read.len,
+        dir: found_dir,
+    };
+
+    match archive::read_member_fd(fd, Some(member), package_dir, &mut found, max) {
+        0 => Ok(read),
+        err => Err(err),
+    }
+}
+
+/// [`visit_members`] of the package from the start of `fd`, which it
+/// leaves open.
+pub(crate) fn visit_members_fd(
+    fd: std::os::fd::BorrowedFd<'_>,
     package_dir: Option<&[u8]>,
     visit: &mut dyn FnMut(&CStr, c_char) -> c_int,
 ) -> c_int {
-    archive::visit_members(archive.as_ptr(), package_dir, Some(visit))
+    archive::visit_members_fd(fd, package_dir, Some(visit))
 }
 
 pub(crate) fn extract(archive: &CStr, dest: &CStr) -> c_int {

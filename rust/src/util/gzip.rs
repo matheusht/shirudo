@@ -95,7 +95,7 @@ impl GzRead {
         Ok(Self::from_file(file))
     }
 
-    /// Read from a File whose ownership the caller has transferred.
+    /// gzdopen(): the stream of `file` from where it is.
     pub(crate) fn from_file(file: File) -> GzRead {
         GzRead {
             file,

@@ -9,6 +9,7 @@ pub const PATH_MAX: usize = 4096;
 pub const AT_FDCWD: c_int = -100;
 pub const F_DUPFD_CLOEXEC: c_int = 1030;
 pub const SEEK_SET: c_int = 0;
+pub const MFD_CLOEXEC: core::ffi::c_uint = 1;
 pub const STDOUT_FILENO: c_int = 1;
 
 pub const F_OK: c_int = 0;
@@ -457,6 +458,7 @@ unsafe extern "C" {
     pub fn strptime(s: *const c_char, fmt: *const c_char, tm: *mut Tm) -> *mut c_char;
     pub fn timegm(tm: *mut Tm) -> i64;
     pub fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64;
+    pub fn memfd_create(name: *const c_char, flags: core::ffi::c_uint) -> c_int;
     fn __errno_location() -> *mut c_int;
 }
 

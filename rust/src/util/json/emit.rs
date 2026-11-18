@@ -81,22 +81,6 @@ fn format_u64_full(mut n: u64, buf: &mut [u8; 20]) -> &[u8] {
     &buf[pos..]
 }
 
-/// Emit into the caller's fixed buffer while it is borrowed here.
-pub(crate) fn emit_fixed(buf: &mut [u8], emit: impl FnOnce(&mut JsonEmit)) -> Result<usize, c_int> {
-    let mut e = JsonEmit {
-        buf: buf.as_mut_ptr().cast(),
-        cap: buf.len(),
-        len: 0,
-        max: 0,
-        err: 0,
-        depth: 0,
-        nonempty: [0; EMIT_MAX_DEPTH as usize / 64],
-        value_pending: false,
-    };
-    emit(&mut e);
-    if e.err != 0 { Err(e.err) } else { Ok(e.len) }
-}
-
 impl JsonEmit {
     /// An emitter into the `cap` bytes at `buf`, which it does not grow,
     /// as a C caller sets one up.

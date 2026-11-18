@@ -402,36 +402,20 @@ pub(crate) unsafe fn cert_read_der(der: *const u8, len: usize, cert: *mut Cert) 
     }
 }
 
-/// The certificate in memory, DER or PEM, as the C reader accepted.
-///
-/// # Safety
-///
-/// `buf` holds `len` bytes, and `cert` points to a cert.
-pub(crate) unsafe fn cert_read_memory(buf: *const u8, len: usize, cert: *mut Cert) -> c_int {
-    if buf.is_null() || cert.is_null() || len > c_int::MAX as usize {
+/// A DER or a PEM certificate in `buf`, as cert_read_file() takes one
+/// from a file, into `cert`: 0 or -EINVAL.
+pub(crate) fn cert_read_memory(buf: &[u8], cert: &mut Cert) -> c_int {
+    cert.imp = ptr::null_mut();
+    if buf.len() > c_int::MAX as usize {
         return -EINVAL;
     }
-    // SAFETY: the caller supplies the bytes and cert.
-    if unsafe { cert_read_der(buf, len, cert) } == 0 {
-        return 0;
-    }
-    // SAFETY: failed DER parsing leaves OpenSSL errors before the PEM attempt.
-    unsafe { ERR_clear_error() };
-    // SAFETY: the caller supplies the bytes, whose length fits c_int.
-    let bio = unsafe { BIO_new_mem_buf(buf.cast(), len as c_int) };
-    if bio.is_null() {
-        return -ENOMEM;
-    }
-    // SAFETY: the BIO stays alive for this read, then is released once.
-    unsafe {
-        (*cert).imp = PEM_read_bio_X509(bio, core::ptr::null_mut(), None, core::ptr::null_mut());
-        BIO_free(bio);
-        if (*cert).imp.is_null() {
-            ERR_clear_error();
-            return -EINVAL;
+    match X509::from_der(buf).or_else(|_| X509::from_pem(buf)) {
+        Ok(x509) => {
+            cert.hold(x509);
+            0
         }
+        Err(_) => -EINVAL,
     }
-    0
 }
 
 /// # Safety
@@ -1524,19 +1508,6 @@ mod capi {
     pub unsafe extern "C" fn cert_read_der(der: *const u8, len: usize, cert: *mut Cert) -> c_int {
         // SAFETY: the caller's pointers.
         unsafe { super::cert_read_der(der, len, cert) }
-    }
-
-    /// # Safety
-    ///
-    /// `buf` holds `len` bytes, and `cert` points to a cert.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn cert_read_memory(
-        buf: *const u8,
-        len: usize,
-        cert: *mut Cert,
-    ) -> c_int {
-        // SAFETY: the caller passes the bytes and cert.
-        unsafe { super::cert_read_memory(buf, len, cert) }
     }
 
     /// # Safety

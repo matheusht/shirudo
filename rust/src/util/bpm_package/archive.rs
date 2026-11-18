@@ -5,7 +5,6 @@
 //! one member, the names of all, or all of it unpacked.
 
 use core::ffi::{CStr, c_char, c_int};
-use std::os::fd::FromRawFd;
 use std::os::unix::ffi::OsStrExt;
 
 use super::tar::{
@@ -15,10 +14,7 @@ use super::tar::{
 use crate::errno::{E2BIG, EFBIG, EINVAL, EIO, ENAMETOOLONG, ENOENT, ENOMEM, EPERM};
 use crate::ffi;
 use crate::heap::{xfree, xmalloc};
-use crate::sys::libc::{
-    F_DUPFD_CLOEXEC, O_CREAT, O_EXCL, O_WRONLY, PATH_MAX, SEEK_SET, close, errno, fchmod, fcntl,
-    lseek,
-};
+use crate::sys::libc::{O_CREAT, O_EXCL, O_WRONLY, PATH_MAX, close, errno, fchmod};
 use crate::text::{at, cstr, strsprintf};
 use crate::util::bpm_oci::{MAX_PACKAGE_BYTES, MAX_PACKAGE_ENTRIES};
 use crate::util::gzip::{GzRead, Z_OK};
@@ -56,21 +52,22 @@ impl Gz {
         }
     }
 
-    /// Rewind the caller descriptor, then read from a duplicate that
-    /// this reader owns. The caller keeps its descriptor open.
-    fn open_fd(fd: c_int) -> Result<Gz, c_int> {
-        // SAFETY: lseek uses the caller open descriptor.
-        if unsafe { lseek(fd, 0, SEEK_SET) } < 0 {
-            return Err(-errno());
+    /// The stream from the start of `fd`, on a descriptor of its own;
+    /// None, with errno set, when it cannot be.
+    fn open_fd(fd: std::os::fd::BorrowedFd<'_>) -> Option<Gz> {
+        use std::os::fd::AsRawFd;
+
+        // SAFETY: the caller's descriptor.
+        if unsafe { crate::sys::libc::lseek(fd.as_raw_fd(), 0, crate::sys::libc::SEEK_SET) } < 0 {
+            return None;
         }
-        // SAFETY: fcntl duplicates the descriptor with close-on-exec.
-        let copy = unsafe { fcntl(fd, F_DUPFD_CLOEXEC, 0) };
-        if copy < 0 {
-            return Err(-errno());
+        match fd.try_clone_to_owned() {
+            Ok(copy) => Some(Gz(GzRead::from_file(std::fs::File::from(copy)))),
+            Err(e) => {
+                crate::sys::libc::set_errno(e.raw_os_error().unwrap_or(EIO));
+                None
+            }
         }
-        // SAFETY: copy is a fresh descriptor owned by this File.
-        let file = unsafe { std::fs::File::from_raw_fd(copy) };
-        Ok(Gz(GzRead::from_file(file)))
     }
 
     /// Whether the file is read as it is, it not being gzip.
@@ -145,34 +142,32 @@ pub(super) fn read_member_in(
     found: &mut Found<'_>,
     max: usize,
 ) -> c_int {
-    let Some(gz) = Gz::open(archive) else {
+    read_member_gz(Gz::open(archive), member, package_dir, found, max)
+}
+
+/// [`read_member_in`] of the archive from the start of `fd`, which it
+/// leaves open.
+pub(super) fn read_member_fd(
+    fd: std::os::fd::BorrowedFd<'_>,
+    member: Option<&[u8]>,
+    package_dir: Option<&[u8]>,
+    found: &mut Found<'_>,
+    max: usize,
+) -> c_int {
+    read_member_gz(Gz::open_fd(fd), member, package_dir, found, max)
+}
+
+/// Takes `gz` over, and its open's errno when it is None.
+fn read_member_gz(
+    gz: Option<Gz>,
+    member: Option<&[u8]>,
+    package_dir: Option<&[u8]>,
+    found: &mut Found<'_>,
+    max: usize,
+) -> c_int {
+    let Some(mut gz) = gz else {
         return -errno();
     };
-    read_member_gz(gz, member, package_dir, found, max)
-}
-
-/// Read from the start of fd, leaving the caller's descriptor open.
-pub(super) fn read_member_fd(
-    fd: c_int,
-    member: Option<&[u8]>,
-    package_dir: Option<&[u8]>,
-    found: &mut Found<'_>,
-    max: usize,
-) -> c_int {
-    let gz = match Gz::open_fd(fd) {
-        Ok(gz) => gz,
-        Err(err) => return err,
-    };
-    read_member_gz(gz, member, package_dir, found, max)
-}
-
-fn read_member_gz(
-    mut gz: Gz,
-    member: Option<&[u8]>,
-    package_dir: Option<&[u8]>,
-    found: &mut Found<'_>,
-    max: usize,
-) -> c_int {
     if gz.direct() {
         gz.close();
         return -EINVAL;
@@ -284,26 +279,24 @@ pub(super) fn visit_members(
     package_dir: Option<&[u8]>,
     visit: Option<Visit<'_>>,
 ) -> c_int {
-    let Some(gz) = Gz::open(archive) else {
-        return -errno();
-    };
-    visit_members_gz(gz, package_dir, visit)
+    visit_members_gz(Gz::open(archive), package_dir, visit)
 }
 
-/// Walk from the start of fd, leaving the caller's descriptor open.
+/// [`visit_members`] of the archive from the start of `fd`, which it
+/// leaves open.
 pub(super) fn visit_members_fd(
-    fd: c_int,
+    fd: std::os::fd::BorrowedFd<'_>,
     package_dir: Option<&[u8]>,
     visit: Option<Visit<'_>>,
 ) -> c_int {
-    let gz = match Gz::open_fd(fd) {
-        Ok(gz) => gz,
-        Err(err) => return err,
-    };
-    visit_members_gz(gz, package_dir, visit)
+    visit_members_gz(Gz::open_fd(fd), package_dir, visit)
 }
 
-fn visit_members_gz(mut gz: Gz, package_dir: Option<&[u8]>, visit: Option<Visit<'_>>) -> c_int {
+/// Takes `gz` over, and its open's errno when it is None.
+fn visit_members_gz(gz: Option<Gz>, package_dir: Option<&[u8]>, visit: Option<Visit<'_>>) -> c_int {
+    let Some(mut gz) = gz else {
+        return -errno();
+    };
     if gz.direct() {
         gz.close();
         return -EINVAL;

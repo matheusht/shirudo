@@ -10,7 +10,6 @@ mod capi;
 mod client;
 mod http;
 mod manifest;
-pub(crate) use manifest::emit_descriptor;
 mod refs;
 
 use core::ffi::{CStr, c_char, c_long};
@@ -133,23 +132,6 @@ impl Descriptor {
             title: [0; PATH_MAX],
             size: 0,
         }
-    }
-}
-
-pub(crate) fn descriptor(media: &[u8], digest: &[u8], size: i64) -> Option<Descriptor> {
-    if media.len() >= MAX_MEDIA || digest.len() >= MAX_DIGEST {
-        return None;
-    }
-    let mut d = Descriptor::new();
-    copy_string(&mut d.media, media);
-    copy_string(&mut d.digest, digest);
-    d.size = size;
-    Some(d)
-}
-
-impl Descriptor {
-    pub(crate) fn media_bytes(&self) -> &[u8] {
-        cstr(&self.media)
     }
 }
 

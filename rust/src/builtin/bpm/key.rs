@@ -5,25 +5,28 @@
 //! the node's package signer, and listing those installed.
 
 use core::ffi::{CStr, c_char, c_int};
-use std::ffi::{CString, OsStr};
+use std::ffi::OsStr;
 use std::fs;
 use std::io::Write;
-use std::os::fd::{AsRawFd, IntoRawFd};
+use std::os::fd::{AsFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 
 use super::{
     CERT_PATH, KEYS_DIR, Result, curl_ready, error, fail, finish, item, last_err, message, os_err,
-    path, print, remove, show_help, status, temporary,
+    path, print, remove, show_help, status,
 };
 use crate::errno::{EEXIST, EIO, EKEYREJECTED, ENOENT, EPERM};
-use crate::sys::libc::close;
+use crate::sys::libc::{O_CREAT, O_EXCL, O_WRONLY, close};
 use crate::text::name_has_suffix;
-use crate::util::bpm_package::read_member_in;
-use crate::util::crypto_openssl::{Cert, cert_free, cert_pubkey_digest, cert_read_file};
+use crate::util::bpm_package::read_member_fd;
+use crate::util::crypto_openssl::{
+    Cert, cert_free, cert_pubkey_digest, cert_read_file, cert_read_memory,
+};
 use crate::util::help::{HelpItem, is_help, is_list_cmds, print_subcmd_list, resolve_subcommand};
 use crate::util::image_config;
 use crate::util::json::JsonEmit;
-use crate::util::seal::{seal_inherit_path, seal_mkdir_p};
+use crate::util::keys::{DER_MAX, read_der_bytes};
+use crate::util::seal::{seal_inherit_path, seal_mkdir_p, seal_open};
 
 const ITEMS: [HelpItem; 3] = [
     item(
@@ -55,13 +58,12 @@ fn os(path: &CStr) -> &OsStr {
     OsStr::from_bytes(path.to_bytes())
 }
 
-/// The SHA-256 of the SPKI of the certificate at `path`.
-fn pubkey_digest(path: &CStr) -> Result<[u8; 32]> {
+/// The SHA-256 of the SPKI of the DER or PEM certificate `der`.
+fn pubkey_digest(der: &[u8]) -> Result<[u8; 32]> {
     let mut cert = Cert::new();
     let mut digest = [0; 32];
 
-    // SAFETY: a C string and a certificate to fill, freed below.
-    let mut ret = unsafe { cert_read_file(path.as_ptr(), &mut cert) };
+    let mut ret = cert_read_memory(der, &mut cert);
     if ret == 0 {
         // SAFETY: the certificate read and room for the digest.
         ret = unsafe { cert_pubkey_digest(&cert, digest.as_mut_ptr()) };
@@ -71,19 +73,38 @@ fn pubkey_digest(path: &CStr) -> Result<[u8; 32]> {
     status(ret).map(|()| digest)
 }
 
-/// Whether the certificate at `path` has the key of the node's active
-/// certificate.
-pub(super) fn matches_active(path: &CStr) -> bool {
-    matches!(
-        (pubkey_digest(path), pubkey_digest(CERT_PATH)),
-        (Ok(a), Ok(b)) if a == b
-    )
+/// The SHA-256 of the SPKI of the node's active certificate.
+fn active_digest() -> Result<[u8; 32]> {
+    let mut cert = Cert::new();
+    let mut digest = [0; 32];
+
+    // SAFETY: a C string and a certificate to fill, freed below.
+    let mut ret = unsafe { cert_read_file(CERT_PATH.as_ptr(), &mut cert) };
+    if ret == 0 {
+        // SAFETY: the certificate read and room for the digest.
+        ret = unsafe { cert_pubkey_digest(&cert, digest.as_mut_ptr()) };
+    }
+    // SAFETY: the certificate, read or not.
+    unsafe { cert_free(&mut cert) };
+    status(ret).map(|()| digest)
 }
 
-/// The lowercase hex fingerprint of the certificate at `path`.
-fn fingerprint(path: &CStr) -> Result<[u8; 64]> {
+/// Whether the certificate `der` has the key of the node's active
+/// certificate.
+fn matches_active(der: &[u8]) -> bool {
+    matches!((pubkey_digest(der), active_digest()), (Ok(a), Ok(b)) if a == b)
+}
+
+/// [`matches_active`] of the certificate file at `path`, read as a key
+/// file is.
+pub(super) fn file_matches_active(path: &CStr) -> bool {
+    read_der_bytes(path).is_ok_and(|der| matches_active(&der))
+}
+
+/// The lowercase hex fingerprint of the certificate `der`.
+fn fingerprint(der: &[u8]) -> Result<[u8; 64]> {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let digest = pubkey_digest(path)?;
+    let digest = pubkey_digest(der)?;
     let mut hex = [0; 64];
 
     for (i, b) in digest.iter().enumerate() {
@@ -93,11 +114,39 @@ fn fingerprint(path: &CStr) -> Result<[u8; 64]> {
     Ok(hex)
 }
 
-/// Installs the certificate at `src` under its fingerprint, and as the
+/// [`fingerprint`] of the key file at `path`.
+fn file_fingerprint(path: &CStr) -> Result<[u8; 64]> {
+    fingerprint(&read_der_bytes(path)?)
+}
+
+/// A new key file of `der`: created, never one replaced, and synced.
+fn write_key(dst: &CStr, der: &[u8]) -> Result {
+    // SAFETY: a C string, flags and a mode.
+    let fd = unsafe { seal_open(dst.as_ptr(), O_WRONLY | O_CREAT | O_EXCL, 0o644) };
+    if fd < 0 {
+        return Err(fd);
+    }
+    // SAFETY: the fd seal_open() opened, owned from here.
+    let mut file = fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+    let mut ret = file
+        .write_all(der)
+        .and_then(|()| file.sync_all())
+        .map_err(os_err);
+    // SAFETY: the file's fd, closed once.
+    if unsafe { close(file.into_raw_fd()) } != 0 && ret.is_ok() {
+        ret = Err(last_err());
+    }
+    if ret.is_err() {
+        remove(dst);
+    }
+    ret
+}
+
+/// Installs the certificate `der` under its fingerprint, and as the
 /// active certificate when the node has none yet; one with another key
 /// than an active certificate's is refused.
-fn install(src: &CStr) -> Result {
-    let hex = fingerprint(src)?;
+fn install(der: &[u8]) -> Result {
+    let hex = fingerprint(der)?;
     let keys_dir = message(&[KEYS_DIR.as_bytes()]);
 
     // SAFETY: a C string.
@@ -107,19 +156,19 @@ fn install(src: &CStr) -> Result {
         Err(e) if e.raw_os_error() == Some(ENOENT) => false,
         Err(e) => return Err(os_err(e)),
     };
-    if active && !matches_active(src) {
+    if active && !matches_active(der) {
         return Err(-EPERM);
     }
     let dst = path(&[KEYS_DIR.as_bytes(), b"/", &hex, b".der"])?;
     let made = match fs::symlink_metadata(os(&dst)) {
         Ok(m) => {
-            if !m.file_type().is_file() || fingerprint(&dst).ok() != Some(hex) {
+            if !m.file_type().is_file() || file_fingerprint(&dst).ok() != Some(hex) {
                 return Err(-EKEYREJECTED);
             }
             false
         }
         Err(e) if e.raw_os_error() == Some(ENOENT) => {
-            super::package::copy_file(src, &dst, 0o644, true)?;
+            write_key(&dst, der)?;
             true
         }
         Err(e) => return Err(os_err(e)),
@@ -131,7 +180,7 @@ fn install(src: &CStr) -> Result {
         // SAFETY: a C string.
         Ok(()) => status(unsafe { seal_inherit_path(CERT_PATH.as_ptr()) }),
         Err(e) if e.raw_os_error() != Some(EEXIST) => Err(os_err(e)),
-        Err(_) if matches_active(src) => Ok(()),
+        Err(_) if matches_active(der) => Ok(()),
         Err(_) => Err(-EPERM),
     };
     if ret.is_err() && made {
@@ -140,42 +189,16 @@ fn install(src: &CStr) -> Result {
     ret
 }
 
-/// The certificate a package carries, written to a temporary file.
-fn extract_cert(archive: &CStr) -> Result<CString> {
-    let body = read_member_in(archive, b"cert.der", None, None, 1 << 20)?;
-    let (name, fd) = temporary(c"/tmp/shirudo-bpm-cert-XXXXXX")?;
-    let mut file = fs::File::from(fd);
-    let mut ret = file.write_all(body.bytes()).map_err(os_err);
-
-    // SAFETY: the file's fd, closed once.
-    if unsafe { close(file.into_raw_fd()) } != 0 && ret.is_ok() {
-        ret = Err(last_err());
+/// The DER certificate a key command takes, read once so that the key
+/// installed is the one fingerprinted: the file named, or the cert.der
+/// of a package, a download read in memory.
+fn source_read(source: &[u8]) -> Result<Vec<u8>> {
+    if !source.starts_with(b"oci://") && !name_has_suffix(source, b".bee") {
+        return read_der_bytes(&message(&[source]));
     }
-    match ret {
-        Ok(()) => Ok(name),
-        Err(err) => {
-            remove(&name);
-            Err(err)
-        }
-    }
-}
-
-/// The certificate a source names, written to a temporary file when it
-/// comes in a package or an OCI reference to one; None for a
-/// certificate file itself.
-fn certificate_of(source: &[u8]) -> Result<Option<CString>> {
-    if source.starts_with(b"oci://") {
-        let (archive, fd) = temporary(c"/tmp/shirudo-bpm-key-XXXXXX")?;
-        let fetched = super::fetch::download(source, Some((&archive, fd.as_raw_fd())));
-        drop(fd);
-        let cert = fetched.and_then(|()| extract_cert(&archive));
-        remove(&archive);
-        return cert.map(Some);
-    }
-    if name_has_suffix(source, b".bee") {
-        return extract_cert(&message(&[source])).map(Some);
-    }
-    Ok(None)
+    let fd = super::fetch::package_source_open(source)?;
+    let cert = read_member_fd(fd.as_fd(), b"cert.der", None, None, DER_MAX)?;
+    Ok(cert.bytes().to_vec())
 }
 
 /// The fingerprints of the certificates installed, each a regular file
@@ -204,7 +227,7 @@ fn installed() -> Result<Vec<[u8; 64]>> {
         if !fs::symlink_metadata(os(&p)).is_ok_and(|m| m.file_type().is_file()) {
             continue;
         }
-        match fingerprint(&p) {
+        match file_fingerprint(&p) {
             Ok(hex) if name[..64].eq_ignore_ascii_case(&hex) => found.push(hex),
             _ => continue,
         }
@@ -288,22 +311,13 @@ pub(super) fn key(raw: &[*const c_char], args: &[&[u8]]) -> c_int {
     if !curl_ready() {
         return fail(b"initialize curl", -EIO);
     }
-    let cert = certificate_of(args[2]);
-    let ret = match &cert {
-        Ok(cert) => {
-            let src = cert.clone().unwrap_or_else(|| message(&[args[2]]));
-            fingerprint(&src).and_then(|hex| {
-                if add {
-                    install(&src)?;
-                }
-                print(&[&hex[..], b"\n"].concat());
-                Ok(())
-            })
+    let ret = source_read(args[2]).and_then(|der| {
+        let hex = fingerprint(&der)?;
+        if add {
+            install(&der)?;
         }
-        Err(err) => Err(*err),
-    };
-    if let Ok(Some(temp)) = &cert {
-        remove(temp);
-    }
+        print(&[&hex[..], b"\n"].concat());
+        Ok(())
+    });
     finish(None, ret, if add { b"key add" } else { b"key fingerprint" })
 }
