@@ -75,7 +75,7 @@ fuzz_target!(
         };
         // SAFETY: an identity of nothing, for which zeros are the value.
         let mut info: PackageInfo = unsafe { core::mem::zeroed() };
-        if load_info(input.path.as_ptr(), &mut info) == 0 {
+        if load_info(&input.path, &mut info) == 0 {
             // SAFETY: the certificate the read gave, freed once.
             unsafe { xfree(info.cert.cast(), info.cert_len + 1) };
         }

@@ -70,7 +70,7 @@ pub(crate) fn read_member_in(
         dir: found_dir,
     };
 
-    match archive::read_member_in(archive.as_ptr(), Some(member), package_dir, &mut found, max) {
+    match archive::read_member_in(archive, Some(member), package_dir, &mut found, max) {
         0 => Ok(read),
         err => Err(err),
     }
@@ -112,7 +112,7 @@ pub(crate) fn visit_members_fd(
 }
 
 pub(crate) fn extract(archive: &CStr, dest: &CStr) -> c_int {
-    archive::extract(archive.as_ptr(), dest)
+    archive::extract(archive, dest)
 }
 
 fn signed(payload: &[u8], sig: &[u8]) -> Signed {
@@ -135,7 +135,7 @@ fn signed(payload: &[u8], sig: &[u8]) -> Signed {
 /// Whether `sig` is a CMS signature over `payload` by the certificate
 /// at `cert_path`: 0 or -errno.
 pub(crate) fn verify_cms(payload: &[u8], sig: &[u8], cert_path: &CStr) -> c_int {
-    publication::verify_cms(&signed(payload, sig), cert_path.as_ptr())
+    publication::verify_cms(&signed(payload, sig), cert_path)
 }
 
 /// As [`verify_cms`], with the certificate open on `cert_fd`.
@@ -176,7 +176,7 @@ pub(crate) fn fetch_document(
         client.as_mut(),
         repository,
         reference,
-        cert_path.map_or(core::ptr::null(), CStr::as_ptr),
+        cert_path,
         trusted,
         &mut payload,
         &mut digest,
@@ -203,7 +203,7 @@ pub(crate) fn fetch_publication(
         client.as_mut(),
         repository,
         reference,
-        cert_path.as_ptr(),
+        Some(cert_path),
         trusted,
         out,
         manifest_digest,

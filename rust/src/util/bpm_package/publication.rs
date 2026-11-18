@@ -4,7 +4,7 @@
 //! Signed payloads: a detached CMS signature checked against a
 //! certificate, and the signed tree publication a registry holds.
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
 use core::ptr;
 
 use crate::errno::{EBADMSG, EINVAL, ENAMETOOLONG, ENOMEM};
@@ -48,9 +48,11 @@ fn verify_with(s: &Signed, read: impl FnOnce(&mut Cert) -> c_int) -> c_int {
 }
 
 /// Against the certificate in the file at `cert_path`.
-pub(super) fn verify_cms(s: &Signed, cert_path: *const c_char) -> c_int {
+pub(super) fn verify_cms(s: &Signed, cert_path: &CStr) -> c_int {
     // SAFETY: cert_read_file() takes the caller's path as it is.
-    verify_with(s, |cert| unsafe { cert_read_file(cert_path, cert) })
+    verify_with(s, |cert| unsafe {
+        cert_read_file(cert_path.as_ptr(), cert)
+    })
 }
 
 /// Against the certificate the open `cert_fd` reads.
@@ -147,7 +149,7 @@ pub(crate) fn fetch_document(
     c: &mut OciClient,
     repository: &[u8],
     reference: &[u8],
-    cert_path: *const c_char,
+    cert_path: Option<&CStr>,
     trusted: Option<&TrustedSet>,
     payload: &mut BpmBuffer,
     manifest_digest: &mut [u8],
@@ -171,7 +173,7 @@ fn fetch_checked(
     c: &mut OciClient,
     repository: &[u8],
     reference: &[u8],
-    cert_path: *const c_char,
+    cert_path: Option<&CStr>,
     trusted: Option<&TrustedSet>,
     payload: &mut BpmBuffer,
     manifest_digest: &mut [u8],
@@ -262,15 +264,18 @@ fn fetch_checked(
                 None,
             )
         },
-        None => verify_cms(
-            &Signed {
-                payload: payload.data,
-                payload_len: payload.len,
-                sig: f.sig.data,
-                sig_len: f.sig.len,
-            },
-            cert_path,
-        ),
+        None => match cert_path {
+            Some(cert_path) => verify_cms(
+                &Signed {
+                    payload: payload.data,
+                    payload_len: payload.len,
+                    sig: f.sig.data,
+                    sig_len: f.sig.len,
+                },
+                cert_path,
+            ),
+            None => -EINVAL,
+        },
     }
 }
 
@@ -279,7 +284,7 @@ pub(crate) fn fetch_publication(
     c: &mut OciClient,
     repository: &[u8],
     reference: &[u8],
-    cert_path: *const c_char,
+    cert_path: Option<&CStr>,
     trusted: Option<&TrustedSet>,
     publication: *mut TreePublication,
     manifest_digest: &mut [u8],

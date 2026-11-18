@@ -36,14 +36,10 @@ struct Gz(GzRead);
 
 impl Gz {
     /// `path` opened; None, with errno set, when it cannot be.
-    fn open(path: *const c_char) -> Option<Gz> {
-        if path.is_null() {
-            crate::sys::libc::set_errno(crate::errno::EINVAL);
-            return None;
-        }
-        // SAFETY: a C string the caller passes.
-        let path = unsafe { CStr::from_ptr(path) }.to_bytes();
-        match GzRead::open(std::path::Path::new(std::ffi::OsStr::from_bytes(path))) {
+    fn open(path: &CStr) -> Option<Gz> {
+        match GzRead::open(std::path::Path::new(std::ffi::OsStr::from_bytes(
+            path.to_bytes(),
+        ))) {
             Ok(gz) => Some(Gz(gz)),
             Err(err) => {
                 crate::sys::libc::set_errno(err);
@@ -136,7 +132,7 @@ pub(super) struct Found<'a> {
 /// package directory; `package_dir` pins that directory when known, the
 /// found directory reports it otherwise.
 pub(super) fn read_member_in(
-    archive: *const c_char,
+    archive: &CStr,
     member: Option<&[u8]>,
     package_dir: Option<&[u8]>,
     found: &mut Found<'_>,
@@ -372,7 +368,7 @@ fn walk_members(gz: &mut Gz, package_dir: Option<&[u8]>, mut visit: Option<Visit
 
 /// Unpack the regular files and directories under the single top-level
 /// directory of a `.bee` into `dest`; anything else fails the archive.
-pub(super) fn extract(archive: *const c_char, dest: &CStr) -> c_int {
+pub(super) fn extract(archive: &CStr, dest: &CStr) -> c_int {
     let Some(mut gz) = Gz::open(archive) else {
         return -EINVAL;
     };

@@ -4,7 +4,7 @@
 //! A package's identity: the name and version its build environment
 //! records, and the signer of the certificate it carries.
 
-use core::ffi::{c_char, c_int};
+use core::ffi::{CStr, c_int};
 use core::ptr;
 
 use openssl::x509::{X509, X509Ref};
@@ -45,7 +45,7 @@ fn read_x509_memory(body: &[u8]) -> Option<X509> {
 
 /// The name, version and signer of the `.bee` at `archive` into `info`,
 /// with the certificate that signed it.
-pub(super) fn load_info(archive: *const c_char, info: &mut PackageInfo) -> c_int {
+pub(super) fn load_info(archive: &CStr, info: &mut PackageInfo) -> c_int {
     let mut environment: *mut u8 = ptr::null_mut();
     let mut environment_len = 0;
     let ret = read_member_in(
@@ -78,7 +78,7 @@ pub(super) fn load_info(archive: *const c_char, info: &mut PackageInfo) -> c_int
     ret
 }
 
-fn identify(archive: *const c_char, environment: &[u8], info: &mut PackageInfo) -> c_int {
+fn identify(archive: &CStr, environment: &[u8], info: &mut PackageInfo) -> c_int {
     let mut parsed = Parsed {
         name: [0; MAX_NAME],
         version: [0; MAX_NAME],
