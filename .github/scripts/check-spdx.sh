@@ -62,14 +62,16 @@ vendor_ok() {
 }
 
 # The licences a vendored crate may declare: permissive ones, which the
-# binaries may carry beside BSD-2-Clause, and the Unicode data licence
-# of a crate the build alone runs. "MIT/Apache-2.0" is cargo's older
-# spelling of "MIT OR Apache-2.0".
+# binaries may carry beside BSD-2-Clause, and of a crate the build alone
+# runs the Unicode data licence and Apache-2.0 with the LLVM exception,
+# which grants only more, target-lexicon's, which the build script of
+# tss-esapi-sys takes. "MIT/Apache-2.0" is cargo's older spelling of
+# "MIT OR Apache-2.0".
 crate_ok() {
 	case "$1" in
 	'MIT'|'Apache-2.0'|'MIT OR Apache-2.0'|'MIT/Apache-2.0'|\
 	'MIT OR Zlib OR Apache-2.0'|'0BSD OR MIT OR Apache-2.0'|\
-	'(MIT OR Apache-2.0) AND Unicode-3.0')
+	'(MIT OR Apache-2.0) AND Unicode-3.0'|'Apache-2.0 WITH LLVM-exception')
 		return 0 ;;
 	esac
 	return 1
