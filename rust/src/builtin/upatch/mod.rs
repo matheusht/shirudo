@@ -139,6 +139,18 @@ fn type_name(m: &MapSummary) -> &'static [u8] {
     }
 }
 
+/// The category of a pin that could not be opened: the guards refused
+/// it, or it is missing or not what it should be.
+fn pin_category(err: c_int) -> &'static CStr {
+    use crate::errno::{EACCES, ENOENT, EPERM, ESTALE};
+
+    match err {
+        EACCES | EPERM => c"lsm_denied",
+        ENOENT | ESTALE => c"tampered",
+        _ => c"unknown",
+    }
+}
+
 fn strerr(err: c_int) -> &'static [u8] {
     // SAFETY: strerror() gives a C string that outlives the message.
     unsafe { crate::ffi::c_str(crate::sys::libc::strerror(err)) }

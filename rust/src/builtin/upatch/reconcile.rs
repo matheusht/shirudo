@@ -16,7 +16,7 @@ use std::os::unix::ffi::OsStrExt;
 
 use super::loader::{AttachError, trust_anchor, xdp_attach_one};
 use super::ops::{LSM_LINK_PIN, fail, finish};
-use super::{log_audit, log_err, log_info, log_warn, strerr};
+use super::{log_audit, log_err, log_info, log_warn, pin_category, strerr};
 use crate::errno::{EACCES, ENAMETOOLONG, ENODATA, ENOENT, EOVERFLOW, EPERM, ESTALE};
 use crate::util::bpf_info::{Info, LINK_INFO_SIZE};
 use crate::util::chain::memneq_explicit;
@@ -391,14 +391,6 @@ fn attach(
         ),
     }
     Ok(())
-}
-
-fn pin_category(e: c_int) -> &'static CStr {
-    match e {
-        EACCES | EPERM => c"lsm_denied",
-        ENOENT | ESTALE => c"tampered",
-        _ => c"unknown",
-    }
 }
 
 /// The devices the XDP programs of `w` select and that run nothing, each

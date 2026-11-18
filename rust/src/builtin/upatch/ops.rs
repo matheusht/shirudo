@@ -54,6 +54,7 @@ use crate::util::report::{OpReport, report_emit, report_free};
 use crate::util::seal::{seal_mkdir_p, seal_open_read, seal_write_file};
 use crate::util::upatch::{self, NAME_MAX, Opened, Upatch, name_valid, pin_name, upatch_signature};
 use crate::util::upatch_resolve::XATTR_PAYLOAD;
+use crate::util::upatch_verify::archive_verify;
 
 /// INCOMING_DIR, LSM_LINK_PIN and XATTR_PAYLOAD of util/paths.h, and
 /// UPATCH_FILE_MAX of util/upatch.h.
@@ -658,13 +659,31 @@ fn preflight(expect_chain: Option<&CStr>, rep: &mut OpReport) -> Result<(), ()> 
     // SAFETY: a C string.
     let fd = unsafe { bpf_obj_get(LSM_LINK_PIN.as_ptr()) };
     if fd < 0 {
+        let err = errno();
+        let category = super::pin_category(err);
+        let detached: &[u8] = if err == ENOENT {
+            b", message: lsm_detached"
+        } else {
+            b""
+        };
         log_err(
             &[
-                b"upatch load: pre-flight refused (category: tampered, message: lsm_detached): ",
+                b"upatch: pre-flight refused (category: ",
+                category.to_bytes(),
+                detached,
+                b"): open ",
                 LSM_LINK_PIN.to_bytes(),
-                b" not pinned",
+                b": ",
+                strerr(err),
             ]
             .concat(),
+        );
+        fail(
+            rep,
+            c"pre_flight",
+            category,
+            err,
+            b"cannot open the LSM link pin",
         );
         return Err(());
     }
@@ -1376,8 +1395,38 @@ fn unload_steps(a: &OpArgs, file: &CStr, rep: &mut OpReport, name_out: &mut CStr
             }
         }
     };
+    // An archive with no pins is one init could not restore, or one an
+    // interrupted unload left: the directive removes it only when it is
+    // the payload the directive names, as it would its pins.
     if !is_pinned(&name) {
-        unarchive();
+        // SAFETY: an all-zero container is a closed one.
+        let mut held: Upatch = unsafe { core::mem::zeroed() };
+        match archive_verify(&name, &payload, &mut held) {
+            0 => {
+                // SAFETY: the container archive_verify() opened.
+                unsafe { upatch::upatch_close(&mut held) };
+                unarchive();
+            }
+            err if err != -ESTALE || fs::metadata(os(archived.to_bytes())).is_ok() => {
+                log_err(
+                    &[
+                        b"upatch unload: payload_mismatch, ",
+                        archived.to_bytes(),
+                        b" is not the upatch the directive expects; it stays",
+                    ]
+                    .concat(),
+                );
+                fail(
+                    rep,
+                    c"pin",
+                    c"payload_mismatch",
+                    if err == -ESTALE { EPERM } else { -err },
+                    b"archived payload does not match directive",
+                );
+                return 1;
+            }
+            _ => {}
+        }
         log_info(&[b"upatch unload: ", &name[..], b" already unloaded (no pin)"].concat());
         log_audit(&[b"upatch unload: name=", &name[..], b" already_unloaded"].concat());
         rep.ok = true;
