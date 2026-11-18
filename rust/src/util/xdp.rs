@@ -1075,15 +1075,6 @@ mod capi {
 
     /// # Safety
     ///
-    /// `devs` holds `count` devices.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn xdp_devices_warn_unclassified(devs: *const XdpDevice, count: usize) {
-        // SAFETY: the caller's devices.
-        super::warn_unclassified(unsafe { ffi::slice(devs, count) })
-    }
-
-    /// # Safety
-    ///
     /// `expected` is a device.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn xdp_device_verify(expected: *const XdpDevice) -> c_int {
@@ -1104,21 +1095,6 @@ mod capi {
         match super::features_parse(unsafe { ffi::slice(data.cast(), len) }) {
             Ok(f) => {
                 // SAFETY: as above.
-                unsafe { *features = f };
-                0
-            }
-            Err(err) => err,
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `features` is room for a number.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn xdp_device_features(ifindex: u32, features: *mut u64) -> c_int {
-        match super::device_features(ifindex) {
-            Ok(f) => {
-                // SAFETY: the caller's room.
                 unsafe { *features = f };
                 0
             }

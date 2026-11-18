@@ -272,16 +272,6 @@ fn take_member(
     0
 }
 
-/// Visit the validated package-relative members of a `.bee`, each name
-/// with its type, without extracting them.
-pub(super) fn visit_members(
-    archive: *const c_char,
-    package_dir: Option<&[u8]>,
-    visit: Option<Visit<'_>>,
-) -> c_int {
-    visit_members_gz(Gz::open(archive), package_dir, visit)
-}
-
 /// [`visit_members`] of the archive from the start of `fd`, which it
 /// leaves open.
 pub(super) fn visit_members_fd(

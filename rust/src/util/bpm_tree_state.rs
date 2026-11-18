@@ -1561,7 +1561,6 @@ mod capi {
         }
     }
 
-    #[unsafe(no_mangle)]
     pub extern "C" fn tree_configured() -> bool {
         super::configured()
     }
@@ -1570,7 +1569,6 @@ mod capi {
     ///
     /// `selector` is NULL or a selector whose pairs are as its counts
     /// say.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn tree_selector_matches(selector: *const TreeSelector) -> c_int {
         // SAFETY: the caller passes a selector.
         unsafe { super::selector_matches(selector) }
@@ -1592,7 +1590,6 @@ mod capi {
     /// # Safety
     ///
     /// `out` is room for a record.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn tree_pending_read(out: *mut TreePending) -> c_int {
         // SAFETY: the caller passes room for a record.
         unsafe { super::pending_read(out) }
@@ -1601,7 +1598,6 @@ mod capi {
     /// # Safety
     ///
     /// `op` is an operation.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn tree_pending_write(op: *const TreeOperation) -> c_int {
         // SAFETY: the caller passes an operation.
         super::pending_write(unsafe { &*op })
@@ -1642,7 +1638,6 @@ mod capi {
     /// # Safety
     ///
     /// `out` is room for 32 bytes.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn tree_event_replay(out: *mut u8) -> c_int {
         // SAFETY: a C string, and the caller's room.
         unsafe { super::event_replay(super::tree_path(super::EVENTLOG).as_ptr(), out) }
@@ -1651,7 +1646,6 @@ mod capi {
     /// # Safety
     ///
     /// `e` is an emitter.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn tree_emit_status(e: *mut JsonEmit) {
         // SAFETY: the caller passes an emitter.
         super::emit_status(unsafe { &mut *e })
@@ -1686,26 +1680,5 @@ mod capi {
         // SAFETY: the caller passes a path and room for the pairs and
         // their count.
         unsafe { super::read_config_file(path, labels, &mut *n, max) }
-    }
-
-    /// # Safety
-    ///
-    /// `path` is a C string, and `out` room for a state.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn tree_state_read_path(
-        path: *const c_char,
-        out: *mut TreeState,
-    ) -> c_int {
-        // SAFETY: the caller passes a path and room for a state.
-        unsafe { super::state_read(path, out) }
-    }
-
-    /// # Safety
-    ///
-    /// `path` is a C string, and `out` room for 32 bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn tree_event_replay_path(path: *const c_char, out: *mut u8) -> c_int {
-        // SAFETY: the caller passes a path and room for 32 bytes.
-        unsafe { super::event_replay(path, out) }
     }
 }

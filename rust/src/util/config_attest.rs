@@ -484,7 +484,6 @@ mod capi {
     ///
     /// `update` is NULL or an open update, and `out` points to room for a
     /// view.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn config_evidence_collect(
         update: *mut ConfigUpdate,
         out: *mut Evidence,
@@ -506,7 +505,6 @@ mod capi {
     /// # Safety
     ///
     /// `emit` points to an emitter and `view` to a view.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn config_evidence_emit(
         emit: *mut JsonEmit,
         view: *const Evidence,

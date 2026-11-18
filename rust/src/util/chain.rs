@@ -1124,7 +1124,6 @@ mod capi {
     ///
     /// `set` holds `n` members, `cert_sha` and `tree_root` digests, and
     /// `set_digest` and `event` have room for one.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn chain_init_event(
         cert_sha: *const u8,
         set: *mut MeasuredUpatch,
@@ -1283,7 +1282,6 @@ mod capi {
         unsafe { super::read(out) }
     }
 
-    #[unsafe(no_mangle)]
     pub extern "C" fn chain_bound() -> bool {
         super::bound()
     }

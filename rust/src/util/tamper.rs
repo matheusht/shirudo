@@ -317,80 +317,13 @@ fn counters_read_into(pin: &CStr, count: &mut [u64]) -> Result<u64, c_int> {
 }
 
 mod capi {
-    use core::ffi::{CStr, c_char, c_int};
+    use core::ffi::c_char;
 
-    use super::{Counters, POINTS, TamperCounts, point_meaning, point_name};
+    use super::{POINTS, point_name};
 
     /// Any point is answered, "?" past the last.
     #[unsafe(no_mangle)]
     pub extern "C" fn tamper_name(point: u32) -> *const c_char {
         point_name(&POINTS, point as usize).as_ptr()
     }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn tamper_meaning(point: u32) -> *const c_char {
-        point_meaning(&POINTS, point as usize).as_ptr()
-    }
-
-    /// # Safety
-    ///
-    /// `out` is room for the counters.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn tamper_read(out: *mut TamperCounts) -> c_int {
-        let r = super::read();
-        // SAFETY: the caller's room.
-        unsafe { put(out, r) }
-    }
-
-    /// The counters read into `out`, zeroed where the read failed: 0 or
-    /// the -errno.
-    ///
-    /// # Safety
-    ///
-    /// `out` is room for the counters.
-    pub(crate) unsafe fn put<const N: usize>(
-        out: *mut Counters<N>,
-        r: Result<Counters<N>, c_int>,
-    ) -> c_int {
-        let (c, ret) = match r {
-            Ok(c) => (c, 0),
-            Err(err) => (
-                Counters {
-                    count: [0; N],
-                    total: 0,
-                },
-                err,
-            ),
-        };
-        // SAFETY: the caller's room.
-        unsafe { out.write(c) };
-        ret
-    }
-
-    /// # Safety
-    ///
-    /// `pin` is a C string, `count` room for `n` counters and `total` for
-    /// their sum.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn counters_read(
-        pin: *const c_char,
-        n: u32,
-        count: *mut u64,
-        total: *mut u64,
-    ) -> c_int {
-        // SAFETY: the caller's C string and rooms.
-        unsafe {
-            let count = crate::ffi::zeroed_slice_mut(count, n as usize);
-            *total = 0;
-            match super::counters_read_into(CStr::from_ptr(pin), count) {
-                Ok(sum) => {
-                    *total = sum;
-                    0
-                }
-                Err(err) => err,
-            }
-        }
-    }
 }
-
-pub(crate) use capi::put;

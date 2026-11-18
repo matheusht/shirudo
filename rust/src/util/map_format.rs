@@ -6,8 +6,6 @@
 //! per-CPU value as the sum over the CPUs. Map reading, printing, JSON and
 //! OTLP all render cells through here.
 
-use core::ffi::c_char;
-
 use crate::bpf::btf::{
     Btf, INT_SIGNED, KIND_ARRAY, KIND_CONST, KIND_ENUM, KIND_ENUM64, KIND_INT, KIND_PTR,
     KIND_RESTRICT, KIND_STRUCT, KIND_TYPE_TAG, KIND_TYPEDEF, KIND_UNION, KIND_VOLATILE,
@@ -437,82 +435,4 @@ pub(crate) fn percpu_sum(v: &MapView, values: &[u8]) -> Vec<u8> {
         sum.wrapping_add(if signed { sign_extend(one, bits) } else { one })
     });
     number(sum, signed)
-}
-
-/// The text, as a C string the C library frees with xstrfree().
-fn to_xstr(s: &[u8]) -> *mut c_char {
-    // SAFETY: a size alone.
-    let p = unsafe { crate::heap::xmalloc(s.len() + 1) }.cast::<u8>();
-    if !p.is_null() {
-        // SAFETY: the allocation, of the text and its NUL.
-        unsafe {
-            core::ptr::copy_nonoverlapping(s.as_ptr(), p, s.len());
-            *p.add(s.len()) = 0;
-        }
-    }
-    p.cast()
-}
-
-mod capi {
-    use core::ffi::{c_char, c_void};
-
-    use super::{MapView, to_xstr};
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn upatch_map_is_percpu(ty: u32) -> bool {
-        super::is_percpu(ty)
-    }
-
-    /// # Safety
-    ///
-    /// `v` is a view.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_map_value_stride(v: *const MapView) -> u32 {
-        // SAFETY: the caller's view.
-        super::value_stride(unsafe { &*v })
-    }
-
-    /// # Safety
-    ///
-    /// `v` is a view, `bytes` holds `size` bytes, and `btf_name` is a C
-    /// string or NULL.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_map_format_cell(
-        v: *const MapView,
-        type_id: u32,
-        bytes: *const c_void,
-        size: u32,
-        btf_name: *const c_char,
-    ) -> *mut c_char {
-        // SAFETY: the caller's view, bytes and C string.
-        let (v, bytes, name) = unsafe {
-            (
-                &*v,
-                crate::ffi::slice(bytes.cast::<u8>(), size as usize),
-                if btf_name.is_null() {
-                    &b""[..]
-                } else {
-                    crate::ffi::c_str(btf_name)
-                },
-            )
-        };
-        to_xstr(&super::format_cell(v, type_id, bytes, name))
-    }
-
-    /// # Safety
-    ///
-    /// `v` is a view, and `values` holds its values of every CPU.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_map_format_percpu_sum(
-        v: *const MapView,
-        values: *const c_void,
-        _btf_type: *const c_char,
-    ) -> *mut c_char {
-        // SAFETY: the caller's view.
-        let v = unsafe { &*v };
-        let len = super::value_stride(v) as usize * v.n_cpus as usize;
-        // SAFETY: the caller's values, one per CPU.
-        let values = unsafe { crate::ffi::slice(values.cast::<u8>(), len) };
-        to_xstr(&super::percpu_sum(v, values))
-    }
 }

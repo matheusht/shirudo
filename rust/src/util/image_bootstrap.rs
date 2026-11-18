@@ -172,18 +172,9 @@ pub(crate) use capi::{image_bootstrap_read, image_bootstrap_read_fd};
 mod capi {
     use core::ffi::{c_char, c_int};
 
-    use super::{ImageBootstrap, parse, path_valid};
-    use crate::ffi;
-    use crate::sys::libc::{F_DUPFD_CLOEXEC, SEEK_SET, close, errno, fcntl, fdopen, fopen, lseek};
+    use super::{ImageBootstrap, parse};
 
-    /// # Safety
-    ///
-    /// `path` is NULL or a C string.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn image_path_valid(path: *const c_char) -> bool {
-        // SAFETY: the caller passes NULL or a C string.
-        !path.is_null() && path_valid(unsafe { ffi::c_str(path) })
-    }
+    use crate::sys::libc::{F_DUPFD_CLOEXEC, SEEK_SET, close, errno, fcntl, fdopen, fopen, lseek};
 
     /// # Safety
     ///

@@ -223,7 +223,6 @@ mod capi {
         super::lock_acquire_at(unsafe { CStr::from_ptr(dir) }, map_id)
     }
 
-    #[unsafe(no_mangle)]
     pub extern "C" fn serializer_lock_acquire(map_id: u32) -> c_int {
         super::lock_acquire_at(super::LOCKS_DIR, map_id)
     }

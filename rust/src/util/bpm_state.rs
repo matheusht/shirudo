@@ -263,23 +263,4 @@ mod capi {
         // SAFETY: the caller passes the entries, the room and the length.
         unsafe { super::emit(ffi::slice(st, n.max(0) as usize), buf, cap, &mut *len) }
     }
-
-    /// # Safety
-    ///
-    /// `st` has room for `BPM_MAX_STATE` entries, and `n` points to an
-    /// int.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn bpm_state_read(st: *mut BpmStateEntry, n: *mut c_int) -> c_int {
-        // SAFETY: the caller passes the room and the count.
-        unsafe { super::read(st, &mut *n) }
-    }
-
-    /// # Safety
-    ///
-    /// `st` holds `n` entries.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn bpm_state_write(st: *const BpmStateEntry, n: c_int) -> c_int {
-        // SAFETY: the caller passes the entries.
-        super::write(unsafe { ffi::slice(st, n.max(0) as usize) })
-    }
 }

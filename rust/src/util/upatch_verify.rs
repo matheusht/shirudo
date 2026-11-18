@@ -573,7 +573,6 @@ mod capi {
     use super::{Checks, PAYLOAD_HASH_LEN};
     use crate::util::measured::MeasuredSet;
     use crate::util::upatch::{ProgSpec, Upatch};
-    use crate::util::xdp::XdpDevice;
 
     /// # Safety
     ///
@@ -726,68 +725,5 @@ mod capi {
         c.nr_uncovered = checks.nr_uncovered;
         c.check_err = checks.check_err;
         c.coverage_err = checks.coverage_err;
-    }
-
-    /// # Safety
-    ///
-    /// `name` is a C string, `specs` holds `nr_progs` specs, `devices`
-    /// `count` devices, and `cb` takes `ctx`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_xdp_each_uncovered(
-        name: *const c_char,
-        specs: *const ProgSpec,
-        nr_progs: u32,
-        devices: *const XdpDevice,
-        count: usize,
-        cb: unsafe extern "C" fn(
-            c_int,
-            *const ProgSpec,
-            *const XdpDevice,
-            u32,
-            *mut c_void,
-        ) -> c_int,
-        ctx: *mut c_void,
-    ) -> c_int {
-        // SAFETY: the caller's C string, specs and devices.
-        let (name, specs, devices) = unsafe {
-            (
-                CStr::from_ptr(name).to_bytes(),
-                crate::ffi::slice(specs, nr_progs as usize),
-                crate::ffi::slice(devices, count),
-            )
-        };
-        super::xdp_each_uncovered(name, specs, devices, &mut |fd, spec, dev, attached| {
-            // SAFETY: the caller's callback and context.
-            unsafe {
-                cb(
-                    std::os::fd::AsRawFd::as_raw_fd(&fd),
-                    spec,
-                    dev,
-                    attached,
-                    ctx,
-                )
-            }
-        })
-    }
-
-    /// # Safety
-    ///
-    /// `s` is a set, `name` a C string and `payload` room for a hash.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_pin_measured(
-        s: *const MeasuredSet,
-        name: *const c_char,
-        payload: *mut [u8; PAYLOAD_HASH_LEN],
-    ) -> bool {
-        // SAFETY: the caller's C string.
-        let name = unsafe { CStr::from_ptr(name) }.to_bytes();
-        // The payload the directory records is left in `payload`, whether
-        // the set holds it or not.
-        let Ok(p) = crate::util::upatch_pins::pin_payload(name) else {
-            return false;
-        };
-        // SAFETY: the caller's room.
-        unsafe { *payload = p };
-        super::pin_measured(s, name).is_some()
     }
 }

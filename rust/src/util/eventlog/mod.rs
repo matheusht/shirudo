@@ -282,26 +282,6 @@ fn read_log() -> Result<Log, c_int> {
     Ok(log)
 }
 
-/// Give a C caller its own allocation, with the same length it frees.
-fn read_for_c() -> Result<(*mut u8, usize), c_int> {
-    let mut log = read_log()?;
-    let file_len = match &log {
-        Log::File(file) => Some(file.len),
-        Log::Joined { .. } => None,
-    };
-    let len = file_len.unwrap_or_else(|| cstr(log.bytes()).len());
-    let alloc = len + 1;
-    // SAFETY: xmalloc allocates alloc bytes or returns NULL.
-    let ptr = unsafe { xmalloc(alloc) }.cast::<u8>();
-
-    if ptr.is_null() {
-        return Err(-ENOMEM);
-    }
-    // SAFETY: both the log and ptr hold alloc bytes, and do not overlap.
-    unsafe { core::ptr::copy_nonoverlapping(log.bytes().as_ptr(), ptr, alloc) };
-    Ok((ptr, len))
-}
-
 /// `f` on each line of the C string in `buf`, terminated in place as
 /// strtok_r() leaves it, until it returns other than 0.
 fn each_line(buf: &mut [u8], mut f: impl FnMut(&CStr) -> c_int) -> c_int {

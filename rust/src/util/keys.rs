@@ -1426,7 +1426,6 @@ mod capi {
 
     use super::{TrustedCert, TrustedSet};
     use crate::ffi;
-    use crate::util::crypto_openssl::Cert;
 
     /// # Safety
     ///
@@ -1460,7 +1459,6 @@ mod capi {
     /// # Safety
     ///
     /// `primary` is a C string, and `set` room for a set.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn keys_load_image_root(
         primary: *const c_char,
         root_fd: c_int,
@@ -1535,7 +1533,6 @@ mod capi {
     ///
     /// `c` is a certificate of a set, and `der` and `len` room for the
     /// kept bytes and their length.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn keys_cert_der(
         c: *const TrustedCert,
         der: *mut *const u8,
@@ -1557,15 +1554,6 @@ mod capi {
 
     /// # Safety
     ///
-    /// `c` is a certificate of a set, and `cert` room for a certificate.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn keys_cert_read(c: *const TrustedCert, cert: *mut Cert) -> c_int {
-        // SAFETY: the caller passes a certificate and room.
-        unsafe { super::cert_read(&*c, cert) }
-    }
-
-    /// # Safety
-    ///
     /// `path` is a C string, and `out` and `out_sz` room for the bytes
     /// and their length.
     #[unsafe(no_mangle)]
@@ -1582,7 +1570,6 @@ mod capi {
     ///
     /// `fd` is open, and `out` and `out_sz` room for the bytes and their
     /// length.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn keys_read_der_fd(
         fd: c_int,
         out: *mut *mut u8,
@@ -1611,7 +1598,6 @@ mod capi {
     ///
     /// `path` is a C string, and `sha256` and `fingerprint` room for 32
     /// bytes each.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn keys_digest_file(
         path: *const c_char,
         sha256: *mut u8,
@@ -1624,7 +1610,6 @@ mod capi {
     /// # Safety
     ///
     /// `sha256` holds `n` digests, and `out` is room for 32 bytes.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn keys_anchor_digest(
         sha256: *const [u8; 32],
         n: usize,
@@ -1670,7 +1655,6 @@ mod capi {
     /// # Safety
     ///
     /// `revoked_dir` is NULL or a C string, and `fingerprint` 32 bytes.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn keys_is_revoked(
         revoked_dir: *const c_char,
         fingerprint: *const [u8; 32],
@@ -1683,7 +1667,6 @@ mod capi {
     ///
     /// `der` holds `der_sz` bytes, and `out` and `out_sz` are room for
     /// the payload and its length.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn keys_vouch_payload(
         der: *const u8,
         der_sz: usize,
@@ -1722,7 +1705,6 @@ mod capi {
     ///
     /// `set` is a trust set, `der` and `sig` hold `der_sz` and `sig_sz`
     /// bytes, and `voucher` has room for 32.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn keys_verify_vouch(
         set: *const TrustedSet,
         der: *const u8,
@@ -1739,7 +1721,6 @@ mod capi {
     ///
     /// `keys_dir` is a C string, `der` and `sig` hold `der_sz` and
     /// `sig_sz` bytes, and `out` has room for `cap`.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn keys_install(
         keys_dir: *const c_char,
         der: *const u8,

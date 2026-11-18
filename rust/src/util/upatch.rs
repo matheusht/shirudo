@@ -1337,7 +1337,6 @@ mod capi {
     /// # Safety
     ///
     /// `u` is a container.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn upatch_metadata(u: *const Upatch) -> *const c_void {
         // SAFETY: the caller passes a container.
         let u = unsafe { &*u };
@@ -1369,11 +1368,6 @@ mod capi {
     pub unsafe extern "C" fn upatch_is_unload(u: *const Upatch) -> bool {
         // SAFETY: the caller passes a container.
         super::is_unload(unsafe { &*u })
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn upatch_type_str(_u: *const Upatch) -> *const c_char {
-        c"bpf".as_ptr()
     }
 
     /// # Safety
@@ -1425,7 +1419,6 @@ mod capi {
     /// # Safety
     ///
     /// `e` is a directory entry.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn upatch_select(e: *const Dirent) -> c_int {
         // SAFETY: the entry's name, a C string, and a suffix.
         unsafe {

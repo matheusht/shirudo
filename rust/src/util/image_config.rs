@@ -439,11 +439,6 @@ mod capi {
     use crate::errno::EINVAL;
     use crate::util::config::Config;
 
-    #[unsafe(no_mangle)]
-    pub extern "C" fn image_config_active() -> bool {
-        super::active()
-    }
-
     /// # Safety
     ///
     /// `out` points to room for a configuration.
@@ -451,11 +446,6 @@ mod capi {
     pub unsafe extern "C" fn image_config_get(out: *mut Config) -> c_int {
         // SAFETY: the caller passes the room.
         unsafe { super::get(out) }
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn image_config_root_fd() -> c_int {
-        super::root_fd()
     }
 
     /// An entry of the image, opened from its verified root: an fd or

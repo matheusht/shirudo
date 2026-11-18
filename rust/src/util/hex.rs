@@ -46,10 +46,10 @@ pub(crate) fn decode(hex: &[u8], out: &mut [u8]) -> Result<(), c_int> {
 }
 
 mod capi {
-    use core::ffi::{CStr, c_char, c_int, c_void};
+    use core::ffi::{CStr, c_char, c_int};
 
     use crate::errno::EINVAL;
-    use crate::heap::xmalloc;
+
     use crate::sys::libc::{strlen, strnlen};
 
     /// # Safety
@@ -67,24 +67,6 @@ mod capi {
         let hex = super::encode(inp);
         out[..hex.len()].copy_from_slice(&hex);
         out[hex.len()] = 0;
-    }
-
-    /// The hex of the `n` bytes at `inp`, xmalloc()'d to `2 * n + 1`
-    /// bytes; NULL when the allocation fails.
-    ///
-    /// # Safety
-    ///
-    /// `inp` holds `n` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn hex_alloc(inp: *const c_void, n: usize) -> *mut c_char {
-        let size = n.saturating_mul(2).saturating_add(1);
-        // SAFETY: a size alone.
-        let out = unsafe { xmalloc(size) }.cast::<c_char>();
-        if !out.is_null() {
-            // SAFETY: the caller's bytes, and the room just allocated.
-            unsafe { hex_encode(inp.cast(), n, out) };
-        }
-        out
     }
 
     #[unsafe(no_mangle)]

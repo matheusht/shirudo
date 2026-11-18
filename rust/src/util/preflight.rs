@@ -550,7 +550,6 @@ mod capi {
     /// # Safety
     ///
     /// `out` is room for a result.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn preflight_run(out: *mut PreflightResult) {
         // SAFETY: the caller passes room for a result.
         unsafe { super::run(out) }

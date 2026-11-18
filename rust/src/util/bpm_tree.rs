@@ -1310,7 +1310,6 @@ mod capi {
     ///
     /// `src` is a selector whose pairs are as its counts say, and `dst`
     /// room for one.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn tree_selector_copy(
         dst: *mut TreeSelector,
         src: *const TreeSelector,

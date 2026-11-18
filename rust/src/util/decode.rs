@@ -1510,7 +1510,6 @@ mod capi {
     /// # Safety
     ///
     /// `v` is a view or NULL; `out` and `out_len` rooms or NULL.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn upatch_decode_map_json(
         v: *const MapView,
         out: *mut *mut c_char,
@@ -1525,7 +1524,6 @@ mod capi {
     /// # Safety
     ///
     /// As upatch_decode_map_json().
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn upatch_decode_map_json_limit(
         v: *const MapView,
         max_bytes: usize,
@@ -1544,7 +1542,6 @@ mod capi {
     /// # Safety
     ///
     /// As upatch_decode_map_json().
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn upatch_decode_map_otel(
         v: *const MapView,
         out: *mut *mut c_char,
@@ -1574,7 +1571,6 @@ mod capi {
     /// # Safety
     ///
     /// As upatch_decode_map_file_json().
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn upatch_decode_map_file_json_limit(
         path: *const c_char,
         v: *const MapView,
@@ -1604,34 +1600,6 @@ mod capi {
         }
         // SAFETY: the caller's arguments.
         unsafe { decode(path, v, true, JSON_MAX, out, out_len) }
-    }
-
-    /// The signal the map's decoder in its upatch's archive exports into
-    /// `signal_out`: 0, -ENODATA without one, or -errno.
-    ///
-    /// # Safety
-    ///
-    /// `v` is a view or NULL and `signal_out` room or NULL.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_decode_map_signal(
-        v: *const MapView,
-        signal_out: *mut u32,
-    ) -> c_int {
-        // SAFETY: the caller's view.
-        let Some(v) = (unsafe { v.as_ref() }) else {
-            return -EINVAL;
-        };
-        if signal_out.is_null() {
-            return -EINVAL;
-        }
-        match super::signal(v) {
-            Ok(s) => {
-                // SAFETY: the caller's room.
-                unsafe { *signal_out = s };
-                0
-            }
-            Err(err) => err,
-        }
     }
 
     /// For the fuzzer: one decoder run on the view, as the export runs

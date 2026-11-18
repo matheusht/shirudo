@@ -519,27 +519,8 @@ pub(crate) use capi::{config_load_fd, config_load_path};
 mod capi {
     use core::ffi::{c_char, c_int};
 
-    use super::{Config, load, load_path};
+    use super::{Config, load_path};
     use crate::errno::EINVAL;
-    use crate::sys::libc::explicit_bzero;
-
-    /// # Safety
-    ///
-    /// `cfg` is a configuration to fill.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn config_load(cfg: *mut Config) -> c_int {
-        // SAFETY: the caller passes its configuration.
-        unsafe { load(cfg) }
-    }
-
-    /// # Safety
-    ///
-    /// `cfg` is a configuration to fill.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn config_clear(cfg: *mut Config) {
-        // SAFETY: the caller passes its configuration.
-        unsafe { explicit_bzero(cfg.cast(), size_of::<Config>()) };
-    }
 
     /// # Safety
     ///
@@ -559,7 +540,6 @@ mod capi {
     /// # Safety
     ///
     /// `cfg` is NULL or a configuration to fill, and `label` a C string.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn config_load_fd(
         cfg: *mut Config,
         fd: c_int,

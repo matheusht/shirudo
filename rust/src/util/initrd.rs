@@ -67,27 +67,3 @@ pub(crate) fn cert_path() -> &'static CStr {
         CERT_PATH
     }
 }
-
-mod capi {
-    use core::ffi::c_char;
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn in_initrd() -> bool {
-        super::in_initrd()
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn sysroot() -> *const c_char {
-        super::sysroot().as_ptr()
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn get_keys_dir() -> *const c_char {
-        super::keys_dir().as_ptr()
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn get_cert_path() -> *const c_char {
-        super::cert_path().as_ptr()
-    }
-}

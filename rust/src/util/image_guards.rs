@@ -760,9 +760,4 @@ mod capi {
         // SAFETY: the caller's guard.
         super::config_root_end(unsafe { &mut *guard })
     }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn image_guards_ready() -> c_int {
-        super::image_guards_ready()
-    }
 }

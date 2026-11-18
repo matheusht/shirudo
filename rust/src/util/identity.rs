@@ -75,17 +75,6 @@ fn lookup(fd: c_int, out: &mut Identity) -> c_int {
 mod capi {
     use core::ffi::c_int;
 
-    use crate::sys::identity::Identity;
-
-    /// # Safety
-    ///
-    /// `out` is room for an identity.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn identity_read(out: *mut Identity) -> c_int {
-        // SAFETY: the caller's room.
-        super::read(unsafe { &mut *out })
-    }
-
     #[unsafe(no_mangle)]
     pub extern "C" fn enforcement_active() -> c_int {
         super::enforcement_active()

@@ -322,29 +322,3 @@ pub(crate) unsafe fn tls_ca_cleanup(ca: *mut TlsCa) {
         unsafe { (*ca).imp = ptr::null_mut() };
     }
 }
-
-mod capi {
-    use core::ffi::c_int;
-
-    use super::TlsCa;
-    use crate::sys::curl::Curl;
-
-    /// # Safety
-    ///
-    /// `curl` is NULL or a live handle, and `ca` NULL or a TLS CA that
-    /// outlives the handle's transfers.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn tls_curl_policy(curl: *mut Curl, ca: *mut TlsCa) -> c_int {
-        // SAFETY: the caller passes a handle and a TLS CA.
-        unsafe { super::tls_curl_policy(curl, ca) }
-    }
-
-    /// # Safety
-    ///
-    /// `ca` is NULL or a TLS CA.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn tls_ca_cleanup(ca: *mut TlsCa) {
-        // SAFETY: the caller passes a TLS CA.
-        unsafe { super::tls_ca_cleanup(ca) }
-    }
-}

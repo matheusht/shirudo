@@ -45,12 +45,10 @@ pub extern "C" fn eventlog_adopt_pending() -> c_int {
     super::adopt_pending_locked()
 }
 
-#[unsafe(no_mangle)]
 pub extern "C" fn eventlog_lock() -> c_int {
     super::lock()
 }
 
-#[unsafe(no_mangle)]
 pub extern "C" fn eventlog_unlock(fd: c_int) {
     super::unlock(fd)
 }
@@ -108,27 +106,8 @@ pub unsafe extern "C" fn eventlog_boot_upatches(cb: Option<UpatchFn>, ctx: *mut 
 /// # Safety
 ///
 /// `cb` takes `ctx`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn eventlog_upatches(cb: Option<UpatchFn>, ctx: *mut c_void) -> c_int {
     records::upatches(true, cb, ctx)
-}
-
-/// # Safety
-///
-/// out and len are writable outputs. The caller frees out with xfree.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn eventlog_read(out: *mut *mut c_char, len: *mut usize) -> c_int {
-    match super::read_for_c() {
-        Ok((buf, size)) => {
-            // SAFETY: the C caller provided both outputs.
-            unsafe {
-                out.write(buf.cast());
-                len.write(size);
-            }
-            0
-        }
-        Err(err) => err,
-    }
 }
 
 /// # Safety
@@ -187,38 +166,6 @@ pub unsafe extern "C" fn eventlog_upatch_record_parse(
     }
 }
 
-/// # Safety
-///
-/// kind points to len bytes; ty and load are writable outputs.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn eventlog_upatch_kind_parse(
-    kind: *const c_char,
-    len: usize,
-    ty: *mut u32,
-    load: *mut bool,
-) -> bool {
-    // SAFETY: the caller passes len readable bytes.
-    let kind = unsafe { ffi::slice(kind.cast(), len) };
-    let found = match kind {
-        b"load" => Some((1, true)),
-        b"unload" => Some((1, false)),
-        b"java-load" => Some((2, true)),
-        b"java-unload" => Some((2, false)),
-        _ => None,
-    };
-    if let Some((payload_type, direction)) = found {
-        // SAFETY: the caller passes both output rooms.
-        unsafe {
-            ty.write(payload_type);
-            load.write(direction);
-        }
-        true
-    } else {
-        false
-    }
-}
-
-#[unsafe(no_mangle)]
 pub extern "C" fn eventlog_would_exceed(max_bytes: u64) -> c_int {
     super::would_exceed(max_bytes)
 }

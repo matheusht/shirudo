@@ -6,13 +6,10 @@
 use core::ffi::{CStr, c_char, c_int, c_void};
 
 use super::archive::{self, Found};
-use super::publication::{self, Signed};
+use super::publication::{self};
 use super::{IndexEntry, PackageInfo, UpatchMember, index, info, semver, tar};
 use crate::ffi;
-use crate::util::bpm_oci::{BpmBuffer, Descriptor, OciClient};
-use crate::util::bpm_tree::TreePublication;
 
-/// The `bpm_pkg_member_fn` a member walk calls.
 type MemberFn = unsafe extern "C" fn(ctx: *mut c_void, member: *const c_char, ty: c_char) -> c_int;
 
 /// A C string the caller may pass as NULL.
@@ -61,49 +58,6 @@ pub unsafe extern "C" fn bpm_semver_valid(s: *const c_char) -> bool {
 
 /// # Safety
 ///
-/// `payload` and `sig` are NULL or hold their lengths' bytes, and
-/// `cert_path` is NULL or a C string.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn bpm_verify_cms(
-    payload: *const u8,
-    payload_len: usize,
-    sig: *const u8,
-    sig_len: usize,
-    cert_path: *const c_char,
-) -> c_int {
-    let signed = Signed {
-        payload,
-        payload_len,
-        sig,
-        sig_len,
-    };
-
-    publication::verify_cms(&signed, cert_path)
-}
-
-/// # Safety
-///
-/// `payload` and `sig` are NULL or hold their lengths' bytes.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn bpm_verify_cms_fd(
-    payload: *const u8,
-    payload_len: usize,
-    sig: *const u8,
-    sig_len: usize,
-    cert_fd: c_int,
-) -> c_int {
-    let signed = Signed {
-        payload,
-        payload_len,
-        sig,
-        sig_len,
-    };
-
-    publication::verify_cms_fd(&signed, cert_fd)
-}
-
-/// # Safety
-///
 /// `name` is NULL or a C string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bpm_archive_rel_ok(name: *const c_char) -> bool {
@@ -136,62 +90,6 @@ pub unsafe extern "C" fn bpm_upatch_pair(
             ffi::slice(name.cast(), len),
             ffi::bytes_mut(out.cast(), cap),
         )
-    }
-}
-
-/// # Safety
-///
-/// `archive` and `package_dir` are NULL or C strings, and `visit` NULL
-/// or a function that takes `ctx`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn bpm_pkg_visit_members(
-    archive: *const c_char,
-    package_dir: *const c_char,
-    visit: Option<MemberFn>,
-    ctx: *mut c_void,
-) -> c_int {
-    // SAFETY: the caller passes NULL or a C string.
-    let package_dir = unsafe { opt_bytes(package_dir) };
-
-    match visit {
-        Some(visit) => {
-            let mut call = |member: &CStr, ty: c_char| {
-                // SAFETY: the caller's function, with its context and the
-                // member's terminated name, which lives for the call.
-                unsafe { visit(ctx, member.as_ptr(), ty) }
-            };
-            archive::visit_members(archive, package_dir, Some(&mut call))
-        }
-        None => archive::visit_members(archive, package_dir, None),
-    }
-}
-
-/// # Safety
-///
-/// fd is an open archive descriptor, package_dir is NULL or a C string,
-/// and visit is NULL or a function that takes ctx.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn bpm_pkg_visit_members_fd(
-    fd: c_int,
-    package_dir: *const c_char,
-    visit: Option<MemberFn>,
-    ctx: *mut c_void,
-) -> c_int {
-    // SAFETY: the caller passes NULL or a C string.
-    let package_dir = unsafe { opt_bytes(package_dir) };
-    // SAFETY: the caller lends an open descriptor for this call.
-    let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
-
-    match visit {
-        Some(visit) => {
-            let mut call = |member: &CStr, ty: c_char| {
-                // SAFETY: the caller's function, with its context and the
-                // member's terminated name, which lives for the call.
-                unsafe { visit(ctx, member.as_ptr(), ty) }
-            };
-            archive::visit_members_fd(fd, package_dir, Some(&mut call))
-        }
-        None => archive::visit_members_fd(fd, package_dir, None),
     }
 }
 
@@ -232,46 +130,8 @@ pub unsafe extern "C" fn bpm_pkg_read_member_in(
 
 /// # Safety
 ///
-/// fd is an open archive descriptor, member and package_dir are NULL or
-/// C strings, found_dir is NULL or has found_dir_sz bytes of room, and
-/// out and out_len take the member.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn bpm_pkg_read_member_fd(
-    fd: c_int,
-    member: *const c_char,
-    package_dir: *const c_char,
-    found_dir: *mut c_char,
-    found_dir_sz: usize,
-    out: *mut *mut u8,
-    out_len: *mut usize,
-    max: usize,
-) -> c_int {
-    // SAFETY: the caller passes NULL or C strings, NULL or the room at
-    // found_dir, and the two outputs.
-    unsafe {
-        let mut found = Found {
-            out: &mut *out,
-            out_len: &mut *out_len,
-            dir: (!found_dir.is_null()).then(|| ffi::bytes_mut(found_dir.cast(), found_dir_sz)),
-        };
-
-        // SAFETY: the caller lends an open descriptor for this call.
-        let fd = std::os::fd::BorrowedFd::borrow_raw(fd);
-        archive::read_member_fd(
-            fd,
-            opt_bytes(member),
-            opt_bytes(package_dir),
-            &mut found,
-            max,
-        )
-    }
-}
-
-/// # Safety
-///
 /// `archive` and `member` are NULL or C strings, and `out` and `out_len`
 /// take the member.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn bpm_pkg_read_member(
     archive: *const c_char,
     member: *const c_char,
@@ -313,96 +173,99 @@ pub unsafe extern "C" fn bpm_pkg_load_info(
     info::load_info(archive, unsafe { &mut *info })
 }
 
+/// The manifest of a tree publication whose layers are `payload` and
+/// `sig`, as bpm tree append writes it, into `out` of `cap` bytes with
+/// its length in `*len`: 0 or -errno.
+///
 /// # Safety
 ///
-/// payload and sig point to descriptors, out has cap bytes and len is
-/// writable.
+/// `payload` and `sig` are descriptors, `out` has room for `cap` bytes
+/// and `len` for a size.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bpm_tree_manifest(
-    payload: *const Descriptor,
-    sig: *const Descriptor,
+    payload: *const crate::util::bpm_oci::Descriptor,
+    sig: *const crate::util::bpm_oci::Descriptor,
     out: *mut c_char,
     cap: usize,
     len: *mut usize,
 ) -> c_int {
-    // SAFETY: the caller passes a writable length.
-    let len = unsafe { &mut *len };
-    *len = 0;
-    // SAFETY: the caller passes a descriptor.
-    let payload = unsafe { &*payload };
-    // SAFETY: the caller passes a descriptor.
-    let sig = unsafe { &*sig };
-    // SAFETY: the caller passes cap output bytes.
-    let out = unsafe { ffi::bytes_mut(out.cast(), cap) };
-    match publication::tree_manifest(payload, sig) {
-        Ok(body) if body.len() <= out.len() => {
-            out[..body.len()].copy_from_slice(&body);
-            *len = body.len();
-            0
+    // SAFETY: the caller's descriptors, room and size.
+    unsafe {
+        *len = 0;
+        let room = ffi::bytes_mut(out.cast(), cap);
+        match publication::emit_tree_manifest(&*payload, &*sig, room) {
+            Ok(n) => {
+                *len = n;
+                0
+            }
+            Err(err) => err,
         }
-        Ok(_) => -crate::errno::E2BIG,
-        Err(err) => err,
     }
 }
 
 /// # Safety
 ///
-/// c points to a client, repository and reference are C strings,
-/// cert_path is NULL or a C string, trusted is NULL or a trusted set,
-/// payload is writable and manifest_digest has digest_sz bytes.
+/// fd is an open archive descriptor, package_dir is NULL or a C string,
+/// and visit is NULL or a function that takes ctx.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn bpm_tree_fetch_document(
-    c: *mut OciClient,
-    repository: *const c_char,
-    reference: *const c_char,
-    cert_path: *const c_char,
-    trusted: *const crate::util::keys::TrustedSet,
-    payload: *mut BpmBuffer,
-    manifest_digest: *mut c_char,
-    digest_sz: usize,
+pub unsafe extern "C" fn bpm_pkg_visit_members_fd(
+    fd: c_int,
+    package_dir: *const c_char,
+    visit: Option<MemberFn>,
+    ctx: *mut c_void,
 ) -> c_int {
-    // SAFETY: the caller lends its client, strings, payload and digest.
-    unsafe {
-        publication::fetch_document(
-            &mut *c,
-            ffi::c_str(repository),
-            ffi::c_str(reference),
-            cert_path,
-            trusted.as_ref(),
-            &mut *payload,
-            ffi::bytes_mut(manifest_digest.cast(), digest_sz),
-        )
+    // SAFETY: the caller passes NULL or a C string.
+    let package_dir = unsafe { opt_bytes(package_dir) };
+    // SAFETY: the caller lends an open descriptor for this call.
+    let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
+
+    match visit {
+        Some(visit) => {
+            let mut call = |member: &CStr, ty: c_char| {
+                // SAFETY: the caller's function, with its context and the
+                // member's terminated name, which lives for the call.
+                unsafe { visit(ctx, member.as_ptr(), ty) }
+            };
+            archive::visit_members_fd(fd, package_dir, Some(&mut call))
+        }
+        None => archive::visit_members_fd(fd, package_dir, None),
     }
 }
 
 /// # Safety
 ///
-/// `c` is a client, `repository` and `reference` are C strings,
-/// `cert_path` NULL or one, `trusted` NULL or a trusted set,
-/// `publication` a publication to fill and `manifest_digest` has room
-/// for `digest_sz`.
+/// fd is an open archive descriptor, member and package_dir are NULL or
+/// C strings, found_dir is NULL or has found_dir_sz bytes of room, and
+/// out and out_len take the member.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn bpm_tree_fetch_publication(
-    c: *mut OciClient,
-    repository: *const c_char,
-    reference: *const c_char,
-    cert_path: *const c_char,
-    trusted: *const crate::util::keys::TrustedSet,
-    publication: *mut TreePublication,
-    manifest_digest: *mut c_char,
-    digest_sz: usize,
+pub unsafe extern "C" fn bpm_pkg_read_member_fd(
+    fd: c_int,
+    member: *const c_char,
+    package_dir: *const c_char,
+    found_dir: *mut c_char,
+    found_dir_sz: usize,
+    out: *mut *mut u8,
+    out_len: *mut usize,
+    max: usize,
 ) -> c_int {
-    // SAFETY: the caller passes its client, C strings, its publication
-    // and room for the digest.
+    // SAFETY: the caller passes NULL or C strings, NULL or the room at
+    // found_dir, and the two outputs.
     unsafe {
-        publication::fetch_publication(
-            &mut *c,
-            ffi::c_str(repository),
-            ffi::c_str(reference),
-            cert_path,
-            trusted.as_ref(),
-            publication,
-            ffi::bytes_mut(manifest_digest.cast(), digest_sz),
+        let mut found = Found {
+            out: &mut *out,
+            out_len: &mut *out_len,
+            dir: (!found_dir.is_null()).then(|| ffi::bytes_mut(found_dir.cast(), found_dir_sz)),
+        };
+
+        // SAFETY: the caller lends an open descriptor for this call.
+        let fd = std::os::fd::BorrowedFd::borrow_raw(fd);
+        archive::read_member_fd(
+            fd,
+            opt_bytes(member),
+            opt_bytes(package_dir),
+            &mut found,
+            max,
         )
     }
 }
+

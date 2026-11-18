@@ -150,9 +150,9 @@ pub(crate) fn read() -> Result<IntegrityCounts, c_int> {
 }
 
 mod capi {
-    use core::ffi::{c_char, c_int};
+    use core::ffi::c_char;
 
-    use super::{IntegrityCounts, POINTS};
+    use super::POINTS;
     use crate::util::tamper::{point_meaning, point_name};
 
     #[unsafe(no_mangle)]
@@ -163,15 +163,5 @@ mod capi {
     #[unsafe(no_mangle)]
     pub extern "C" fn integrity_meaning(point: u32) -> *const c_char {
         point_meaning(&POINTS, point as usize).as_ptr()
-    }
-
-    /// # Safety
-    ///
-    /// `out` is room for the counters.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn integrity_read(out: *mut IntegrityCounts) -> c_int {
-        let r = super::read();
-        // SAFETY: the caller's room.
-        unsafe { crate::util::tamper::put(out, r) }
     }
 }

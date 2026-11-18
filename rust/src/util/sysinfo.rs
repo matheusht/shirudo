@@ -589,9 +589,9 @@ fn emit_json(e: &mut JsonEmit, si: &Sysinfo) {
 pub(crate) use capi::{sysinfo_emit_json, sysinfo_gather};
 
 mod capi {
-    use core::ffi::{CStr, c_char, c_int, c_void};
+    use core::ffi::{CStr, c_char};
 
-    use super::{KernelConfigCb, Sysinfo, SysinfoImage};
+    use super::{Sysinfo, SysinfoImage};
     use crate::util::json::JsonEmit;
 
     /// # Safety
@@ -617,17 +617,7 @@ mod capi {
 
     /// # Safety
     ///
-    /// `img` is room for a `struct sysinfo_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn sysinfo_image_read(img: *mut SysinfoImage) {
-        // SAFETY: the caller passes the room.
-        unsafe { img.write(super::image_read()) };
-    }
-
-    /// # Safety
-    ///
     /// `si` points to room for a `struct sysinfo`.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn sysinfo_gather(si: *mut Sysinfo) {
         // SAFETY: the caller passes the room, zeroed whole, padding too,
         // before anything reads it.
@@ -639,22 +629,7 @@ mod capi {
 
     /// # Safety
     ///
-    /// `kernel_release` is NULL or a C string, and `cb` takes `ctx`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn sysinfo_kernel_config_foreach(
-        kernel_release: *const c_char,
-        cb: Option<KernelConfigCb>,
-        ctx: *mut c_void,
-    ) -> c_int {
-        // SAFETY: the caller passes the release, the callback and its
-        // context.
-        unsafe { super::kernel_config_foreach(kernel_release, cb, ctx) }
-    }
-
-    /// # Safety
-    ///
     /// `e` points to an emitter, and `si` to a `struct sysinfo`.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn sysinfo_emit_json(e: *mut JsonEmit, si: *const Sysinfo) {
         // SAFETY: the caller passes an emitter and a sysinfo.
         unsafe { super::emit_json(&mut *e, &*si) }

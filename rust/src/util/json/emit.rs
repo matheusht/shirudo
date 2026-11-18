@@ -402,7 +402,7 @@ impl JsonEmit {
 }
 
 mod capi {
-    use core::ffi::{c_char, c_int};
+    use core::ffi::c_char;
 
     use super::JsonEmit;
     use crate::ffi;
@@ -440,15 +440,6 @@ mod capi {
     ///
     /// `e` is a valid emitter.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn json_obj_value_open(e: *mut JsonEmit) {
-        // SAFETY: the caller passes a valid emitter.
-        unsafe { emitter(e) }.obj_value_open();
-    }
-
-    /// # Safety
-    ///
-    /// `e` is a valid emitter.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn json_obj_close(e: *mut JsonEmit) {
         // SAFETY: the caller passes a valid emitter.
         unsafe { emitter(e) }.obj_close();
@@ -479,15 +470,6 @@ mod capi {
     pub unsafe extern "C" fn json_arr_close(e: *mut JsonEmit) {
         // SAFETY: the caller passes a valid emitter.
         unsafe { emitter(e) }.arr_close();
-    }
-
-    /// # Safety
-    ///
-    /// `e` is a valid emitter and `key` a C string.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn json_key(e: *mut JsonEmit, key: *const c_char) {
-        // SAFETY: the caller passes a valid emitter and a C string.
-        unsafe { emitter(e).key(ffi::c_str(key)) };
     }
 
     /// # Safety
@@ -557,36 +539,9 @@ mod capi {
     ///
     /// `e` is a valid emitter and `key` a C string.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn json_kv_bool(e: *mut JsonEmit, key: *const c_char, val: c_int) {
-        // SAFETY: the caller passes a valid emitter and a C string.
-        unsafe { emitter(e).kv_bool(ffi::c_str(key), val != 0) };
-    }
-
-    /// # Safety
-    ///
-    /// `e` is a valid emitter and `key` a C string.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn json_kv_null(e: *mut JsonEmit, key: *const c_char) {
         // SAFETY: the caller passes a valid emitter and a C string.
         unsafe { emitter(e).kv_null(ffi::c_str(key)) };
-    }
-
-    /// # Safety
-    ///
-    /// `e` is a valid emitter, `key` a C string and `value` holds
-    /// `value_len` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn json_kv_raw(
-        e: *mut JsonEmit,
-        key: *const c_char,
-        value: *const c_char,
-        value_len: usize,
-    ) {
-        // SAFETY: the caller passes a valid emitter, a C string and
-        // value_len bytes at value.
-        unsafe {
-            emitter(e).kv_raw(ffi::c_str(key), ffi::slice(value.cast(), value_len));
-        }
     }
 
     /// # Safety
@@ -600,15 +555,6 @@ mod capi {
 
     /// # Safety
     ///
-    /// `e` is a valid emitter and `val` a C string.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn json_str_value(e: *mut JsonEmit, val: *const c_char) {
-        // SAFETY: the caller passes a valid emitter and a C string.
-        unsafe { emitter(e).str_value(ffi::c_str(val)) };
-    }
-
-    /// # Safety
-    ///
     /// `e` is a valid emitter and `value` holds `value_len` bytes.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn json_raw_value(
@@ -618,15 +564,6 @@ mod capi {
     ) {
         // SAFETY: the caller passes a valid emitter and value_len bytes.
         unsafe { emitter(e).raw_value(ffi::slice(value.cast(), value_len)) };
-    }
-
-    /// # Safety
-    ///
-    /// `e` is a valid emitter and `value` holds `value_len` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn json_raw(e: *mut JsonEmit, value: *const c_char, value_len: usize) {
-        // SAFETY: the caller passes a valid emitter and value_len bytes.
-        unsafe { emitter(e).raw(ffi::slice(value.cast(), value_len)) };
     }
 
     /// # Safety

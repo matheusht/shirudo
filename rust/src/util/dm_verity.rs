@@ -1324,7 +1324,6 @@ mod capi {
     /// # Safety
     ///
     /// `callback` is NULL or takes `ctx`.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn dm_verity_list(
         callback: Option<DmVerityCb>,
         ctx: *mut c_void,
@@ -1351,7 +1350,6 @@ mod capi {
     ///
     /// `name` is NULL or a C string, `image` NULL or an image, and `out`
     /// NULL or room for a mapping.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn dm_verity_inspect(
         name: *const c_char,
         image: *const ConfigImage,
@@ -1376,7 +1374,6 @@ mod capi {
     /// # Safety
     ///
     /// `device` is NULL or a mapping, and `mountpoint` NULL or a C string.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn dm_verity_mount(
         device: *const DmVerity,
         mountpoint: *const c_char,

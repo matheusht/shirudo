@@ -394,27 +394,9 @@ pub(crate) fn emit_json_object(e: &mut JsonEmit, v: &MapView) {
 }
 
 mod capi {
-    use crate::sys::upatch::MapSummary;
+
     use crate::sys::upatch_maps::MapView;
     use crate::util::json::JsonEmit;
-
-    /// # Safety
-    ///
-    /// `list` holds `n` summaries, or is NULL with `n` 0.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_maps_print_summary(list: *const MapSummary, n: usize) {
-        // SAFETY: the caller's summaries.
-        super::print_summary(unsafe { crate::ffi::slice(list, n) });
-    }
-
-    /// # Safety
-    ///
-    /// `v` is a view a read filled.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_maps_print_detail(v: *const MapView) {
-        // SAFETY: the caller's view.
-        super::print_detail(unsafe { &*v });
-    }
 
     /// # Safety
     ///

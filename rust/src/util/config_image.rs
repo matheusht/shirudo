@@ -325,7 +325,7 @@ pub(crate) use capi::{config_image_close, config_image_open, config_image_open_r
 mod capi {
     use core::ffi::{CStr, c_char, c_int};
 
-    use super::{ConfigImage, ConfigImageOpen, check_files, open_image, read_header};
+    use super::{ConfigImage, ConfigImageOpen, open_image, read_header};
     use crate::errno::EINVAL;
 
     /// `src` into `dst` field by field after its bytes are zeroed, so that
@@ -382,22 +382,6 @@ mod capi {
             }
             Err(e) => e,
         }
-    }
-
-    /// # Safety
-    ///
-    /// `image` is NULL or an image.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn config_image_check_files(
-        data_fd: c_int,
-        hash_fd: c_int,
-        image: *const ConfigImage,
-    ) -> c_int {
-        if image.is_null() {
-            return -EINVAL;
-        }
-        // SAFETY: the caller passes its image.
-        check_files(data_fd, hash_fd, unsafe { &*image })
     }
 
     /// # Safety

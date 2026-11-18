@@ -6,11 +6,11 @@
 //! the kernel describes it, whether it holds a certificate or exactly a
 //! set of them, and the bpf and dm-verity keyrings that anchor trust.
 
-use core::ffi::{CStr, c_char, c_int, c_long, c_void};
+use core::ffi::{CStr, c_char, c_int, c_long};
 
 use crate::errno::{ENOMEM, ERANGE};
 use crate::heap::{xcalloc, xfree, xmalloc, xreallocarray};
-use crate::sys::libc::{SYS_ADD_KEY, SYS_KEYCTL, abort, errno, syscall};
+use crate::sys::libc::{SYS_ADD_KEY, SYS_KEYCTL, errno, syscall};
 use crate::text::{cstr, strscpy};
 
 /// `KEYRING_DESC_MAX`.
@@ -24,14 +24,6 @@ const KEYCTL_RESTRICT_KEYRING: c_long = 29;
 const KEY_SPEC_THREAD_KEYRING: i32 = -1;
 pub(crate) const KEY_SPEC_BPF_KEYRING: i32 = -9;
 const KEY_SPEC_DM_VERITY_KEYRING: i32 = -10;
-
-/// `shirudo_keyring_cb`.
-type KeyringCb = unsafe extern "C" fn(
-    serial: i32,
-    ty: *const c_char,
-    description: *const c_char,
-    ud: *mut c_void,
-);
 
 /// `struct keyring_link`.
 #[repr(C)]
@@ -635,42 +627,18 @@ pub(crate) fn seal_bpf_set(ring: i32, set: &TrustedSet) -> c_int {
 }
 
 mod capi {
-    use core::ffi::{c_char, c_int, c_long, c_void};
+    use core::ffi::{c_int, c_long};
 
     use super::{
-        DESC_MAX, KEY_SPEC_BPF_KEYRING, KEY_SPEC_DM_VERITY_KEYRING, KEYCTL_GET_KEYRING_ID,
-        KEYCTL_RESTRICT_KEYRING, KEYCTL_UNLINK, KeyringCb, KeyringCert, KeyringLink, abort, errno,
-        keyctl,
+        KEY_SPEC_DM_VERITY_KEYRING, KEYCTL_GET_KEYRING_ID, KEYCTL_RESTRICT_KEYRING, KEYCTL_UNLINK,
+        KeyringCert, KeyringLink, errno, keyctl,
     };
     use crate::errno::ENOKEY;
     use crate::ffi;
 
     /// # Safety
     ///
-    /// `cb` takes `ud`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn keyring_list(
-        keyring: i32,
-        cb: Option<KeyringCb>,
-        ud: *mut c_void,
-    ) -> c_int {
-        super::list(keyring, |serial, ty, description| {
-            let Some(cb) = cb else {
-                // SAFETY: a call that takes no pointer; the C called a
-                // NULL callback here.
-                unsafe { abort() }
-            };
-
-            // SAFETY: the caller's callback and context, and two C
-            // strings that last the call.
-            unsafe { cb(serial, ty.as_ptr(), description.as_ptr(), ud) }
-        })
-    }
-
-    /// # Safety
-    ///
     /// `links` and `n` point to where the links and their count go.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn keyring_links(
         keyring: i32,
         links: *mut *mut KeyringLink,
@@ -682,22 +650,7 @@ mod capi {
 
     /// # Safety
     ///
-    /// `der` holds `der_len` bytes, and `out` has room for
-    /// `KEYRING_DESC_MAX`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn keyring_cert_description(
-        der: *const u8,
-        der_len: usize,
-        out: *mut c_char,
-    ) -> c_int {
-        // SAFETY: the caller passes the certificate and the room.
-        unsafe { super::cert_description(der, der_len, &mut *out.cast::<[u8; DESC_MAX]>()) }
-    }
-
-    /// # Safety
-    ///
     /// `der` holds `der_len` bytes.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn keyring_holds_cert(
         keyring: i32,
         der: *const u8,
@@ -713,7 +666,6 @@ mod capi {
     /// # Safety
     ///
     /// `der` holds `der_len` bytes.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn keyring_find_cert(
         keyring: i32,
         der: *const u8,
@@ -758,28 +710,11 @@ mod capi {
         0
     }
 
-    #[unsafe(no_mangle)]
     pub extern "C" fn keyring_bpf_serial() -> i32 {
         super::bpf_serial()
     }
 
-    /// # Safety
-    ///
-    /// `cert` holds `cert_len` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn keyring_bpf_add_cert(cert: *const u8, cert_len: usize) -> i32 {
-        // SAFETY: the caller passes the certificate.
-        unsafe { super::add_cert(KEY_SPEC_BPF_KEYRING, cert, cert_len) }
-    }
-
-    /// No restriction type: the keyring rejects every further link.
-    #[unsafe(no_mangle)]
-    pub extern "C" fn keyring_bpf_seal() -> c_int {
-        super::keyctl_spec(KEYCTL_RESTRICT_KEYRING, KEY_SPEC_BPF_KEYRING).min(0) as c_int
-    }
-
     /// The kernel-owned ring itself, never one found by name.
-    #[unsafe(no_mangle)]
     pub extern "C" fn keyring_dm_verity_serial() -> i32 {
         super::keyctl_spec(KEYCTL_GET_KEYRING_ID, KEY_SPEC_DM_VERITY_KEYRING) as i32
     }
@@ -787,14 +722,12 @@ mod capi {
     /// # Safety
     ///
     /// `cert` holds `cert_len` bytes.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn keyring_dm_verity_add_cert(cert: *const u8, cert_len: usize) -> i32 {
         // SAFETY: the caller passes the certificate.
         unsafe { super::add_cert(KEY_SPEC_DM_VERITY_KEYRING, cert, cert_len) }
     }
 
     /// No restriction type: the keyring rejects every further addition.
-    #[unsafe(no_mangle)]
     pub extern "C" fn keyring_dm_verity_seal() -> c_int {
         super::keyctl_spec(KEYCTL_RESTRICT_KEYRING, KEY_SPEC_DM_VERITY_KEYRING).min(0) as c_int
     }

@@ -231,7 +231,6 @@ mod capi {
     /// # Safety
     ///
     /// `argv` holds `argc` C strings.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn cmd_upatch(argc: c_int, argv: *const *const c_char) -> c_int {
         // SAFETY: the caller's argc words.
         super::run(unsafe { super::super::words(argc, argv) })

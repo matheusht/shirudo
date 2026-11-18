@@ -48,7 +48,6 @@ mod capi {
     use crate::errno::EINVAL;
     use crate::util::crypto_openssl::sha256_buffer;
 
-    #[unsafe(no_mangle)]
     pub extern "C" fn config_measure_pcr_valid(pcr: u32) -> c_int {
         pcr_valid(pcr)
     }

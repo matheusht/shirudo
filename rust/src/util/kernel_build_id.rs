@@ -98,7 +98,7 @@ pub(crate) unsafe fn read_build_id(out: *mut c_char) -> c_int {
 mod capi {
     use core::ffi::{c_char, c_int, c_void};
 
-    use super::{from_notes, read_build_id};
+    use super::from_notes;
     use crate::errno::EINVAL;
     use crate::ffi;
 
@@ -117,17 +117,5 @@ mod capi {
         }
         // SAFETY: the caller passes the notes and the room.
         unsafe { from_notes(ffi::slice(notes.cast(), notes_len), out) }
-    }
-
-    /// # Safety
-    ///
-    /// `out` is NULL or has room for `KERNEL_BUILD_ID_STRING_MAX` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn kernel_build_id_read(out: *mut c_char) -> c_int {
-        if out.is_null() {
-            return -EINVAL;
-        }
-        // SAFETY: the caller passes the room.
-        unsafe { read_build_id(out) }
     }
 }

@@ -37,7 +37,6 @@ fn key_path(out: &mut [u8], dir: &[u8], file: &[u8]) -> Result<(), c_int> {
 /// # Safety
 ///
 /// `arg` is NULL or a C string, which the result may be.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn keys_dir_resolve(arg: *const c_char) -> *const c_char {
     if !arg.is_null() {
         return arg;
@@ -58,7 +57,6 @@ pub unsafe extern "C" fn keys_dir_resolve(arg: *const c_char) -> *const c_char {
 ///
 /// `out` is NULL or room for `out_sz` bytes, and `dir` and `file` are
 /// NULL or C strings.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn format_key_path(
     out: *mut c_char,
     out_sz: usize,
@@ -90,7 +88,6 @@ pub unsafe extern "C" fn format_key_path(
 /// # Safety
 ///
 /// As format_key_path(), for both paths.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn key_paths(
     dir: *const c_char,
     pkey: *mut c_char,
@@ -111,7 +108,6 @@ pub unsafe extern "C" fn key_paths(
 /// # Safety
 ///
 /// `path` is a C string.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn path_exists(path: *const c_char) -> bool {
     use std::os::unix::ffi::OsStrExt;
 

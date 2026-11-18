@@ -380,25 +380,6 @@ mod capi {
         })
     }
 
-    /// # Safety
-    ///
-    /// `name` is a C string and `cb` takes the index, the pin and `ctx`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_each_link(
-        name: *const c_char,
-        cb: unsafe extern "C" fn(u32, *const c_char, *mut core::ffi::c_void) -> c_int,
-        ctx: *mut core::ffi::c_void,
-    ) -> c_int {
-        // SAFETY: the caller's C string.
-        super::each_link(
-            unsafe { CStr::from_ptr(name) }.to_bytes(),
-            &mut |index, pin| {
-                // SAFETY: the caller's callback and context, with a C string.
-                unsafe { cb(index, pin.as_ptr(), ctx) }
-            },
-        )
-    }
-
     /// The numbered link `index` in the pin directory `dir`: 0 or
     /// -ENAMETOOLONG.
     ///

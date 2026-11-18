@@ -528,15 +528,6 @@ mod capi {
 
     /// # Safety
     ///
-    /// `c` holds `n` conditions.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn conditions_print(c: *const Condition, n: usize) {
-        // SAFETY: the caller passes the conditions.
-        super::conditions_print(unsafe { ffi::slice(c, n) })
-    }
-
-    /// # Safety
-    ///
     /// `input` points to an input.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn status_verdict(input: *const ConditionsInput) -> *const c_char {

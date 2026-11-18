@@ -142,43 +142,9 @@ pub fn resolve<'a>(
 }
 
 mod capi {
-    use core::ffi::{c_char, c_int};
+    use core::ffi::c_char;
 
-    use super::Suggestion;
     use crate::ffi;
-
-    /// # Safety
-    ///
-    /// `name` is a C string, `commands` holds `n_commands` of them and
-    /// `out` has room for `cap` suggestions.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn suggest(
-        name: *const c_char,
-        commands: *const *const c_char,
-        n_commands: usize,
-        max_dist: c_int,
-        out: *mut Suggestion<*const c_char>,
-        cap: usize,
-    ) -> usize {
-        if cap == 0 {
-            return 0;
-        }
-        // SAFETY: the caller passes a C string.
-        let name = unsafe { ffi::c_str(name) };
-        // SAFETY: the caller passes `n_commands` C strings.
-        let commands = unsafe { ffi::slice(commands, n_commands) };
-        // SAFETY: the caller passes room for `cap` suggestions, and a null
-        // name at distance 0 is a valid one.
-        let out = unsafe { ffi::zeroed_slice_mut(out, cap) };
-        let candidates = commands.iter().map(|&command| {
-            // SAFETY: each of the commands is a C string.
-            let bytes = unsafe { ffi::c_str(command) };
-
-            (command, bytes)
-        });
-
-        super::suggest(name, candidates, max_dist, out)
-    }
 
     /// # Safety
     ///

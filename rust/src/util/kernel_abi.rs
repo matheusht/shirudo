@@ -477,7 +477,6 @@ mod capi {
     /// # Safety
     ///
     /// `detail` is NULL or room for `detail_sz` bytes.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kernel_abi_check(detail: *mut c_char, detail_sz: usize) -> c_int {
         // SAFETY: the caller passes the room.
         unsafe { super::check(detail, detail_sz) }
@@ -516,19 +515,5 @@ mod capi {
                 detail_sz,
             )
         }
-    }
-
-    /// # Safety
-    ///
-    /// `hooks` is a hook list, and `detail` NULL or room for `detail_sz`
-    /// bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn kernel_abi_check_lsm_hooks(
-        hooks: *const super::LsmHooks,
-        detail: *mut c_char,
-        detail_sz: usize,
-    ) -> c_int {
-        // SAFETY: the caller passes a list and the room.
-        unsafe { super::report_hooks(super::check_lsm_hooks(&*hooks), detail, detail_sz) }
     }
 }

@@ -683,7 +683,6 @@ mod capi {
     /// # Safety
     ///
     /// `argv` holds `argc` C strings.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn cmd_genkey(argc: c_int, argv: *const *const c_char) -> c_int {
         // SAFETY: the caller passes the command line.
         unsafe { super::genkey(words(argc, argv)) }

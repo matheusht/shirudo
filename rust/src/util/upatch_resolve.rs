@@ -420,26 +420,6 @@ mod capi {
         })
     }
 
-    /// From the first link, or from an XDP program pin when it has none.
-    ///
-    /// # Safety
-    ///
-    /// `name` is a C string and `out` room for an id.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_first_prog_id(name: *const c_char, out: *mut u32) -> c_int {
-        // SAFETY: the caller's C string and room.
-        unsafe {
-            *out = 0;
-            match super::first_prog_id(CStr::from_ptr(name).to_bytes()) {
-                Ok(id) => {
-                    *out = id;
-                    0
-                }
-                Err(err) => err,
-            }
-        }
-    }
-
     /// upatch_pin_path(): the pin directory of upatch `name` and below it
     /// each component of `parts`, an array a NULL ends or NULL for none,
     /// into the `cap` bytes at `out`: 0, or -ENAMETOOLONG with `out` left

@@ -119,7 +119,6 @@ mod capi {
     ///
     /// `ptr` is NULL or a block of `old_nmemb * size` bytes from this
     /// allocator, which the caller stops using on success.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn xreallocarray(
         old: *mut c_void,
         old_nmemb: usize,
@@ -154,7 +153,6 @@ mod capi {
     /// # Safety
     ///
     /// `s` is NULL or a C string.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn xstrdup(s: *const c_char) -> *mut c_char {
         if s.is_null() {
             return ptr::null_mut();
@@ -169,7 +167,6 @@ mod capi {
     /// # Safety
     ///
     /// `s` is NULL, or a C string or `n` readable bytes.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn xstrndup(s: *const c_char, n: usize) -> *mut c_char {
         if s.is_null() {
             return ptr::null_mut();
@@ -210,7 +207,6 @@ mod capi {
     /// # Safety
     ///
     /// `s` is NULL or such a string, which the caller stops using.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn xstrfree(s: *mut c_char) {
         if s.is_null() {
             return;
@@ -226,7 +222,6 @@ mod capi {
     /// # Safety
     ///
     /// `p` is NULL or a block the C library's malloc gave.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn libc_free(p: *mut c_void) {
         // SAFETY: the caller's block, freed once.
         unsafe { free(p) };

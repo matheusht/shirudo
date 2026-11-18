@@ -456,22 +456,6 @@ mod capi {
         }
     }
 
-    /// # Safety
-    ///
-    /// `v` is a view or NULL, `opts` options or NULL.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_maps_otel_send_decoded(
-        v: *const MapView,
-        signal: c_int,
-        opts: *const OtelOpts,
-    ) -> c_int {
-        // SAFETY: the caller's view.
-        match unsafe { v.as_ref() } {
-            Some(v) => super::send_decoded(v, signal, self::opts(opts)),
-            None => -crate::errno::EINVAL,
-        }
-    }
-
     /// Sends the `body_len` bytes at `body` as the string body of one
     /// OTLP log with the one string attribute `attr_key`: the receiver
     /// decodes the very bytes passed in. A body with a NUL or malformed

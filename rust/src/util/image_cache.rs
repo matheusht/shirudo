@@ -470,29 +470,3 @@ pub(crate) fn fetch_verified(
     // SAFETY: a C string.
     unsafe { fetch(source.as_ptr(), target, &mut verify) }
 }
-
-mod capi {
-    use core::ffi::{c_char, c_int, c_void};
-
-    use crate::util::config_update::ConfigUpdateTarget;
-
-    /// # Safety
-    ///
-    /// `source` is a C string and `target` room for a target.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn image_cache_fetch(
-        source: *const c_char,
-        target: *mut ConfigUpdateTarget,
-        verify: Option<
-            unsafe extern "C" fn(image: *const super::ConfigImageOpen, ctx: *mut c_void) -> c_int,
-        >,
-        ctx: *mut c_void,
-    ) -> c_int {
-        let Some(verify) = verify else {
-            return -super::EINVAL;
-        };
-        // SAFETY: the caller passes a C string and the room, and a
-        // callback safe to call with its context.
-        unsafe { super::fetch(source, &mut *target, &mut |image| verify(image, ctx)) }
-    }
-}
