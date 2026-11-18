@@ -7,7 +7,7 @@
 
 use core::ffi::{CStr, c_char, c_int};
 
-use crate::errno::{EBADMSG, EINPROGRESS, EKEYREJECTED, ENOENT, ESTALE};
+use crate::errno::{EBADMSG, EINPROGRESS, EKEYREJECTED, ENOENT, ESTALE, EXDEV};
 use crate::sys::libc::{printf, snprintf, strerror};
 use crate::text::strscpy;
 
@@ -47,9 +47,25 @@ pub struct ConditionsInput {
     pub(crate) pins_rc: c_int,
     pub(crate) pins_unmeasured: c_int,
     pub(crate) pins_detail: *const c_char,
+    /// Loaded XDP upatches whose archive changed, and their names.
+    pub(crate) xdp_tampered: c_int,
+    pub(crate) xdp_tampered_detail: *const c_char,
+    /// Loaded upatches missing a link or their archive, and their names.
+    pub(crate) links_lost: c_int,
+    pub(crate) links_lost_detail: *const c_char,
+    /// -errno of a link or archive check that could not run.
+    pub(crate) checks_rc: c_int,
+    /// Selected devices an XDP upatch does not run on: upatch, device and
+    /// why.
+    pub(crate) xdp_uncovered: c_int,
+    pub(crate) xdp_uncovered_detail: *const c_char,
+    /// -errno when that could not be checked.
+    pub(crate) xdp_coverage_rc: c_int,
 }
 
-const _: () = assert!(size_of::<ConditionsInput>() == 168);
+const _: () = assert!(size_of::<ConditionsInput>() == 224);
+const _: () = assert!(core::mem::offset_of!(ConditionsInput, xdp_tampered_detail) == 176);
+const _: () = assert!(core::mem::offset_of!(ConditionsInput, xdp_uncovered_detail) == 208);
 const _: () = assert!(core::mem::offset_of!(ConditionsInput, keyring_serial) == 32);
 const _: () = assert!(core::mem::offset_of!(ConditionsInput, nv_index) == 128);
 const _: () = assert!(core::mem::offset_of!(ConditionsInput, pins_detail) == 160);
@@ -65,28 +81,39 @@ pub struct Condition {
 const _: () = assert!(size_of::<Condition>() == 208);
 
 /// `CONDITIONS_MAX`: the conditions there are.
-const CONDITIONS_MAX: usize = 6;
+pub(crate) const CONDITIONS_MAX: usize = 7;
 
 const OK: &CStr = c"OK";
 const WARN: &CStr = c"WARN";
 const ALERT: &CStr = c"ALERT";
 
 /// The status and the detail of a condition, the detail as snprintf()
-/// prints the format and its arguments, or "?" when that does not fit.
+/// prints the format and its arguments. A list of names can outgrow the
+/// detail, and its start still says the most, so a detail too long is cut
+/// and ends in "..."; one that does not print is "?".
 macro_rules! set_detail {
     ($c:expr, $status:expr, $fmt:expr $(, $arg:expr)* $(,)?) => {{
         let c: &mut Condition = $c;
+        let mut full = [0u8; 1024];
 
         c.status = $status.as_ptr();
-        // SAFETY: the room of the detail, and a format whose
-        // conversions take the arguments given, in their C types.
-        let n = unsafe { snprintf(c.detail.as_mut_ptr().cast(), c.detail.len(), $fmt.as_ptr() $(, $arg)*) };
+        // SAFETY: the room of the buffer, and a format whose conversions
+        // take the arguments given, in their C types.
+        let n = unsafe { snprintf(full.as_mut_ptr().cast(), full.len(), $fmt.as_ptr() $(, $arg)*) };
 
-        if n < 0 || n as usize >= c.detail.len() {
-            c.detail[0] = 0;
-            let _ = strscpy(&mut c.detail, b"?");
-        }
+        cut_detail(c, (n >= 0 && (n as usize) < full.len()).then(|| crate::text::cstr(&full)));
     }};
+}
+
+fn cut_detail(c: &mut Condition, full: Option<&[u8]>) {
+    let Some(full) = full else {
+        let _ = strscpy(&mut c.detail, b"?");
+        return;
+    };
+    if strscpy(&mut c.detail, full).is_err() {
+        let end = c.detail.len();
+        c.detail[end - 4..].copy_from_slice(b"...\0");
+    }
 }
 
 /// What a nullable C string field holds, or `?` for NULL.
@@ -211,8 +238,8 @@ fn set_fixed(c: &mut Condition, status: &CStr, detail: &CStr) {
 }
 
 /// The conditions, as many as `out` holds, in their order: LsmAttached,
-/// KeyringSealed, ChainIntact, UpatchesMeasured, TpmMeasured and
-/// ConfigActive; returns how many it wrote.
+/// KeyringSealed, ChainIntact, UpatchesMeasured, TpmMeasured,
+/// ConfigActive and XdpCovered; returns how many it wrote.
 pub(crate) fn conditions(i: &ConditionsInput, out: &mut [Condition]) -> usize {
     let n = out.len().min(CONDITIONS_MAX);
     let mut it = out[..n].iter_mut();
@@ -248,7 +275,23 @@ pub(crate) fn conditions(i: &ConditionsInput, out: &mut [Condition]) -> usize {
     }
     if let Some(c) = it.next() {
         c.kind = c"UpatchesMeasured".as_ptr();
-        if i.pins_rc == -ENOENT {
+        if i.xdp_tampered != 0 {
+            set_detail!(
+                c,
+                ALERT,
+                c"%d XDP archives differ from the loaded payload: %s",
+                i.xdp_tampered,
+                or_unknown(i.xdp_tampered_detail),
+            );
+        } else if i.links_lost != 0 {
+            set_detail!(
+                c,
+                ALERT,
+                c"%d upatches are missing a link or their archive: %s",
+                i.links_lost,
+                or_unknown(i.links_lost_detail),
+            );
+        } else if i.pins_rc == -ENOENT {
             set_detail!(c, WARN, c"no record of this boot to check the pins against");
         } else if i.pins_rc == -EBADMSG {
             set_detail!(
@@ -269,6 +312,11 @@ pub(crate) fn conditions(i: &ConditionsInput, out: &mut [Condition]) -> usize {
                 i.pins_unmeasured,
                 or_unknown(i.pins_detail),
             );
+        } else if i.checks_rc != 0 {
+            // SAFETY: a call that takes no pointer.
+            let reason = unsafe { strerror(-i.checks_rc) };
+
+            set_detail!(c, WARN, c"links or archives not checked: %s", reason);
         } else {
             set_detail!(
                 c,
@@ -311,6 +359,31 @@ pub(crate) fn conditions(i: &ConditionsInput, out: &mut [Condition]) -> usize {
             set_detail!(c, OK, c"config %.12s.. is active", root);
         }
     }
+    if let Some(c) = it.next() {
+        c.kind = c"XdpCovered".as_ptr();
+        if i.xdp_uncovered != 0 {
+            set_detail!(
+                c,
+                WARN,
+                c"%d selected devices run without their XDP upatch: %s",
+                i.xdp_uncovered,
+                or_unknown(i.xdp_uncovered_detail),
+            );
+        } else if i.xdp_coverage_rc == -EXDEV {
+            set_fixed(
+                c,
+                WARN,
+                c"XDP coverage not checked: not in the initial network namespace",
+            );
+        } else if i.xdp_coverage_rc != 0 {
+            // SAFETY: a call that takes no pointer.
+            let reason = unsafe { strerror(-i.xdp_coverage_rc) };
+
+            set_detail!(c, WARN, c"XDP coverage not checked: %s", reason);
+        } else {
+            set_fixed(c, OK, c"every device an XDP upatch selects runs it");
+        }
+    }
     n
 }
 
@@ -344,6 +417,8 @@ pub(crate) fn status_verdict(i: &ConditionsInput) -> &'static CStr {
     } else if (i.cm_seen != 0 && i.chain_matches == 0)
         || i.pins_unmeasured != 0
         || i.pins_rc == -EBADMSG
+        || i.xdp_tampered != 0
+        || i.links_lost != 0
         || keyring_tampered(i)
         || config_untrusted(i)
     {
@@ -354,7 +429,7 @@ pub(crate) fn status_verdict(i: &ConditionsInput) -> &'static CStr {
         c"init-pending"
     } else if i.config_seen != 0 && i.config_state == -EINPROGRESS {
         c"reboot-pending"
-    } else if i.chain_seen == 0 {
+    } else if i.chain_seen == 0 || i.xdp_uncovered != 0 {
         c"degraded"
     } else {
         c"ok"
@@ -377,6 +452,10 @@ pub(crate) unsafe fn status_reason(i: &ConditionsInput, buf: &mut [u8]) {
         b"unparseable" => Some(b"status JSON unparseable"),
         b"tampered" => Some(if i.cm_seen != 0 && i.chain_matches == 0 {
             b"live register differs from the eventlog replay"
+        } else if i.xdp_tampered != 0 {
+            b"the archive of a loaded XDP upatch differs from what was loaded"
+        } else if i.links_lost != 0 {
+            b"a loaded upatch is missing a link or its archive"
         } else if i.pins_unmeasured != 0 {
             b"a upatch is pinned or archived without a record of this boot"
         } else if i.pins_rc == -EBADMSG {
@@ -399,7 +478,9 @@ pub(crate) unsafe fn status_reason(i: &ConditionsInput, buf: &mut [u8]) {
         b"lsm-off" => Some(b"LSM not attached, enforcement off"),
         b"init-pending" => Some(b".bpf keyring absent before init"),
         b"reboot-pending" => Some(b"a config activation is pending until the next reboot"),
-        b"degraded" => Some(if i.tpm_reachable != 0 {
+        b"degraded" => Some(if i.chain_seen != 0 {
+            b"a device an XDP upatch selects does not run it"
+        } else if i.tpm_reachable != 0 {
             b"no register bound this boot"
         } else {
             b"no TPM answered"

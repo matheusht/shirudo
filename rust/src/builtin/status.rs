@@ -26,7 +26,7 @@ use crate::text::{cstr, name_has_suffix};
 use crate::util::bpf_sys::bpf_obj_get;
 use crate::util::bpm_tree_state::tree_emit_status;
 use crate::util::chain::{self, ChainStatus};
-use crate::util::conditions::{self, Condition, ConditionsInput};
+use crate::util::conditions::{self, CONDITIONS_MAX, Condition, ConditionsInput};
 use crate::util::config::{self, Config};
 use crate::util::crypto_openssl::{
     Cert, cert_free, cert_key_algorithm, cert_not_before, cert_read_der, cert_subject,
@@ -76,7 +76,6 @@ const TCTI_MAX: usize = 256;
 const IDENTITY_KEYS_MAX: usize = 16;
 const UNMEASURED_NAMES: usize = 256;
 const SUBJECT_MAX: usize = 256;
-const CONDITIONS_MAX: usize = 6;
 
 fn print(text: &[u8]) {
     // SAFETY: the bytes, to the C library's stdout.
@@ -1286,6 +1285,15 @@ impl Report {
             pins_rc: self.unmeasured.min(0),
             pins_unmeasured: self.unmeasured.max(0),
             pins_detail: self.unmeasured_names.as_ptr().cast(),
+            // The status port brings the XDP and link checks.
+            xdp_tampered: 0,
+            xdp_tampered_detail: ptr::null(),
+            links_lost: 0,
+            links_lost_detail: ptr::null(),
+            checks_rc: 0,
+            xdp_uncovered: 0,
+            xdp_uncovered_detail: ptr::null(),
+            xdp_coverage_rc: 0,
         }
     }
 
