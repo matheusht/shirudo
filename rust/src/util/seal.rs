@@ -782,25 +782,10 @@ pub(crate) fn write_file(path: &[u8], data: &[u8], mode: u32) -> Result<(), c_in
     placed
 }
 
-/// The C-shaped entry points that util/decode.rs and builtin/attest.rs
-/// still call, over the functions above.
+/// Entry points still used by the Rust decoder and C Java agent.
 mod capi {
-    use core::ffi::{CStr, c_char, c_int, c_void};
+    use core::ffi::{CStr, c_char, c_int};
     use std::os::fd::IntoRawFd;
-
-    use super::Output;
-    use crate::errno::EBADF;
-
-    /// An output being written, which seal_output_create() opens and
-    /// seal_output_commit() writes and closes.
-    pub(crate) struct SealOutput(Option<Output>);
-
-    impl SealOutput {
-        /// One not open, for seal_output_create() to fill.
-        pub(crate) const fn closed() -> Self {
-            SealOutput(None)
-        }
-    }
 
     /// [`super::open_read`]: the fd, the caller's to close, or -errno.
     ///
@@ -838,52 +823,6 @@ mod capi {
             .err()
             .unwrap_or(0)
     }
-
-    /// [`Output::create`] into `out`: 0 or -errno.
-    ///
-    /// # Safety
-    ///
-    /// `out` points at a SealOutput no reference reaches during the call,
-    /// and `path` is a C string.
-    pub(crate) unsafe fn seal_output_create(
-        out: *mut SealOutput,
-        path: *const c_char,
-        mode: u32,
-    ) -> c_int {
-        // SAFETY: the caller's C string.
-        let path = unsafe { CStr::from_ptr(path) };
-
-        match Output::create(path.to_bytes(), mode) {
-            Ok(output) => {
-                // SAFETY: the caller's SealOutput, which nothing else reaches.
-                unsafe { (*out).0 = Some(output) };
-                0
-            }
-            Err(err) => err,
-        }
-    }
-
-    /// [`Output::commit`] of the output in `out`, which it takes: 0 or
-    /// -errno, -EBADF for one not open.
-    ///
-    /// # Safety
-    ///
-    /// `out` points at a SealOutput no reference reaches during the call,
-    /// and `buf` holds `len` bytes.
-    pub(crate) unsafe fn seal_output_commit(
-        out: *mut SealOutput,
-        buf: *const c_void,
-        len: usize,
-    ) -> c_int {
-        // SAFETY: the caller's SealOutput, which nothing else reaches.
-        let Some(output) = (unsafe { (*out).0.take() }) else {
-            return -EBADF;
-        };
-        // SAFETY: the caller's len bytes at buf.
-        let doc = unsafe { crate::ffi::slice(buf.cast::<u8>(), len) };
-
-        output.commit(doc).err().unwrap_or(0)
-    }
 }
 
-pub(crate) use capi::{SealOutput, seal_open_read, seal_output_commit, seal_output_create};
+pub(crate) use capi::seal_open_read;

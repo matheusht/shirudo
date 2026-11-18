@@ -36,7 +36,7 @@ use crate::util::measured::{measured_set_add, measured_upatch_of};
 use crate::util::options::{
     EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OPT_REPEAT, OptParser, OptSpec,
 };
-use crate::util::seal::{SealOutput, seal_output_commit, seal_output_create};
+use crate::util::seal;
 use crate::util::tpm::REGISTER_ATTRS;
 use crate::util::tpm_wire::{NAME_LEN, NV_RSA_BYTES, RegisterPolicy, nv_name, register_policy};
 use crate::util::upatch::{Upatch, upatch_close, upatch_open};
@@ -1077,18 +1077,14 @@ fn challenge(args: &[&CStr]) -> c_int {
 /// The challenge made into the file at `out_path`, and the credential it
 /// carries printed.
 fn challenge_write(out_path: &[u8], made: &MadeChallenge) -> c_int {
-    let path = message(&[out_path]);
-    let mut out = SealOutput::closed();
-    // SAFETY: the output to create and a C string.
-    let e = unsafe { seal_output_create(&mut out, path.as_ptr(), 0o600) };
-    if e != 0 {
-        error(&[b"attest challenge: open ", out_path, b": ", strerr(-e)]);
-        return 1;
-    }
-    let doc = &made.document;
-    // SAFETY: the output created above and the document's bytes.
-    let e = unsafe { seal_output_commit(&mut out, doc.as_ptr().cast(), doc.len()) };
-    if e != 0 {
+    let out = match seal::Output::create(out_path, 0o600) {
+        Ok(out) => out,
+        Err(e) => {
+            error(&[b"attest challenge: open ", out_path, b": ", strerr(-e)]);
+            return 1;
+        }
+    };
+    if let Err(e) = out.commit(&made.document) {
         error(&[b"attest challenge: write ", out_path, b": ", strerr(-e)]);
         return 1;
     }
@@ -1175,23 +1171,16 @@ fn evidence(args: &[&CStr]) -> c_int {
         }
     };
     let ret = match out_path {
-        Some(path) => {
-            let c = message(&[path]);
-            let mut out = SealOutput::closed();
-            // SAFETY: the output to create and a C string.
-            let e = unsafe { seal_output_create(&mut out, c.as_ptr(), 0o600) };
-            if e != 0 {
+        Some(path) => match seal::Output::create(path, 0o600) {
+            Ok(out) => out.commit(&body).err().map_or(0, |e| {
+                error(&[b"attest: write ", path, b": ", strerr(-e)]);
+                e
+            }),
+            Err(e) => {
                 error(&[b"attest: open ", path, b": ", strerr(-e)]);
                 e
-            } else {
-                // SAFETY: the output created above and the bytes.
-                let e = unsafe { seal_output_commit(&mut out, body.as_ptr().cast(), body.len()) };
-                if e != 0 {
-                    error(&[b"attest: write ", path, b": ", strerr(-e)]);
-                }
-                e
             }
-        }
+        },
         None => {
             // SAFETY: the bytes, to the C library's stdout.
             let n = unsafe { fwrite(body.as_ptr().cast(), 1, body.len(), stdout) };
