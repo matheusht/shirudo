@@ -72,6 +72,9 @@ const EK_CERT_B64_MAX: usize = 4 * EK_CERT_MAX.div_ceil(3) + 1;
 const AK_ATTRS_REQUIRED: u32 = 0x0005_0032;
 /// `ATTEST_NONCE_MAX` of util/attest.h.
 pub(crate) const NONCE_MAX: usize = 64;
+/// `ATTEST_PCR_DEFAULT` of util/attest.h: the PCRs a quote covers when
+/// the operator names none.
+pub(crate) const PCR_DEFAULT: u32 = 0x0000_FAFF;
 /// `ATTEST_CHALLENGE_MAX` of util/attest.h.
 const CHALLENGE_MAX: usize = 16 * 1024;
 /// The label of a credential's seed, which the TPM takes with its NUL.

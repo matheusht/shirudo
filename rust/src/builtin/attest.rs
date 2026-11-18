@@ -14,18 +14,20 @@ use crate::errno::{EEXIST, EINVAL, EIO, EKEYREJECTED, ENODATA, ENODEV, ENXIO};
 use crate::ffi;
 use crate::heap::xfree;
 use crate::sys::libc::{fwrite, stdout, strerror};
+use crate::sys::tss2::NV_WRITTEN;
 use crate::text::{cstr, parse_u64};
 use crate::util::attest::{
-    AttestChallenge, AttestChallengePolicy, AttestExpect, attest_challenge_make,
-    attest_challenge_read, attest_evidence_config, attest_parse_name_digest,
+    AttestChallenge, AttestChallengePolicy, AttestExpect, NONCE_MAX, PCR_DEFAULT,
+    attest_challenge_make, attest_challenge_read, attest_evidence_config, attest_parse_name_digest,
     attest_parse_pcr_value, attest_parse_pcrs, attest_verify,
 };
 use crate::util::chain::{
-    MeasuredUpatch, chain_anchor, chain_fold, chain_init_event, chain_key_event, chain_tree_event,
-    chain_upatch_event,
+    ANCHOR_MAX, MeasuredUpatch, PCR, PCR_MASK as CHAIN_PCR_MASK, PHASE_PCR, chain_anchor,
+    chain_fold, chain_init_event, chain_key_event, chain_tree_event, chain_upatch_event,
 };
 use crate::util::config_measure::config_measure_pcr_valid;
 use crate::util::crypto_openssl::sha256_into;
+use crate::util::eventlog::NV_INDEX;
 use crate::util::help::{
     Help, HelpItem, HelpSection, is_help, is_list_cmds, print_help, print_subcmd_list,
     resolve_subcommand,
@@ -39,25 +41,19 @@ use crate::util::options::{
     EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OPT_REPEAT, OptParser, OptSpec,
 };
 use crate::util::seal::{SealOutput, seal_output_commit, seal_output_create};
-use crate::util::tpm_wire::{tpm_nv_name, tpm_register_policy};
+use crate::util::tpm::REGISTER_ATTRS;
+use crate::util::tpm_wire::{
+    CREDENTIAL_LEN, NAME_LEN, NV_RSA_BYTES, tpm_nv_name, tpm_register_policy,
+};
 use crate::util::upatch::{self, Upatch, upatch_close, upatch_open};
 
-const NONCE_MAX: usize = 64;
 const MEMBERS_MAX: usize = 256;
 const REPORT_MAX: usize = 8192;
-const PCR_DEFAULT: u32 = 0x0000_FAFF;
 const EVENTS_MAX: usize = 256;
 const KEYS_DER_MAX: usize = 1024 * 1024;
-const NAME_LEN: usize = 34;
-const NV_RSA_BYTES: usize = 384;
-const CREDENTIAL_LEN: usize = 32;
-const NV_INDEX: u32 = 0x0181_8E00;
-const REGISTER_ATTRS: u32 = 0x0E06_0048;
-const NV_WRITTEN: u32 = 0x2000_0000;
-const CHAIN_PCR: u64 = 9;
-const CHAIN_PHASE_PCR: u64 = 11;
-const CHAIN_PCR_MASK: u32 = (1 << 9) | (1 << 11);
-const ANCHOR_MAX: usize = 128;
+/// The register's PCRs, as the options and messages take them.
+const CHAIN_PCR: u64 = PCR as u64;
+const CHAIN_PHASE_PCR: u64 = PHASE_PCR as u64;
 
 static SUBCMDS: [HelpItem; 3] = [
     HelpItem::new(
