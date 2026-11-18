@@ -20,14 +20,14 @@ use std::ffi::CString;
 
 use crate::errno::{EIO, ENAMETOOLONG, EPERM};
 use crate::ffi;
-use crate::sys::libc::{access, close, fwrite, mkstemps, stderr, stdout, strerror, unlink};
+use crate::sys::libc::{access, close, fwrite, mkstemps, stderr, stdout, strerror};
 use crate::text::{cstr, name_has_suffix};
 use crate::util::harden::{harden_self, harden_stdio};
 use crate::util::help::{Help, HelpSection};
-use crate::util::hex::hex_decode;
+use crate::util::hex::decode;
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::paths::{key_file, key_files, keys_dir};
-use crate::util::upatch::{Upatch, upatch_close, upatch_open};
+use crate::util::upatch::Opened;
 
 const SIGNING_KEY_PATH: &CStr = c"/var/lib/shirudo/keys/signing_key.pem";
 const CERT_PATH: &CStr = c"/var/lib/shirudo/keys/cert.der";
@@ -63,10 +63,19 @@ fn last_err() -> c_int {
 }
 
 fn print(to_stdout: bool, text: &[u8]) {
-    // SAFETY: the bytes, to one of the C library's streams.
-    unsafe {
-        let f = if to_stdout { stdout } else { stderr };
-        fwrite(text.as_ptr().cast(), 1, text.len(), f);
+    // Keep writes ordered with the help and option parser's stdio.
+    // SAFETY: libc provides both streams throughout the command.
+    let stream = unsafe { if to_stdout { stdout } else { stderr } };
+    // SAFETY: the bytes are readable for the duration of the write.
+    unsafe { fwrite(text.as_ptr().cast(), 1, text.len(), stream) };
+}
+
+fn check_access(path: &CStr, mode: c_int) -> Result<(), c_int> {
+    // SAFETY: path is NUL terminated and access does not retain it.
+    if unsafe { access(path.as_ptr(), mode) } == 0 {
+        Ok(())
+    } else {
+        Err(last_err())
     }
 }
 
@@ -213,8 +222,7 @@ struct TempObject(CString);
 
 impl Drop for TempObject {
     fn drop(&mut self) {
-        // SAFETY: a C string.
-        unsafe { unlink(self.0.as_ptr()) };
+        let _ = std::fs::remove_file(path(self.0.to_bytes()));
     }
 }
 
@@ -225,7 +233,7 @@ fn compile_to_temp(
 ) -> Result<TempObject, c_int> {
     let mut tmpl = *b"/tmp/shirudo-build-XXXXXX.bpf.o\0";
     // SAFETY: the template, which mkstemps() fills in.
-    let fd = unsafe { mkstemps(tmpl.as_mut_ptr().cast(), b".bpf.o".len() as c_int) };
+    let fd = unsafe { mkstemps(tmpl.as_mut_ptr().cast(), 6) };
 
     if fd < 0 {
         return Err(last_err());
@@ -233,10 +241,8 @@ fn compile_to_temp(
     // SAFETY: the descriptor opened above.
     unsafe { close(fd) };
     let obj = TempObject(CString::new(cstr(&tmpl).to_vec()).unwrap_or_default());
-    match compile::compile(source, &obj.0, vmlinux_h, extra, None) {
-        0 => Ok(obj),
-        err => Err(err),
-    }
+    compile::compile(source, &obj.0, vmlinux_h, extra, None)?;
+    Ok(obj)
 }
 
 /// Whether the signing key opens as one and the certificate reads: 0,
@@ -248,9 +254,7 @@ fn check_keys(pkey: &CStr, cert: &CStr) -> c_int {
         }
         return 1;
     }
-    // SAFETY: a C string.
-    if unsafe { access(cert.as_ptr(), R_OK) } != 0 {
-        let err = last_err();
+    if let Err(err) = check_access(cert, R_OK) {
         error(&[b"cert not readable: ", cert.to_bytes(), b": ", strerr(-err)].concat());
         error(b"run `shirudo genkey` on the operator (or pass --cert).");
         return 1;
@@ -331,6 +335,30 @@ impl KeyFiles {
     }
 }
 
+/// Owns a certificate returned by the shared crypto reader.
+struct Certificate(crate::util::crypto_openssl::Cert);
+
+impl Certificate {
+    fn open(path: &CStr) -> Result<Self, c_int> {
+        let mut cert = Self(crate::util::crypto_openssl::Cert::new());
+        // SAFETY: path is NUL terminated and the certificate is empty.
+        let ret =
+            unsafe { crate::util::crypto_openssl::cert_read_file(path.as_ptr(), &mut cert.0) };
+        if ret == 0 { Ok(cert) } else { Err(ret) }
+    }
+
+    fn as_cert(&self) -> &crate::util::crypto_openssl::Cert {
+        &self.0
+    }
+}
+
+impl Drop for Certificate {
+    fn drop(&mut self) {
+        // SAFETY: the reader left either an empty certificate or one we own.
+        unsafe { crate::util::crypto_openssl::cert_free(&mut self.0) };
+    }
+}
+
 fn hex(bytes: &[u8]) -> Vec<u8> {
     const HEX: &[u8; 16] = b"0123456789abcdef";
 
@@ -367,8 +395,7 @@ fn unload_digest(name: &CStr, given: Option<&CStr>) -> Result<[u8; 32], Option<c
     let mut digest = [0u8; 32];
 
     if let Some(hex) = given {
-        // SAFETY: a C string and room for 32 bytes.
-        if unsafe { hex_decode(hex.as_ptr(), digest.as_mut_ptr(), 32) } != 0 {
+        if decode(hex.to_bytes(), &mut digest).is_err() {
             return Err(None);
         }
         return Ok(digest);
@@ -379,10 +406,7 @@ fn unload_digest(name: &CStr, given: Option<&CStr>) -> Result<[u8; 32], Option<c
         return Err(Some(1));
     }
     let path = CString::new(archive).unwrap_or_default();
-    // SAFETY: an all-zero container is a closed one.
-    let mut u: Upatch = unsafe { core::mem::zeroed() };
-    // SAFETY: a C string and the container to fill.
-    if unsafe { upatch_open(path.as_ptr(), &mut u) } != 0 {
+    let Ok(u) = Opened::open(&path) else {
         error(
             &[
                 b"--payload-sha256 omitted and no archive at ",
@@ -392,10 +416,9 @@ fn unload_digest(name: &CStr, given: Option<&CStr>) -> Result<[u8; 32], Option<c
             .concat(),
         );
         return Err(Some(2));
-    }
+    };
     digest = u.hdr.payload_sha256;
-    // SAFETY: the container opened above.
-    unsafe { upatch_close(&mut u) };
+    drop(u);
     info(&[b"--payload-sha256 derived from archive ", path.to_bytes()].concat());
     Ok(digest)
 }
@@ -500,11 +523,11 @@ fn load(o: &Opts, input: &CStr, pkey: &CStr, cert: &CStr) -> c_int {
                 }
             };
             match compile::compile(input, &artifact, vmlinux_h, o.extra_cflags, None) {
-                0 => {
+                Ok(()) => {
                     emitted = Some(&*artifact);
                     Ok(&*artifact)
                 }
-                err => Err(err),
+                Err(err) => Err(err),
             }
         } else {
             match compile_to_temp(input, vmlinux_h, o.extra_cflags) {

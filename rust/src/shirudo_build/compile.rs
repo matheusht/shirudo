@@ -14,7 +14,6 @@ use std::process::Command;
 use super::{error, strerr};
 use crate::errno::{E2BIG, EINTR, EIO, ENAMETOOLONG, ENOENT};
 use crate::ffi::c_splice;
-use crate::sys::libc::{access, fwrite, stderr};
 
 /// The clang the build configured, as SHIRUDO_CLANG_PATH passes it.
 const CLANG_PATH: &str = match option_env!("SHIRUDO_CLANG_PATH") {
@@ -39,9 +38,8 @@ const PATH_MAX: usize = 4096;
 const R_OK: c_int = 4;
 const X_OK: c_int = 1;
 
-fn readable(path: &CStr) -> bool {
-    // SAFETY: a C string.
-    unsafe { access(path.as_ptr(), R_OK) == 0 }
+pub(super) fn readable(path: &CStr) -> bool {
+    super::check_access(path, R_OK).is_ok()
 }
 
 fn exists(path: &str) -> bool {
@@ -79,17 +77,15 @@ fn shirudo_bpf_headers() -> Option<Vec<u8>> {
 
 /// Compiles `source` into `output` against `vmlinux_h`, with
 /// `extra_cflags` split on blanks after the rest, and shirudo's BPF
-/// headers from `incdir` when named: 0 or -errno.
+/// headers from `incdir` when named.
 pub(super) fn compile(
     source: &CStr,
     output: &CStr,
     vmlinux_h: &CStr,
     extra_cflags: Option<&CStr>,
     incdir: Option<&CStr>,
-) -> c_int {
-    // SAFETY: a C string.
-    if unsafe { access(CLANG.as_ptr(), X_OK) } != 0 {
-        let err = super::last_err();
+) -> Result<(), c_int> {
+    if let Err(err) = super::check_access(CLANG, X_OK) {
         error(
             &[
                 b"clang not at hardcoded path ",
@@ -99,19 +95,19 @@ pub(super) fn compile(
             ]
             .concat(),
         );
-        return -ENOENT;
+        return Err(-ENOENT);
     }
     let vh = vmlinux_h.to_bytes();
     if vh.len() >= 1024 {
         error(&[b"vmlinux.h path too long: ", vh].concat());
-        return -ENAMETOOLONG;
+        return Err(-ENAMETOOLONG);
     }
     let dir: &[u8] = match vh.iter().rposition(|&c| c == b'/') {
         Some(slash) => &vh[..slash],
         None => b".",
     };
     let shirudo_inc = match incdir {
-        Some(d) if d.to_bytes().len() + 2 >= PATH_MAX + 8 => return -ENAMETOOLONG,
+        Some(d) if d.to_bytes().len() + 2 >= PATH_MAX + 8 => return Err(-ENAMETOOLONG),
         Some(d) => Some([b"-I", d.to_bytes()].concat()),
         None => shirudo_bpf_headers(),
     };
@@ -158,7 +154,7 @@ pub(super) fn compile(
     {
         // clang itself is the first word.
         if args.len() + 1 >= MAX_ARGS {
-            return -E2BIG;
+            return Err(-E2BIG);
         }
         args.push(word.to_vec());
     }
@@ -177,22 +173,21 @@ pub(super) fn compile(
                 b"\n",
             ]
             .concat();
-            // SAFETY: the bytes, to the C library's stderr.
-            unsafe { fwrite(msg.as_ptr().cast(), 1, msg.len(), stderr) };
+            super::print(false, &msg);
             error(b"clang exited with status 127");
-            -EIO
+            Err(-EIO)
         }
         Ok(s) => match (s.code(), s.signal()) {
-            (Some(0), _) => 0,
+            (Some(0), _) => Ok(()),
             (Some(es), _) => {
                 error(format!("clang exited with status {es}").as_bytes());
-                -EIO
+                Err(-EIO)
             }
             (None, Some(sig)) => {
                 error(format!("clang killed by signal {sig}").as_bytes());
-                -EINTR
+                Err(-EINTR)
             }
-            (None, None) => -EIO,
+            (None, None) => Err(-EIO),
         },
     }
 }

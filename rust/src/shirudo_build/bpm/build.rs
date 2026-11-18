@@ -466,8 +466,9 @@ fn build_upatches(
                 return -ENAMETOOLONG;
             }
             let v = vmlinux_h.as_deref().unwrap_or_default();
-            let ret = compile::compile(&cstring(&source), &cstring(&object), v, None, incdir);
-            if ret != 0 {
+            if let Err(ret) =
+                compile::compile(&cstring(&source), &cstring(&object), v, None, incdir)
+            {
                 error(
                     &[
                         b"bpm build: compile ",
@@ -799,8 +800,7 @@ fn build(
         .ok()
         .filter(|d| {
             let h = cstring(&[&d[..], b"/serializer.h"].concat());
-            // SAFETY: a C string.
-            d.len() + 14 < PATH_MAX && unsafe { crate::sys::libc::access(h.as_ptr(), 4) } == 0
+            d.len() + 14 < PATH_MAX && compile::readable(&h)
         })
         .map(|d| cstring(&d));
     let build_file = match file {

@@ -9,21 +9,17 @@
 
 use core::ffi::{CStr, c_int};
 use std::ffi::OsStr;
-use std::io::{ErrorKind, Read, Write};
-use std::mem::ManuallyDrop;
-use std::os::fd::FromRawFd;
+use std::io::{Read, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::Command;
 
 use super::{KeyFiles, error, hex, print, strerr};
-use crate::errno::{EINVAL, EIO, EKEYREJECTED, ENOENT};
-use crate::sys::libc::{F_SETFD, O_NOFOLLOW, O_NONBLOCK, access, fcntl};
+use crate::errno::{EINTR, EINVAL, EIO, EKEYREJECTED, ENOENT};
+use crate::sys::libc::{F_SETFD, O_NOFOLLOW, O_NONBLOCK, fcntl, pread};
 use crate::util::config_image::{self, ConfigImageOpen};
-use crate::util::crypto_openssl::{
-    Cert, cert_free, cert_key_algorithm, cert_read_file, cms_signed_by, verify_detached,
-};
+use crate::util::crypto_openssl::{cert_key_algorithm, cms_signed_by, verify_detached};
 use crate::util::help::{Help, HelpSection, is_help, print_help};
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 
@@ -56,8 +52,7 @@ fn build(args: &[&CStr]) -> c_int {
         return 1;
     }
     let installed_c = std::ffi::CString::new(installed.clone()).unwrap_or_default();
-    // SAFETY: a C string.
-    let script = if unsafe { access(installed_c.as_ptr(), X_OK) } == 0 {
+    let script = if super::check_access(&installed_c, X_OK).is_ok() {
         installed
     } else if fits(&in_tree) {
         in_tree
@@ -81,9 +76,10 @@ fn build(args: &[&CStr]) -> c_int {
     1
 }
 
-/// Runs `veritysetup verify` on the data and hash trees open at
-/// `data_fd` and `hash_fd`, which it inherits, against `root`.
-fn verify_verity(data_fd: c_int, hash_fd: c_int, root: &[u8]) -> c_int {
+/// Runs veritysetup on the very data and hash descriptors the image
+/// reader checked. Only the child clears close-on-exec.
+fn verify_verity(img: &Opened, root: &[u8]) -> Result<(), c_int> {
+    let (data_fd, hash_fd) = (img.0.data_fd, img.0.hash_fd);
     let (data, hash) = (
         format!("/proc/self/fd/{data_fd}"),
         format!("/proc/self/fd/{hash_fd}"),
@@ -92,16 +88,17 @@ fn verify_verity(data_fd: c_int, hash_fd: c_int, root: &[u8]) -> c_int {
 
     cmd.args(["verify", "--hash-offset=0", &data, &hash])
         .arg(OsStr::from_bytes(root));
-    // SAFETY: between fork and exec only fcntl(), which is
-    // async-signal-safe, on two descriptors this process owns.
-    unsafe {
-        cmd.pre_exec(move || {
-            if fcntl(data_fd, F_SETFD, 0) != 0 || fcntl(hash_fd, F_SETFD, 0) != 0 {
+    let inherit_image = move || {
+        for fd in [data_fd, hash_fd] {
+            // SAFETY: fcntl is async-signal-safe and the image keeps fd open.
+            if unsafe { fcntl(fd, F_SETFD, 0) } != 0 {
                 return Err(std::io::Error::from_raw_os_error(EIO));
             }
-            Ok(())
-        });
-    }
+        }
+        Ok(())
+    };
+    // SAFETY: the child callback only calls async-signal-safe operations.
+    unsafe { cmd.pre_exec(inherit_image) };
     match cmd.status() {
         Err(e) => {
             error(
@@ -112,51 +109,86 @@ fn verify_verity(data_fd: c_int, hash_fd: c_int, root: &[u8]) -> c_int {
                 ]
                 .concat(),
             );
-            -ENOENT
+            Err(-ENOENT)
         }
         Ok(s) => match (s.code(), s.signal()) {
-            (Some(0), _) => 0,
-            (Some(127), _) => -ENOENT,
-            (Some(_), _) | (None, _) => -EIO,
+            (Some(0), _) => Ok(()),
+            (Some(127), _) => Err(-ENOENT),
+            _ => Err(-EIO),
         },
     }
 }
 
-/// Whether `signature` signs `root`, the 64 hex digits of a root hash,
-/// by the ML-DSA-87 key of the certificate at `cert_path`.
-fn verify_root_signature(root: &[u8], signature: &[u8], cert_path: &CStr) -> c_int {
-    let mut cert = Cert::new();
+fn verify_root_signature(
+    root: &[u8; 64],
+    signature: &[u8],
+    cert: &super::Certificate,
+) -> Result<(), c_int> {
+    let cert = cert.as_cert();
     let mut alg = [0u8; 32];
-
-    // SAFETY: a C string, the cert to fill and room for its algorithm;
-    // the signature and root with their lengths; the cert freed last.
-    unsafe {
-        let mut ret = cert_read_file(cert_path.as_ptr(), &mut cert);
-        if ret == 0 {
-            ret = cert_key_algorithm(&cert, alg.as_mut_ptr().cast(), alg.len());
-        }
-        if ret == 0 && crate::text::cstr(&alg) != b"ML-DSA-87" {
-            ret = -EKEYREJECTED;
-        }
-        if ret == 0 && cms_signed_by(signature.as_ptr(), signature.len(), &cert) != 1 {
-            ret = -EKEYREJECTED;
-        }
-        if ret == 0 {
-            ret = verify_detached(
-                root.as_ptr(),
-                64,
-                signature.as_ptr(),
-                signature.len(),
-                &cert,
-            );
-        }
-        cert_free(&mut cert);
-        ret
+    // SAFETY: cert is live and alg has the stated writable capacity.
+    let ret = unsafe { cert_key_algorithm(cert, alg.as_mut_ptr().cast(), alg.len()) };
+    if ret != 0 {
+        return Err(ret);
     }
+    if crate::text::cstr(&alg) != b"ML-DSA-87" {
+        return Err(-EKEYREJECTED);
+    }
+    // SAFETY: the signature slice and certificate are live for the call.
+    if unsafe { cms_signed_by(signature.as_ptr(), signature.len(), cert) } != 1 {
+        return Err(-EKEYREJECTED);
+    }
+    // SAFETY: both input slices have the stated lengths and cert is live.
+    let ret = unsafe {
+        verify_detached(
+            root.as_ptr(),
+            root.len(),
+            signature.as_ptr(),
+            signature.len(),
+            cert,
+        )
+    };
+    if ret == 0 { Ok(()) } else { Err(ret) }
 }
 
 /// The open parts of an image, closed when it goes.
 struct Opened(ConfigImageOpen);
+
+impl Opened {
+    fn signature(&self) -> Result<Vec<u8>, c_int> {
+        let mut bytes = vec![0u8; SIG_MAX + 1];
+        let mut size = 0;
+        while size < bytes.len() {
+            let offset = i64::try_from(size).map_err(|_| -EIO)?;
+            let rest = &mut bytes[size..];
+            // SAFETY: the image owns the fd and rest is writable for its length.
+            let n = unsafe {
+                pread(
+                    self.0.signature_fd,
+                    rest.as_mut_ptr().cast(),
+                    rest.len(),
+                    offset,
+                )
+            };
+            if n < 0 {
+                let err = super::last_err();
+                if err == -EINTR {
+                    continue;
+                }
+                return Err(err);
+            }
+            if n == 0 {
+                break;
+            }
+            size += usize::try_from(n).map_err(|_| -EIO)?;
+        }
+        if size == 0 || size > SIG_MAX {
+            return Err(-EINVAL);
+        }
+        bytes.truncate(size);
+        Ok(bytes)
+    }
+}
 
 impl Drop for Opened {
     fn drop(&mut self) {
@@ -164,102 +196,65 @@ impl Drop for Opened {
     }
 }
 
-/// `image verify`: the signature, the verity tree, then the root hash
-/// on stdout.
-fn verify(prefix: &CStr, cert: &CStr) -> c_int {
-    let img = match ConfigImageOpen::open(prefix, None) {
-        Ok(img) => Opened(img),
-        Err(err) => return err,
-    };
-    // SAFETY: the signature's descriptor, which the image keeps open.
-    let file = ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(img.0.signature_fd) });
-    let mut signature = vec![0u8; SIG_MAX + 1];
-    let mut size = 0;
-    while size < signature.len() {
-        match file.read_at(&mut signature[size..], size as u64) {
-            Ok(0) => break,
-            Ok(n) => size += n,
-            Err(e) if e.kind() == ErrorKind::Interrupted => {}
-            Err(e) => return errno_of(&e),
-        }
-    }
-    if size == 0 || size > SIG_MAX {
-        return -EINVAL;
-    }
-    let root = hex(&img.0.image.root_hash);
-    let mut ret = verify_root_signature(&root, &signature[..size], cert);
-    if ret == 0 {
-        ret = verify_verity(img.0.data_fd, img.0.hash_fd, &root);
-    }
-    if ret == 0 {
-        print(true, &[&root[..], b"\n"].concat());
-    }
-    ret
+fn verify(prefix: &CStr, cert: &CStr) -> Result<(), c_int> {
+    let img = Opened(ConfigImageOpen::open(prefix, None)?);
+    let signature = img.signature()?;
+    let root: [u8; 64] = hex(&img.0.image.root_hash)
+        .try_into()
+        .map_err(|_| -EINVAL)?;
+    verify_root_signature(&root, &signature, &super::Certificate::open(cert)?)?;
+    verify_verity(&img, &root)?;
+    print(true, &[&root[..], b"\n"].concat());
+    Ok(())
 }
 
-/// `image sign-root`: signs the root hash, 64 lowercase hex digits, of
-/// the file `input` into `output`, which must not exist.
-fn sign_root(input: &CStr, output: &CStr, keys: &KeyFiles) -> c_int {
-    if super::check_keys(&keys.pkey, &keys.cert) != 0 {
-        return -EKEYREJECTED;
-    }
-    let file = std::fs::OpenOptions::new()
+/// The file must itself contain exactly 64 lowercase hex digits.
+fn read_root(input: &CStr) -> Result<[u8; 64], c_int> {
+    let mut file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(O_NOFOLLOW | O_NONBLOCK)
-        .open(super::path(input.to_bytes()));
-    let mut file = match file {
-        Ok(f) => f,
-        Err(e) => return errno_of(&e),
-    };
-    let mut ret = match file.metadata() {
-        Ok(m) if m.is_file() && m.size() == 64 => 0,
-        Ok(_) => -EINVAL,
-        Err(e) => errno_of(&e),
-    };
+        .open(super::path(input.to_bytes()))
+        .map_err(|e| errno_of(&e))?;
+    let metadata = file.metadata().map_err(|e| errno_of(&e))?;
     let mut root = [0u8; 64];
-    let mut done = 0;
-    while ret == 0 && done < root.len() {
-        match file.read(&mut root[done..]) {
-            Ok(0) => ret = -EIO,
-            Ok(n) => done += n,
-            Err(e) if e.kind() == ErrorKind::Interrupted => {}
-            Err(e) => ret = errno_of(&e),
+    if !metadata.is_file() || metadata.size() != 64 {
+        return Err(-EINVAL);
+    }
+    file.read_exact(&mut root).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::UnexpectedEof {
+            -EIO
+        } else {
+            errno_of(&e)
         }
+    })?;
+    if root.iter().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f')) {
+        Ok(root)
+    } else {
+        Err(-EINVAL)
     }
-    drop(file);
-    if ret != 0 {
-        return ret;
+}
+
+/// Signs the root hash into a new file, removing an incomplete write.
+fn sign_root(input: &CStr, output: &CStr, keys: &KeyFiles) -> Result<(), c_int> {
+    if super::check_keys(&keys.pkey, &keys.cert) != 0 {
+        return Err(-EKEYREJECTED);
     }
-    if !root.iter().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f')) {
-        return -EINVAL;
-    }
-    let signature = match super::sign::cms_sign(&root[..], &[], SIG_MAX, &keys.pkey, &keys.cert) {
-        Ok((signature, _)) => signature,
-        Err(err) => return err,
-    };
-    let ret = verify_root_signature(&root, &signature, &keys.cert);
-    if ret != 0 {
-        return ret;
-    }
+    let root = read_root(input)?;
+    let (signature, _) = super::sign::cms_sign(&root, &[], SIG_MAX, &keys.pkey, &keys.cert)?;
+    verify_root_signature(&root, &signature, &super::Certificate::open(&keys.cert)?)?;
     let out = super::path(output.to_bytes());
-    let file = std::fs::OpenOptions::new()
+    let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o644)
-        .open(out);
-    let mut file = match file {
-        Ok(f) => f,
-        Err(e) => return errno_of(&e),
-    };
-    let ret = match file.write_all(&signature).and_then(|()| file.sync_all()) {
-        Ok(()) => 0,
-        Err(e) => errno_of(&e),
-    };
+        .open(out)
+        .map_err(|e| errno_of(&e))?;
+    let written = file.write_all(&signature).and_then(|()| file.sync_all());
     drop(file);
-    if ret != 0 {
+    if written.is_err() {
         let _ = std::fs::remove_file(out);
     }
-    ret
+    written.map_err(|e| errno_of(&e))
 }
 
 const IMAGE_VERIFY_CERT: c_int = 0;
@@ -356,11 +351,13 @@ fn verify_cmd(args: &[&CStr]) -> c_int {
         p.usage(b"takes <prefix> and --cert <cert.der>");
         return EXIT_USAGE;
     };
-    let ret = verify(prefix, cert);
-    if ret != 0 {
-        error(&[b"image verify: ", strerr(-ret)].concat());
+    match verify(prefix, cert) {
+        Ok(()) => 0,
+        Err(err) => {
+            error(&[b"image verify: ", strerr(-err)].concat());
+            1
+        }
     }
-    c_int::from(ret != 0)
 }
 
 /// What shirudo-gen-verity calls back with for the root hash it made.
@@ -396,11 +393,13 @@ fn sign_root_cmd(args: &[&CStr]) -> c_int {
     if keys.resolve_both(keys_dir).is_err() {
         return EXIT_USAGE;
     }
-    let ret = sign_root(input, signature, &keys);
-    if ret != 0 {
-        error(&[b"image sign-root: ", strerr(-ret)].concat());
+    match sign_root(input, signature, &keys) {
+        Ok(()) => 0,
+        Err(err) => {
+            error(&[b"image sign-root: ", strerr(-err)].concat());
+            1
+        }
     }
-    c_int::from(ret != 0)
 }
 
 /// `shirudo-build image`, from `image` on.

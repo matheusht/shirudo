@@ -10,6 +10,7 @@
 //! GPL-2.0-only OR BSD-2-Clause), under its BSD-2-Clause branch.
 
 use core::ffi::{CStr, c_int};
+use core::marker::PhantomData;
 use core::ptr;
 use std::fs::{File, OpenOptions};
 use std::io::Read;
@@ -134,12 +135,28 @@ fn certificate(cert: &CStr) -> Result<X509, Failure> {
 }
 
 /// A memory BIO reading bytes in place, freed when it goes.
-struct Input(*mut ffi::BIO);
+struct Input<'a> {
+    bio: std::ptr::NonNull<ffi::BIO>,
+    content: PhantomData<&'a [u8]>,
+}
 
-impl Drop for Input {
+impl<'a> Input<'a> {
+    fn new(content: &'a [u8]) -> Result<Self, Failure> {
+        let len = c_int::try_from(content.len()).map_err(|_| failed(-E2BIG))?;
+        // SAFETY: the BIO reads content in place and the lifetime ties it
+        // to the underlying slice.
+        let bio = unsafe { ffi::BIO_new_mem_buf(content.as_ptr().cast(), len) };
+        Ok(Self {
+            bio: std::ptr::NonNull::new(bio).ok_or_else(|| failed(-ENOMEM))?,
+            content: PhantomData,
+        })
+    }
+}
+
+impl Drop for Input<'_> {
     fn drop(&mut self) {
-        // SAFETY: the BIO, freed once.
-        unsafe { ffi::BIO_free_all(self.0) };
+        // SAFETY: this owns the BIO, which does not own the bytes.
+        unsafe { ffi::BIO_free_all(self.bio.as_ptr()) };
     }
 }
 
@@ -176,12 +193,7 @@ fn sign(
     // The signature and the payload digest span insns || data, the
     // concatenation the kernel folds and verifies at load.
     let content = [insns, data].concat();
-    let len = c_int::try_from(content.len()).map_err(|_| failed(-E2BIG))?;
-    // SAFETY: the content, which outlives the BIO.
-    let input = Input(unsafe { ffi::BIO_new_mem_buf(content.as_ptr().cast(), len) });
-    if input.0.is_null() {
-        return Err(failed(-ENOMEM));
-    }
+    let input = Input::new(&content)?;
     let key = private_key(pkey)?;
     if !key.is_a(KeyType::ML_DSA_87) {
         let name = key_type_name(&key);
@@ -249,7 +261,7 @@ fn sign(
     let finished = unsafe {
         CMS_final(
             cms.as_ptr(),
-            input.0,
+            input.bio.as_ptr(),
             ptr::null_mut(),
             ffi::CMS_NOCERTS | ffi::CMS_BINARY,
         )
