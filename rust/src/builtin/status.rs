@@ -1116,8 +1116,7 @@ impl Otel {
         let cfg = Box::new(unsafe { mem::zeroed() });
         let mut o = Otel { cfg };
 
-        // SAFETY: the configuration to fill.
-        let err = unsafe { config::load(&mut *o.cfg) };
+        let err = config::load(&mut o.cfg);
         if err != 0 {
             let msg = message(&[b"status: load OTEL configuration: ", strerr(-err)]);
             // SAFETY: a "%s" format with a C string.

@@ -8,7 +8,6 @@
 //! key init froze.
 
 use core::ffi::{CStr, c_char, c_int, c_uint};
-use core::mem::MaybeUninit;
 use core::ptr;
 
 use crate::errno::{
@@ -233,7 +232,7 @@ fn session_setup(t: &mut Tpm, active: bool) -> c_int {
 ///
 /// `buf` is room for `size` bytes.
 unsafe fn tcti(buf: *mut u8, size: usize) -> c_int {
-    let mut cfg = Scrubbed(MaybeUninit::zeroed());
+    let mut cfg = Scrubbed::new();
     let mut tcti: *const c_char = if image_config::active() {
         ptr::null()
     } else {
@@ -243,16 +242,8 @@ unsafe fn tcti(buf: *mut u8, size: usize) -> c_int {
     // SAFETY: tcti NULL or a C string the environment holds.
     let empty = |t: *const c_char| t.is_null() || unsafe { *t } == 0;
 
-    if empty(tcti) {
-        // SAFETY: room for a configuration, zeroed as the C's was.
-        if unsafe { config::load(cfg.ptr()) } == 0 {
-            // SAFETY: the configuration, filled.
-            let c = unsafe { cfg.0.assume_init_ref() };
-
-            if c.tpm_tcti[0] != 0 {
-                tcti = c.tpm_tcti.as_ptr().cast();
-            }
-        }
+    if empty(tcti) && config::load(&mut cfg) == 0 && cfg.tpm_tcti[0] != 0 {
+        tcti = cfg.tpm_tcti.as_ptr().cast();
     }
     if empty(tcti) {
         tcti = c"device:/dev/tpmrm0".as_ptr();
@@ -871,7 +862,7 @@ pub(crate) fn writer_primary(
     let creation_pcr = PcrSelectionList::zeroed();
     let sensitive = Tpm2bSensitiveCreate::zeroed();
     let mut out_pub: *mut Tpm2bPublic = ptr::null_mut();
-    let mut cfg = Scrubbed(MaybeUninit::zeroed());
+    let mut cfg = Scrubbed::new();
     let mut in_pub = Tpm2bPublic::zeroed();
     let mut name: *mut Tpm2bName = ptr::null_mut();
     let outside = Tpm2bData::zeroed();
@@ -895,19 +886,16 @@ pub(crate) fn writer_primary(
     rsa.buffer[..DIGEST_LEN].copy_from_slice(seed);
     p.unique.rsa = rsa;
 
-    // SAFETY: room for a configuration, zeroed as the C's was.
-    let mut e = unsafe { config::load(cfg.ptr()) };
+    let mut e = config::load(&mut cfg);
     if e == 0 {
-        // SAFETY: the configuration, filled.
-        let c = unsafe { cfg.0.assume_init_ref() };
+        let c = &*cfg;
 
         e = match c.tpm_owner_auth.get(..c.tpm_owner_auth_len) {
             Some(auth) => owner_auth_set(t, auth),
             None => -EINVAL,
         };
     }
-    // SAFETY: the configuration's bytes, scrubbed now as the C did.
-    unsafe { explicit_bzero(cfg.ptr().cast(), size_of::<config::Config>()) };
+    cfg.scrub();
     if e != 0 {
         return e;
     }

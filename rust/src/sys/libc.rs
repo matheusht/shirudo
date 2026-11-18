@@ -17,7 +17,7 @@ pub use libc::{
     if_indextoname, ioctl, lgetxattr, link, lseek, lsetxattr, memfd_create, mkdirat, mkdtemp,
     mknod, mkstemp, mkstemps, mlockall, mount, open, openat, opendir, openlog, personality,
     posix_memalign, prctl, pread, printf, putchar, read, readdir, recvmsg, renameat, rmdir,
-    sendto, setenv, setitimer, setrlimit, setsockopt, setvbuf, setxattr, snprintf, socket, sscanf,
+    sendto, setenv, setitimer, setrlimit, setsockopt, setxattr, snprintf, socket, sscanf,
     statfs, statvfs, statx, strcasecmp, strcmp, strerror, strftime, strlen, strncasecmp, strnlen,
     strptime, syscall, sysconf, syslog, timegm, umount2, uname, unlink, unlinkat, unsetenv, write,
 };
@@ -64,8 +64,6 @@ pub type Utsname = libc::utsname;
 /// The constants the tree takes in another type or under another name
 /// than the crate's.
 pub const PATH_MAX: usize = libc::PATH_MAX as usize;
-pub const BUFSIZ: usize = libc::BUFSIZ as usize;
-pub const IOFBF: c_int = libc::_IOFBF;
 pub const SC_NPROCESSORS_ONLN: c_int = libc::_SC_NPROCESSORS_ONLN;
 pub const STATX_ATTR_MOUNT_ROOT: u64 = libc::STATX_ATTR_MOUNT_ROOT as u64;
 /// The file type and mode bits, as `struct statx` holds them.

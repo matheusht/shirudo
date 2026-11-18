@@ -6,7 +6,6 @@
 //! the digests every measuring path shares.
 
 use core::ffi::{c_int, c_void};
-use core::mem::MaybeUninit;
 use core::ptr;
 
 use crate::errno::{
@@ -468,13 +467,10 @@ fn name_equals(info: &TpmNvInfo, name: &[u8; NAME_LEN]) -> bool {
 /// The index defined afresh with `policy`, undefined first when
 /// `defined`, under the owner auth of the configuration.
 fn register_define(tpm: *mut Tpm, defined: bool, policy: &[u8; DIGEST_LEN]) -> c_int {
-    let mut cfg = Scrubbed(MaybeUninit::zeroed());
+    let mut cfg = Scrubbed::new();
 
-    // SAFETY: the configuration to fill; the C went on with whatever its
-    // result.
-    unsafe { config::load(cfg.ptr()) };
-    // SAFETY: the configuration, zero or filled.
-    let c = unsafe { &*cfg.ptr() };
+    config::load(&mut cfg);
+    let c = &*cfg;
     let auth = c.tpm_owner_auth.as_ptr().cast::<c_void>();
 
     if defined {

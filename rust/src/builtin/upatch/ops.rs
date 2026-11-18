@@ -720,11 +720,9 @@ fn precheck(a: &OpArgs, rep: &mut OpReport, op: &[u8]) -> Result<(), ()> {
 /// Refuses an operation whose event the log could not take: the
 /// register and the log advance together.
 fn eventlog_room(rep: &mut OpReport, op: &[u8]) -> Result<(), ()> {
-    let mut cfg = Scrubbed(core::mem::MaybeUninit::zeroed());
-    // SAFETY: room for the configuration, which defaults when unreadable.
-    unsafe { config::load(cfg.ptr()) };
-    // SAFETY: as above.
-    let max = unsafe { cfg.0.assume_init_ref() }.eventlog_max_bytes;
+    let mut cfg = Scrubbed::new();
+    config::load(&mut cfg);
+    let max = cfg.eventlog_max_bytes;
     if eventlog_would_exceed(max) == 0 {
         return Ok(());
     }

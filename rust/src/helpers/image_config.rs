@@ -16,7 +16,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use super::{helper_main, out};
 use crate::errno::{EINVAL, EIO};
 use crate::text::cstr;
-use crate::util::config::{Config, config_load_path};
+use crate::util::config::{Config, load_path};
 use crate::util::image_bootstrap::{self, ImageBootstrap};
 use crate::util::image_config::{self, REGISTRIES, get, open, open_relative, validate};
 
@@ -65,10 +65,8 @@ fn opened(fd: c_int, what: &str) -> c_int {
 }
 
 fn effective() -> c_int {
-    // SAFETY: room for a config, filled when an image is set.
-    let mut cfg: Box<Config> = Box::new(unsafe { core::mem::zeroed() });
-    // SAFETY: the room.
-    if unsafe { get(&mut *cfg) } == 0 {
+    let mut cfg = Box::new(Config::zeroed());
+    if get(&mut cfg) == 0 {
         return -EIO;
     }
     out(&format!(
@@ -85,10 +83,8 @@ fn effective() -> c_int {
 }
 
 fn with_image(args: &[&CStr], root: c_int) -> c_int {
-    // SAFETY: a config of numbers and arrays, for which zeros are a value.
-    let mut bootstrap: Box<Config> = Box::new(unsafe { core::mem::zeroed() });
-    // SAFETY: the config to fill and a C string.
-    let ret = unsafe { config_load_path(&mut *bootstrap, c"/dev/null".as_ptr()) };
+    let mut bootstrap = Box::new(Config::zeroed());
+    let ret = load_path(&mut bootstrap, c"/dev/null");
     if ret != 0 {
         return ret;
     }

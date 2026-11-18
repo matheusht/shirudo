@@ -8,7 +8,7 @@
 //! change how certificates are verified.
 
 use core::ffi::{CStr, c_char, c_int, c_long, c_void};
-use core::mem::{ManuallyDrop, MaybeUninit};
+use core::mem::ManuallyDrop;
 use core::ptr;
 use std::fs::File;
 use std::io::Read;
@@ -110,15 +110,12 @@ unsafe fn host_listed(host: *mut c_char, list: &[u8]) -> bool {
 ///
 /// `curl` is the handle libcurl is connecting.
 unsafe fn classical_host_allowed(curl: *mut Curl) -> bool {
-    let mut cfg = Scrubbed(MaybeUninit::zeroed());
+    let mut cfg = Scrubbed::new();
 
-    // SAFETY: room for a configuration, zeroed as the C's was, filled
-    // from the image or else from the file.
-    if unsafe { image_config::get(cfg.ptr()) == 0 && config::load(cfg.ptr()) != 0 } {
+    if image_config::get(&mut cfg) == 0 && config::load(&mut cfg) != 0 {
         return false;
     }
-    // SAFETY: a configuration, zeroed and then filled.
-    let c = unsafe { cfg.0.assume_init_ref() };
+    let c = &*cfg;
 
     if !c.tls_classical_hosts_valid || c.tls_classical_hosts[0] == 0 {
         return false;

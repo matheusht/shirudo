@@ -35,7 +35,7 @@ use crate::sys::libc::{
 };
 use crate::text::cstr;
 use crate::util::bpf_sys::{bpf_map_get_next_key, bpf_map_lookup_elem, bpf_obj_get};
-use crate::util::config::{CONF_PATH, Config, config_load_fd, config_load_path};
+use crate::util::config::{self, CONF_PATH, Config};
 use crate::util::config_image::{self, ConfigImageOpen};
 use crate::util::config_update::{
     ConfigUpdate, ConfigUpdateOps, ConfigUpdateRecord, ConfigUpdateTarget, config_update_begin,
@@ -470,14 +470,7 @@ fn load_runtime_config(s: &mut State, trusted_boot: bool) -> c_int {
     s.bootstrap.n_certificates = 0;
     let mut ret = image_bootstrap::read_fd(conf.as_raw_fd(), &mut s.bootstrap, false);
     if ret == 0 {
-        // SAFETY: the config to fill, the open file and its label.
-        ret = unsafe {
-            config_load_fd(
-                &mut s.bootstrap_config,
-                conf.as_raw_fd(),
-                RUNTIME_CONF_PATH.as_ptr(),
-            )
-        };
+        ret = config::load_fd(&mut s.bootstrap_config, conf.as_raw_fd(), RUNTIME_CONF_PATH);
     }
     drop(conf);
     if ret != 0 {
@@ -1102,8 +1095,7 @@ pub(crate) fn bootstrap_load() -> c_int {
                 ret = -EINVAL;
             }
             if ret == 0 {
-                // SAFETY: the config to fill and a C string.
-                ret = unsafe { config_load_path(&mut s.bootstrap_config, CONF_PATH.as_ptr()) };
+                ret = config::load_path(&mut s.bootstrap_config, CONF_PATH);
             }
             ret
         };

@@ -95,13 +95,10 @@ pub(crate) fn root_fd() -> c_int {
     unsafe { *STATE.config_fd.get() }
 }
 
-/// The configuration the image carries into `out`, as a struct copy of
-/// the C made it, to the byte: 1, or 0 without an image.
-///
-/// # Safety
-///
-/// `out` points to room for a configuration.
-pub(crate) unsafe fn get(out: *mut Config) -> c_int {
+/// The configuration the image carries into `out`, copied whole: 1, or 0
+/// without an image.
+pub(crate) fn get(out: &mut Config) -> c_int {
+    let out: *mut Config = out;
     if !active() {
         return 0;
     }
@@ -112,24 +109,16 @@ pub(crate) unsafe fn get(out: *mut Config) -> c_int {
 }
 
 /// The image's shirudo.conf into `cfg`, read through its root.
-///
-/// # Safety
-///
-/// `cfg` points to room for a configuration.
-unsafe fn load_root(cfg: *mut Config, root_fd: c_int) -> c_int {
+fn load_root(cfg: &mut Config, root_fd: c_int) -> c_int {
     // SAFETY: the root's fd, a relative path and flags.
     let fd = unsafe { open_beneath(root_fd, SHIRUDO_CONF.as_ptr(), O_RDONLY) };
     if fd < 0 {
         return fd;
     }
-    // SAFETY: the caller's room, the fd open_beneath() gave, closed once,
-    // and a label.
-    unsafe {
-        let ret = load_fd(cfg, fd, c"config image shirudo.conf".as_ptr());
-
-        close(fd);
-        ret
-    }
+    let ret = load_fd(cfg, fd, c"config image shirudo.conf");
+    // SAFETY: the fd open_beneath() gave, closed once.
+    unsafe { close(fd) };
+    ret
 }
 
 /// A device as statx() gives it.
@@ -323,7 +312,7 @@ fn validate_settings(root_fd: c_int) -> c_int {
 /// Whether the tree under `root_fd` is a config image this target may
 /// run from: 0 or -errno.
 pub(crate) fn validate(root_fd: c_int) -> c_int {
-    let mut candidate = Scrubbed(MaybeUninit::zeroed());
+    let mut candidate = Scrubbed::new();
     let mut entries = 0u32;
     let mut st = Statx::zeroed();
 
@@ -345,10 +334,8 @@ pub(crate) fn validate(root_fd: c_int) -> c_int {
         ret = validate_settings(root_fd);
     }
     if ret == 0 {
-        // SAFETY: the candidate's room.
-        ret = unsafe { load_root(candidate.ptr(), root_fd) };
-        // SAFETY: the candidate, filled by the load.
-        let c = unsafe { &*candidate.ptr() };
+        ret = load_root(&mut candidate, root_fd);
+        let c = &*candidate;
 
         if ret == 0 && (!c.map_export_valid || !c.tls_classical_hosts_valid) {
             ret = -EINVAL;
@@ -361,12 +348,13 @@ pub(crate) fn validate(root_fd: c_int) -> c_int {
 /// root at `root_fd`, or the bootstrap one alone without a root: 0, or
 /// -errno with nothing changed.
 pub(crate) fn set(bootstrap: &Config, root_fd: c_int) -> c_int {
-    let mut candidate = Scrubbed(MaybeUninit::uninit());
+    let mut candidate = Scrubbed::new();
     let mut fd = -1;
+    let room: *mut Config = &mut *candidate;
 
     // SAFETY: the bootstrap configuration, every byte of it, into the
-    // candidate's room.
-    unsafe { core::ptr::copy_nonoverlapping(bootstrap, candidate.ptr(), 1) };
+    // candidate, copied in place so that no copy of its secret is left.
+    unsafe { core::ptr::copy_nonoverlapping(bootstrap, room, 1) };
     if root_fd >= 0 {
         let ret = validate(root_fd);
         if ret != 0 {
@@ -377,10 +365,8 @@ pub(crate) fn set(bootstrap: &Config, root_fd: c_int) -> c_int {
         if fd < 0 {
             return -errno();
         }
-        // SAFETY: the candidate's room, and the copy of the root.
-        let ret = unsafe { load_root(candidate.ptr(), fd) };
-        // SAFETY: the candidate, filled.
-        let (c, b) = (unsafe { &mut *candidate.ptr() }, bootstrap);
+        let ret = load_root(&mut candidate, fd);
+        let (c, b) = (&mut *candidate, bootstrap);
 
         if ret != 0 || !c.map_export_valid || !c.tls_classical_hosts_valid {
             // SAFETY: the copy fcntl() gave, closed once.
@@ -402,11 +388,7 @@ pub(crate) fn set(bootstrap: &Config, root_fd: c_int) -> c_int {
             close(*config_fd);
         }
         *config_fd = fd;
-        core::ptr::copy_nonoverlapping(
-            candidate.ptr().cast_const(),
-            STATE.effective.get().cast::<Config>(),
-            1,
-        );
+        core::ptr::copy_nonoverlapping(&*candidate, STATE.effective.get().cast::<Config>(), 1);
         *STATE.active.get() = true;
     }
     0

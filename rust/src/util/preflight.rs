@@ -485,11 +485,9 @@ fn check_tpm(r: &mut PreflightResult) {
     // setup. The operator's expectation still rejects what a fake TPM
     // produces, so this is a convenience, not a relaxation.
     {
-        let mut cfg = Scrubbed(MaybeUninit::zeroed());
-        // SAFETY: room for a configuration, zeroed as the C's was.
-        let loaded = unsafe { config::load(cfg.ptr()) } == 0;
-        // SAFETY: the configuration, zeroed and then filled.
-        let c = unsafe { cfg.0.assume_init_ref() };
+        let mut cfg = Scrubbed::new();
+        let loaded = config::load(&mut cfg) == 0;
+        let c = &*cfg;
 
         if loaded && c.tpm_tcti[0] != 0 {
             r.pass(i);

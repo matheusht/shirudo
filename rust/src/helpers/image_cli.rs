@@ -18,7 +18,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use super::out;
 use crate::builtin::{cmd_bpm, cmd_config, cmd_keys, source_key_open};
 use crate::errno::EIO;
-use crate::util::config::{Config, config_load_path};
+use crate::util::config::{Config, load_path};
 use crate::util::image_config;
 
 /// The image's config set from a bootstrap of no file but the TPM's
@@ -31,10 +31,8 @@ fn use_image(root: &CStr) -> bool {
     else {
         return false;
     };
-    // SAFETY: a config of numbers and arrays, for which zeros are a value.
-    let mut bootstrap: Box<Config> = Box::new(unsafe { core::mem::zeroed() });
-    // SAFETY: the config to fill and a C string.
-    if unsafe { config_load_path(&mut *bootstrap, c"/dev/null".as_ptr()) } != 0 {
+    let mut bootstrap = Box::new(Config::zeroed());
+    if load_path(&mut bootstrap, c"/dev/null") != 0 {
         return false;
     }
     bootstrap.tpm_owner_auth[..15].copy_from_slice(b"bootstrap-owner");

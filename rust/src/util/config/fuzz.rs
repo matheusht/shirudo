@@ -18,10 +18,8 @@ fuzz_target!(shirudo_fuzz_config, shirudo_fuzz_config_init, |data| {
     let Some(input) = input_file(data) else {
         return;
     };
-    // SAFETY: a config the load fills.
-    let mut cfg: Box<Config> = Box::new(unsafe { core::mem::zeroed() });
-    // SAFETY: room for the config and a C string.
-    unsafe { super::capi::config_load_path(&mut *cfg, input.path.as_ptr()) };
+    let mut cfg = Box::new(Config::zeroed());
+    super::load_path(&mut cfg, &input.path);
     let (mut endpoint, mut reference) = ([0u8; MAX_ENDPOINT], [0u8; MAX_DIGEST]);
     let (mut index_repository, mut key_file) = ([0u8; MAX_ENDPOINT], [0u8; MAX_KEY]);
     // Read as load_source() and load_tree_config() read their files: as

@@ -11,7 +11,7 @@ use std::os::unix::ffi::OsStrExt;
 
 use super::helper_main;
 use crate::text::cstr;
-use crate::util::config::{Config, LOG_RECORD_MAX_DEFAULT, OTLP_MAX_DEFAULT, config_load_path};
+use crate::util::config::{Config, LOG_RECORD_MAX_DEFAULT, OTLP_MAX_DEFAULT, load_path};
 
 helper_main!(shirudo_helper_test_config, run);
 
@@ -25,10 +25,8 @@ fn load(path: &CStr, contents: Option<&str>) -> Option<Box<Config>> {
             let _ = std::fs::remove_file(file);
         }
     }
-    // SAFETY: room for a config, which the load fills.
-    let mut cfg: Box<Config> = Box::new(unsafe { core::mem::zeroed() });
-    // SAFETY: the room and a C string.
-    (unsafe { config_load_path(&mut *cfg, path.as_ptr()) } == 0).then_some(cfg)
+    let mut cfg = Box::new(Config::zeroed());
+    (load_path(&mut cfg, path) == 0).then_some(cfg)
 }
 
 fn defaults(path: &CStr) -> bool {

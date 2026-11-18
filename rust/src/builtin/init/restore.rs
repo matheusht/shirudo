@@ -353,10 +353,8 @@ struct Digests {
 
 /// eventlog.max_bytes of the configuration.
 fn eventlog_max_bytes() -> Result<u64, c_int> {
-    // SAFETY: an all-zero configuration is room for one.
-    let mut cfg: Box<Config> = Box::new(unsafe { mem::zeroed() });
-    // SAFETY: the configuration to fill.
-    let ret = unsafe { config::load(&mut *cfg) };
+    let mut cfg = Box::new(Config::zeroed());
+    let ret = config::load(&mut cfg);
     let max = cfg.eventlog_max_bytes;
 
     // SAFETY: the configuration, all of it.

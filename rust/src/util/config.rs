@@ -5,19 +5,20 @@
 //! lines of /etc/shirudo/shirudo.conf, or the settings a config image
 //! carries, and the TPM settings the environment overrides.
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
 use core::mem::MaybeUninit;
-use core::ptr;
+use std::ffi::OsStr;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::mem::ManuallyDrop;
+use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
 
 use crate::errno::{EINVAL, EIO, ENOENT, EPERM};
-use crate::ffi;
-use crate::sys::libc::{
-    BUFSIZ, F_DUPFD_CLOEXEC, File, IOFBF, SEEK_SET, close, env, errno, explicit_bzero, fclose,
-    fcntl, fdopen, ferror, fileno, fopen, free, lseek, scrub, setvbuf,
-};
+use crate::sys::libc::{F_DUPFD_CLOEXEC, close, env, errno, explicit_bzero, fcntl, scrub};
 use crate::text::{dns_name_valid, parse_u64, strscpy, trim_blanks};
 use crate::util::hex::hex_decode_max;
-use crate::util::io::{check_trusted, read_text_line};
+use crate::util::io::check_trusted;
 use crate::util::json::MAX_BYTES;
 
 const OWNER_AUTH_MAX: usize = 256;
@@ -55,18 +56,60 @@ const _: () = assert!(size_of::<Config>() == 9888);
 
 /// A configuration scrubbed when it goes, as `__cleanup(config_clear)`
 /// left the C's.
-pub(crate) struct Scrubbed(pub(crate) MaybeUninit<Config>);
+pub(crate) struct Scrubbed(Box<Config>);
 
 impl Scrubbed {
-    pub(crate) fn ptr(&mut self) -> *mut Config {
-        self.0.as_mut_ptr()
+    /// An empty configuration, for load() to fill.
+    pub(crate) fn new() -> Self {
+        Scrubbed(Box::new(Config::zeroed()))
+    }
+
+    /// Every byte of the configuration scrubbed, now.
+    pub(crate) fn scrub(&mut self) {
+        let cfg: *mut Config = &mut *self.0;
+        // SAFETY: the bytes of the configuration, all of whose bits zeroed
+        // are a value of it.
+        unsafe { explicit_bzero(cfg.cast(), size_of::<Config>()) };
+    }
+}
+
+impl core::ops::Deref for Scrubbed {
+    type Target = Config;
+
+    fn deref(&self) -> &Config {
+        &self.0
+    }
+}
+
+impl core::ops::DerefMut for Scrubbed {
+    fn deref_mut(&mut self) -> &mut Config {
+        &mut self.0
     }
 }
 
 impl Drop for Scrubbed {
     fn drop(&mut self) {
-        // SAFETY: the bytes of the configuration.
-        unsafe { explicit_bzero(self.0.as_mut_ptr().cast(), size_of::<Config>()) };
+        self.scrub();
+    }
+}
+
+impl Config {
+    /// A configuration of zeros, which every field takes as a value.
+    pub(crate) fn zeroed() -> Self {
+        // SAFETY: integers, booleans and arrays of bytes, for which all
+        // bits zeroed are a value.
+        unsafe { MaybeUninit::zeroed().assume_init() }
+    }
+
+    /// The configuration of no file: zeros, and the defaults.
+    fn defaults() -> Self {
+        let mut cfg = Self::zeroed();
+        cfg.map_export_valid = true;
+        cfg.tls_classical_hosts_valid = true;
+        cfg.map_export_otel_retries = 3;
+        cfg.map_export_log_record_max_bytes = LOG_RECORD_MAX_DEFAULT;
+        cfg.map_export_otlp_max_bytes = OTLP_MAX_DEFAULT;
+        cfg
     }
 }
 
@@ -104,25 +147,6 @@ fn tls_classical_hosts_valid(value: &[u8]) -> bool {
             return false;
         }
     }
-}
-
-/// `cfg` cleared and given its defaults, its padding zeroed.
-///
-/// # Safety
-///
-/// `cfg` is a configuration nothing else accesses meanwhile.
-unsafe fn defaults(cfg: *mut Config) {
-    // SAFETY: the caller's configuration, all of whose bits zeroed are a
-    // valid one.
-    let cfg = unsafe {
-        cfg.write_bytes(0, 1);
-        &mut *cfg
-    };
-    cfg.map_export_valid = true;
-    cfg.tls_classical_hosts_valid = true;
-    cfg.map_export_otel_retries = 3;
-    cfg.map_export_log_record_max_bytes = LOG_RECORD_MAX_DEFAULT;
-    cfg.map_export_otlp_max_bytes = OTLP_MAX_DEFAULT;
 }
 
 /// A setting of the map export refused: the export goes idle.
@@ -294,89 +318,94 @@ fn apply(cfg: &mut Config, key: &CStr, val: &CStr) {
     }
 }
 
-/// The lines of the stream `f`, which this consumes and closes, into
-/// `cfg`; `path` names the file for the log.
-///
-/// # Safety
-///
-/// `f` is an open stream nothing else uses, and `path` a C string.
-unsafe fn parse(cfg: &mut Config, f: *mut File, path: *const c_char) -> c_int {
+/// One line of the file, as getline() gave it with its newline, into
+/// `cfg`.
+fn parse_line(cfg: &mut Config, line: &[u8]) {
+    // The line as the C string the C trimmed in place.
+    let mut buf = [line, b"\0"].concat();
+    let (ps, pe) = trim_blanks(&mut buf, 0, line.len());
+    if ps == pe || buf[ps] == b'#' {
+        return;
+    }
+    let Some(eq) = buf[ps..pe].iter().position(|&c| c == b'=').map(|i| ps + i) else {
+        return;
+    };
+    buf[eq] = 0;
+    let (ks, _) = trim_blanks(&mut buf, ps, eq);
+    let (vs, _) = trim_blanks(&mut buf, eq + 1, pe);
+    apply(cfg, text_at(&buf, ks), text_at(&buf, vs));
+}
+
+/// The lines of the file `f` into `cfg`, `path` naming it for the log:
+/// a line longer than MAX is skipped, one with a NUL ends the read.
+/// What the file holds, and the copies made of it, go back to the
+/// allocator, which scrubs them.
+fn parse(cfg: &mut Config, f: File, path: &CStr) -> c_int {
     const MAX: usize = MAP_EXPORT_PATH_MAX + 127;
-    let mut buffer = [0u8; BUFSIZ];
-    let mut line: *mut c_char = ptr::null_mut();
-    let mut capacity = 0usize;
+    let fd = f.into_raw_fd();
     let mut ret = 0;
 
-    // SAFETY: the caller's stream and path; the buffer stdio takes lives
-    // until the stream closes below, and the line is getline()'s, the
-    // len bytes before its NUL.
-    unsafe {
-        if check_trusted(fileno(f), path, false) != 0 {
-            fclose(f);
-            return -EPERM;
-        }
-        // stdio's own buffer would keep the owner's authorization after
-        // fclose().
-        setvbuf(f, buffer.as_mut_ptr().cast(), IOFBF, buffer.len());
-        loop {
-            let got = read_text_line(f, &mut line, &mut capacity, MAX);
-
-            if got == 0 {
-                break;
-            }
-            if got == -crate::errno::E2BIG {
-                crate::log::warn(
-                    format!("config: line longer than {MAX} bytes (ignored)").as_bytes(),
-                );
-                continue;
-            }
-            if got < 0 {
-                crate::log::err(
-                    &[
-                        &b"config: "[..],
-                        ffi::c_str(path),
-                        b": unreadable line: ",
-                        crate::errno::text(got).as_bytes(),
-                    ]
-                    .concat(),
-                );
-                ret = got;
-                break;
-            }
-            let len = CStr::from_ptr(line).to_bytes().len();
-            let buf = ffi::bytes_mut(line.cast(), len + 1);
-            let (ps, pe) = trim_blanks(buf, 0, len);
-            if ps == pe || buf[ps] == b'#' {
-                continue;
-            }
-            let Some(eq) = buf[ps..pe].iter().position(|&c| c == b'=').map(|i| ps + i) else {
-                continue;
-            };
-            buf[eq] = 0;
-            let (ks, _) = trim_blanks(buf, ps, eq);
-            let (vs, _) = trim_blanks(buf, eq + 1, pe);
-            apply(cfg, text_at(buf, ks), text_at(buf, vs));
-        }
-        if ferror(f) != 0 && ret == 0 {
-            ret = -EIO;
-        }
-        // The TPM owner's authorization is for no other user's eyes.
-        if cfg.tpm_owner_auth_len != 0 && check_trusted(fileno(f), path, true) != 0 {
-            scrub(&mut cfg.tpm_owner_auth);
-            cfg.tpm_owner_auth_len = 0;
-            ret = -EPERM;
-        }
-        if !line.is_null() {
-            // The owner's authorization may have been read into it.
-            explicit_bzero(line.cast(), capacity);
-            free(line.cast());
-        }
-        if fclose(f) != 0 && ret == 0 {
-            ret = -errno();
-        }
+    // SAFETY: the file's fd, and the caller's C string.
+    if unsafe { check_trusted(fd, path.as_ptr(), false) } != 0 {
+        // SAFETY: the fd, closed once.
+        unsafe { close(fd) };
+        return -EPERM;
     }
-    scrub(&mut buffer);
+    // SAFETY: the fd, owned until it is closed below.
+    let mut file = ManuallyDrop::new(unsafe { File::from_raw_fd(fd) });
+    let mut text = Vec::new();
+    let read = file.read_to_end(&mut text);
+    // What a failed read gave, up to its last whole line, as getline()
+    // gave it before the call that failed.
+    let whole = match &read {
+        Ok(_) => text.len(),
+        Err(_) => text.iter().rposition(|&c| c == b'\n').map_or(0, |i| i + 1),
+    };
+    for line in text[..whole].split_inclusive(|&c| c == b'\n') {
+        let err = if line.contains(&0) {
+            -EINVAL
+        } else if line.strip_suffix(b"\n").unwrap_or(line).len() > MAX {
+            crate::log::warn(format!("config: line longer than {MAX} bytes (ignored)").as_bytes());
+            continue;
+        } else {
+            0
+        };
+        if err != 0 {
+            unreadable(path, err);
+            ret = err;
+            break;
+        }
+        parse_line(cfg, line);
+    }
+    if let (Err(e), 0) = (&read, ret) {
+        ret = -e.raw_os_error().unwrap_or(EIO);
+        unreadable(path, ret);
+    }
+    // The TPM owner's authorization is for no other user's eyes.
+    // SAFETY: the file's fd, and the caller's C string.
+    if cfg.tpm_owner_auth_len != 0 && unsafe { check_trusted(fd, path.as_ptr(), true) } != 0 {
+        scrub(&mut cfg.tpm_owner_auth);
+        cfg.tpm_owner_auth_len = 0;
+        ret = -EPERM;
+    }
+    // SAFETY: the fd, closed once; the File is not dropped.
+    if unsafe { close(fd) } != 0 && ret == 0 {
+        ret = -errno();
+    }
     ret
+}
+
+/// A line the file could not give.
+fn unreadable(path: &CStr, err: c_int) {
+    crate::log::err(
+        &[
+            &b"config: "[..],
+            path.to_bytes(),
+            b": unreadable line: ",
+            crate::errno::text(err).as_bytes(),
+        ]
+        .concat(),
+    );
 }
 
 fn finish(cfg: &mut Config, ret: c_int) -> c_int {
@@ -399,132 +428,63 @@ fn finish(cfg: &mut Config, ret: c_int) -> c_int {
     ret
 }
 
-/// # Safety
-///
-/// `cfg` is a configuration and `path` a C string.
-unsafe fn load_path(cfg: *mut Config, path: *const c_char) -> c_int {
-    let mut ret = 0;
-
-    // SAFETY: the caller's configuration and C string.
-    unsafe {
-        defaults(cfg);
-        let f = fopen(path, c"re".as_ptr());
-        if f.is_null() {
-            if errno() != ENOENT {
-                // The environment's overrides still apply.
-                ret = -errno();
-            }
-        } else {
-            ret = parse(&mut *cfg, f, path);
-        }
-        finish(&mut *cfg, ret)
-    }
+/// The file at `path` into `cfg`, over the defaults: none at all is
+/// no error.
+pub(crate) fn load_path(cfg: &mut Config, path: &CStr) -> c_int {
+    *cfg = Config::defaults();
+    let ret = match File::open(OsStr::from_bytes(path.to_bytes())) {
+        Ok(f) => parse(cfg, f, path),
+        // The environment's overrides still apply.
+        Err(e) if e.raw_os_error() == Some(ENOENT) => 0,
+        Err(e) => -e.raw_os_error().unwrap_or(EIO),
+    };
+    finish(cfg, ret)
 }
 
 /// The configuration from the image, or else the file and then the
 /// environment, which wins so that one dev run can point at swtpm while
 /// the file is shared.
-///
-/// # Safety
-///
-/// `cfg` is a configuration.
-pub(crate) unsafe fn load(cfg: *mut Config) -> c_int {
-    // SAFETY: the caller's configuration.
-    unsafe {
-        if crate::util::image_config::get(cfg) != 0 {
-            return 0;
-        }
-        let ret = load_path(cfg, CONF_PATH.as_ptr());
-        if ret != 0 && ret != -ENOENT {
-            return ret;
-        }
-        let cfg = &mut *cfg;
-        if let Some(auth) = env(c"SHIRUDO_TPM_OWNER_AUTH") {
-            set_owner_auth(cfg, auth);
-        }
-        if let Some(tcti) = env(c"SHIRUDO_TPM_TCTI").filter(|t| !t.is_empty()) {
-            if tcti.to_bytes().len() < cfg.tpm_tcti.len() {
-                set_string(&mut cfg.tpm_tcti, tcti);
-            } else {
-                crate::log::warn(b"SHIRUDO_TPM_TCTI too long (ignored)");
-            }
-        }
-        if ret == -ENOENT { 0 } else { ret }
+pub(crate) fn load(cfg: &mut Config) -> c_int {
+    if crate::util::image_config::get(cfg) != 0 {
+        return 0;
     }
+    let ret = load_path(cfg, CONF_PATH);
+    if ret != 0 && ret != -ENOENT {
+        return ret;
+    }
+    if let Some(auth) = env(c"SHIRUDO_TPM_OWNER_AUTH") {
+        set_owner_auth(cfg, auth);
+    }
+    if let Some(tcti) = env(c"SHIRUDO_TPM_TCTI").filter(|t| !t.is_empty()) {
+        if tcti.to_bytes().len() < cfg.tpm_tcti.len() {
+            set_string(&mut cfg.tpm_tcti, tcti);
+        } else {
+            crate::log::warn(b"SHIRUDO_TPM_TCTI too long (ignored)");
+        }
+    }
+    if ret == -ENOENT { 0 } else { ret }
 }
 
 /// The configuration in the file open on `fd`, read from its start
 /// through a copy of the fd; the caller keeps its own.
-///
-/// # Safety
-///
-/// `cfg` is a configuration to fill, and `label` a C string.
-pub(crate) unsafe fn load_fd(cfg: *mut Config, fd: c_int, label: *const c_char) -> c_int {
+pub(crate) fn load_fd(cfg: &mut Config, fd: c_int, label: &CStr) -> c_int {
     if fd < 0 {
         return -EINVAL;
     }
-    // SAFETY: the caller's configuration and label, and the copy of its
-    // fd, which the stream takes over or which is closed here.
-    unsafe {
-        defaults(cfg);
-        let copy = fcntl(fd, F_DUPFD_CLOEXEC, 3);
-        if copy < 0 {
-            return -errno();
-        }
-        if lseek(copy, 0, SEEK_SET) < 0 {
-            let ret = -errno();
-
-            close(copy);
-            return ret;
-        }
-        let f = fdopen(copy, c"r".as_ptr());
-        if f.is_null() {
-            let ret = -errno();
-
-            close(copy);
-            return ret;
-        }
-        let ret = parse(&mut *cfg, f, label);
-        finish(&mut *cfg, ret)
+    *cfg = Config::defaults();
+    // SAFETY: the caller's fd, and a minimum.
+    let copy = unsafe { fcntl(fd, F_DUPFD_CLOEXEC, 3) };
+    if copy < 0 {
+        return -errno();
     }
+    // SAFETY: the copy fcntl() gave, owned from here.
+    let mut f = File::from(unsafe { OwnedFd::from_raw_fd(copy) });
+    if let Err(e) = f.seek(SeekFrom::Start(0)) {
+        return -e.raw_os_error().unwrap_or(EIO);
+    }
+    let ret = parse(cfg, f, label);
+    finish(cfg, ret)
 }
-
-pub(crate) use capi::{config_load_fd, config_load_path};
 
 #[cfg(shirudo_fuzz)]
 mod fuzz;
-mod capi {
-    use core::ffi::{c_char, c_int};
-
-    use super::{Config, load_path};
-    use crate::errno::EINVAL;
-
-    /// # Safety
-    ///
-    /// `cfg` is NULL or a configuration to fill, and `path` NULL or a C
-    /// string.
-    pub unsafe extern "C" fn config_load_path(cfg: *mut Config, path: *const c_char) -> c_int {
-        if cfg.is_null() || path.is_null() {
-            return -EINVAL;
-        }
-        // SAFETY: the caller passes its configuration and a C string.
-        unsafe { load_path(cfg, path) }
-    }
-
-    /// A copy of `fd` is read from its start; the caller keeps its own.
-    ///
-    /// # Safety
-    ///
-    /// `cfg` is NULL or a configuration to fill, and `label` a C string.
-    pub unsafe extern "C" fn config_load_fd(
-        cfg: *mut Config,
-        fd: c_int,
-        label: *const c_char,
-    ) -> c_int {
-        if cfg.is_null() {
-            return -EINVAL;
-        }
-        // SAFETY: the caller passes its configuration and label.
-        unsafe { super::load_fd(cfg, fd, label) }
-    }
-}

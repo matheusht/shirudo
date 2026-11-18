@@ -5,7 +5,6 @@
 //! defaults in the same syntax, as a template.
 
 use core::ffi::{CStr, c_char, c_int};
-use core::mem::MaybeUninit;
 
 use crate::errno::ENOENT;
 use crate::ffi::c_splice;
@@ -40,7 +39,7 @@ static HELP: Help = Help::new(USAGE, Some(SUMMARY), &[], Some(FOOTER));
 ///
 /// Each of `args` is NULL or a C string.
 unsafe fn config(args: &[*const c_char]) -> c_int {
-    let mut cfg = Scrubbed(MaybeUninit::uninit());
+    let mut cfg = Scrubbed::new();
     let image_mode = image_config::active();
 
     let mut p = OptParser::new(c"config", &[], Some(&HELP), args, 1);
@@ -56,8 +55,7 @@ unsafe fn config(args: &[*const c_char]) -> c_int {
 
     // SAFETY: a path, and a mode.
     let file_present = unsafe { access(CONF_PATH.as_ptr(), F_OK) } == 0;
-    // SAFETY: the room for the configuration.
-    let ret = unsafe { load(cfg.ptr()) };
+    let ret = load(&mut cfg);
     if ret != 0 && ret != -ENOENT {
         // SAFETY: the C's format, the path and the error's text.
         unsafe {
@@ -70,9 +68,7 @@ unsafe fn config(args: &[*const c_char]) -> c_int {
         };
         return 1;
     }
-    // SAFETY: the configuration load() filled, which cfg scrubs when it
-    // goes at the end.
-    let c = unsafe { &*cfg.ptr() };
+    let c = &*cfg;
 
     // SAFETY: the C's formats, with the configuration's numbers and its
     // strings, each ending within its array.
