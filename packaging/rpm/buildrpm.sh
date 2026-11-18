@@ -61,10 +61,20 @@ trap 'rm -rf "$work"' EXIT HUP INT TERM
 spec=$work/$pkg.spec
 mkdir -p "$work/BUILD" "$work/RPMS" "$work/buildroot"
 
+# shirudo's licence and the notices of what the package carries besides,
+# marked %license below, and the License: and Provides: bundled() lines
+# that name them.
+here=$(CDPATH= cd "$(dirname "$0")" && pwd)
+licences=$stage/usr/share/licenses/$pkg
+mkdir -p "$licences"
+install -m 0644 "$here/../../LICENSE" "$licences/"
+"$here/../notices.sh" "$role" "$licences" "$work/notices"
+
 # Every staged file, plus the directories shirudo itself owns. The FHS
 # directories (/usr/bin, the systemd unit dir, ...) belong to the base
 # system's filesystem package and are not claimed.
-files=$(cd "$stage" && find . -mindepth 1 \( -type f -o -type l \) | sed 's#^\.##' | sort)
+files=$(cd "$stage" && find . -mindepth 1 \( -type f -o -type l \) | sed 's#^\.##' | sort |
+	sed "s#^/usr/share/licenses/$pkg/#%license &#")
 dirs=$(cd "$stage" && find . -mindepth 1 -type d -path '*/shirudo*' | sed 's#^\.#%dir #' | sort)
 [ -n "$files" ] || { printf 'buildrpm: nothing staged under %s\n' "$stage" >&2; exit 1; }
 
@@ -80,7 +90,7 @@ dirs=$(cd "$stage" && find . -mindepth 1 -type d -path '*/shirudo*' | sed 's#^\.
 	printf 'Version: %s\n' "$version"
 	printf 'Release: %s\n' "$release"
 	printf 'Summary: %s\n' "$short"
-	printf 'License: BSD-2-Clause\n'
+	cat "$work/notices"
 	printf 'Group: System Environment/Base\n'
 	printf 'Packager: %s\n' "$maint"
 	printf 'Conflicts: %s\n' "$other"

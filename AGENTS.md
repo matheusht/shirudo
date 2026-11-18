@@ -375,6 +375,13 @@ one usually still compiles and passes tests.
   `.github/scripts/check-spdx.sh` accepts.
   Never copy or link GPL-2.0 code; study a pattern,
   then write it from scratch without the GPL source open.
+- Every package carries the notices of what it bundles beside shirudo's
+  own code: `packaging/notices.sh` writes them from the components
+  `gen-sbom.sh` lists, with the Rust standard library and the operator's
+  `vmlinux.h`, and fails for a component without its licence text. A
+  new bundled component brings its licence text before it ships, and a
+  statically linked LGPL library, as glibc in the target, its source and
+  the way to relink the program.
 - No kernel tree or submodule is needed to build: libbpf and the BPF
   UAPI headers live in `vendor/libbpf/` and `vmlinux.h` is generated
   into `vendor/linux/` from BTF. `make bpf-deps` refreshes the

@@ -10,8 +10,11 @@
 # the vendored libbpf and the crates vendored in rust/vendor.
 #
 #   .github/scripts/gen-sbom.sh <package>...
+#   .github/scripts/gen-sbom.sh --components <target|operator>
 #
-# Each <package> gets <package>.spdx.json beside it. A target package
+# Each <package> gets <package>.spdx.json beside it; --components prints
+# the components of a role, one SPDX package a line, for
+# packaging/notices.sh to write their notices from. A target package
 # needs the SHIRUDO_TARGET_PKG_CONFIG_PATH and SHIRUDO_TARGET_STATIC_LIBDIR
 # it was built with and a Debian-family build host: every archive in the
 # static libdir has to be one of the source-built dependencies or belong
@@ -228,6 +231,32 @@ target_components() {
 libbpf_component >"$work/common"
 crate_components >>"$work/common"
 
+# The components of <role>, the target's found once.
+role_components() {
+	cat "$work/common"
+	[ "$1" = target ] || return 0
+	if [ ! -f "$work/target" ]; then
+		if [ -z "${TARGET_SYSTEM_LIBDIR:-}" ]; then
+			ma=$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null ||
+			     gcc -print-multiarch)
+			TARGET_SYSTEM_LIBDIR=/usr/lib/$ma
+		fi
+		os_id=$(sed -n 's/^ID=//p' /etc/os-release | tr -d '"')
+		distro=$(sed -n 's/^VERSION_ID=//p' /etc/os-release | tr -d '"')
+		distro=${distro:+$os_id-$distro}
+		target_components >"$work/target"
+	fi
+	cat "$work/target"
+}
+
+if [ "$1" = --components ]; then
+	case ${2:-} in
+	target|operator) role_components "$2" ;;
+	*) die 'usage: --components <target|operator>' ;;
+	esac
+	exit 0
+fi
+
 for pkg; do
 	[ -f "$pkg" ] || die "$pkg: no such file"
 	case ${pkg##*/} in
@@ -242,21 +271,7 @@ for pkg; do
 		;;
 	esac
 
-	cp "$work/common" "$work/components"
-	if [ $role = target ]; then
-		if [ ! -f "$work/target" ]; then
-			if [ -z "${TARGET_SYSTEM_LIBDIR:-}" ]; then
-				ma=$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null ||
-				     gcc -print-multiarch)
-				TARGET_SYSTEM_LIBDIR=/usr/lib/$ma
-			fi
-			os_id=$(sed -n 's/^ID=//p' /etc/os-release | tr -d '"')
-			distro=$(sed -n 's/^VERSION_ID=//p' /etc/os-release | tr -d '"')
-			distro=${distro:+$os_id-$distro}
-			target_components >"$work/target"
-		fi
-		cat "$work/target" >>"$work/components"
-	fi
+	role_components $role >"$work/components"
 
 	base=${pkg##*/}
 	sum=$(sha256sum "$pkg" | cut -d' ' -f1)

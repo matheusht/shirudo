@@ -17,6 +17,14 @@ root-path = $(if $(filter /%,$(1)),$(1),$(ROOT)/$(1))
 include $(ROOT)/Makefile.version
 .DEFAULT_GOAL := help
 
+# The target dependency builds the packaged target binary links, whose
+# licences packaging/notices.sh puts in its packages: the root Makefile's
+# defaults, unless given.
+TARGET_DEPS_DIR ?= $(ROOT)/build/target-deps
+SHIRUDO_TARGET_STATIC_LIBDIR ?= $(TARGET_DEPS_DIR)/lib
+SHIRUDO_TARGET_PKG_CONFIG_PATH ?= $(TARGET_DEPS_DIR)/curl/lib/pkgconfig:$(TARGET_DEPS_DIR)/openssl/lib/pkgconfig:$(SHIRUDO_TARGET_STATIC_LIBDIR)/pkgconfig
+export SHIRUDO_TARGET_STATIC_LIBDIR SHIRUDO_TARGET_PKG_CONFIG_PATH
+
 prefix      ?= /usr/local
 exec_prefix ?= $(prefix)
 bindir      ?= $(exec_prefix)/bin
@@ -126,6 +134,7 @@ bintar-pkg: config $(ROOT)/packaging/tar/install.sh
 	    install-target
 	$(Q)install -m 0755 $(ROOT)/packaging/tar/install.sh $(INSTALLER_STAGE_PATH)/install.sh
 	$(Q)install -m 0644 $(ROOT)/LICENSE $(ROOT)/README.md $(ROOT)/VERSION $(INSTALLER_STAGE_PATH)/
+	$(Q)$(ROOT)/packaging/notices.sh target $(INSTALLER_STAGE_PATH)
 	@printf '  TAR     $(INSTALLER_TARBALL_PATH)\n'
 	$(Q)tar -C $(dir $(INSTALLER_STAGE_PATH)) -czf $(INSTALLER_TARBALL_PATH) \
 	    $(notdir $(INSTALLER_STAGE_PATH))
@@ -136,6 +145,7 @@ bintar-pkg: config $(ROOT)/packaging/tar/install.sh
 	$(Q)install -m 0755 $(ROOT)/packaging/tar/install.sh \
 	    $(STATIC_IMAGE_STAGE_PATH)/install.sh
 	$(Q)install -m 0644 $(ROOT)/LICENSE $(ROOT)/README.md $(ROOT)/VERSION $(STATIC_IMAGE_STAGE_PATH)/
+	$(Q)$(ROOT)/packaging/notices.sh target $(STATIC_IMAGE_STAGE_PATH)
 	@printf '  TAR     $(STATIC_IMAGE_TARBALL_PATH)\n'
 	$(Q)tar -C $(dir $(STATIC_IMAGE_STAGE_PATH)) -czf $(STATIC_IMAGE_TARBALL_PATH) \
 	    $(notdir $(STATIC_IMAGE_STAGE_PATH))

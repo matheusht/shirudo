@@ -285,6 +285,35 @@ point ``SHIRUDO_TARGET_PKG_CONFIG_PATH`` and
 ``SHIRUDO_TARGET_STATIC_LIBDIR`` at them. ``make target-deps-clean``
 removes ``build/target-deps``.
 
+Licence notices
+---------------
+
+Every package carries the copyright and licence notices of what it
+bundles beside shirudo's own code: the Debian package in
+``/usr/share/doc/<package>/copyright``, the RPM in
+``/usr/share/licenses/<package>/``, with the ``License:`` and
+``Provides: bundled()`` lines that name them, and a tarball in
+``THIRD-PARTY-LICENSES`` beside ``LICENSE``.
+:src:`packaging/notices.sh` writes them from the components
+:src:`.github/scripts/gen-sbom.sh` lists: the vendored crates and
+libbpf, the Rust standard library, the dependency builds and
+distribution archives the static target links, and ``vmlinux.h`` in the
+operator package. It reads a dependency build's licence texts from
+``<libdir>/../share/licenses/<name>``, where ``make target-deps`` puts
+them, and fails for a component whose licence text it cannot find.
+
+The static target links the build host's GNU C Library, whose licence,
+the LGPL, lets anyone link the program again with a changed copy of it,
+and its notice says how. Build the changed library, install its static
+archives (``libc.a``, ``libm.a`` and ``rcrt1.o``) where the C compiler
+finds them, or give make a ``CC`` that finds them there, as
+``--sysroot`` or ``-B`` and ``-L`` do, and build the target as usual:
+
+.. code-block:: console
+
+   $ make target-deps
+   $ make target CC="gcc --sysroot=<sysroot>"
+
 Refresh the vendored crates
 ---------------------------
 

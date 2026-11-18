@@ -76,6 +76,7 @@ CURL_STAMP := $(TARGET_CURL_PREFIX)/.built
 TSS_SOURCE := $(TARGET_SOURCE_DIR)/tpm2-tss-$(TSS_VERSION)
 TSS_STAMP := $(TARGET_STATIC_LIBDIR)/.tpm2-tss-built
 STATIC_ARCHIVES_STAMP := $(TARGET_STATIC_LIBDIR)/.system-archives-staged
+LICENSES_STAMP := $(TARGET_DEPS_DIR)/.licenses-copied
 ENV_FILE := $(TARGET_DEPS_DIR)/target.env
 
 SYSTEM_ARCHIVES := \
@@ -95,7 +96,8 @@ TSS_ARCHIVES := \
 
 .PHONY: all openssl clean check-system-archives
 
-all: $(OPENSSL_STAMP) $(CURL_STAMP) $(TSS_STAMP) $(STATIC_ARCHIVES_STAMP) $(ENV_FILE)
+all: $(OPENSSL_STAMP) $(CURL_STAMP) $(TSS_STAMP) $(STATIC_ARCHIVES_STAMP) $(LICENSES_STAMP) \
+	$(ENV_FILE)
 	@printf 'shirudo: target dependencies ready\n'
 	@printf 'shirudo: run make target (or source %s)\n' '$(ENV_FILE)'
 
@@ -208,6 +210,21 @@ $(STATIC_ARCHIVES_STAMP): check-system-archives $(OPENSSL_STAMP) $(TSS_STAMP)
 			exit 1; \
 		fi; \
 	done
+	@touch "$@"
+
+# The licence texts of each build's release, which the packages of the
+# target binary that links them carry: packaging/notices.sh reads them
+# from <libdir>/../share/licenses/<name>.
+$(LICENSES_STAMP): Makefile.target-deps $(OPENSSL_STAMP) $(CURL_STAMP) $(TSS_STAMP)
+	@install -d "$(TARGET_OPENSSL_PREFIX)/share/licenses/openssl" \
+		"$(TARGET_CURL_PREFIX)/share/licenses/curl" \
+		"$(TARGET_STATIC_LIBDIR)/../share/licenses/tpm2-tss"
+	@install -m 0644 "$(OPENSSL_SOURCE)/LICENSE.txt" \
+		"$(TARGET_OPENSSL_PREFIX)/share/licenses/openssl/"
+	@install -m 0644 "$(CURL_SOURCE)/COPYING" \
+		"$(TARGET_CURL_PREFIX)/share/licenses/curl/"
+	@install -m 0644 "$(TSS_SOURCE)/LICENSE" "$(TSS_SOURCE)"/LICENSES/*.txt \
+		"$(TARGET_STATIC_LIBDIR)/../share/licenses/tpm2-tss/"
 	@touch "$@"
 
 $(ENV_FILE): $(OPENSSL_STAMP) $(CURL_STAMP) $(STATIC_ARCHIVES_STAMP)

@@ -57,6 +57,19 @@ operator)
 	;;
 esac
 
+# The copyright file Debian policy asks of every package: shirudo's
+# licence, then the notices of what the package carries besides, with
+# the Rust standard library's own beside it.
+doc=$stage/usr/share/doc/$pkg
+mkdir -p "$doc"
+"$here/../notices.sh" "$role" "$doc"
+{
+	cat "$here/../../LICENSE"
+	printf '\n'
+	cat "$doc/THIRD-PARTY-LICENSES"
+} >"$doc/copyright"
+rm -f "$doc/THIRD-PARTY-LICENSES"
+
 depends=$("$here/depends.sh" $bins || true)
 if [ "$role" = operator ]; then
 	# Operator-only compilers and the standard image format/verify tool.

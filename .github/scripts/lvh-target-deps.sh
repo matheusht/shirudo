@@ -21,12 +21,14 @@ install_distro_archives()
 if [ -s "$cache/openssl/lib/libcrypto.a" ] &&
 	[ -s "$cache/curl/lib/libcurl.a" ] &&
 	[ -s "$cache/lib/libtss2-esys.a" ] &&
-	[ -s "$cache/lib/libz.a" ]; then
+	[ -s "$cache/lib/libz.a" ] &&
+	[ -s "$cache/lib/libluajit-5.1.a" ] &&
+	[ -s "$cache/share/licenses/tpm2-tss/LICENSE" ]; then
 	rm -rf "$openssl" "$curl_prefix" "$tss"
 	cp -a "$cache/openssl" "$openssl"
 	cp -a "$cache/curl" "$curl_prefix"
 	mkdir -p "$tss"
-	cp -a "$cache/lib" "$tss/"
+	cp -a "$cache/lib" "$cache/share" "$tss/"
 	install_distro_archives
 	exit 0
 fi
@@ -43,6 +45,10 @@ cd /tmp/openssl-3.5.9
 	--libdir=lib no-shared no-module no-docs no-tests no-apps
 make -j4
 make install_sw
+# Each build's licence texts, which packaging/notices.sh reads from
+# <libdir>/../share/licenses/<name>.
+install -d "$openssl/share/licenses/openssl"
+install -m 0644 LICENSE.txt "$openssl/share/licenses/openssl/"
 
 curl -fsSL https://curl.se/download/curl-8.18.0.tar.xz \
 	-o /tmp/curl-8.18.0.tar.xz
@@ -68,6 +74,8 @@ LDFLAGS="-L$openssl/lib" \
 	--disable-ftp --disable-file --disable-manual --disable-docs
 make -j4
 make install
+install -d "$curl_prefix/share/licenses/curl"
+install -m 0644 COPYING "$curl_prefix/share/licenses/curl/"
 
 git clone --depth 1 --branch 4.2.0 \
 	https://github.com/tpm2-software/tpm2-tss.git \
@@ -96,6 +104,8 @@ PKG_CONFIG_PATH="$openssl/lib/pkgconfig" \
 	--disable-tcti-swtpm
 make -j4
 make install
+install -d "$tss/share/licenses/tpm2-tss"
+install -m 0644 LICENSE LICENSES/*.txt "$tss/share/licenses/tpm2-tss/"
 
 install -m 0644 "$openssl/lib/libcrypto.a" "$tss/lib/libcrypto.a"
 install -m 0644 "$openssl/lib/libssl.a" "$tss/lib/libssl.a"
@@ -106,3 +116,4 @@ mkdir -p "$cache"
 cp -a "$openssl" "$cache/openssl"
 cp -a "$curl_prefix" "$cache/curl"
 cp -a "$tss/lib" "$cache/lib"
+cp -a "$tss/share" "$cache/share"
