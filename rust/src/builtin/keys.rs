@@ -10,27 +10,31 @@
 use core::ffi::{CStr, c_char, c_int};
 use core::ptr;
 use std::ffi::CString;
+use std::fs::File;
+use std::io::Read;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+use foreign_types::ForeignTypeRef;
+use openssl::asn1::Asn1TimeRef;
+use openssl::hash::MessageDigest;
+use openssl::pkey::{HasPublic, PKey, PKeyRef, Private};
+use openssl::x509::{X509, X509NameRef};
 
 use super::{word, words};
-use crate::errno::{EACCES, EINVAL, EKEYREJECTED, ENODEV, ENOENT, ENOKEY, ESTALE};
+use crate::errno::{EACCES, EINVAL, EIO, EKEYREJECTED, ENODEV, ENOENT, ENOKEY, ESTALE};
 use crate::ffi;
 use crate::heap::{libc_free, xfree};
 use crate::sys::identity::Identity;
 use crate::sys::libc::{
-    Dirent, O_CLOEXEC, O_RDONLY, PATH_MAX, Tm, alphasort, close, errno, fwrite, open, scandir,
-    stdout, strerror, strftime,
+    Dirent, O_CLOEXEC, O_RDONLY, PATH_MAX, alphasort, errno, fwrite, open, scandir, stdout,
+    strerror,
 };
-use crate::sys::openssl::{
-    ASN1_TIME_to_tm, Asn1Time, BIO_free, BIO_new_fd, Bio, CRYPTO_free, EVP_Digest, EVP_PKEY_free,
-    EVP_PKEY_get_base_id, EVP_PKEY_get_bits, EVP_PKEY_get0_type_name, EVP_sha256, EvpPkey,
-    PEM_read_bio_PrivateKey, X509, X509_NAME_cmp, X509_NAME_oneline, X509_digest, X509_free,
-    X509_get_issuer_name, X509_get_subject_name, X509_get0_notBefore, X509_get0_pubkey, X509Name,
-    d2i_X509_bio, i2d_PUBKEY,
-};
+use crate::sys::openssl::{EVP_PKEY_get_base_id, X509_NAME_oneline};
 use crate::text::cstr;
 use crate::util::chain::{chain_extend, chain_key_event};
 use crate::util::crypto_openssl::{
-    Cert, cert_free, cert_key_algorithm, cert_read_der, cms_signed_by, openssl_complain,
+    Cert, cert_free, cert_key_algorithm, cert_read_der, cms_signed_by, complain_stack,
+    key_type_name, openssl_complain, sha256, utc, x509_from_der_bio,
 };
 use crate::util::eventlog::{
     eventlog_append, eventlog_lock, eventlog_record_open, eventlog_unlock,
@@ -133,33 +137,16 @@ fn line(label: &[u8], value: &[u8]) {
     print(&[b"  ", &padded(label, 22)[..], b" ", value, b"\n"].concat());
 }
 
-/// A certificate OpenSSL read, freed when it goes.
-struct OwnedX509(*mut X509);
-
-impl Drop for OwnedX509 {
-    fn drop(&mut self) {
-        // SAFETY: the certificate OpenSSL gave.
-        unsafe { X509_free(self.0) };
-    }
-}
-
-/// An EVP_PKEY, freed when it goes.
-struct PKey(*mut EvpPkey);
-
-impl Drop for PKey {
-    fn drop(&mut self) {
-        // SAFETY: the key OpenSSL gave.
-        unsafe { EVP_PKEY_free(self.0) };
-    }
-}
-
 fn complain(what: &CStr) {
     // SAFETY: a C string.
     unsafe { openssl_complain(what.as_ptr()) };
 }
 
-/// An fd's BIO, which closes the fd with it.
-fn bio_of(path: &CStr, trusted: bool) -> Option<*mut Bio> {
+/// The bytes of the file at `path`, checked first when `trusted`; none,
+/// logged, when it cannot be opened or read. They are read unbuffered,
+/// and the allocator scrubs them when they go, so that a key read this
+/// way leaves no copy behind.
+fn read_file(path: &CStr, trusted: bool) -> Option<Vec<u8>> {
     // SAFETY: a C string.
     let fd = unsafe { open(path.as_ptr(), O_RDONLY | O_CLOEXEC) };
 
@@ -167,149 +154,96 @@ fn bio_of(path: &CStr, trusted: bool) -> Option<*mut Bio> {
         error(&[b"open ", path.to_bytes(), b": ", strerr(errno())]);
         return None;
     }
+    // SAFETY: the fd open() gave, owned from here.
+    let file = File::from(unsafe { OwnedFd::from_raw_fd(fd) });
     // SAFETY: the fd and a C string.
-    if trusted && unsafe { check_trusted(fd, path.as_ptr(), false) } != 0 {
-        // SAFETY: the fd opened above.
-        unsafe { close(fd) };
+    if trusted && unsafe { check_trusted(file.as_raw_fd(), path.as_ptr(), false) } != 0 {
         return None;
     }
-    // SAFETY: the fd, which the BIO closes once it holds it.
-    let bio = unsafe { BIO_new_fd(fd, 1) };
-    if bio.is_null() {
-        // SAFETY: the fd opened above.
-        unsafe { close(fd) };
-        complain(c"BIO_new_fd");
+    let mut text = Vec::new();
+    if let Err(e) = (&file).read_to_end(&mut text) {
+        error(&[
+            b"read ",
+            path.to_bytes(),
+            b": ",
+            strerr(e.raw_os_error().unwrap_or(EIO)),
+        ]);
         return None;
     }
-    Some(bio)
+    Some(text)
 }
 
-fn read_cert_der(path: &CStr) -> Option<OwnedX509> {
-    let bio = bio_of(path, true)?;
-    // SAFETY: the BIO, freed after.
-    let c = unsafe { d2i_X509_bio(bio, ptr::null_mut()) };
+fn read_cert_der(path: &CStr) -> Option<X509> {
+    let der = read_file(path, true)?;
 
-    // SAFETY: the BIO made above.
-    unsafe { BIO_free(bio) };
-    if c.is_null() {
-        complain(c"d2i_X509_bio");
-        return None;
-    }
-    Some(OwnedX509(c))
+    x509_from_der_bio(&der)
+        .map_err(|e| complain_stack(c"d2i_X509_bio", &e))
+        .ok()
 }
 
-/// The private key PEM at `path`, read unbuffered, where a FILE would
-/// keep the key in memory freed unscrubbed.
-fn read_priv_pem(path: &CStr) -> Option<PKey> {
-    let bio = bio_of(path, false)?;
-    // SAFETY: the BIO, freed after.
-    let k = unsafe { PEM_read_bio_PrivateKey(bio, ptr::null_mut(), None, ptr::null_mut()) };
+/// The private key PEM at `path`.
+fn read_priv_pem(path: &CStr) -> Option<PKey<Private>> {
+    let pem = read_file(path, false)?;
 
-    // SAFETY: the BIO made above.
-    unsafe { BIO_free(bio) };
-    if k.is_null() {
-        complain(c"PEM_read_bio_PrivateKey");
-        return None;
-    }
-    Some(PKey(k))
+    PKey::private_key_from_pem(&pem)
+        .map_err(|e| complain_stack(c"PEM_read_bio_PrivateKey", &e))
+        .ok()
 }
 
-fn name_text(name: *const X509Name) -> Vec<u8> {
+fn name_text(name: &X509NameRef) -> Vec<u8> {
     let mut buf = [0u8; 256];
 
     // SAFETY: a name and the room for its line.
-    if unsafe { X509_NAME_oneline(name, buf.as_mut_ptr().cast(), buf.len() as c_int) }.is_null() {
+    let line =
+        unsafe { X509_NAME_oneline(name.as_ptr(), buf.as_mut_ptr().cast(), buf.len() as c_int) };
+    if line.is_null() {
         return b"(parse error)".to_vec();
     }
     cstr(&buf).to_vec()
 }
 
-fn time_text(t: *const Asn1Time) -> Vec<u8> {
-    // SAFETY: an all-zero tm is a valid one to fill.
-    let mut tm: Tm = unsafe { core::mem::zeroed() };
-    let mut buf = [0u8; 32];
-
-    // SAFETY: the time and a tm to fill.
-    if unsafe { ASN1_TIME_to_tm(t, &mut tm) } == 0 {
-        return b"(unparseable)".to_vec();
-    }
-    // SAFETY: the room, a format and the tm.
-    let n = unsafe {
-        strftime(
-            buf.as_mut_ptr().cast(),
-            buf.len(),
-            c"%Y-%m-%dT%H:%M:%SZ".as_ptr(),
-            &tm,
+/// The time as strftime()'s "%Y-%m-%dT%H:%M:%SZ" writes it.
+fn time_text(t: &Asn1TimeRef) -> Vec<u8> {
+    match utc(t) {
+        None => b"(unparseable)".to_vec(),
+        Some(t) => format!(
+            "{}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+            t.year, t.month, t.day, t.hour, t.minute, t.second
         )
-    };
-    if n == 0 {
-        return b"(format error)".to_vec();
+        .into_bytes(),
     }
-    buf[..n].to_vec()
 }
 
-fn cert_fpr(c: &OwnedX509) -> Option<[u8; 32]> {
-    let mut fpr = [0; 32];
-    let mut n: u32 = 32;
+fn cert_fpr(c: &X509) -> Option<[u8; 32]> {
+    let fpr = c
+        .digest(MessageDigest::sha256())
+        .map_err(|e| complain_stack(c"X509_digest", &e))
+        .ok()?;
 
-    // SAFETY: the certificate, a digest and room for it.
-    if unsafe { X509_digest(c.0, EVP_sha256(), fpr.as_mut_ptr(), &mut n) } != 1 {
-        complain(c"X509_digest");
-        return None;
-    }
-    Some(fpr)
+    (*fpr).try_into().ok()
 }
 
 /// SHA-256 over the SPKI, comparable across a certificate and its key.
-fn spki_fpr(pkey: *const EvpPkey) -> Option<[u8; 32]> {
-    let mut der: *mut u8 = ptr::null_mut();
-    let mut fpr = [0; 32];
-    let mut n: u32 = 32;
+fn spki_fpr<T: HasPublic>(pkey: &PKeyRef<T>) -> Option<[u8; 32]> {
+    let der = pkey
+        .public_key_to_der()
+        .map_err(|e| complain_stack(c"i2d_PUBKEY", &e))
+        .ok()?;
 
-    // SAFETY: the key, and room for the DER OpenSSL allocates.
-    let len = unsafe { i2d_PUBKEY(pkey, &mut der) };
-    if len <= 0 {
-        complain(c"i2d_PUBKEY");
-        return None;
-    }
-    // SAFETY: the DER's bytes and room for the digest.
-    let ok = unsafe {
-        EVP_Digest(
-            der.cast(),
-            len as usize,
-            fpr.as_mut_ptr(),
-            &mut n,
-            EVP_sha256(),
-            ptr::null_mut(),
-        )
-    } == 1;
-    if !ok {
-        complain(c"EVP_Digest");
-    }
-    // SAFETY: the DER OpenSSL allocated.
-    unsafe { CRYPTO_free(der.cast(), c"".as_ptr(), 0) };
-    ok.then_some(fpr)
+    sha256(&der).map_err(|_| complain(c"EVP_Digest")).ok()
 }
 
 /// "RSA-2048" or "EC-256" for the classical families, else the
 /// provider's own name, "ML-DSA-87", whose parameter set says what a bit
 /// count would.
-fn pkey_algorithm(pkey: *const EvpPkey) -> Vec<u8> {
+fn pkey_algorithm<T: HasPublic>(pkey: &PKeyRef<T>) -> Vec<u8> {
+    let name = key_type_name(pkey);
+    let name = name.as_deref().map_or(&b"unknown"[..], CStr::to_bytes);
     // SAFETY: the key.
-    let name = unsafe { EVP_PKEY_get0_type_name(pkey) };
-    let name = if name.is_null() {
-        &b"unknown"[..]
-    } else {
-        // SAFETY: OpenSSL's C string.
-        unsafe { ffi::c_str(name) }
-    };
-    // SAFETY: the key.
-    let id = unsafe { EVP_PKEY_get_base_id(pkey) };
+    let id = unsafe { EVP_PKEY_get_base_id(pkey.as_ptr()) };
 
     if id == EVP_PKEY_RSA || id == EVP_PKEY_EC {
-        // SAFETY: the key.
-        let bits = unsafe { EVP_PKEY_get_bits(pkey) };
-        return [name, b"-", bits.to_string().as_bytes()].concat();
+        return [name, b"-", pkey.bits().to_string().as_bytes()].concat();
     }
     name[..name.len().min(63)].to_vec()
 }
@@ -321,19 +255,15 @@ fn print_fpr(label: &[u8], fpr: &[u8; 32]) {
 /// Where the material goes: text to stdout, or the JSON being built.
 type Out<'a> = Option<&'a mut JsonEmit>;
 
-fn dump_cert(out: &mut Out, cert: &OwnedX509, path: &CStr, spki: &[u8; 32]) {
-    // SAFETY: the certificate's own names, time and key.
-    let (subj, iss, nb, pubkey) = unsafe {
-        (
-            X509_get_subject_name(cert.0),
-            X509_get_issuer_name(cert.0),
-            X509_get0_notBefore(cert.0),
-            X509_get0_pubkey(cert.0),
-        )
-    };
-    let (subj_s, iss_s, nb_s) = (name_text(subj), name_text(iss), time_text(nb));
-    // SAFETY: two names.
-    let self_signed = unsafe { X509_NAME_cmp(subj, iss) } == 0;
+fn dump_cert(out: &mut Out, cert: &X509, path: &CStr, spki: &[u8; 32]) {
+    let (subj, iss) = (cert.subject_name(), cert.issuer_name());
+    let pubkey = cert.public_key().ok();
+    let (subj_s, iss_s, nb_s) = (
+        name_text(subj),
+        name_text(iss),
+        time_text(cert.not_before()),
+    );
+    let self_signed = subj.try_cmp(iss).is_ok_and(|o| o.is_eq());
 
     if let Some(e) = out {
         e.obj_open_key(b"cert");
@@ -341,10 +271,9 @@ fn dump_cert(out: &mut Out, cert: &OwnedX509, path: &CStr, spki: &[u8; 32]) {
         e.kv_string(b"subject", &subj_s);
         e.kv_string(b"issuer", &iss_s);
         e.kv_bool(b"self_signed", self_signed);
-        if pubkey.is_null() {
-            e.kv_null(b"algorithm");
-        } else {
-            e.kv_string(b"algorithm", &pkey_algorithm(pubkey));
+        match &pubkey {
+            None => e.kv_null(b"algorithm"),
+            Some(k) => e.kv_string(b"algorithm", &pkey_algorithm(k)),
         }
         match cert_fpr(cert) {
             Some(fpr) => e.kv_string(b"fingerprint", &hex(&fpr)),
@@ -365,8 +294,8 @@ fn dump_cert(out: &mut Out, cert: &OwnedX509, path: &CStr, spki: &[u8; 32]) {
         ]
         .concat(),
     );
-    if !pubkey.is_null() {
-        line(b"Public key:", &pkey_algorithm(pubkey));
+    if let Some(k) = &pubkey {
+        line(b"Public key:", &pkey_algorithm(k));
     }
     if let Some(fpr) = cert_fpr(cert) {
         print_fpr(b"Fingerprint:", &fpr);
@@ -392,7 +321,7 @@ fn dump_signing_key(out: &mut Out, pkey_path: &CStr, spki: &[u8; 32]) -> Result<
         return Ok(());
     }
     let priv_key = read_priv_pem(pkey_path).ok_or(())?;
-    let alg = pkey_algorithm(priv_key.0);
+    let alg = pkey_algorithm(&priv_key);
     match out {
         Some(e) => {
             e.obj_open_key(b"signing_key");
@@ -406,7 +335,7 @@ fn dump_signing_key(out: &mut Out, pkey_path: &CStr, spki: &[u8; 32]) -> Result<
             line(b"Algorithm:", &alg);
         }
     }
-    let ret = match spki_fpr(priv_key.0) {
+    let ret = match spki_fpr(&priv_key) {
         None => Err(()),
         Some(fpr) => {
             let matches = fpr == *spki;
@@ -447,12 +376,10 @@ fn dump_disk_material(out: &mut Out, cert_path: &CStr, pkey_path: &CStr) -> c_in
     let Some(cert) = read_cert_der(cert_path) else {
         return 1;
     };
-    // SAFETY: the certificate's own key.
-    let pubkey = unsafe { X509_get0_pubkey(cert.0) };
-    if pubkey.is_null() {
+    let Ok(pubkey) = cert.public_key() else {
         return 1;
-    }
-    let Some(spki) = spki_fpr(pubkey) else {
+    };
+    let Some(spki) = spki_fpr(&pubkey) else {
         return 1;
     };
     dump_cert(out, &cert, cert_path, &spki);

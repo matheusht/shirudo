@@ -6,34 +6,36 @@
 
 use core::ffi::{CStr, c_char, c_int};
 use core::ptr;
+use std::ffi::CString;
+use std::fs::File;
+use std::io::Write;
+use std::os::fd::{FromRawFd, OwnedFd};
+
+use foreign_types::ForeignType;
+use openssl::asn1::{Asn1Integer, Asn1Time};
+use openssl::bn::BigNum;
+use openssl::error::ErrorStack;
+use openssl::hash::MessageDigest;
+use openssl::nid::Nid;
+use openssl::pkey::{PKey, PKeyRef, Private};
+use openssl::x509::{X509, X509Extension, X509NameBuilder, X509Ref};
 
 use super::word;
-use crate::errno::{EINVAL, ENAMETOOLONG, ENOENT, EPERM};
+use crate::errno::{EINVAL, EIO, ENAMETOOLONG, ENOENT, EPERM};
 use crate::ffi::{self, c_splice};
 use crate::sys::libc::{
     O_CLOEXEC, O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_RDONLY, O_WRONLY, PATH_MAX, Statx,
-    close, errno, fchmod, fprintf, fsync, geteuid, link, open, openat, rename, stderr, strerror,
-    unlink,
+    close, errno, fchmod, fprintf, geteuid, link, open, openat, rename, stderr, strerror, unlink,
 };
-use crate::sys::openssl::{
-    ASN1_INTEGER_set, ASN1_TIME_set_string_X509, BIO_NOCLOSE, BIO_free, BIO_new_fd,
-    EVP_PKEY_Q_keygen, EVP_PKEY_free, EvpPkey, MBSTRING_UTF8, NID_AUTHORITY_KEY_IDENTIFIER,
-    NID_BASIC_CONSTRAINTS, NID_KEY_USAGE, NID_SUBJECT_KEY_IDENTIFIER, OPENSSL_VERSION,
-    OPENSSL_version_major, OPENSSL_version_minor, OpenSSL_version, PEM_write_bio_PrivateKey, X509,
-    X509_EXTENSION_free, X509_NAME_add_entry_by_txt, X509_NAME_free, X509_NAME_new, X509_add_ext,
-    X509_free, X509_get_serialNumber, X509_getm_notAfter, X509_getm_notBefore, X509_gmtime_adj,
-    X509_new, X509_set_issuer_name, X509_set_pubkey, X509_set_subject_name, X509_set_version,
-    X509_sign, X509V3_EXT_conf_nid, X509V3_set_ctx, X509v3Ctx, i2d_X509_bio,
-};
-use crate::util::crypto_openssl::openssl_complain;
+use crate::util::crypto_openssl::{complain_stack, openssl_complain};
 use crate::util::help::{Help, HelpItem, HelpSection, is_help, print_help};
 use crate::util::identity;
 use crate::util::io::stat_fd;
 use crate::util::paths::{key_paths, keys_dir_resolve, path_exists};
 use crate::util::seal::seal_mkdir_p;
 
-const CERT_CN: &CStr = c"shirudo";
-const CERT_NO_EXPIRY: &CStr = c"99991231235959Z";
+const CERT_CN: &str = "shirudo";
+const CERT_NO_EXPIRY: &str = "99991231235959Z";
 
 /// ML-DSA-87 (FIPS 204, NIST category 5) is the only key type: the
 /// kernel verifies it natively (CONFIG_CRYPTO_MLDSA) and the largest
@@ -172,183 +174,111 @@ fn check_user_keys_dir(keys_dir: &[u8]) -> c_int {
     ret
 }
 
-fn gen_keypair() -> *mut EvpPkey {
+/// A new ML-DSA-87 key; none, logged, when libcrypto cannot make one.
+fn gen_keypair() -> Option<PKey<Private>> {
     // SAFETY: no library context, no properties, and an algorithm.
-    let k = unsafe { EVP_PKEY_Q_keygen(ptr::null_mut(), ptr::null(), GENKEY_ALG.as_ptr()) };
-
-    if k.is_null() {
-        // SAFETY: a C string; calls that take nothing; the C's format,
-        // the algorithm and OpenSSL's version.
-        unsafe {
-            openssl_complain(c"EVP_PKEY_Q_keygen".as_ptr());
-            if OPENSSL_version_major() < 3
-                || (OPENSSL_version_major() == 3 && OPENSSL_version_minor() < 5)
-            {
-                crate::log::log_c!(
-                    crate::log::err,
-                    c"genkey: %s needs OpenSSL 3.5 or newer (running %s); upgrade libcrypto"
-                        .as_ptr(),
-                    GENKEY_ALG.as_ptr(),
-                    OpenSSL_version(OPENSSL_VERSION),
-                );
-            }
-        }
-    }
-    k
-}
-
-/// OpenSSL 4.0 returns the certificate's own names const, so build the
-/// name apart and set it as both, which copies it.
-///
-/// # Safety
-///
-/// `c` is a certificate.
-unsafe fn set_subject_and_issuer(c: *mut X509) -> c_int {
-    // SAFETY: a call that takes nothing.
-    let name = unsafe { X509_NAME_new() };
-    let mut ret = -1;
-
-    // SAFETY: C strings, the name X509_NAME_new() gave, freed once, and
-    // the caller's certificate.
-    unsafe {
-        if name.is_null() {
-            openssl_complain(c"X509_NAME_new".as_ptr());
-            return -1;
-        }
-        if X509_NAME_add_entry_by_txt(
-            name,
-            c"CN".as_ptr(),
-            MBSTRING_UTF8,
-            CERT_CN.as_ptr().cast(),
-            -1,
-            -1,
-            0,
-        ) != 1
-        {
-            openssl_complain(c"X509_NAME_add_entry_by_txt".as_ptr());
-        } else if X509_set_subject_name(c, name) != 1 {
-            openssl_complain(c"X509_set_subject_name".as_ptr());
-        } else if X509_set_issuer_name(c, name) != 1 {
-            openssl_complain(c"X509_set_issuer_name".as_ptr());
-        } else {
-            ret = 0;
-        }
-        X509_NAME_free(name);
-    }
-    ret
-}
-
-/// # Safety
-///
-/// `c` is a certificate, and `value` a C string.
-unsafe fn add_ext(c: *mut X509, nid: c_int, value: *const c_char) -> c_int {
-    let mut ctx = X509v3Ctx::zeroed();
-
-    // X509V3_set_ctx_nodb(), a macro.
-    ctx.db = ptr::null_mut();
-    // SAFETY: the context, the caller's certificate as issuer and
-    // subject, no request or list, no flags.
-    unsafe { X509V3_set_ctx(&mut ctx, c, c, ptr::null_mut(), ptr::null_mut(), 0) };
-    // SAFETY: no configuration, the context, and the caller's NID and
-    // value.
-    let ex = unsafe { X509V3_EXT_conf_nid(ptr::null_mut(), &mut ctx, nid, value) };
-    if ex.is_null() {
-        // SAFETY: a C string.
-        unsafe { openssl_complain(c"X509V3_EXT_conf_nid".as_ptr()) };
-        return -1;
-    }
-    // SAFETY: the certificate, the extension it copies, freed once, and
-    // an index for the end.
-    let ret = unsafe {
-        let ret = X509_add_ext(c, ex, -1);
-
-        X509_EXTENSION_free(ex);
-        ret
+    let k = unsafe {
+        openssl_sys::EVP_PKEY_Q_keygen(ptr::null_mut(), ptr::null(), GENKEY_ALG.as_ptr())
     };
-    if ret != 1 {
-        // SAFETY: a C string.
-        unsafe { openssl_complain(c"X509_add_ext".as_ptr()) };
-        return -1;
+
+    if !k.is_null() {
+        // SAFETY: the key EVP_PKEY_Q_keygen() made, owned from here.
+        return Some(unsafe { PKey::from_ptr(k) });
     }
-    0
+    // SAFETY: a C string.
+    unsafe { openssl_complain(c"EVP_PKEY_Q_keygen".as_ptr()) };
+    let version = openssl::version::number();
+    let (major, minor) = (version >> 28, (version >> 20) & 0xff);
+    if major < 3 || (major == 3 && minor < 5) {
+        let running = CString::new(openssl::version::version()).unwrap_or_default();
+        // SAFETY: the C's format, the algorithm and OpenSSL's version.
+        unsafe {
+            crate::log::log_c!(
+                crate::log::err,
+                c"genkey: %s needs OpenSSL 3.5 or newer (running %s); upgrade libcrypto".as_ptr(),
+                GENKEY_ALG.as_ptr(),
+                running.as_ptr(),
+            );
+        }
+    }
+    None
 }
 
-/// # Safety
+/// The certificate of `pkey`, self-signed: X.509 v3, serial 1, the name
+/// CN=shirudo as subject and issuer, an end entity's extensions.
 ///
-/// `c` is a certificate.
-unsafe fn build_serial(c: *mut X509) -> c_int {
-    // SAFETY: the certificate's own serial number.
-    if unsafe { ASN1_INTEGER_set(X509_get_serialNumber(c), 1) } != 1 {
-        // SAFETY: a C string.
-        unsafe { openssl_complain(c"ASN1_INTEGER_set".as_ptr()) };
-        return -1;
-    }
-    0
-}
-
 /// Neither shirudo nor the kernel compares a certificate's validity with
 /// the clock; a key is retired by revoking it. notAfter therefore holds
 /// the value RFC 5280 4.1.2.5 gives a certificate with no well-defined
 /// expiration, not a date that reads as the end of the key's trust.
 ///
-/// # Safety
-///
-/// `c` is a certificate.
-unsafe fn build_validity(c: *mut X509) -> c_int {
-    // SAFETY: the certificate's own times, and C strings.
-    unsafe {
-        if X509_gmtime_adj(X509_getm_notBefore(c), 0).is_null() {
-            openssl_complain(c"X509_gmtime_adj notBefore".as_ptr());
-            return -1;
-        }
-        if ASN1_TIME_set_string_X509(X509_getm_notAfter(c), CERT_NO_EXPIRY.as_ptr()) != 1 {
-            openssl_complain(c"ASN1_TIME_set_string_X509 notAfter".as_ptr());
-            return -1;
-        }
-    }
-    0
-}
-
 /// ML-DSA hashes the message internally; OpenSSL requires a NULL digest.
-///
-/// # Safety
-///
-/// `c` is a certificate, and `pkey` a key.
-unsafe fn build_cert(c: *mut X509, pkey: *mut EvpPkey) -> c_int {
-    // SAFETY: the caller's certificate and key, and C strings.
-    unsafe {
-        // X.509 v3.
-        if X509_set_version(c, 2) != 1 {
-            openssl_complain(c"X509_set_version".as_ptr());
-            return -1;
-        }
-        if build_serial(c) != 0 || build_validity(c) != 0 {
-            return -1;
-        }
-        if X509_set_pubkey(c, pkey) != 1 {
-            openssl_complain(c"X509_set_pubkey".as_ptr());
-            return -1;
-        }
-        if set_subject_and_issuer(c) != 0
-            || add_ext(c, NID_BASIC_CONSTRAINTS, c"critical,CA:FALSE".as_ptr()) != 0
-            || add_ext(c, NID_KEY_USAGE, c"digitalSignature".as_ptr()) != 0
-            || add_ext(c, NID_SUBJECT_KEY_IDENTIFIER, c"hash".as_ptr()) != 0
-            || add_ext(c, NID_AUTHORITY_KEY_IDENTIFIER, c"keyid:always".as_ptr()) != 0
-        {
-            return -1;
-        }
-        if X509_sign(c, pkey, ptr::null()) == 0 {
-            openssl_complain(c"X509_sign".as_ptr());
-            return -1;
-        }
+fn build_cert(pkey: &PKeyRef<Private>) -> Option<X509> {
+    let failed = |what: &'static CStr| move |e: ErrorStack| complain_stack(what, &e);
+    let mut cert = X509::builder().map_err(failed(c"X509_new")).ok()?;
+
+    // X.509 v3.
+    cert.set_version(2)
+        .map_err(failed(c"X509_set_version"))
+        .ok()?;
+    let serial = BigNum::from_u32(1)
+        .and_then(|n| Asn1Integer::from_bn(&n))
+        .and_then(|n| cert.set_serial_number(&n))
+        .map_err(failed(c"ASN1_INTEGER_set"));
+    serial.ok()?;
+    let not_before = Asn1Time::days_from_now(0)
+        .and_then(|t| cert.set_not_before(&t))
+        .map_err(failed(c"X509_gmtime_adj notBefore"));
+    not_before.ok()?;
+    let not_after = Asn1Time::from_str_x509(CERT_NO_EXPIRY)
+        .and_then(|t| cert.set_not_after(&t))
+        .map_err(failed(c"ASN1_TIME_set_string_X509 notAfter"));
+    not_after.ok()?;
+    cert.set_pubkey(pkey)
+        .map_err(failed(c"X509_set_pubkey"))
+        .ok()?;
+    // OpenSSL 4.0 returns the certificate's own names const, so the name
+    // is built apart and set as both, which copies it.
+    let mut name = X509NameBuilder::new()
+        .map_err(failed(c"X509_NAME_new"))
+        .ok()?;
+    name.append_entry_by_text("CN", CERT_CN)
+        .map_err(failed(c"X509_NAME_add_entry_by_txt"))
+        .ok()?;
+    let name = name.build();
+    cert.set_subject_name(&name)
+        .map_err(failed(c"X509_set_subject_name"))
+        .ok()?;
+    cert.set_issuer_name(&name)
+        .map_err(failed(c"X509_set_issuer_name"))
+        .ok()?;
+    for (nid, value) in [
+        (Nid::BASIC_CONSTRAINTS, "critical,CA:FALSE"),
+        (Nid::KEY_USAGE, "digitalSignature"),
+        (Nid::SUBJECT_KEY_IDENTIFIER, "hash"),
+        (Nid::AUTHORITY_KEY_IDENTIFIER, "keyid:always"),
+    ] {
+        // The certificate as issuer and subject, no configuration.
+        let ext = {
+            let ctx = cert.x509v3_context(None, None);
+            #[allow(deprecated)]
+            X509Extension::new_nid(None, Some(&ctx), nid, value)
+        };
+        let ext = ext.map_err(failed(c"X509V3_EXT_conf_nid")).ok()?;
+        cert.append_extension(ext)
+            .map_err(failed(c"X509_add_ext"))
+            .ok()?;
     }
-    0
+    // SAFETY: no digest, which X509_sign() takes as the key's own.
+    let none = unsafe { MessageDigest::from_ptr(ptr::null()) };
+    cert.sign(pkey, none).map_err(failed(c"X509_sign")).ok()?;
+    Some(cert.build())
 }
 
-/// What writes the key or the certificate into the BIO of a new file.
-enum Payload {
-    Key(*mut EvpPkey),
-    Cert(*mut X509),
+/// What goes into a new file: the key or the certificate.
+enum Payload<'a> {
+    Key(&'a PKeyRef<Private>),
+    Cert(&'a X509Ref),
 }
 
 /// `payload` into a new file at `path`, mode 0600, synced; the file goes
@@ -356,11 +286,8 @@ enum Payload {
 ///
 /// # Safety
 ///
-/// `path` is a C string, and the payload's key or certificate valid.
+/// `path` is a C string.
 unsafe fn write_new(payload: Payload, path: *const c_char) -> c_int {
-    let mut ret = -1;
-    let mut b = ptr::null_mut();
-
     // SAFETY: the caller's C string, flags and a mode.
     let fd = unsafe {
         open(
@@ -381,74 +308,47 @@ unsafe fn write_new(payload: Payload, path: *const c_char) -> c_int {
         };
         return -1;
     }
-    // SAFETY: the fd open() gave, closed once at the end; the BIO on it,
-    // freed once; the caller's key or certificate; C strings.
-    unsafe {
-        'out: {
-            if fchmod(fd, 0o600) != 0 {
-                crate::log::log_c!(
-                    crate::log::err,
-                    c"fchmod %s: %s".as_ptr(),
-                    path,
-                    strerror(errno())
-                );
-                break 'out;
-            }
-            // Unbuffered, where a FILE would keep the key in memory freed
-            // unscrubbed.
-            b = BIO_new_fd(fd, BIO_NOCLOSE);
-            if b.is_null() {
-                openssl_complain(c"BIO_new_fd".as_ptr());
-                break 'out;
-            }
-            match payload {
-                Payload::Key(pkey) => {
-                    if PEM_write_bio_PrivateKey(
-                        b,
-                        pkey,
-                        ptr::null(),
-                        ptr::null(),
-                        0,
-                        None,
-                        ptr::null_mut(),
-                    ) != 1
-                    {
-                        openssl_complain(c"PEM_write_bio_PrivateKey".as_ptr());
-                        break 'out;
-                    }
-                    if fsync(fd) != 0 {
-                        crate::log::log_c!(
-                            crate::log::err,
-                            c"flush %s: %s".as_ptr(),
-                            path,
-                            strerror(errno())
-                        );
-                        break 'out;
-                    }
-                }
-                Payload::Cert(c) => {
-                    if i2d_X509_bio(b, c) != 1 {
-                        openssl_complain(c"i2d_X509_bio".as_ptr());
-                        break 'out;
-                    }
-                    if fsync(fd) != 0 {
-                        crate::log::log_c!(
-                            crate::log::err,
-                            c"fsync %s: %s".as_ptr(),
-                            path,
-                            strerror(errno())
-                        );
-                        break 'out;
-                    }
-                }
-            }
-            ret = 0;
+    // SAFETY: the fd open() gave, owned from here and closed with it.
+    let file = File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+    let fail = |format: &CStr, err: c_int| {
+        // SAFETY: the C's format, the path and the error's text.
+        unsafe { crate::log::log_c!(crate::log::err, format.as_ptr(), path, strerror(err)) };
+        -1
+    };
+    let ret = 'out: {
+        // SAFETY: the fd and a mode.
+        if unsafe { fchmod(fd, 0o600) } != 0 {
+            break 'out fail(c"fchmod %s: %s", errno());
         }
-        BIO_free(b);
-        close(fd);
-        if ret != 0 {
-            unlink(path);
+        // Written unbuffered, and the allocator scrubs the key's text when
+        // it goes, so no copy stays behind.
+        let (text, what, sync) = match payload {
+            Payload::Key(k) => (
+                k.private_key_to_pem_pkcs8(),
+                c"PEM_write_bio_PrivateKey",
+                c"flush %s: %s",
+            ),
+            Payload::Cert(c) => (c.to_der(), c"i2d_X509_bio", c"fsync %s: %s"),
+        };
+        let text = match text {
+            Ok(text) => text,
+            Err(e) => {
+                complain_stack(what, &e);
+                break 'out -1;
+            }
+        };
+        if let Err(e) = (&file).write_all(&text) {
+            break 'out fail(c"write %s: %s", e.raw_os_error().unwrap_or(EIO));
         }
+        if let Err(e) = file.sync_all() {
+            break 'out fail(sync, e.raw_os_error().unwrap_or(EIO));
+        }
+        0
+    };
+    drop(file);
+    if ret != 0 {
+        // SAFETY: the caller's C string.
+        unsafe { unlink(path) };
     }
     ret
 }
@@ -578,8 +478,8 @@ fn print_genkey_help() {
 ///
 /// The key and certificate are valid, and the paths C strings.
 unsafe fn write_pair(
-    pkey: *mut EvpPkey,
-    cert: *mut X509,
+    pkey: &PKeyRef<Private>,
+    cert: &X509Ref,
     pkey_path: *const c_char,
     cert_path: *const c_char,
     force: bool,
@@ -765,22 +665,16 @@ unsafe fn genkey(args: &[*const c_char]) -> c_int {
     }
 
     let mut ret = 1;
-    let pkey = gen_keypair();
-    let mut cert = ptr::null_mut();
-    // SAFETY: the key gen_keypair() gave and the certificate X509_new()
-    // gave, each freed once at the end; the paths; C strings and the C's
-    // formats.
+    // SAFETY: the paths, C strings and the C's formats.
     unsafe {
         'out: {
-            if pkey.is_null() {
+            let Some(pkey) = gen_keypair() else {
                 break 'out;
-            }
-            cert = X509_new();
-            if cert.is_null() {
-                openssl_complain(c"X509_new".as_ptr());
+            };
+            let Some(cert) = build_cert(&pkey) else {
                 break 'out;
-            }
-            if build_cert(cert, pkey) != 0 || write_pair(pkey, cert, pp, cp, force) != 0 {
+            };
+            if write_pair(&pkey, &cert, pp, cp, force) != 0 {
                 break 'out;
             }
             crate::log::log_c!(
@@ -802,8 +696,6 @@ unsafe fn genkey(args: &[*const c_char]) -> c_int {
             );
             ret = 0;
         }
-        X509_free(cert);
-        EVP_PKEY_free(pkey);
     }
     ret
 }

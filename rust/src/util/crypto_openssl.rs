@@ -7,13 +7,44 @@
 //! target trusts. Every key algorithm the kernel verifies comes from one
 //! implementation.
 
-use core::ffi::{CStr, c_char, c_int, c_long, c_uint, c_ulong, c_void};
+use core::ffi::{CStr, c_char, c_int, c_long, c_void};
+use core::mem::ManuallyDrop;
+use core::ptr;
+use std::ffi::CString;
+use std::fs::File;
+use std::io::Read;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+use foreign_types::{ForeignType, ForeignTypeRef};
+use openssl::asn1::{Asn1Time, Asn1TimeRef};
+use openssl::base64;
+use openssl::bn::{BigNum, BigNumContext, BigNumRef};
+use openssl::cipher::Cipher;
+use openssl::cipher_ctx::CipherCtx;
+use openssl::cms::{CMSOptions, CmsContentInfo};
+use openssl::derive::Deriver;
+use openssl::ec::{EcGroup, EcKey};
+use openssl::ecdsa::EcdsaSig;
+use openssl::error::ErrorStack;
+use openssl::hash::{Hasher, MessageDigest, hash};
+use openssl::md::Md;
+use openssl::nid::Nid;
+use openssl::pkey::{PKey, PKeyRef, Public};
+use openssl::pkey_ctx::PkeyCtx;
+use openssl::rsa::{Padding, Rsa};
+use openssl::sign::Signer;
+use openssl::stack::Stack;
+use openssl::x509::store::X509StoreBuilder;
+use openssl::x509::verify::X509VerifyFlags;
+use openssl::x509::{X509, X509Ref, X509StoreContext};
+use openssl_sys as ffi;
 
 use crate::errno::{EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOMEM, ENOPKG, EPROTONOSUPPORT};
-use crate::heap::{xfree, xmalloc};
-use crate::sys::libc::{O_CLOEXEC, O_RDONLY, Tm, close, errno, open, strftime};
-use crate::sys::openssl::*;
-use crate::text::{cstr, strscpy};
+use crate::ffi::slice;
+use crate::heap::xfree;
+use crate::sys::libc::{O_CLOEXEC, O_RDONLY, errno, open};
+use crate::sys::openssl as more;
+use crate::text::strscpy;
 use crate::util::io::{check_trusted, read_fd};
 
 pub(crate) const SHA256_LEN: usize = 32;
@@ -24,34 +55,46 @@ const KEYS_DER_MAX: usize = 1024 * 1024;
 /// `struct cert`: an X.509 certificate, NULL before one is read.
 #[repr(C)]
 pub struct Cert {
-    imp: *mut X509,
+    imp: *mut ffi::X509,
 }
 
 impl Cert {
     pub(crate) const fn new() -> Self {
         Cert {
-            imp: core::ptr::null_mut(),
+            imp: ptr::null_mut(),
         }
     }
 
-    /// The cert of an OpenSSL `X509`, which the caller keeps and frees.
-    pub(crate) const fn of_x509(x509: *mut c_void) -> Self {
-        Cert { imp: x509.cast() }
+    /// The certificate the cert holds, from here.
+    fn hold(&mut self, x509: X509) {
+        self.imp = ManuallyDrop::new(x509).as_ptr();
     }
+}
+
+/// The certificate a cert holds, or none.
+///
+/// # Safety
+///
+/// `cert` is NULL or points to a cert, which outlives what this gives.
+unsafe fn x509_of<'a>(cert: *const Cert) -> Option<&'a X509Ref> {
+    // SAFETY: the caller passes NULL or a cert, whose certificate is NULL
+    // or one it holds.
+    unsafe { cert.as_ref() }
+        .filter(|c| !c.imp.is_null())
+        // SAFETY: the certificate the cert holds, as long as the cert.
+        .map(|c| unsafe { X509Ref::from_ptr(c.imp) })
 }
 
 /// `struct sha256_ctx`: a digest under way, which sha256_final() or
 /// sha256_free() releases.
 #[repr(C)]
 pub struct Sha256Ctx {
-    imp: *mut EvpMdCtx,
+    imp: Option<Box<Hasher>>,
 }
 
 impl Sha256Ctx {
     pub(crate) const fn new() -> Self {
-        Sha256Ctx {
-            imp: core::ptr::null_mut(),
-        }
+        Sha256Ctx { imp: None }
     }
 }
 
@@ -67,61 +110,62 @@ pub struct CertPubkey {
 }
 
 const _: () = assert!(size_of::<CertPubkey>() == 600);
+const _: () = assert!(size_of::<Sha256Ctx>() == size_of::<*mut c_void>());
 
-/// OPENSSL_free().
-///
-/// # Safety
-///
-/// `p` is NULL or from OpenSSL's allocator.
-unsafe fn openssl_free(p: *mut c_void) {
-    // SAFETY: the caller passes such a pointer.
-    unsafe { CRYPTO_free(p, c"".as_ptr(), 0) };
+/// Drops what libcrypto queued for this thread, the ERR_clear_error()
+/// of the calls the crate does not make itself.
+fn clear_errors() {
+    drop(ErrorStack::get());
+}
+
+/// The certificate DER `der` begins with, read as d2i_X509_bio() reads
+/// a file: one object, as long as its header says, and libcrypto's
+/// reasons when it is not one.
+pub(crate) fn x509_from_der_bio(der: &[u8]) -> Result<X509, ErrorStack> {
+    let len = c_int::try_from(der.len()).map_err(|_| ErrorStack::get())?;
+    // SAFETY: the bytes, which the BIO reads in place and outlive it,
+    // freed once; the certificate d2i makes, owned from here.
+    unsafe {
+        let bio = ffi::BIO_new_mem_buf(der.as_ptr().cast(), len);
+        if bio.is_null() {
+            return Err(ErrorStack::get());
+        }
+        let x509 = ffi::d2i_X509_bio(bio, ptr::null_mut());
+        ffi::BIO_free_all(bio);
+        if x509.is_null() {
+            return Err(ErrorStack::get());
+        }
+        Ok(X509::from_ptr(x509))
+    }
 }
 
 /// The certificate at `path`, PEM or DER, from a file only root may
-/// write: 0, -EINVAL for one that does not parse, or -errno.
-fn read_x509(path: *const c_char, out: &mut *mut X509) -> c_int {
-    *out = core::ptr::null_mut();
+/// write: -EINVAL for one that does not parse, or -errno.
+fn read_x509(path: *const c_char) -> Result<X509, c_int> {
     // SAFETY: the caller's C string and flags without a mode.
     let fd = unsafe { open(path, O_RDONLY | O_CLOEXEC) };
     if fd < 0 {
-        return -errno();
+        return Err(-errno());
     }
+    // SAFETY: the fd open() gave, owned from here.
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
     // SAFETY: the fd, the caller's path, and not a secret.
-    let ret = unsafe { check_trusted(fd, path, false) };
+    let ret = unsafe { check_trusted(fd.as_raw_fd(), path, false) };
     if ret != 0 {
-        // SAFETY: the fd open() gave, closed once.
-        unsafe { close(fd) };
-        return ret;
+        return Err(ret);
     }
-    // SAFETY: the fd, which the BIO takes over.
-    let bio = unsafe { BIO_new_fd(fd, BIO_CLOSE) };
-    if bio.is_null() {
-        // SAFETY: the fd open() gave, closed once.
-        unsafe { close(fd) };
-        return -ENOMEM;
-    }
-    // SAFETY: the BIO, freed once with its fd.
-    let cert = unsafe {
-        let mut cert = PEM_read_bio_X509(bio, core::ptr::null_mut(), None, core::ptr::null_mut());
+    let mut text = Vec::new();
+    File::from(fd).read_to_end(&mut text).map_err(|_| -EINVAL)?;
+    X509::from_pem(&text)
+        .or_else(|_| x509_from_der_bio(&text))
+        .map_err(|_| -EINVAL)
+}
 
-        if cert.is_null() {
-            ERR_clear_error();
-            // File BIOs report a successful reset as 0, not 1.
-            if BIO_ctrl(bio, BIO_CTRL_RESET, 0, core::ptr::null_mut()) >= 0 {
-                cert = d2i_X509_bio(bio, core::ptr::null_mut());
-            }
-        }
-        BIO_free(bio);
-        cert
-    };
-    if cert.is_null() {
-        // SAFETY: a call that takes no pointer.
-        unsafe { ERR_clear_error() };
-        return -EINVAL;
-    }
-    *out = cert;
-    0
+/// SHA-256 of `data`: -EIO when libcrypto fails.
+pub(crate) fn sha256(data: &[u8]) -> Result<[u8; SHA256_LEN], c_int> {
+    let digest = hash(MessageDigest::sha256(), data).map_err(|_| -EIO)?;
+
+    (*digest).try_into().map_err(|_| -EIO)
 }
 
 /// # Safety
@@ -133,18 +177,14 @@ pub(crate) unsafe fn sha256_init(ctx: *mut Sha256Ctx) -> c_int {
         return -EINVAL;
     };
 
-    ctx.imp = core::ptr::null_mut();
-    // SAFETY: calls that take no pointer, and the new context.
-    unsafe {
-        let md = EVP_MD_CTX_new();
-
-        if md.is_null() || EVP_DigestInit_ex(md, EVP_sha256(), core::ptr::null_mut()) != 1 {
-            EVP_MD_CTX_free(md);
-            return -EIO;
+    ctx.imp = None;
+    match Hasher::new(MessageDigest::sha256()) {
+        Ok(h) => {
+            ctx.imp = Some(Box::new(h));
+            0
         }
-        ctx.imp = md;
+        Err(_) => -EIO,
     }
-    0
 }
 
 /// # Safety
@@ -152,15 +192,15 @@ pub(crate) unsafe fn sha256_init(ctx: *mut Sha256Ctx) -> c_int {
 /// `ctx` is NULL or points to a context, and `data` holds `len` bytes.
 pub(crate) unsafe fn sha256_update(ctx: *mut Sha256Ctx, data: *const c_void, len: usize) -> c_int {
     // SAFETY: the caller passes NULL or a context.
-    let Some(ctx) = (unsafe { ctx.as_mut() }) else {
+    let Some(h) = (unsafe { ctx.as_mut() }).and_then(|c| c.imp.as_deref_mut()) else {
         return -EINVAL;
     };
 
-    if ctx.imp.is_null() || (len != 0 && data.is_null()) {
+    if len != 0 && data.is_null() {
         return -EINVAL;
     }
-    // SAFETY: the context's digest, and the caller's data.
-    if unsafe { EVP_DigestUpdate(ctx.imp, data, len) } == 1 {
+    // SAFETY: the caller's data.
+    if h.update(unsafe { slice(data.cast::<u8>(), len) }).is_ok() {
         0
     } else {
         -EIO
@@ -172,24 +212,25 @@ pub(crate) unsafe fn sha256_update(ctx: *mut Sha256Ctx, data: *const c_void, len
 /// `ctx` is NULL or points to a context, and `out` is NULL or has room
 /// for 32 bytes.
 pub(crate) unsafe fn sha256_final(ctx: *mut Sha256Ctx, out: *mut u8) -> c_int {
-    let mut len: c_uint = 0;
     // SAFETY: the caller passes NULL or a context.
     let Some(ctx) = (unsafe { ctx.as_mut() }) else {
         return -EINVAL;
     };
-
-    if ctx.imp.is_null() || out.is_null() {
+    if out.is_null() {
         return -EINVAL;
     }
-    // SAFETY: the context's digest, freed once, and the caller's room.
-    let ret = unsafe {
-        let ok = EVP_DigestFinal_ex(ctx.imp, out, &mut len) == 1 && len == 32;
-
-        EVP_MD_CTX_free(ctx.imp);
-        if ok { 0 } else { -EIO }
+    let Some(mut h) = ctx.imp.take() else {
+        return -EINVAL;
     };
-    ctx.imp = core::ptr::null_mut();
-    ret
+
+    match h.finish() {
+        Ok(d) if d.len() == SHA256_LEN => {
+            // SAFETY: the caller's room for the digest.
+            unsafe { ptr::copy_nonoverlapping(d.as_ptr(), out, SHA256_LEN) };
+            0
+        }
+        _ => -EIO,
+    }
 }
 
 /// # Safety
@@ -198,43 +239,40 @@ pub(crate) unsafe fn sha256_final(ctx: *mut Sha256Ctx, out: *mut u8) -> c_int {
 pub(crate) unsafe fn sha256_free(ctx: *mut Sha256Ctx) {
     // SAFETY: the caller passes NULL or a context.
     if let Some(ctx) = unsafe { ctx.as_mut() } {
-        // SAFETY: the context's digest or NULL, freed once.
-        unsafe { EVP_MD_CTX_free(ctx.imp) };
-        ctx.imp = core::ptr::null_mut();
+        ctx.imp = None;
     }
 }
 
 /// SHA-256 of `data` into `out`, zeros when it fails: the sha256_calc()
 /// of util/chain.h.
 pub(crate) fn sha256_calc(data: &[u8], out: &mut [u8; 32]) -> c_int {
-    // SAFETY: data.len() bytes, and room for the digest.
-    let ret = unsafe { sha256_buffer(data.as_ptr().cast(), data.len(), out.as_mut_ptr()) };
-
-    if ret != 0 {
-        *out = [0; 32];
+    match sha256(data) {
+        Ok(d) => {
+            *out = d;
+            0
+        }
+        Err(err) => {
+            *out = [0; 32];
+            err
+        }
     }
-    ret
 }
 
 /// # Safety
 ///
 /// `data` holds `len` bytes, and `out` is NULL or has room for 32.
 pub(crate) unsafe fn sha256_buffer(data: *const c_void, len: usize, out: *mut u8) -> c_int {
-    let mut ctx = Sha256Ctx::new();
-
-    // SAFETY: the context here, and the caller's data and room.
-    unsafe {
-        let mut ret = sha256_init(&mut ctx);
-
-        if ret == 0 {
-            ret = sha256_update(&mut ctx, data, len);
+    if (len != 0 && data.is_null()) || out.is_null() {
+        return -EINVAL;
+    }
+    // SAFETY: the caller's data.
+    match sha256(unsafe { slice(data.cast::<u8>(), len) }) {
+        Ok(d) => {
+            // SAFETY: the caller's room for the digest.
+            unsafe { ptr::copy_nonoverlapping(d.as_ptr(), out, SHA256_LEN) };
+            0
         }
-        if ret == 0 {
-            ret = sha256_final(&mut ctx, out);
-        } else {
-            sha256_free(&mut ctx);
-        }
-        ret
+        Err(err) => err,
     }
 }
 
@@ -256,50 +294,27 @@ pub(crate) unsafe fn base64_encode(
     if out_sz < need {
         return -EINVAL;
     }
-    // SAFETY: the caller's room for need bytes, and its data.
+    // SAFETY: the caller's data.
+    let text = base64::encode_block(unsafe { slice(data, len) });
+    if text.len() != need - 1 {
+        return -EIO;
+    }
+    // SAFETY: the caller's room for need bytes.
     unsafe {
-        if EVP_EncodeBlock(out.cast(), data, len as c_int) < 0 {
-            return -EIO;
-        }
+        ptr::copy_nonoverlapping(text.as_ptr(), out.cast(), text.len());
         *out.add(need - 1) = 0;
     }
     0
 }
 
-/// The P-256 public key at the point (x, y), or NULL for one not on the
+/// The P-256 public key at the point (x, y), or none for one not on the
 /// curve.
-fn p256_public_key(x: &[u8; 32], y: &[u8; 32]) -> *mut EvpPkey {
-    let mut point = [0u8; 65];
-    let mut pkey: *mut EvpPkey = core::ptr::null_mut();
+fn p256_public_key(x: &[u8; 32], y: &[u8; 32]) -> Option<PKey<Public>> {
+    let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).ok()?;
+    let (x, y) = (BigNum::from_slice(x).ok()?, BigNum::from_slice(y).ok()?);
+    let key = EcKey::from_public_key_affine_coordinates(&group, &x, &y).ok()?;
 
-    point[0] = 0x04;
-    point[1..33].copy_from_slice(x);
-    point[33..].copy_from_slice(y);
-    // SAFETY: parameters naming the group and the point, both of which
-    // outlive the calls, and the context made and freed here.
-    unsafe {
-        let mut params = [
-            OSSL_PARAM_construct_utf8_string(c"group".as_ptr(), c"P-256".as_ptr().cast_mut(), 0),
-            OSSL_PARAM_construct_octet_string(
-                c"pub".as_ptr(),
-                point.as_mut_ptr().cast(),
-                point.len(),
-            ),
-            OSSL_PARAM_construct_end(),
-        ];
-        let kctx =
-            EVP_PKEY_CTX_new_from_name(core::ptr::null_mut(), c"EC".as_ptr(), core::ptr::null());
-
-        if kctx.is_null()
-            || EVP_PKEY_fromdata_init(kctx) <= 0
-            || EVP_PKEY_fromdata(kctx, &mut pkey, EVP_PKEY_PUBLIC_KEY, params.as_mut_ptr()) <= 0
-        {
-            EVP_PKEY_free(pkey);
-            pkey = core::ptr::null_mut();
-        }
-        EVP_PKEY_CTX_free(kctx);
-    }
-    pkey
+    PKey::from_ec_key(key).ok()
 }
 
 /// 0 when (r, s) is the ECDSA P-256 signature of the digest by the key
@@ -311,59 +326,27 @@ pub(crate) fn ecdsa_p256_verify(
     r: &[u8; 32],
     s: &[u8; 32],
 ) -> c_int {
-    let mut der: *mut u8 = core::ptr::null_mut();
-    let mut ret = -EIO;
-    let pkey = p256_public_key(x, y);
+    let Some(key) = p256_public_key(x, y) else {
+        clear_errors();
+        return -EINVAL;
+    };
+    let verified = (|| -> Result<Result<bool, ErrorStack>, ErrorStack> {
+        let sig =
+            EcdsaSig::from_private_components(BigNum::from_slice(r)?, BigNum::from_slice(s)?)?;
+        let der = sig.to_der()?;
+        let mut ctx = PkeyCtx::new(&key)?;
 
-    // SAFETY: what OpenSSL gives here, each freed once below, the
-    // numbers handed to the signature once it takes them.
-    unsafe {
-        let (mut br, mut bs, mut sig, mut vctx) = (
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
-        );
+        ctx.verify_init()?;
+        ctx.set_signature_md(Md::sha256())?;
+        Ok(ctx.verify(digest, &der))
+    })();
 
-        'out: {
-            if pkey.is_null() {
-                ret = -EINVAL;
-                break 'out;
-            }
-            br = BN_bin2bn(r.as_ptr(), 32, core::ptr::null_mut());
-            bs = BN_bin2bn(s.as_ptr(), 32, core::ptr::null_mut());
-            sig = ECDSA_SIG_new();
-            if br.is_null() || bs.is_null() || sig.is_null() || ECDSA_SIG_set0(sig, br, bs) == 0 {
-                break 'out;
-            }
-            br = core::ptr::null_mut();
-            bs = core::ptr::null_mut();
-            let der_len = i2d_ECDSA_SIG(sig, &mut der);
-            if der_len <= 0 {
-                break 'out;
-            }
-            vctx = EVP_PKEY_CTX_new_from_pkey(core::ptr::null_mut(), pkey, core::ptr::null());
-            if vctx.is_null()
-                || EVP_PKEY_verify_init(vctx) <= 0
-                || EVP_PKEY_CTX_set_signature_md(vctx, EVP_sha256()) <= 0
-            {
-                break 'out;
-            }
-            ret = if EVP_PKEY_verify(vctx, der, der_len as usize, digest.as_ptr(), 32) == 1 {
-                0
-            } else {
-                -EKEYREJECTED
-            };
-        }
-        openssl_free(der.cast());
-        ECDSA_SIG_free(sig);
-        BN_free(br);
-        BN_free(bs);
-        EVP_PKEY_CTX_free(vctx);
-        EVP_PKEY_free(pkey);
-        ERR_clear_error();
+    clear_errors();
+    match verified {
+        Ok(Ok(true)) => 0,
+        Ok(_) => -EKEYREJECTED,
+        Err(_) => -EIO,
     }
-    ret
 }
 
 /// The certificate in `der` into `cert`: 0 or -EINVAL.
@@ -372,15 +355,20 @@ pub(crate) fn ecdsa_p256_verify(
 ///
 /// `der` holds `len` bytes, and `cert` points to a cert.
 pub(crate) unsafe fn cert_read_der(der: *const u8, len: usize, cert: *mut Cert) -> c_int {
-    let mut p = der;
-
     if der.is_null() || cert.is_null() || len > c_long::MAX as usize {
         return -EINVAL;
     }
-    // SAFETY: the caller's DER bytes and cert.
-    unsafe {
-        (*cert).imp = d2i_X509(core::ptr::null_mut(), &mut p, len as c_long);
-        if (*cert).imp.is_null() { -EINVAL } else { 0 }
+    // SAFETY: the caller's cert.
+    let cert = unsafe { &mut *cert };
+
+    cert.imp = ptr::null_mut();
+    // SAFETY: the caller's DER bytes.
+    match X509::from_der(unsafe { slice(der, len) }) {
+        Ok(x509) => {
+            cert.hold(x509);
+            0
+        }
+        Err(_) => -EINVAL,
     }
 }
 
@@ -420,22 +408,27 @@ pub(crate) unsafe fn cert_read_memory(buf: *const u8, len: usize, cert: *mut Cer
 ///
 /// `path` is NULL or a C string, and `cert` NULL or points to a cert.
 pub(crate) unsafe fn cert_read_file(path: *const c_char, cert: *mut Cert) -> c_int {
-    let mut x509 = core::ptr::null_mut();
-
     if path.is_null() || cert.is_null() {
         return -EINVAL;
     }
-    let ret = read_x509(path, &mut x509);
     // SAFETY: the caller's cert.
-    unsafe { (*cert).imp = x509 };
-    ret
+    let cert = unsafe { &mut *cert };
+
+    cert.imp = ptr::null_mut();
+    match read_x509(path) {
+        Ok(x509) => {
+            cert.hold(x509);
+            0
+        }
+        Err(err) => err,
+    }
 }
 
 /// # Safety
 ///
 /// `cert` is NULL or points to a cert.
 pub(crate) unsafe fn cert_read_fd(fd: c_int, cert: *mut Cert) -> c_int {
-    let mut der: *mut u8 = core::ptr::null_mut();
+    let mut der: *mut u8 = ptr::null_mut();
     let mut len = 0usize;
 
     if fd < 0 || cert.is_null() {
@@ -470,76 +463,72 @@ pub(crate) unsafe fn cert_read_fd(fd: c_int, cert: *mut Cert) -> c_int {
 pub(crate) unsafe fn cert_free(cert: *mut Cert) {
     // SAFETY: the caller passes NULL or a cert.
     if let Some(cert) = unsafe { cert.as_mut() } {
-        // SAFETY: its certificate or NULL, freed once.
-        unsafe { X509_free(cert.imp) };
-        cert.imp = core::ptr::null_mut();
+        if !cert.imp.is_null() {
+            // SAFETY: the certificate the cert holds, freed once.
+            drop(unsafe { X509::from_ptr(cert.imp) });
+        }
+        cert.imp = ptr::null_mut();
     }
 }
 
-/// The certificate a cert holds, or none.
-///
-/// # Safety
-///
-/// `cert` is NULL or points to a cert.
-unsafe fn x509_of(cert: *const Cert) -> Option<*mut X509> {
-    // SAFETY: the caller passes NULL or a cert.
-    unsafe { cert.as_ref() }
-        .map(|c| c.imp)
-        .filter(|x| !x.is_null())
+/// The DER SubjectPublicKeyInfo of the certificate as it holds it.
+fn spki_der(x509: &X509Ref) -> Option<Vec<u8>> {
+    // SAFETY: the certificate's own key, encoded twice, first for its
+    // length and then into room of that length.
+    unsafe {
+        let spki = more::X509_get_X509_PUBKEY(x509.as_ptr());
+        if spki.is_null() {
+            return None;
+        }
+        let len = more::i2d_X509_PUBKEY(spki, ptr::null_mut());
+        if len <= 0 {
+            return None;
+        }
+        let mut der = vec![0u8; len as usize];
+        let mut p = der.as_mut_ptr();
+
+        (more::i2d_X509_PUBKEY(spki, &mut p) == len).then_some(der)
+    }
 }
 
 /// SHA-256 over the DER SubjectPublicKeyInfo, the bytes Go's
 /// x509.MarshalPKIXPublicKey writes; X509_pubkey_digest() hashes only the
-/// key's bit string, which is easy to mistake for it. Re-encoding through
-/// i2d_X509_PUBKEY keeps the value identical for every key algorithm the
-/// X.509 parser accepts, including ML-DSA keys libcrypto cannot otherwise
-/// marshal as a bare EVP_PKEY on older releases.
-///
+/// key's bit string, which is easy to mistake for it. Re-encoding the
+/// certificate's own X509_PUBKEY keeps the value identical for every key
+/// algorithm the X.509 parser accepts, including ML-DSA keys libcrypto
+/// cannot otherwise marshal as a bare EVP_PKEY on older releases.
+pub(crate) fn pubkey_digest(x509: &X509Ref) -> Result<[u8; SHA256_LEN], c_int> {
+    let der = spki_der(x509).ok_or(-EINVAL)?;
+
+    sha256(&der).map_err(|_| -EINVAL)
+}
+
 /// # Safety
 ///
 /// `cert` is NULL or points to a cert, and `out` NULL or room for 32.
 pub(crate) unsafe fn cert_pubkey_digest(cert: *const Cert, out: *mut u8) -> c_int {
-    let mut len: c_uint = 0;
-
     // SAFETY: the caller passes NULL or a cert.
     let Some(x509) = (unsafe { x509_of(cert) }).filter(|_| !out.is_null()) else {
         return -EINVAL;
     };
-    // SAFETY: the certificate, its key, the room xmalloc() gives freed
-    // once, and the caller's room for the digest.
-    unsafe {
-        let spki = X509_get_X509_PUBKEY(x509);
-        if spki.is_null() {
-            return -EINVAL;
-        }
-        let der_len = i2d_X509_PUBKEY(spki, core::ptr::null_mut());
-        if der_len <= 0 {
-            return -EINVAL;
-        }
-        let der: *mut u8 = xmalloc(der_len as usize).cast();
-        if der.is_null() {
-            return -ENOMEM;
-        }
-        let mut p = der;
-        let ret = if i2d_X509_PUBKEY(spki, &mut p) == der_len
-            && EVP_Digest(
-                der.cast(),
-                der_len as usize,
-                out,
-                &mut len,
-                EVP_sha256(),
-                core::ptr::null_mut(),
-            ) != 0
-            && len as usize == SHA256_LEN
-        {
+    match pubkey_digest(x509) {
+        Ok(d) => {
+            // SAFETY: the caller's room for the digest.
+            unsafe { ptr::copy_nonoverlapping(d.as_ptr(), out, SHA256_LEN) };
             0
-        } else {
-            -EINVAL
-        };
-
-        xfree(der.cast(), der_len as usize);
-        ret
+        }
+        Err(err) => err,
     }
+}
+
+/// The provider's name for the key's algorithm, "ML-DSA-87".
+pub(crate) fn key_type_name<T>(key: &PKeyRef<T>) -> Option<CString> {
+    // SAFETY: the key, whose type's name is NULL or a C string of
+    // libcrypto's.
+    let name = unsafe { more::EVP_PKEY_get0_type_name(key.as_ptr()) };
+
+    // SAFETY: a C string, copied before the key can go.
+    (!name.is_null()).then(|| unsafe { CStr::from_ptr(name) }.to_owned())
 }
 
 /// The provider's name for the cert's public key, "ML-DSA-87".
@@ -557,30 +546,48 @@ pub(crate) unsafe fn cert_key_algorithm(
     let Some(x509) = (unsafe { x509_of(cert) }).filter(|_| !out.is_null() && out_sz != 0) else {
         return -EINVAL;
     };
-    // SAFETY: the certificate and its key.
-    let name = unsafe {
-        let pubk = X509_get0_pubkey(x509);
-
-        if pubk.is_null() {
-            core::ptr::null()
-        } else {
-            EVP_PKEY_get0_type_name(pubk)
-        }
-    };
-    if name.is_null() {
+    let Some(name) = x509.public_key().ok().and_then(|k| key_type_name(&k)) else {
+        clear_errors();
         return -ENOPKG;
-    }
-    // SAFETY: the caller's room, and OpenSSL's C string.
-    let (out, name) = unsafe {
-        (
-            crate::ffi::bytes_mut(out.cast(), out_sz),
-            CStr::from_ptr(name),
-        )
     };
+    // SAFETY: the caller's room.
+    let out = unsafe { crate::ffi::bytes_mut(out.cast(), out_sz) };
     if strscpy(out, name.to_bytes()).is_err() {
         return -ENAMETOOLONG;
     }
     0
+}
+
+/// A memory BIO, freed when it goes.
+struct MemBio(*mut ffi::BIO);
+
+impl MemBio {
+    fn new() -> Option<Self> {
+        // SAFETY: calls that take no pointer.
+        let bio = unsafe { ffi::BIO_new(ffi::BIO_s_mem()) };
+
+        (!bio.is_null()).then_some(MemBio(bio))
+    }
+
+    /// What was written to it.
+    fn data(&self) -> &[u8] {
+        let mut text: *mut c_char = ptr::null_mut();
+        // SAFETY: the BIO, asked where its bytes are, BIO_get_mem_data().
+        let len = unsafe { ffi::BIO_ctrl(self.0, ffi::BIO_CTRL_INFO, 0, (&raw mut text).cast()) };
+
+        if len <= 0 || text.is_null() {
+            return &[];
+        }
+        // SAFETY: the len bytes the BIO holds, while it lives unwritten.
+        unsafe { core::slice::from_raw_parts(text.cast(), len as usize) }
+    }
+}
+
+impl Drop for MemBio {
+    fn drop(&mut self) {
+        // SAFETY: the BIO made in new(), freed once.
+        unsafe { ffi::BIO_free_all(self.0) };
+    }
 }
 
 /// The subject on one line, "O=Example, CN=fleet", control bytes
@@ -595,39 +602,64 @@ pub(crate) unsafe fn cert_subject(cert: *const Cert, out: *mut c_char, out_sz: u
     let Some(x509) = (unsafe { x509_of(cert) }).filter(|_| !out.is_null() && out_sz != 0) else {
         return -EINVAL;
     };
-    // SAFETY: a memory BIO freed once, the certificate's subject, and the
-    // caller's room for out_sz bytes.
-    unsafe {
-        let bio = BIO_new(BIO_s_mem());
-        if bio.is_null() {
-            return -ENOMEM;
-        }
-        let ret = 'out: {
-            if X509_NAME_print_ex(
-                bio,
-                X509_get_subject_name(x509),
-                0,
-                XN_FLAG_ONELINE & !XN_FLAG_SPC_EQ,
-            ) < 0
-            {
-                break 'out -EINVAL;
-            }
-            let mut text: *mut c_char = core::ptr::null_mut();
-            // BIO_get_mem_data().
-            let len = BIO_ctrl(bio, BIO_CTRL_INFO, 0, (&raw mut text).cast());
-            if len < 0 || len as usize >= out_sz {
-                break 'out -ENAMETOOLONG;
-            }
-            if len != 0 {
-                core::ptr::copy_nonoverlapping(text, out, len as usize);
-            }
-            *out.add(len as usize) = 0;
-            0
-        };
-
-        BIO_free(bio);
-        ret
+    let Some(bio) = MemBio::new() else {
+        return -ENOMEM;
+    };
+    let flags = more::XN_FLAG_ONELINE & !more::XN_FLAG_SPC_EQ;
+    // SAFETY: the BIO and the certificate's own subject.
+    if unsafe { more::X509_NAME_print_ex(bio.0, x509.subject_name().as_ptr(), 0, flags) } < 0 {
+        return -EINVAL;
     }
+    let text = bio.data();
+    if text.len() >= out_sz {
+        return -ENAMETOOLONG;
+    }
+    // SAFETY: the caller's room for out_sz bytes.
+    unsafe {
+        ptr::copy_nonoverlapping(text.as_ptr(), out.cast(), text.len());
+        *out.add(text.len()) = 0;
+    }
+    0
+}
+
+/// A UTC time, as `struct tm` holds one: the year whole, the month
+/// from 1.
+pub(crate) struct Utc {
+    pub(crate) year: i64,
+    pub(crate) month: u32,
+    pub(crate) day: u32,
+    pub(crate) hour: u32,
+    pub(crate) minute: u32,
+    pub(crate) second: u32,
+}
+
+/// The time an ASN1_TIME holds, as ASN1_TIME_to_tm() reads it: from its
+/// distance to the epoch, which libcrypto parses the same way.
+pub(crate) fn utc(t: &Asn1TimeRef) -> Option<Utc> {
+    let epoch = Asn1Time::from_unix(0).ok()?;
+    let diff = epoch.diff(t).ok()?;
+    let secs = i64::from(diff.days) * 86_400 + i64::from(diff.secs);
+    let (days, rest) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Days since 1970-01-01 to the proleptic Gregorian date, after
+    // Howard Hinnant's civil_from_days().
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+
+    Some(Utc {
+        year,
+        month: month as u32,
+        day: day as u32,
+        hour: (rest / 3600) as u32,
+        minute: (rest / 60 % 60) as u32,
+        second: (rest % 60) as u32,
+    })
 }
 
 /// The start of the validity period as a UTC date, YYYY-MM-DD.
@@ -636,45 +668,40 @@ pub(crate) unsafe fn cert_subject(cert: *const Cert, out: *mut c_char, out_sz: u
 ///
 /// `cert` is NULL or points to a cert, and `out` has room for 11 bytes.
 pub(crate) unsafe fn cert_not_before(cert: *const Cert, out: *mut c_char) -> c_int {
-    let mut tm = Tm::zeroed();
-
     // SAFETY: the caller passes NULL or a cert.
     let Some(x509) = (unsafe { x509_of(cert) }) else {
         return -EINVAL;
     };
-    // SAFETY: the certificate, a struct tm to fill, and the caller's
-    // room for 11 bytes.
-    unsafe {
-        let t = X509_get0_notBefore(x509);
-
-        if t.is_null() || ASN1_TIME_to_tm(t, &mut tm) == 0 {
-            return -EINVAL;
-        }
-        if strftime(out, 11, c"%Y-%m-%d".as_ptr(), &tm) == 10 {
-            0
-        } else {
-            -EINVAL
-        }
+    let Some(t) = utc(x509.not_before()) else {
+        return -EINVAL;
+    };
+    // strftime()'s "%Y" has four digits from year 1000 to 9999 alone.
+    if !(1000..=9999).contains(&t.year) {
+        return -EINVAL;
     }
+    let text = format!("{:04}-{:02}-{:02}\0", t.year, t.month, t.day);
+    // SAFETY: the caller's room for the 11 bytes.
+    unsafe { ptr::copy_nonoverlapping(text.as_ptr(), out.cast(), 11) };
+    0
 }
 
-/// The CMS blob in `signature`, all of it and nothing more, or NULL.
-fn read_cms(signature: *const u8, len: usize) -> *mut CmsContentInfo {
-    let mut next = signature;
-
+/// The CMS blob in `signature`, all of it and nothing more, or none.
+fn read_cms(signature: *const u8, len: usize) -> Option<CmsContentInfo> {
     if signature.is_null() || len == 0 || len > c_int::MAX as usize {
-        return core::ptr::null_mut();
+        return None;
     }
-    // SAFETY: the caller's len bytes of signature.
-    unsafe {
-        let mut cms = d2i_CMS_ContentInfo(core::ptr::null_mut(), &mut next, len as c_long);
+    let mut next = signature;
+    // SAFETY: the caller's len bytes of signature, and where the parse
+    // stopped in them.
+    let cms = unsafe { ffi::d2i_CMS_ContentInfo(ptr::null_mut(), &mut next, len as c_long) };
+    if cms.is_null() {
+        return None;
+    }
+    // SAFETY: the structure d2i made, owned from here.
+    let cms = unsafe { CmsContentInfo::from_ptr(cms) };
 
-        if !cms.is_null() && next != signature.add(len) {
-            CMS_ContentInfo_free(cms);
-            cms = core::ptr::null_mut();
-        }
-        cms
-    }
+    // SAFETY: the end of the caller's bytes.
+    (next == unsafe { signature.add(len) }).then_some(cms)
 }
 
 /// Whether `signature` is a detached CMS signature of `payload` by the
@@ -704,54 +731,33 @@ pub(crate) unsafe fn verify_detached(
     {
         return -EINVAL;
     }
-    let mut ret = -EINVAL;
-    // SAFETY: what OpenSSL gives here, each freed once below, the cert's
-    // certificate lent to the store and the stack, and the caller's
-    // payload and signature.
-    unsafe {
-        let data = BIO_new_mem_buf(payload.cast(), payload_len as c_int);
-        let out = BIO_new(BIO_s_null());
-        let store = X509_STORE_new();
-        let mut signers = core::ptr::null_mut();
-        let mut cms = core::ptr::null_mut();
+    // SAFETY: the caller's payload.
+    let payload = unsafe { slice(payload, payload_len) };
+    let verified = (|| -> Result<(), ErrorStack> {
+        let mut store = X509StoreBuilder::new()?;
+        store.add_cert(x509.to_owned())?;
+        store.set_flags(X509VerifyFlags::NO_CHECK_TIME)?;
+        let store = store.build();
+        let mut signers = Stack::new()?;
+        signers.push(x509.to_owned())?;
+        let Some(mut cms) = read_cms(signature, signature_len) else {
+            return Err(ErrorStack::get());
+        };
+        cms.verify(
+            Some(&signers),
+            Some(&store),
+            Some(payload),
+            None,
+            CMSOptions::BINARY | CMSOptions::DETACHED | CMSOptions::NOINTERN,
+        )
+    })();
 
-        'done: {
-            if data.is_null()
-                || out.is_null()
-                || store.is_null()
-                || X509_STORE_add_cert(store, x509) != 1
-                || X509_STORE_set_flags(store, X509_V_FLAG_NO_CHECK_TIME) != 1
-            {
-                break 'done;
-            }
-            signers = OPENSSL_sk_new_null();
-            if signers.is_null() || OPENSSL_sk_push(signers, x509.cast()) == 0 {
-                break 'done;
-            }
-            cms = read_cms(signature, signature_len);
-            if !cms.is_null()
-                && CMS_verify(
-                    cms,
-                    signers,
-                    store,
-                    data,
-                    out,
-                    CMS_BINARY | CMS_DETACHED | CMS_NOINTERN,
-                ) == 1
-            {
-                ret = 0;
-            }
-        }
-        if ret != 0 {
-            ERR_clear_error();
-        }
-        CMS_ContentInfo_free(cms);
-        OPENSSL_sk_free(signers);
-        X509_STORE_free(store);
-        BIO_free(out);
-        BIO_free(data);
+    if verified.is_ok() {
+        0
+    } else {
+        clear_errors();
+        -EINVAL
     }
-    ret
 }
 
 /// Whether a signer of the CMS blob names the cert, by key id or by
@@ -774,31 +780,35 @@ pub(crate) unsafe fn cms_signed_by(
     if signature.is_null() || signature_len > c_int::MAX as usize {
         return -EINVAL;
     }
-    let mut ret = -EINVAL;
-    let cms = read_cms(signature, signature_len);
-
-    // SAFETY: the CMS, its signer infos, and the certificate.
+    let Some(cms) = read_cms(signature, signature_len) else {
+        clear_errors();
+        return -EINVAL;
+    };
+    // SAFETY: the structure's signer infos, each compared with the
+    // certificate.
     unsafe {
-        if !cms.is_null() {
-            let sis = CMS_get0_SignerInfos(cms);
-
-            if !sis.is_null() {
-                ret = 0;
-                let mut i = 0;
-                while i < OPENSSL_sk_num(sis) && ret == 0 {
-                    if CMS_SignerInfo_cert_cmp(OPENSSL_sk_value(sis, i).cast(), x509) == 0 {
-                        ret = 1;
-                    }
-                    i += 1;
-                }
-            }
+        let sis = more::CMS_get0_SignerInfos(cms.as_ptr());
+        if sis.is_null() {
+            clear_errors();
+            return -EINVAL;
         }
-        if ret < 0 {
-            ERR_clear_error();
-        }
-        CMS_ContentInfo_free(cms);
+        let named = (0..ffi::OPENSSL_sk_num(sis)).any(|i| {
+            more::CMS_SignerInfo_cert_cmp(ffi::OPENSSL_sk_value(sis, i).cast(), x509.as_ptr()) == 0
+        });
+        c_int::from(named)
     }
-    ret
+}
+
+/// HMAC-SHA-256 of `data` under `key`.
+pub(crate) fn hmac(key: &[u8], data: &[u8]) -> Result<[u8; SHA256_LEN], ErrorStack> {
+    // libcrypto makes no HMAC key of no bytes. HMAC pads a key shorter
+    // than the hash's block with zeros, so one zero byte is the same key.
+    let key = PKey::hmac(if key.is_empty() { &[0] } else { key })?;
+    let mut signer = Signer::new(MessageDigest::sha256(), &key)?;
+
+    signer.update(data)?;
+    let mac = signer.sign_to_vec()?;
+    mac.try_into().map_err(|_| ErrorStack::get())
 }
 
 /// # Safety
@@ -811,75 +821,94 @@ pub(crate) unsafe fn hmac_sha256(
     len: usize,
     out: *mut u8,
 ) -> c_int {
-    let mut outl = 0usize;
-    let mut ret = -EIO;
-
-    // SAFETY: the MAC and its context, freed once, parameters naming the
-    // digest, and the caller's key, data and room.
-    unsafe {
-        let mac = EVP_MAC_fetch(core::ptr::null_mut(), c"HMAC".as_ptr(), core::ptr::null());
-        if mac.is_null() {
-            return -EIO;
-        }
-        let params = [
-            OSSL_PARAM_construct_utf8_string(c"digest".as_ptr(), c"SHA256".as_ptr().cast_mut(), 0),
-            OSSL_PARAM_construct_end(),
-        ];
-        let ctx = EVP_MAC_CTX_new(mac);
-
-        if !ctx.is_null()
-            && EVP_MAC_init(ctx, key, key_len, params.as_ptr()) == 1
-            && EVP_MAC_update(ctx, data.cast(), len) == 1
-            && EVP_MAC_final(ctx, out, &mut outl, 32) == 1
-            && outl == 32
-        {
-            ret = 0;
-        }
-        EVP_MAC_CTX_free(ctx);
-        EVP_MAC_free(mac);
+    if key.is_null() || (len != 0 && data.is_null()) || out.is_null() {
+        return -EIO;
     }
-    ret
+    // SAFETY: the caller's key and data.
+    match hmac(unsafe { slice(key, key_len) }, unsafe {
+        slice(data.cast::<u8>(), len)
+    }) {
+        Ok(mac) => {
+            // SAFETY: the caller's room for the MAC.
+            unsafe { ptr::copy_nonoverlapping(mac.as_ptr(), out, SHA256_LEN) };
+            0
+        }
+        Err(_) => -EIO,
+    }
+}
+
+/// AES-128 in CFB mode with a zero IV and no padding, of `data` in
+/// place.
+pub(crate) fn aes128_cfb(key: &[u8; 16], data: &mut [u8]) -> Result<(), ErrorStack> {
+    let input = data.to_vec();
+    let mut ctx = CipherCtx::new()?;
+    let mut tail = [0u8; 16];
+
+    ctx.encrypt_init(Some(Cipher::aes_128_cfb128()), Some(key), Some(&[0u8; 16]))?;
+    ctx.set_padding(false);
+    let n = ctx.cipher_update(&input, Some(data))?;
+    let rest = ctx.cipher_final(&mut tail)?;
+    if n + rest != data.len() {
+        return Err(ErrorStack::get());
+    }
+    data[n..].copy_from_slice(&tail[..rest]);
+    Ok(())
 }
 
 /// AES-128 in CFB mode with a zero IV and no padding.
 ///
 /// # Safety
 ///
-/// `key` holds 16 bytes, `inp` `len`, and `out` has room for `len`.
+/// `key` holds 16 bytes, `inp` `len`, and `out` has room for `len`; the
+/// two are the same bytes or apart.
 pub(crate) unsafe fn aes128_cfb_encrypt(
     key: *const u8,
     inp: *const u8,
     len: usize,
     out: *mut u8,
 ) -> c_int {
-    let (mut n, mut fin): (c_int, c_int) = (0, 0);
-    let iv = [0u8; 16];
-    let mut ret = -EIO;
-
-    // SAFETY: the cipher context, freed once, and the caller's key, input
-    // and room.
-    unsafe {
-        let ctx = EVP_CIPHER_CTX_new();
-
-        if !ctx.is_null()
-            && len <= c_int::MAX as usize
-            && EVP_EncryptInit_ex(
-                ctx,
-                EVP_aes_128_cfb128(),
-                core::ptr::null_mut(),
-                key,
-                iv.as_ptr(),
-            ) == 1
-            && EVP_CIPHER_CTX_set_padding(ctx, 0) == 1
-            && EVP_EncryptUpdate(ctx, out, &mut n, inp, len as c_int) == 1
-            && EVP_EncryptFinal_ex(ctx, out.add(n as usize), &mut fin) == 1
-            && n as usize + fin as usize == len
-        {
-            ret = 0;
-        }
-        EVP_CIPHER_CTX_free(ctx);
+    if key.is_null() || len > c_int::MAX as usize || (len != 0 && (inp.is_null() || out.is_null()))
+    {
+        return -EIO;
     }
-    ret
+    let mut data = vec![0u8; len];
+    // SAFETY: the caller's key and input.
+    let key: &[u8; 16] = unsafe { &*key.cast() };
+    // SAFETY: the caller's input.
+    data.copy_from_slice(unsafe { slice(inp, len) });
+    if aes128_cfb(key, &mut data).is_err() {
+        return -EIO;
+    }
+    if len != 0 {
+        // SAFETY: the caller's room for len bytes.
+        unsafe { ptr::copy_nonoverlapping(data.as_ptr(), out, len) };
+    }
+    0
+}
+
+/// Hands `label` to `ctx` as its OAEP label through libcrypto's own
+/// EVP_PKEY_CTX_set0_rsa_oaep_label(), which takes the allocation over.
+/// openssl-sys sends it through EVP_PKEY_CTX_ctrl(), as the macro before
+/// OpenSSL 3 did, and libcrypto 3 copies what arrives that way and never
+/// frees the crate's allocation.
+fn set_oaep_label(ctx: &mut PkeyCtx<Public>, label: &[u8]) -> Result<(), ErrorStack> {
+    let len = c_int::try_from(label.len()).map_err(|_| ErrorStack::get())?;
+
+    // SAFETY: an allocation of the label's length, filled with it and
+    // handed over, or freed here when libcrypto does not take it.
+    unsafe {
+        let p = ffi::OPENSSL_malloc(label.len());
+        if p.is_null() {
+            return Err(ErrorStack::get());
+        }
+        ptr::copy_nonoverlapping(label.as_ptr(), p.cast(), label.len());
+        if more::EVP_PKEY_CTX_set0_rsa_oaep_label(ctx.as_ptr(), p, len) > 0 {
+            Ok(())
+        } else {
+            ffi::OPENSSL_free(p);
+            Err(ErrorStack::get())
+        }
+    }
 }
 
 /// RSA-OAEP with SHA-256, MGF1-SHA-256 and the label, to the modulus `n`
@@ -905,80 +934,57 @@ pub(crate) unsafe fn rsa_oaep_encrypt(
     if n_len > c_int::MAX as usize || label_len > c_int::MAX as usize {
         return -EINVAL;
     }
-    let mut ret = -EIO;
-    // SAFETY: what OpenSSL gives here, each freed once below, the label
-    // handed to the context once it takes it, and the caller's buffers.
-    unsafe {
-        let bn = BN_bin2bn(n, n_len as c_int, core::ptr::null_mut());
-        let be = BN_new();
-        let bld = OSSL_PARAM_BLD_new();
-        let (mut params, mut kctx, mut ectx) = (
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
-        );
-        let mut pkey: *mut EvpPkey = core::ptr::null_mut();
-        let mut lbl: *mut u8 = core::ptr::null_mut();
-
-        'out: {
-            if bn.is_null()
-                || be.is_null()
-                || bld.is_null()
-                || BN_set_word(be, c_ulong::from(if e != 0 { e } else { 65537 })) == 0
-                || OSSL_PARAM_BLD_push_BN(bld, c"n".as_ptr(), bn) == 0
-                || OSSL_PARAM_BLD_push_BN(bld, c"e".as_ptr(), be) == 0
-            {
-                break 'out;
-            }
-            params = OSSL_PARAM_BLD_to_param(bld);
-            kctx = EVP_PKEY_CTX_new_from_name(
-                core::ptr::null_mut(),
-                c"RSA".as_ptr(),
-                core::ptr::null(),
-            );
-            if params.is_null()
-                || kctx.is_null()
-                || EVP_PKEY_fromdata_init(kctx) <= 0
-                || EVP_PKEY_fromdata(kctx, &mut pkey, EVP_PKEY_PUBLIC_KEY, params) <= 0
-            {
-                ret = -EINVAL;
-                break 'out;
-            }
-            lbl = CRYPTO_malloc(if label_len != 0 { label_len } else { 1 }, c"".as_ptr(), 0).cast();
-            if lbl.is_null() {
-                break 'out;
-            }
-            if label_len != 0 {
-                core::ptr::copy_nonoverlapping(label.cast::<u8>(), lbl, label_len);
-            }
-            ectx = EVP_PKEY_CTX_new_from_pkey(core::ptr::null_mut(), pkey, core::ptr::null());
-            if ectx.is_null()
-                || EVP_PKEY_encrypt_init(ectx) <= 0
-                || EVP_PKEY_CTX_set_rsa_padding(ectx, RSA_PKCS1_OAEP_PADDING) <= 0
-                || EVP_PKEY_CTX_set_rsa_oaep_md(ectx, EVP_sha256()) <= 0
-                || EVP_PKEY_CTX_set_rsa_mgf1_md(ectx, EVP_sha256()) <= 0
-                || EVP_PKEY_CTX_set0_rsa_oaep_label(ectx, lbl.cast(), label_len as c_int) <= 0
-            {
-                break 'out;
-            }
-            // The context owns the label now.
-            lbl = core::ptr::null_mut();
-            *out_len = cap;
-            if EVP_PKEY_encrypt(ectx, out, out_len, inp, in_len) <= 0 {
-                break 'out;
-            }
-            ret = 0;
+    // SAFETY: the caller's modulus, label and input.
+    let (n, label, inp) = unsafe {
+        (
+            slice(n, n_len),
+            slice(label.cast::<u8>(), label_len),
+            slice(inp, in_len),
+        )
+    };
+    let key = (|| {
+        let e = BigNum::from_u32(if e != 0 { e } else { 65537 })?;
+        PKey::from_rsa(Rsa::from_public_components(BigNum::from_slice(n)?, e)?)
+    })();
+    let Ok(key) = key else {
+        return -EINVAL;
+    };
+    // SAFETY: the caller's size, and its room of cap bytes.
+    let out = unsafe {
+        *out_len = cap;
+        if cap == 0 {
+            &mut []
+        } else {
+            core::slice::from_raw_parts_mut(out, cap)
         }
-        openssl_free(lbl.cast());
-        EVP_PKEY_CTX_free(ectx);
-        EVP_PKEY_CTX_free(kctx);
-        EVP_PKEY_free(pkey);
-        OSSL_PARAM_free(params);
-        OSSL_PARAM_BLD_free(bld);
-        BN_free(bn);
-        BN_free(be);
+    };
+    let sealed = (|| {
+        let mut ctx = PkeyCtx::new(&key)?;
+
+        ctx.encrypt_init()?;
+        ctx.set_rsa_padding(Padding::PKCS1_OAEP)?;
+        ctx.set_rsa_oaep_md(Md::sha256())?;
+        ctx.set_rsa_mgf1_md(Md::sha256())?;
+        // An empty label is libcrypto's own, and an allocation of none
+        // cannot be handed over.
+        if !label.is_empty() {
+            set_oaep_label(&mut ctx, label)?;
+        }
+        ctx.encrypt(inp, Some(out))
+    })();
+    match sealed {
+        Ok(len) => {
+            // SAFETY: the caller's size.
+            unsafe { *out_len = len };
+            0
+        }
+        Err(_) => -EIO,
     }
-    ret
+}
+
+/// `n` as the 32 bytes of a P-256 coordinate.
+fn coordinate(n: &BigNumRef) -> Option<[u8; 32]> {
+    n.to_vec_padded(32).ok()?.try_into().ok()
 }
 
 /// One ephemeral P-256 ECDH against the point (x, y): the ephemeral
@@ -990,53 +996,36 @@ pub(crate) fn ecdh_p256_ephemeral(
     eph_y: &mut [u8; 32],
     z: &mut [u8; 32],
 ) -> c_int {
-    let mut zlen = 32usize;
-    let mut ret = -EIO;
-    let peer = p256_public_key(x, y);
+    let Some(peer) = p256_public_key(x, y) else {
+        clear_errors();
+        return -EINVAL;
+    };
+    let agreed = (|| -> Result<Option<()>, ErrorStack> {
+        let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1)?;
+        let eph = EcKey::generate(&group)?;
+        let (mut bx, mut by) = (BigNum::new()?, BigNum::new()?);
+        let mut bn = BigNumContext::new()?;
 
-    // SAFETY: what OpenSSL gives here, each freed once below, and the
-    // caller's room.
-    unsafe {
-        let (mut bx, mut by) = (core::ptr::null_mut(), core::ptr::null_mut());
-        let (mut eph, mut dctx) = (core::ptr::null_mut(), core::ptr::null_mut());
-
-        'out: {
-            if peer.is_null() {
-                ret = -EINVAL;
-                break 'out;
-            }
-            eph = EVP_PKEY_Q_keygen(
-                core::ptr::null_mut(),
-                core::ptr::null(),
-                c"EC".as_ptr(),
-                c"P-256".as_ptr(),
-            );
-            if eph.is_null()
-                || EVP_PKEY_get_bn_param(eph, c"qx".as_ptr(), &mut bx) == 0
-                || EVP_PKEY_get_bn_param(eph, c"qy".as_ptr(), &mut by) == 0
-                || BN_bn2binpad(bx, eph_x.as_mut_ptr(), 32) != 32
-                || BN_bn2binpad(by, eph_y.as_mut_ptr(), 32) != 32
-            {
-                break 'out;
-            }
-            dctx = EVP_PKEY_CTX_new_from_pkey(core::ptr::null_mut(), eph, core::ptr::null());
-            if dctx.is_null()
-                || EVP_PKEY_derive_init(dctx) <= 0
-                || EVP_PKEY_derive_set_peer(dctx, peer) <= 0
-                || EVP_PKEY_derive(dctx, z.as_mut_ptr(), &mut zlen) <= 0
-                || zlen != 32
-            {
-                break 'out;
-            }
-            ret = 0;
+        eph.public_key()
+            .affine_coordinates(&group, &mut bx, &mut by, &mut bn)?;
+        let (Some(ex), Some(ey)) = (coordinate(&bx), coordinate(&by)) else {
+            return Ok(None);
+        };
+        let eph = PKey::from_ec_key(eph)?;
+        let mut deriver = Deriver::new(&eph)?;
+        deriver.set_peer(&peer)?;
+        if deriver.derive(z)? != 32 {
+            return Ok(None);
         }
-        BN_free(bx);
-        BN_free(by);
-        EVP_PKEY_CTX_free(dctx);
-        EVP_PKEY_free(eph);
-        EVP_PKEY_free(peer);
+        *eph_x = ex;
+        *eph_y = ey;
+        Ok(Some(()))
+    })();
+
+    match agreed {
+        Ok(Some(())) => 0,
+        _ => -EIO,
     }
-    ret
 }
 
 /// # Safety
@@ -1056,26 +1045,20 @@ pub(crate) unsafe fn base64_decode(
     // SAFETY: the decoding context, freed once, and the caller's input,
     // room and size.
     unsafe {
-        let ctx = EVP_ENCODE_CTX_new();
+        let ctx = more::EVP_ENCODE_CTX_new();
 
         if !ctx.is_null() && in_len <= c_int::MAX as usize && cap >= 3 * in_len.div_ceil(4) {
-            EVP_DecodeInit(ctx);
-            if EVP_DecodeUpdate(ctx, out, &mut n, inp.cast(), in_len as c_int) >= 0
-                && EVP_DecodeFinal(ctx, out.add(n as usize), &mut fin) >= 0
+            more::EVP_DecodeInit(ctx);
+            if more::EVP_DecodeUpdate(ctx, out, &mut n, inp.cast(), in_len as c_int) >= 0
+                && more::EVP_DecodeFinal(ctx, out.add(n as usize), &mut fin) >= 0
             {
                 *out_len = n as usize + fin as usize;
                 ret = 0;
             }
         }
-        EVP_ENCODE_CTX_free(ctx);
+        more::EVP_ENCODE_CTX_free(ctx);
     }
     ret
-}
-
-/// `BN_num_bytes()`.
-fn bn_num_bytes(a: *const Bignum) -> c_int {
-    // SAFETY: a number OpenSSL gave.
-    (unsafe { BN_num_bits(a) } + 7) / 8
 }
 
 /// The cert's RSA modulus and exponent, or its P-256 point:
@@ -1086,64 +1069,53 @@ fn bn_num_bytes(a: *const Bignum) -> c_int {
 /// `cert` is NULL or points to a cert, and `out` to room for a
 /// cert_pubkey.
 pub(crate) unsafe fn cert_pubkey(cert: *const Cert, out: *mut CertPubkey) -> c_int {
-    let mut group = [0u8; 32];
-    let mut ret = -EINVAL;
-
     // SAFETY: the caller's room, zeroed whole first, as the C's memset.
     let out = unsafe {
         out.write_bytes(0, 1);
         &mut *out
     };
     // SAFETY: the caller passes NULL or a cert.
-    let pk = match unsafe { x509_of(cert) } {
-        // SAFETY: the certificate.
-        Some(x509) => unsafe { X509_get0_pubkey(x509) },
-        None => core::ptr::null_mut(),
-    };
-    if pk.is_null() {
+    let Some(key) = (unsafe { x509_of(cert) }).and_then(|x| x.public_key().ok()) else {
+        clear_errors();
         return -EINVAL;
-    }
-    // SAFETY: the key, the numbers it gives, each freed once below, and
-    // the room of out.
-    unsafe {
-        let (mut a, mut b) = (core::ptr::null_mut(), core::ptr::null_mut());
-        let id = EVP_PKEY_get_base_id(pk);
-
-        if id == EVP_PKEY_RSA {
-            if EVP_PKEY_get_bn_param(pk, c"n".as_ptr(), &mut a) != 0
-                && EVP_PKEY_get_bn_param(pk, c"e".as_ptr(), &mut b) != 0
-                && bn_num_bytes(a) <= out.n.len() as c_int
-                && bn_num_bytes(b) <= 4
-            {
-                out.rsa = true;
-                out.n_len = BN_bn2bin(a, out.n.as_mut_ptr()) as usize;
-                out.e = BN_get_word(b) as u32;
-                ret = 0;
+    };
+    // SAFETY: the key.
+    let id = unsafe { more::EVP_PKEY_get_base_id(key.as_ptr()) };
+    let ret = if id == ffi::EVP_PKEY_RSA {
+        key.rsa().ok().map_or(-EINVAL, |rsa| {
+            let (n, e) = (rsa.n().to_vec(), rsa.e().to_vec());
+            if n.len() > out.n.len() || e.len() > 4 {
+                return -EINVAL;
             }
-        } else if id == EVP_PKEY_EC {
-            let p256 = EVP_PKEY_get_utf8_string_param(
-                pk,
-                c"group".as_ptr(),
-                group.as_mut_ptr().cast(),
-                group.len(),
-                core::ptr::null_mut(),
-            ) != 0
-                && matches!(cstr(&group), b"P-256" | b"prime256v1");
-
-            if p256
-                && EVP_PKEY_get_bn_param(pk, c"qx".as_ptr(), &mut a) != 0
-                && EVP_PKEY_get_bn_param(pk, c"qy".as_ptr(), &mut b) != 0
-                && BN_bn2binpad(a, out.x.as_mut_ptr(), 32) == 32
-                && BN_bn2binpad(b, out.y.as_mut_ptr(), 32) == 32
-            {
-                ret = 0;
+            out.rsa = true;
+            out.n[..n.len()].copy_from_slice(&n);
+            out.n_len = n.len();
+            out.e = e.iter().fold(0, |acc, &b| acc << 8 | u32::from(b));
+            0
+        })
+    } else if id == ffi::EVP_PKEY_EC {
+        let point = (|| -> Option<([u8; 32], [u8; 32])> {
+            let ec = key.ec_key().ok()?;
+            let group = ec.group();
+            if group.curve_name() != Some(Nid::X9_62_PRIME256V1) {
+                return None;
             }
-        } else {
-            ret = -EPROTONOSUPPORT;
-        }
-        BN_free(a);
-        BN_free(b);
-    }
+            let (mut bx, mut by) = (BigNum::new().ok()?, BigNum::new().ok()?);
+            let mut bn = BigNumContext::new().ok()?;
+            ec.public_key()
+                .affine_coordinates(group, &mut bx, &mut by, &mut bn)
+                .ok()?;
+            Some((coordinate(&bx)?, coordinate(&by)?))
+        })();
+        point.map_or(-EINVAL, |(x, y)| {
+            out.x = x;
+            out.y = y;
+            0
+        })
+    } else {
+        -EPROTONOSUPPORT
+    };
+    clear_errors();
     ret
 }
 
@@ -1160,47 +1132,66 @@ pub(crate) unsafe fn cert_verify_chain(
     bundle_path: *const c_char,
     reason: *mut *const c_char,
 ) -> c_int {
-    let mut ret = -EIO;
-
     // SAFETY: the caller's place for the reason.
     unsafe { *reason = c"".as_ptr() };
     // SAFETY: the caller passes NULL or a cert.
     let Some(x509) = (unsafe { x509_of(cert) }).filter(|_| !bundle_path.is_null()) else {
         return -EINVAL;
     };
-    // SAFETY: the store and its context, freed once, the caller's path
-    // and certificate, and its place for the reason.
-    unsafe {
-        let store = X509_STORE_new();
-        if store.is_null() {
-            return -ENOMEM;
-        }
-        let mut ctx = core::ptr::null_mut();
-
-        'out: {
-            if X509_STORE_load_file(store, bundle_path) != 1 {
-                ret = -EINVAL;
-                break 'out;
-            }
-            if X509_STORE_set_flags(store, X509_V_FLAG_PARTIAL_CHAIN) != 1 {
-                break 'out;
-            }
-            ctx = X509_STORE_CTX_new();
-            if ctx.is_null() || X509_STORE_CTX_init(ctx, store, x509, core::ptr::null_mut()) != 1 {
-                break 'out;
-            }
-            if X509_verify_cert(ctx) == 1 {
-                ret = 0;
-            } else {
-                *reason =
-                    X509_verify_cert_error_string(c_long::from(X509_STORE_CTX_get_error(ctx)));
-                ret = -EKEYREJECTED;
-            }
-        }
-        X509_STORE_CTX_free(ctx);
-        X509_STORE_free(store);
+    let Ok(mut store) = X509StoreBuilder::new() else {
+        return -ENOMEM;
+    };
+    // SAFETY: the store and the caller's C string.
+    if unsafe { more::X509_STORE_load_file(store.as_ptr(), bundle_path) } != 1 {
+        return -EINVAL;
     }
-    ret
+    if store.set_flags(X509VerifyFlags::PARTIAL_CHAIN).is_err() {
+        return -EIO;
+    }
+    let store = store.build();
+    let (Ok(mut ctx), Ok(untrusted)) = (X509StoreContext::new(), Stack::new()) else {
+        return -EIO;
+    };
+    let verified = ctx.init(&store, x509, &untrusted, |ctx| {
+        Ok((ctx.verify_cert(), ctx.error()))
+    });
+    match verified {
+        Ok((Ok(true), _)) => 0,
+        Ok((_, err)) => {
+            // SAFETY: a static string of libcrypto's, into the caller's
+            // place for the reason.
+            unsafe { *reason = ffi::X509_verify_cert_error_string(c_long::from(err.as_raw())) };
+            -EKEYREJECTED
+        }
+        Err(_) => -EIO,
+    }
+}
+
+/// Logs libcrypto's error `code` under `where_`, as ERR_error_string_n()
+/// writes it.
+fn complain_code(where_: *const c_char, code: core::ffi::c_ulong) {
+    let mut buf = [0u8; 256];
+
+    // SAFETY: the room of buf, and a format of two C strings with the
+    // caller's and OpenSSL's.
+    unsafe {
+        more::ERR_error_string_n(code, buf.as_mut_ptr().cast(), buf.len());
+        crate::log::log_c!(
+            crate::log::err,
+            c"openssl: %s: %s".as_ptr(),
+            where_,
+            buf.as_ptr()
+        );
+    }
+}
+
+/// Logs the first of the errors a call of the crate's took from
+/// libcrypto under `where_`, as openssl_complain() logs what is queued.
+pub(crate) fn complain_stack(where_: &CStr, errors: &ErrorStack) {
+    complain_code(
+        where_.as_ptr(),
+        errors.errors().first().map_or(0, |e| e.code()),
+    );
 }
 
 /// Logs libcrypto's last error under `where`.
@@ -1209,19 +1200,8 @@ pub(crate) unsafe fn cert_verify_chain(
 ///
 /// `where_` is a C string.
 pub(crate) unsafe fn openssl_complain(where_: *const c_char) {
-    let mut buf = [0u8; 256];
-
-    // SAFETY: the room of buf, and a format of two C strings with the
-    // caller's and OpenSSL's.
-    unsafe {
-        ERR_error_string_n(ERR_get_error(), buf.as_mut_ptr().cast(), buf.len());
-        crate::log::log_c!(
-            crate::log::err,
-            c"openssl: %s: %s".as_ptr(),
-            where_,
-            buf.as_ptr()
-        );
-    }
+    // SAFETY: a call that takes no pointer.
+    complain_code(where_, unsafe { ffi::ERR_get_error() });
 }
 
 mod capi {

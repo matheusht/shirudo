@@ -61,11 +61,15 @@ vendor_ok() {
 	return 1
 }
 
-# The licences a vendored crate may declare: permissive, and offering a
-# branch the binaries can take beside BSD-2-Clause.
+# The licences a vendored crate may declare: permissive ones, which the
+# binaries may carry beside BSD-2-Clause, and the Unicode data licence
+# of a crate the build alone runs. "MIT/Apache-2.0" is cargo's older
+# spelling of "MIT OR Apache-2.0".
 crate_ok() {
 	case "$1" in
-	'MIT OR Zlib OR Apache-2.0'|'0BSD OR MIT OR Apache-2.0')
+	'MIT'|'Apache-2.0'|'MIT OR Apache-2.0'|'MIT/Apache-2.0'|\
+	'MIT OR Zlib OR Apache-2.0'|'0BSD OR MIT OR Apache-2.0'|\
+	'(MIT OR Apache-2.0) AND Unicode-3.0')
 		return 0 ;;
 	esac
 	return 1

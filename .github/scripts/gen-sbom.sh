@@ -52,8 +52,12 @@ cpe() {
 }
 
 # component <name> <version> <license> <download> <purl> <source info> [<cpe>...]
+# A crate's id names it a crate, apart from a library of its name.
 component() {
 	id=SPDXRef-Package-$(printf '%s' "$1" | tr -c 'A-Za-z0-9.-' '-')
+	case $5 in
+	pkg:cargo/*)	id=SPDXRef-Package-crate-${id#SPDXRef-Package-} ;;
+	esac
 	name=$1 ver=$2 lic=$3 dl=$4 purl=$5 src=$6
 	shift 6
 	jq -cn --arg id "$id" --arg name "$name" --arg ver "$ver" \
@@ -94,26 +98,42 @@ libbpf_component() {
 		"$(cpe libbpf_project libbpf "$major.$minor")"
 }
 
-# The crates rust/Cargo.lock pins, vendored in rust/vendor, each with the
-# licence its Cargo.toml declares.
+# The crates the binaries link, vendored in rust/vendor: those the
+# library reaches through its and their normal dependencies, not what
+# only build scripts and procedural macros take, each with the licence
+# its Cargo.toml declares, "/" read as cargo's old "OR", and the
+# checksum rust/Cargo.lock pins.
 crate_components() {
-	awk '
-		/^\[\[package\]\]/ { if (src != "") print name, ver, sum; name = ver = src = sum = "" }
-		/^name = / { name = $3 }
-		/^version = / { ver = $3 }
-		/^source = / { src = $3 }
-		/^checksum = / { sum = $3 }
-		END { if (src != "") print name, ver, sum }
-	' "$root/rust/Cargo.lock" | tr -d '"' |
-	while read -r name ver sum; do
-		toml=$root/rust/vendor/$name/Cargo.toml
-		lic=$(sed -n '/^\[package\]/,/^\[/s/^license[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$toml" | head -n 1)
-		[ -n "$lic" ] || die "cannot read the licence of the vendored crate $name"
+	command -v cargo >/dev/null 2>&1 || die 'cargo not found'
+	(cd "$root" && cargo metadata --offline --locked --format-version 1 \
+		--manifest-path rust/Cargo.toml) >"$work/metadata" ||
+		die 'cannot read the vendored crates with cargo metadata'
+	jq -r '
+		(.packages | map({key: .id, value: .}) | from_entries) as $pkg |
+		(.resolve.nodes | map({key: .id, value: .}) | from_entries) as $node |
+		def linked:
+			$node[.].deps[] |
+			select(any(.dep_kinds[]; .kind == null)) | .pkg |
+			select(all($pkg[.].targets[]; .kind | index("proc-macro") | not));
+		[.resolve.root | recurse(linked)] | unique[] | $pkg[.] |
+		select(.source != null) |
+		"\(.name) \(.version) \(.license // "" | gsub("/"; " OR "))"
+	' "$work/metadata" >"$work/crates" ||
+		die 'cannot read the vendored crates with cargo metadata'
+	while read -r name ver lic; do
+		sum=$(awk -v n="\"$name\"" -v v="\"$ver\"" '
+			/^\[\[package\]\]/ { name = ver = "" }
+			/^name = / { name = $3 }
+			/^version = / { ver = $3 }
+			/^checksum = / && name == n && ver == v { gsub(/"/, "", $3); print $3 }
+		' "$root/rust/Cargo.lock")
+		[ -n "$lic" ] && [ -n "$sum" ] ||
+			die "cannot read the licence and checksum of the vendored crate $name"
 		component "$name" "$ver" "$lic" \
 			"https://crates.io/api/v1/crates/$name/$ver/download" \
 			"pkg:cargo/$name@$ver" \
 			"vendored in rust/vendor from crates.io, sha256 $sum"
-	done
+	done <"$work/crates"
 }
 
 deb_license() {

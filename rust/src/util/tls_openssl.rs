@@ -8,8 +8,15 @@
 //! change how certificates are verified.
 
 use core::ffi::{CStr, c_char, c_int, c_long, c_void};
-use core::mem::MaybeUninit;
+use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ptr;
+use std::fs::File;
+use std::io::Read;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+use openssl::ssl::{SslContextBuilder, SslVersion};
+use openssl::x509::X509;
+use openssl_sys::{NID_undef, SSL, SSL_ctrl, SSL_get_servername, TLSEXT_NAMETYPE_host_name};
 
 use crate::errno::EINVAL;
 use crate::sys::curl::{
@@ -20,16 +27,10 @@ use crate::sys::curl::{
     curl_easy_getinfo, curl_easy_setopt, curl_free, curl_url, curl_url_cleanup, curl_url_get,
     curl_url_set,
 };
-use crate::sys::libc::{O_CLOEXEC, O_RDONLY, close, open, strcasecmp, strncasecmp};
+use crate::sys::libc::{O_CLOEXEC, O_RDONLY, open, strcasecmp, strncasecmp};
 use crate::sys::openssl::{
-    BIO_CLOSE, BIO_free, BIO_new_fd, ERR_clear_error, PEM_read_bio_X509, X509_STORE_add_cert,
-    X509_free,
-};
-use crate::sys::ssl::{
-    NID_UNDEF, SSL_CB_HANDSHAKE_DONE, SSL_CTRL_GET_NEGOTIATED_GROUP, SSL_CTRL_SET_GROUPS_LIST,
-    SSL_CTRL_SET_MIN_PROTO_VERSION, SSL_CTX_ctrl, SSL_CTX_get_cert_store,
-    SSL_CTX_set_info_callback, SSL_ctrl, SSL_get_servername, SSL_group_to_name, Ssl, SslCtx,
-    TLS1_3_VERSION, TLSEXT_NAMETYPE_HOST_NAME,
+    SSL_CB_HANDSHAKE_DONE, SSL_CTRL_GET_NEGOTIATED_GROUP, SSL_CTX_set_info_callback,
+    SSL_group_to_name,
 };
 use crate::text::capi::dns_name_valid;
 use crate::text::cstr;
@@ -38,10 +39,10 @@ use crate::util::image_config;
 use crate::util::io::check_trusted;
 
 /// The groups of every host by default: hybrid ML-KEM alone.
-const TLS_GROUPS: &CStr = c"*X25519MLKEM768:SecP256r1MLKEM768";
+const TLS_GROUPS: &str = "*X25519MLKEM768:SecP256r1MLKEM768";
 /// The groups of a host tls.classical_hosts names: hybrid first, and
 /// classical ones after.
-const TLS_CLASSICAL_GROUPS: &CStr = c"*X25519MLKEM768:SecP256r1MLKEM768:X25519:secp256r1";
+const TLS_CLASSICAL_GROUPS: &str = "*X25519MLKEM768:SecP256r1MLKEM768:X25519:secp256r1";
 
 /// `struct tls_ca`: the CA file a client trusts, and what the TLS policy
 /// made of it.
@@ -160,7 +161,7 @@ unsafe fn classical_host_allowed(curl: *mut Curl) -> bool {
 /// # Safety
 ///
 /// `ssl` is the connection libssl reports on.
-unsafe extern "C" fn info_callback(ssl: *const Ssl, kind: c_int, _ret: c_int) {
+unsafe extern "C" fn info_callback(ssl: *const SSL, kind: c_int, _ret: c_int) {
     if kind & SSL_CB_HANDSHAKE_DONE == 0 {
         return;
     }
@@ -169,7 +170,7 @@ unsafe extern "C" fn info_callback(ssl: *const Ssl, kind: c_int, _ret: c_int) {
     // C's macro sends, and the C strings of its group and host.
     let (group, host) = unsafe {
         let id = SSL_ctrl(ssl_mut, SSL_CTRL_GET_NEGOTIATED_GROUP, 0, ptr::null_mut()) as c_int;
-        let group = if id == NID_UNDEF {
+        let group = if id == NID_undef {
             ptr::null()
         } else {
             SSL_group_to_name(ssl_mut, id)
@@ -181,7 +182,7 @@ unsafe extern "C" fn info_callback(ssl: *const Ssl, kind: c_int, _ret: c_int) {
         {
             return;
         }
-        (group, SSL_get_servername(ssl, TLSEXT_NAMETYPE_HOST_NAME))
+        (group, SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name))
     };
     let host = if host.is_null() {
         c"unknown host".as_ptr()
@@ -205,52 +206,35 @@ unsafe extern "C" fn info_callback(ssl: *const Ssl, kind: c_int, _ret: c_int) {
 }
 
 /// The CA file at `path` added to the trust store of `ctx`: CURLE_OK, or
-/// CURLE_SSL_CACERT_BADFILE for a file that cannot be opened, is not
-/// trusted or holds no PEM certificate. A certificate the store already
-/// has, or cannot add, leaves the store as it was.
+/// CURLE_SSL_CACERT_BADFILE for a file that cannot be opened or read, is
+/// not trusted or holds no PEM certificate. A certificate the store
+/// already has, or cannot add, leaves the store as it was.
 ///
 /// # Safety
 ///
-/// `ctx` is the context libcurl handed over, and `path` a C string.
-unsafe fn add_ca(ctx: *mut SslCtx, path: *const c_char) -> CurlCode {
+/// `path` is a C string.
+unsafe fn add_ca(ctx: &mut SslContextBuilder, path: *const c_char) -> CurlCode {
     // SAFETY: the caller's C string, and flags.
     let fd = unsafe { open(path, O_RDONLY | O_CLOEXEC) };
 
     if fd < 0 {
         return CURLE_SSL_CACERT_BADFILE;
     }
-    // SAFETY: the fd opened above, and the caller's C string.
-    if unsafe { check_trusted(fd, path, false) } != 0 {
-        // SAFETY: the fd opened above, closed once.
-        unsafe { close(fd) };
+    // SAFETY: the fd open() gave, owned from here.
+    let file = File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+    // SAFETY: the fd, and the caller's C string.
+    if unsafe { check_trusted(file.as_raw_fd(), path, false) } != 0 {
         return CURLE_SSL_CACERT_BADFILE;
     }
-    // SAFETY: the fd, which the BIO closes.
-    let bio = unsafe { BIO_new_fd(fd, BIO_CLOSE) };
-
-    if bio.is_null() {
-        // SAFETY: the fd no BIO took, closed once.
-        unsafe { close(fd) };
+    let mut text = Vec::new();
+    if (&file).read_to_end(&mut text).is_err() {
         return CURLE_SSL_CACERT_BADFILE;
     }
-    // SAFETY: the BIO, read and then freed with the fd.
-    let cert = unsafe {
-        let cert = PEM_read_bio_X509(bio, ptr::null_mut(), None, ptr::null_mut());
-
-        BIO_free(bio);
-        cert
+    let Ok(cert) = X509::from_pem(&text) else {
+        return CURLE_SSL_CACERT_BADFILE;
     };
-    if cert.is_null() {
-        return CURLE_SSL_CACERT_BADFILE;
-    }
-    // SAFETY: the context's store, which takes its own reference to the
-    // certificate, and the certificate, freed once.
-    unsafe {
-        if X509_STORE_add_cert(SSL_CTX_get_cert_store(ctx), cert) != 1 {
-            ERR_clear_error();
-        }
-        X509_free(cert);
-    }
+    // The store takes its own reference, or keeps the one it has.
+    drop(ctx.cert_store_mut().add_cert(cert));
     CURLE_OK
 }
 
@@ -269,7 +253,9 @@ unsafe extern "C" fn sslctx_callback(
 ) -> CurlCode {
     // SAFETY: the client's TLS CA, if any.
     let path = unsafe { userptr.cast::<TlsCa>().as_ref() }.map_or(ptr::null(), |ca| ca.path);
-    let ctx = sslctx.cast::<SslCtx>();
+    // SAFETY: the context libcurl hands over, which it keeps and frees, so
+    // that it is never dropped here.
+    let mut ctx = ManuallyDrop::new(unsafe { SslContextBuilder::from_ptr(sslctx.cast()) });
     let mut groups = TLS_GROUPS;
 
     // SAFETY: the handle libcurl is connecting.
@@ -286,35 +272,20 @@ unsafe extern "C" fn sslctx_callback(
         }
         groups = TLS_CLASSICAL_GROUPS;
         // SAFETY: the context, and a callback of libssl's type.
-        unsafe { SSL_CTX_set_info_callback(ctx, Some(info_callback)) };
+        unsafe { SSL_CTX_set_info_callback(ctx.as_ptr(), Some(info_callback)) };
     }
-    // SAFETY: the context, sent the controls the C's macros send, the
-    // second with a C string libssl copies.
-    let set = unsafe {
-        SSL_CTX_ctrl(
-            ctx,
-            SSL_CTRL_SET_MIN_PROTO_VERSION,
-            TLS1_3_VERSION,
-            ptr::null_mut(),
-        ) == 1
-            && SSL_CTX_ctrl(
-                ctx,
-                SSL_CTRL_SET_GROUPS_LIST,
-                0,
-                groups.as_ptr().cast_mut().cast(),
-            ) == 1
-    };
+    // What either refuses, libcrypto's queue loses with it.
+    let set = ctx.set_min_proto_version(Some(SslVersion::TLS1_3)).is_ok()
+        && ctx.set_groups_list(groups).is_ok();
     if !set {
-        // SAFETY: libcrypto's error queue of this thread.
-        unsafe { ERR_clear_error() };
         return CURLE_SSL_CIPHER;
     }
     // SAFETY: the client's path, NULL or a C string.
     if path.is_null() || unsafe { *path } == 0 {
         return CURLE_OK;
     }
-    // SAFETY: the context, and the client's C string.
-    unsafe { add_ca(ctx, path) }
+    // SAFETY: the client's C string.
+    unsafe { add_ca(&mut ctx, path) }
 }
 
 /// The policy on `curl`: TLS 1.3 at least, and the context callback,
