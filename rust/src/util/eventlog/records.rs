@@ -6,7 +6,6 @@
 //! upatches loaded and unloaded.
 
 use core::ffi::{CStr, c_char, c_int, c_void};
-use core::ptr;
 
 use super::{sha256_into, walk_boot, walk_log};
 use crate::errno::{EINVAL, ENOENT};
@@ -21,19 +20,15 @@ const NV_RSA_BYTES: usize = 384;
 
 /// `enum eventlog_upatch_event`.
 pub(crate) const UPATCH_INIT: c_int = 0;
-pub(super) const UPATCH_LOAD: c_int = 1;
+pub(crate) const UPATCH_LOAD: c_int = 1;
 pub(crate) const UPATCH_UNLOAD: c_int = 2;
 
 /// What `eventlog_boot_lines()` calls with each line.
 pub(crate) type LineFn =
     unsafe extern "C" fn(line: *const c_char, len: usize, ctx: *mut c_void) -> c_int;
-/// What the upatch walks call with each event.
-pub(crate) type UpatchFn = unsafe extern "C" fn(
-    event: c_int,
-    name: *const c_char,
-    payload_hex: *const c_char,
-    ctx: *mut c_void,
-) -> c_int;
+/// What the upatch walks call with each event: the event, and for a
+/// load or an unload the upatch's name and its payload's digest in hex.
+pub(crate) type UpatchFn<'a> = &'a mut dyn FnMut(c_int, &[u8], &[u8]) -> c_int;
 
 /// `struct eventlog_init`: this boot's last init record.
 #[repr(C)]
@@ -242,41 +237,23 @@ pub(crate) fn tree_op_measured(seq: i64, digest: &[u8]) -> c_int {
     c_int::from(found)
 }
 
-/// The upatch walk's state: the caller's callback and its context, what
-/// the schema fills of each record, and the callback's last result.
-struct UpatchSink {
-    cb: Option<UpatchFn>,
-    ctx: *mut c_void,
+/// The upatch walk's state: the caller's callback, what the schema fills
+/// of each record, and the callback's last result.
+struct UpatchSink<'a> {
+    cb: UpatchFn<'a>,
     ty: [u8; 32],
     name: [u8; NAME_MAX + 1],
     payload_hex: [u8; 2 * PAYLOAD_HASH_LEN + 1],
     ret: c_int,
 }
 
-/// The sink's callback on `event`, which faults when it is NULL, as the
-/// C's call through it did.
-///
-/// # Safety
-///
-/// The sink's callback takes its context, and `name` and `payload` are
-/// NULL or C strings.
-unsafe fn notify(
-    u: &UpatchSink,
-    event: c_int,
-    name: *const c_char,
-    payload: *const c_char,
-) -> c_int {
-    // SAFETY: the caller's callback, context and strings.
-    unsafe {
-        match u.cb {
-            Some(cb) => cb(event, name, payload, u.ctx),
-            None => abort(),
-        }
-    }
+/// The sink's callback on `event` for the upatch its fields name.
+fn notify(u: &mut UpatchSink<'_>, event: c_int) -> c_int {
+    (u.cb)(event, cstr(&u.name), cstr(&u.payload_hex))
 }
 
 /// An entry of an init record's set: a load boot restore made.
-fn take_set_entry(u: &mut UpatchSink) -> Result<(), c_int> {
+fn take_set_entry(u: &mut UpatchSink<'_>) -> Result<(), c_int> {
     let name = u.name.as_ptr().cast::<c_char>();
     let payload = u.payload_hex.as_ptr().cast::<c_char>();
 
@@ -284,9 +261,7 @@ fn take_set_entry(u: &mut UpatchSink) -> Result<(), c_int> {
     if !unsafe { upatch_member_valid(name, payload) } {
         return Err(-EINVAL);
     }
-    // SAFETY: the sink of upatches_line(), whose callback takes its
-    // context, and the strings above.
-    u.ret = unsafe { notify(u, UPATCH_LOAD, name, payload) };
+    u.ret = notify(u, UPATCH_LOAD);
     u.name[0] = 0;
     u.payload_hex[0] = 0;
     match u.ret {
@@ -296,35 +271,23 @@ fn take_set_entry(u: &mut UpatchSink) -> Result<(), c_int> {
 }
 
 /// One record of the log to `cb`, as [`upatches`] would give it.
-///
-/// # Safety
-///
-/// `cb` takes `ctx`.
-pub(crate) unsafe fn upatches_record(
-    line: &CStr,
-    is_init: bool,
-    cb: Option<UpatchFn>,
-    ctx: *mut c_void,
-) -> c_int {
+pub(crate) fn upatches_record(line: &CStr, is_init: bool, cb: UpatchFn<'_>) -> c_int {
     let mut sink = UpatchSink {
         cb,
-        ctx,
         ty: [0; 32],
         name: [0; NAME_MAX + 1],
         payload_hex: [0; 2 * PAYLOAD_HASH_LEN + 1],
         ret: 0,
     };
-    // SAFETY: the caller's callback and context.
-    unsafe { upatches_line(&mut sink, line, is_init) }
+    upatches_line(&mut sink, line, is_init)
 }
 
 /// The upatch events of this boot's records, or with `all` of every
 /// record: an init and the set its record lists, then each load and
 /// unload.
-pub(super) fn upatches(all: bool, cb: Option<UpatchFn>, ctx: *mut c_void) -> c_int {
+pub(crate) fn upatches(all: bool, cb: UpatchFn<'_>) -> c_int {
     let mut sink = UpatchSink {
         cb,
-        ctx,
         ty: [0; 32],
         name: [0; NAME_MAX + 1],
         payload_hex: [0; 2 * PAYLOAD_HASH_LEN + 1],
@@ -332,33 +295,28 @@ pub(super) fn upatches(all: bool, cb: Option<UpatchFn>, ctx: *mut c_void) -> c_i
     };
 
     walk_log(all, &mut |line, is_init| {
-        // SAFETY: the caller's callback and context.
-        unsafe { upatches_line(&mut sink, line, is_init) }
+        upatches_line(&mut sink, line, is_init)
     })
 }
 
-/// # Safety
-///
-/// The sink's callback takes its context.
-unsafe fn upatches_line(u: &mut UpatchSink, line: &CStr, is_init: bool) -> c_int {
+fn upatches_line(u: &mut UpatchSink<'_>, line: &CStr, is_init: bool) -> c_int {
     u.ty = [0; 32];
     u.name[0] = 0;
     u.payload_hex[0] = 0;
     if is_init {
-        // SAFETY: the caller's callback and context, and no strings.
-        let ret = unsafe { notify(u, UPATCH_INIT, ptr::null(), ptr::null()) };
+        let ret = (u.cb)(UPATCH_INIT, &[], &[]);
         if ret != 0 {
             return ret;
         }
     }
     let entry = [
-        JsonField::string(c"name", |u: &mut UpatchSink| &mut u.name),
+        JsonField::string(c"name", |u: &mut UpatchSink<'_>| &mut u.name),
         JsonField::string(c"payload_sha256", |u| &mut u.payload_hex),
     ];
     // Only an init record's set lists what boot restore loaded.
     let set_field = JsonField::array(c"set", &entry, &take_set_entry);
     let f = [
-        JsonField::string(c"type", |u: &mut UpatchSink| &mut u.ty),
+        JsonField::string(c"type", |u: &mut UpatchSink<'_>| &mut u.ty),
         if is_init {
             set_field
         } else {
@@ -388,6 +346,5 @@ unsafe fn upatches_line(u: &mut UpatchSink, line: &CStr, is_init: bool) -> c_int
     } else {
         UPATCH_UNLOAD
     };
-    // SAFETY: the caller's callback and context, and the strings above.
-    unsafe { notify(u, event, name, payload) }
+    notify(u, event)
 }

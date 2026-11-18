@@ -15,7 +15,7 @@
 //! either fails, so that nothing runs unmeasured. An unload extends
 //! before it detaches, so that the register never misses a detach.
 
-use core::ffi::{CStr, c_char, c_int, c_void};
+use core::ffi::{CStr, c_char, c_int};
 use std::ffi::CString;
 use std::ffi::OsStr;
 use std::fs;
@@ -41,10 +41,7 @@ use crate::util::hex::hex_decode;
 use crate::util::io::read_file;
 use crate::util::json::JsonEmit;
 use crate::util::kernel_abi;
-use crate::util::measured::{
-    MeasuredSet, measured_set_boot, measured_set_free, measured_unmeasured_archives,
-    measured_unmeasured_pins,
-};
+use crate::util::measured::MeasuredSet;
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::report::{OpReport, report_emit};
 use crate::util::seal::{seal_mkdir_p, seal_open_read, seal_write_file};
@@ -429,10 +426,8 @@ fn unload_unmeasured(name: &[u8]) {
 }
 
 /// An undo pass callback: the rest are still undone when one fails, and
-/// `ctx` keeps the first error.
-unsafe extern "C" fn undo_pin(name: *const c_char, ctx: *mut c_void) -> c_int {
-    // SAFETY: the walk's C string and the pass's first error.
-    let (name, failed) = unsafe { (crate::ffi::c_str(name), &mut *ctx.cast::<c_int>()) };
+/// `failed` keeps the first error.
+fn undo_pin(name: &[u8], failed: &mut c_int) -> c_int {
     match undo_load(name) {
         0 => log_audit(
             &[
@@ -462,19 +457,7 @@ unsafe extern "C" fn undo_pin(name: *const c_char, ctx: *mut c_void) -> c_int {
 }
 
 /// As [`undo_pin`], for an archive no record covers.
-unsafe extern "C" fn undo_archive(
-    name: *const c_char,
-    path: *const c_char,
-    ctx: *mut c_void,
-) -> c_int {
-    // SAFETY: the walk's C strings and the pass's first error.
-    let (name, path, failed) = unsafe {
-        (
-            crate::ffi::c_str(name),
-            crate::ffi::c_str(path),
-            &mut *ctx.cast::<c_int>(),
-        )
-    };
+fn undo_archive(name: &[u8], path: &[u8], failed: &mut c_int) -> c_int {
     match fs::remove_file(os(path)) {
         Err(e) if e.raw_os_error() != Some(ENOENT) => {
             let err = io_err(&e);
@@ -512,14 +495,13 @@ unsafe extern "C" fn undo_archive(
 /// flight for a stopped one. An operation whose pass fails refuses: a
 /// load beside such pins could share their directory under one name.
 fn undo_unmeasured(rep: &mut OpReport, op: &[u8]) -> Result<(), ()> {
-    let mut set: *mut MeasuredSet = core::ptr::null_mut();
-    // SAFETY: room for the set.
-    let ret = unsafe { measured_set_boot(&mut set) };
-    // The records count only as the register vouches for them: the
-    // eventlog and the boot ID are paths root can bind over in a
-    // namespace of its own.
-    if ret == -EBADMSG {
-        log_err(
+    let set = match MeasuredSet::boot() {
+        Ok(set) => set,
+        // The records count only as the register vouches for them: the
+        // eventlog and the boot ID are paths root can bind over in a
+        // namespace of its own.
+        Err(ret) if ret == -EBADMSG => {
+            log_err(
             &[
                 b"upatch ",
                 op,
@@ -527,45 +509,42 @@ fn undo_unmeasured(rep: &mut OpReport, op: &[u8]) -> Result<(), ()> {
             ]
             .concat(),
         );
-        fail(
-            rep,
-            c"tpm_extend",
-            c"tampered",
-            ret,
-            b"this boot's records do not fold to the register",
-        );
-        return Err(());
-    }
-    if ret != 0 {
-        log_err(
-            &[
-                b"upatch ",
-                op,
-                b": cannot read this boot's records: ",
-                strerr(-ret),
-                b"; refused, nothing changed",
-            ]
-            .concat(),
-        );
-        fail(
-            rep,
-            c"tpm_extend",
-            c"tpm_error",
-            ret,
-            b"cannot read this boot's records",
-        );
-        return Err(());
-    }
+            fail(
+                rep,
+                c"tpm_extend",
+                c"tampered",
+                ret,
+                b"this boot's records do not fold to the register",
+            );
+            return Err(());
+        }
+        Err(ret) => {
+            log_err(
+                &[
+                    b"upatch ",
+                    op,
+                    b": cannot read this boot's records: ",
+                    strerr(-ret),
+                    b"; refused, nothing changed",
+                ]
+                .concat(),
+            );
+            fail(
+                rep,
+                c"tpm_extend",
+                c"tpm_error",
+                ret,
+                b"cannot read this boot's records",
+            );
+            return Err(());
+        }
+    };
     let mut failed: c_int = 0;
-    let ctx = (&raw mut failed).cast::<c_void>();
-    // SAFETY: the set, the callbacks and their context.
-    let mut ret = unsafe { measured_unmeasured_pins(set, Some(undo_pin), ctx) };
+    let mut ret = set.unmeasured_pins(|name| undo_pin(name, &mut failed));
     if ret >= 0 {
-        // SAFETY: as above.
-        ret = unsafe { measured_unmeasured_archives(set, Some(undo_archive), ctx) };
+        ret = set.unmeasured_archives(|name, path| undo_archive(name, path, &mut failed));
     }
-    // SAFETY: the set, freed once.
-    unsafe { measured_set_free(set) };
+    drop(set);
     if ret >= 0 && failed == 0 {
         return Ok(());
     }

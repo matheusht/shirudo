@@ -5,7 +5,7 @@
 
 use core::ffi::{c_char, c_int, c_void};
 
-use super::records::{self, EventlogInit, LineFn, UpatchFn};
+use super::records::{self, EventlogInit, LineFn};
 use crate::ffi;
 
 pub extern "C" fn eventlog_path() -> *const c_char {
@@ -29,13 +29,6 @@ pub unsafe extern "C" fn eventlog_boot_init(out: *mut EventlogInit) -> c_int {
 /// `cb` takes `ctx`.
 pub unsafe extern "C" fn eventlog_boot_lines(cb: Option<LineFn>, ctx: *mut c_void) -> c_int {
     records::boot_lines(cb, ctx)
-}
-
-/// # Safety
-///
-/// `cb` takes `ctx`.
-pub unsafe extern "C" fn eventlog_upatches(cb: Option<UpatchFn>, ctx: *mut c_void) -> c_int {
-    records::upatches(true, cb, ctx)
 }
 
 /// # Safety

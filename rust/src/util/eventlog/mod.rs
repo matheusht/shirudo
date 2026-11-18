@@ -14,12 +14,14 @@ mod records;
 
 pub(crate) use capi::{
     eventlog_boot_id, eventlog_boot_init, eventlog_boot_lines, eventlog_path, eventlog_timestamp,
-    eventlog_upatches,
 };
+#[cfg(test)]
+pub(crate) use records::UPATCH_LOAD;
 #[cfg(feature = "test-helpers")]
 pub(crate) use records::boot_lines;
 pub(crate) use records::{
-    EventlogInit, UPATCH_INIT, UPATCH_UNLOAD, boot_init, replay, tree_op_measured, upatches_record,
+    EventlogInit, UPATCH_INIT, UPATCH_UNLOAD, UpatchFn, boot_init, replay, tree_op_measured,
+    upatches, upatches_record,
 };
 
 use core::ffi::{CStr, c_int};

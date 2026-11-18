@@ -5,16 +5,14 @@
 //! records as loaded, each with the payload of its load, and the pins
 //! and archives that set does not account for.
 
-use core::ffi::{CStr, c_char, c_int, c_void};
+use core::ffi::{CStr, c_char, c_int};
 use core::mem::MaybeUninit;
-use core::ptr;
 
-use crate::errno::{E2BIG, EEXIST, EINVAL, ENAMETOOLONG, ENOENT, ENOMEM, ENOSPC};
-use crate::heap::{xcalloc, xfree, xmalloc};
+use crate::errno::{E2BIG, EEXIST, EINVAL, ENAMETOOLONG, ENOENT, ENOSPC};
 use crate::sys::libc::{PATH_MAX, getxattr, strcmp, strnlen};
-use crate::text::{at, strscpy, strsprintf};
+use crate::text::{at, cstr, strscpy, strsprintf};
 use crate::util::chain::MeasuredUpatch;
-use crate::util::eventlog::{UPATCH_INIT, UPATCH_UNLOAD, eventlog_upatches};
+use crate::util::eventlog::{self, UPATCH_INIT, UPATCH_UNLOAD};
 use crate::util::hex::hex_encode;
 use crate::util::seal::seal_owns;
 use crate::util::upatch::{
@@ -31,32 +29,18 @@ const UPATCHES_DIR: &CStr = c"/var/lib/shirudo/upatches";
 /// `XATTR_PAYLOAD` of util/paths.h: the payload digest a pin records.
 const XATTR_PAYLOAD: &CStr = c"security.bpf.shirudo.payload";
 
-/// `struct measured_entry`: a member of a set.
-#[repr(C)]
+/// A member of a set: an upatch the records hold loaded, and its
+/// payload's digest in hex.
 struct Entry {
-    name: [u8; NAME_MAX + 1],
-    payload_hex: [u8; 2 * PAYLOAD_HASH_LEN + 1],
+    name: Vec<u8>,
+    payload_hex: Vec<u8>,
 }
 
-/// `struct measured_set`: the members, room for MEASURED_MAX of them.
-#[repr(C)]
-pub struct MeasuredSet {
-    entries: *mut Entry,
-    n: usize,
+/// The members, at most MEASURED_MAX of them.
+#[derive(Default)]
+pub(crate) struct MeasuredSet {
+    entries: Vec<Entry>,
 }
-
-/// What the pin walk calls with each upatch it finds.
-type PinFn = unsafe extern "C" fn(name: *const c_char, ctx: *mut c_void) -> c_int;
-/// What the archive walk calls with each upatch it finds.
-type ArchiveFn =
-    unsafe extern "C" fn(name: *const c_char, path: *const c_char, ctx: *mut c_void) -> c_int;
-
-/// What util/measured.h's member walk calls with each measured upatch.
-type EachFn = unsafe extern "C" fn(
-    name: *const c_char,
-    payload_hex: *const c_char,
-    ctx: *mut c_void,
-) -> c_int;
 
 /// strscpy() of the C string at `src` into `dst`, reading no more of it
 /// than the C's strnlen() bounded by the room did.
@@ -71,172 +55,70 @@ unsafe fn strscpy_c(dst: &mut [u8], src: *const c_char) -> Result<usize, c_int> 
     strscpy(dst, src)
 }
 
-/// What the eventlog's walk calls with each init, load and unload it
-/// measures: the set at `ctx` started over, the name's payload set or
-/// the name added with it, or the name gone, the last member in its
-/// place.
-///
-/// # Safety
-///
-/// `ctx` is a set, and for a load or an unload `name` and `payload_hex`
-/// are C strings.
-unsafe extern "C" fn measured_event(
-    event: c_int,
-    name: *const c_char,
-    payload_hex: *const c_char,
-    ctx: *mut c_void,
-) -> c_int {
-    // SAFETY: the walk hands back the set the fold gave it.
-    let s = unsafe { &mut *ctx.cast::<MeasuredSet>() };
-    let mut i = 0;
+impl MeasuredSet {
+    /// This boot's set, from records the register vouches for.
+    pub(crate) fn boot() -> Result<Self, c_int> {
+        Self::fold(false)
+    }
 
-    if event == UPATCH_INIT {
-        s.n = 0;
-        return 0;
+    /// The set every boot's records make, an empty one for no log.
+    pub(crate) fn log() -> Result<Self, c_int> {
+        Self::fold(true)
     }
-    while i < s.n {
-        // SAFETY: a member of the set and the walk's name.
-        if unsafe { strcmp((&raw const (*s.entries.add(i)).name).cast(), name) } == 0 {
-            break;
+
+    fn fold(all: bool) -> Result<Self, c_int> {
+        let mut s = Self::default();
+        let mut on_event =
+            |event, name: &[u8], payload_hex: &[u8]| s.event(event, name, payload_hex);
+        let ret = if all {
+            match eventlog::upatches(true, &mut on_event) {
+                r if r == -ENOENT => 0,
+                r => r,
+            }
+        } else {
+            verified::upatches(&mut on_event)
+        };
+        if ret != 0 { Err(ret) } else { Ok(s) }
+    }
+
+    /// One event of the walk: the set started over at an init, the
+    /// name's payload set or the name added with it at a load, or the
+    /// name gone at an unload, the last member in its place.
+    fn event(&mut self, event: c_int, name: &[u8], payload_hex: &[u8]) -> c_int {
+        if event == UPATCH_INIT {
+            self.entries.clear();
+            return 0;
         }
-        i += 1;
-    }
-    if event == UPATCH_UNLOAD {
-        if i < s.n {
-            s.n -= 1;
-            // SAFETY: two members of the set, which may be one.
-            unsafe { ptr::copy(s.entries.add(s.n), s.entries.add(i), 1) };
+        let at = self.entries.iter().position(|e| e.name == name);
+        if event == UPATCH_UNLOAD {
+            if let Some(i) = at {
+                self.entries.swap_remove(i);
+            }
+            return 0;
         }
-        return 0;
-    }
-    if i == s.n {
-        if s.n == MEASURED_MAX {
+        if at.is_none() && self.entries.len() == MEASURED_MAX {
             return -ENOSPC;
         }
-        s.n += 1;
-    }
-    // SAFETY: a member of the set, inside its room, and the walk's
-    // strings.
-    unsafe {
-        let e = &mut *s.entries.add(i);
-
-        if strscpy_c(&mut e.name, name).is_err()
-            || strscpy_c(&mut e.payload_hex, payload_hex).is_err()
-        {
+        if name.len() > NAME_MAX || payload_hex.len() > 2 * PAYLOAD_HASH_LEN {
             return -EINVAL;
         }
-    }
-    0
-}
-
-/// The set the eventlog's records make into `*out`: every boot's with
-/// `all`, an empty one for no log, else this boot's.
-///
-/// # Safety
-///
-/// `out` is room for a pointer.
-unsafe fn fold(out: *mut *mut MeasuredSet, all: bool) -> c_int {
-    // SAFETY: the caller's room.
-    unsafe { *out = ptr::null_mut() };
-    // SAFETY: an allocation of a set, freed by its size.
-    let s = unsafe { xmalloc(size_of::<MeasuredSet>()) }.cast::<MeasuredSet>();
-
-    if s.is_null() {
-        return -ENOMEM;
-    }
-    // SAFETY: the set allocated, its fields written before any is read.
-    let entries = unsafe {
-        (&raw mut (*s).n).write(0);
-        let entries = xcalloc(MEASURED_MAX, size_of::<Entry>()).cast::<Entry>();
-
-        (&raw mut (*s).entries).write(entries);
-        entries
-    };
-    if entries.is_null() {
-        // SAFETY: the set, by its size.
-        unsafe { xfree(s.cast(), size_of::<MeasuredSet>()) };
-        return -ENOMEM;
-    }
-    // SAFETY: the walk calls back with the set, which outlives it.
-    let mut ret = unsafe {
-        if all {
-            eventlog_upatches(Some(measured_event), s.cast())
-        } else {
-            verified::upatches(measured_event, s.cast())
+        let payload_hex = payload_hex.to_vec();
+        match at {
+            Some(i) => self.entries[i].payload_hex = payload_hex,
+            None => self.entries.push(Entry {
+                name: name.to_vec(),
+                payload_hex,
+            }),
         }
-    };
-    if ret == -ENOENT && all {
-        ret = 0;
+        0
     }
-    if ret != 0 {
-        // SAFETY: the set and its members, freed once.
-        unsafe { set_free(s) };
-        return ret;
+
+    /// Whether the set holds `name` with the payload `payload_hex`.
+    pub(crate) fn holds(&self, name: &[u8], payload_hex: &[u8]) -> bool {
+        self.entries
+            .iter()
+            .any(|e| e.name == name && e.payload_hex == payload_hex)
     }
-    // SAFETY: the caller's room.
-    unsafe { *out = s };
-    0
-}
-
-/// # Safety
-///
-/// `s` is NULL or a set fold() made.
-unsafe fn set_free(s: *mut MeasuredSet) {
-    if s.is_null() {
-        return;
-    }
-    // SAFETY: the set's members and the set, by their sizes.
-    unsafe {
-        xfree((*s).entries.cast(), MEASURED_MAX * size_of::<Entry>());
-        xfree(s.cast(), size_of::<MeasuredSet>());
-    }
-}
-
-/// Whether the set holds `name` with the payload `payload_hex`.
-///
-/// # Safety
-///
-/// `s` is a set, and `name` and `payload_hex` C strings.
-unsafe fn holds(s: *const MeasuredSet, name: *const c_char, payload_hex: *const c_char) -> bool {
-    // SAFETY: the caller's set.
-    let s = unsafe { &*s };
-
-    for i in 0..s.n {
-        // SAFETY: a member of the set and the caller's strings.
-        let found = unsafe {
-            let e = s.entries.add(i);
-
-            strcmp((&raw const (*e).name).cast(), name) == 0
-                && strcmp((&raw const (*e).payload_hex).cast(), payload_hex) == 0
-        };
-
-        if found {
-            return true;
-        }
-    }
-    false
-}
-
-/// Walk each member in order, stopping at the first nonzero callback result.
-///
-/// # Safety
-///
-/// `s` is a valid set and `cb` accepts its member strings and `ctx`.
-unsafe fn each(s: *const MeasuredSet, cb: EachFn, ctx: *mut c_void) -> c_int {
-    // SAFETY: the caller's set.
-    let s = unsafe { &*s };
-
-    for i in 0..s.n {
-        // SAFETY: the entry is within the set and its strings are NUL terminated.
-        let ret = unsafe {
-            let e = &*s.entries.add(i);
-            cb(e.name.as_ptr().cast(), e.payload_hex.as_ptr().cast(), ctx)
-        };
-        if ret != 0 {
-            return ret;
-        }
-    }
-    0
 }
 
 /// The name and payload digest an init record lists for the upatch `u`.
@@ -330,225 +212,150 @@ pub(crate) fn name_from_bpffs(out: &mut [u8], name: &[u8]) -> c_int {
     0
 }
 
-/// The upatches pinned in the private bpffs that the set does not hold
-/// with the payload their pin records, each to `cb`: how many, or the
-/// first non-zero `cb` returned, or -errno.
-///
-/// # Safety
-///
-/// `s` is a set, and `cb` takes `ctx`.
-unsafe fn unmeasured_pins(s: *const MeasuredSet, cb: Option<PinFn>, ctx: *mut c_void) -> c_int {
-    let (mut ret, mut unmeasured) = (0, 0);
+impl MeasuredSet {
+    /// The upatches pinned in the private bpffs that the set does not hold
+    /// with the payload their pin records, each to `cb`: how many, or the
+    /// first non-zero `cb` returned, or -errno.
+    pub(crate) fn unmeasured_pins(&self, mut cb: impl FnMut(&[u8]) -> c_int) -> c_int {
+        let (mut ret, mut unmeasured) = (0, 0);
 
-    let pins = match crate::util::io::dir_names(BPFFS_UPATCHES_DIR.to_bytes(), |_| true) {
-        Ok(pins) => pins,
-        Err(err) if err == -ENOENT => return 0,
-        Err(err) => return err,
-    };
-    for pin in &pins {
-        let mut payload_hex = [0u8; 2 * PAYLOAD_HASH_LEN + 1];
-        let mut payload = [0u8; PAYLOAD_HASH_LEN];
-        let mut name = [0u8; NAME_MAX + 1];
-        let mut dir = [0u8; PATH_MAX];
-
-        if name_from_bpffs(&mut name, pin) != 0
-            || strsprintf(&mut dir, &[BPFFS_UPATCHES_DIR.to_bytes(), b"/", pin]).is_err()
-        {
-            continue;
-        }
-        // SAFETY: the pin's path, the attribute's name, and room for it.
-        let got = unsafe {
-            getxattr(
-                dir.as_ptr().cast(),
-                XATTR_PAYLOAD.as_ptr(),
-                payload.as_mut_ptr().cast(),
-                payload.len(),
-            )
+        let pins = match crate::util::io::dir_names(BPFFS_UPATCHES_DIR.to_bytes(), |_| true) {
+            Ok(pins) => pins,
+            Err(err) if err == -ENOENT => return 0,
+            Err(err) => return err,
         };
-        if got == payload.len() as isize {
-            // SAFETY: the digest and room for its hex.
-            unsafe {
-                hex_encode(
-                    payload.as_ptr(),
+        for pin in &pins {
+            let mut payload_hex = [0u8; 2 * PAYLOAD_HASH_LEN + 1];
+            let mut payload = [0u8; PAYLOAD_HASH_LEN];
+            let mut name = [0u8; NAME_MAX + 1];
+            let mut dir = [0u8; PATH_MAX];
+
+            if name_from_bpffs(&mut name, pin) != 0
+                || strsprintf(&mut dir, &[BPFFS_UPATCHES_DIR.to_bytes(), b"/", pin]).is_err()
+            {
+                continue;
+            }
+            // SAFETY: the pin's path, the attribute's name, and room for it.
+            let got = unsafe {
+                getxattr(
+                    dir.as_ptr().cast(),
+                    XATTR_PAYLOAD.as_ptr(),
+                    payload.as_mut_ptr().cast(),
                     payload.len(),
-                    payload_hex.as_mut_ptr().cast(),
                 )
             };
-        }
-        // SAFETY: the caller's set, and two C strings.
-        if unsafe { holds(s, name.as_ptr().cast(), payload_hex.as_ptr().cast()) } {
-            continue;
-        }
-        unmeasured += 1;
-        if let Some(cb) = cb {
-            // SAFETY: the caller's function and context, with a name.
-            ret = unsafe { cb(name.as_ptr().cast(), ctx) };
+            if got == payload.len() as isize {
+                // SAFETY: the digest and room for its hex.
+                unsafe {
+                    hex_encode(
+                        payload.as_ptr(),
+                        payload.len(),
+                        payload_hex.as_mut_ptr().cast(),
+                    )
+                };
+            }
+            if self.holds(cstr(&name), cstr(&payload_hex)) {
+                continue;
+            }
+            unmeasured += 1;
+            ret = cb(cstr(&name));
             if ret != 0 {
                 break;
             }
         }
+        if ret != 0 { ret } else { unmeasured }
     }
-    if ret != 0 { ret } else { unmeasured }
 }
 
-/// The upatches archived with the seal label that the set does not hold
-/// with the payload of their archive, each to `cb`: how many, or the
-/// first non-zero `cb` returned, or -errno.
-///
-/// # Safety
-///
-/// `s` is a set, and `cb` takes `ctx`.
-unsafe fn unmeasured_archives(
-    s: *const MeasuredSet,
-    cb: Option<ArchiveFn>,
-    ctx: *mut c_void,
-) -> c_int {
-    let (mut ret, mut unmeasured) = (0, 0);
+impl MeasuredSet {
+    /// The upatches archived with the seal label that the set does not hold
+    /// with the payload of their archive, each to `cb` with its archive's
+    /// path: how many, or the first non-zero `cb` returned, or -errno.
+    pub(crate) fn unmeasured_archives(&self, mut cb: impl FnMut(&[u8], &[u8]) -> c_int) -> c_int {
+        let (mut ret, mut unmeasured) = (0, 0);
 
-    let names = match crate::util::io::dir_names(UPATCHES_DIR.to_bytes(), |n| {
-        crate::text::name_has_suffix(n, b".upatch")
-    }) {
-        Ok(names) => names,
-        Err(err) if err == -ENOENT => return 0,
-        Err(err) => return err,
-    };
-    for archive in &names {
-        // SAFETY: all of whose bits zeroed are a member, which
-        // upatch_of() fills.
-        let mut m: MeasuredUpatch = unsafe { core::mem::zeroed() };
-        let mut path = [0u8; PATH_MAX];
-        let mut u = MaybeUninit::<Upatch>::uninit();
-
-        if strsprintf(&mut path, &[UPATCHES_DIR.to_bytes(), b"/", archive]).is_err() {
-            continue;
-        }
-        // SAFETY: the archive's path, and room for the upatch; the C
-        // opened only what the seal label marks.
-        let opened = unsafe {
-            seal_owns(path.as_ptr().cast())
-                && upatch_open(path.as_ptr().cast(), u.as_mut_ptr()) == 0
+        let names = match crate::util::io::dir_names(UPATCHES_DIR.to_bytes(), |n| {
+            crate::text::name_has_suffix(n, b".upatch")
+        }) {
+            Ok(names) => names,
+            Err(err) if err == -ENOENT => return 0,
+            Err(err) => return err,
         };
-        if !opened {
-            continue;
-        }
-        // SAFETY: the member's room and the upatch opened, closed once.
-        unsafe {
-            upatch_of(&mut m, u.as_ptr());
-            upatch_close(u.as_mut_ptr());
-        }
-        // SAFETY: the caller's set, and the member's two C strings.
-        if unsafe { holds(s, m.name.as_ptr().cast(), m.payload_hex.as_ptr().cast()) } {
-            continue;
-        }
-        unmeasured += 1;
-        if let Some(cb) = cb {
-            // SAFETY: the caller's function and context, with a name and
-            // a path.
-            ret = unsafe { cb(m.name.as_ptr().cast(), path.as_ptr().cast(), ctx) };
+        for archive in &names {
+            // SAFETY: all of whose bits zeroed are a member, which
+            // upatch_of() fills.
+            let mut m: MeasuredUpatch = unsafe { core::mem::zeroed() };
+            let mut path = [0u8; PATH_MAX];
+            let mut u = MaybeUninit::<Upatch>::uninit();
+
+            if strsprintf(&mut path, &[UPATCHES_DIR.to_bytes(), b"/", archive]).is_err() {
+                continue;
+            }
+            // SAFETY: the archive's path, and room for the upatch; the C
+            // opened only what the seal label marks.
+            let opened = unsafe {
+                seal_owns(path.as_ptr().cast())
+                    && upatch_open(path.as_ptr().cast(), u.as_mut_ptr()) == 0
+            };
+            if !opened {
+                continue;
+            }
+            // SAFETY: the member's room and the upatch opened, closed once.
+            unsafe {
+                upatch_of(&mut m, u.as_ptr());
+                upatch_close(u.as_mut_ptr());
+            }
+            if self.holds(cstr(&m.name), cstr(&m.payload_hex)) {
+                continue;
+            }
+            unmeasured += 1;
+            ret = cb(cstr(&m.name), cstr(&path));
             if ret != 0 {
                 break;
             }
         }
+        if ret != 0 { ret } else { unmeasured }
     }
-    if ret != 0 { ret } else { unmeasured }
 }
 
-/// The members of set `s` whose pin directory is gone, each handed to
-/// `cb` until it returns nonzero: how many, that return, or -errno. A
-/// load the records hold keeps its pin directory until its unload.
-///
-/// # Safety
-///
-/// `s` is a set.
-pub(crate) unsafe fn unpinned(s: *const MeasuredSet, cb: &mut dyn FnMut(&[u8]) -> c_int) -> c_int {
-    use std::os::unix::ffi::OsStrExt;
+impl MeasuredSet {
+    /// The members whose pin directory is gone, each handed to `cb` until it
+    /// returns nonzero: how many, that return, or -errno. A load the records
+    /// hold keeps its pin directory until its unload.
+    pub(crate) fn unpinned(&self, mut cb: impl FnMut(&[u8]) -> c_int) -> c_int {
+        use std::os::unix::ffi::OsStrExt;
 
-    // SAFETY: the caller's set.
-    let s = unsafe { &*s };
-    let mut n = 0;
-    for i in 0..s.n {
-        // SAFETY: a member of the set.
-        let name = crate::text::cstr(unsafe { &(*s.entries.add(i)).name });
-        let Ok(dir) = crate::util::upatch_resolve::pin_path(name, &[]) else {
-            return -ENAMETOOLONG;
-        };
-        match std::fs::symlink_metadata(std::ffi::OsStr::from_bytes(dir.as_bytes())) {
-            Ok(_) => continue,
-            Err(e) if e.raw_os_error() == Some(ENOENT) => {}
-            Err(e) => return -e.raw_os_error().unwrap_or(EINVAL),
+        let mut n = 0;
+        for e in &self.entries {
+            let name = &e.name[..];
+            let Ok(dir) = crate::util::upatch_resolve::pin_path(name, &[]) else {
+                return -ENAMETOOLONG;
+            };
+            match std::fs::symlink_metadata(std::ffi::OsStr::from_bytes(dir.as_bytes())) {
+                Ok(_) => continue,
+                Err(e) if e.raw_os_error() == Some(ENOENT) => {}
+                Err(e) => return -e.raw_os_error().unwrap_or(EINVAL),
+            }
+            n += 1;
+            let ret = cb(name);
+            if ret != 0 {
+                return ret;
+            }
         }
-        n += 1;
-        let ret = cb(name);
-        if ret != 0 {
-            return ret;
-        }
+        n
     }
-    n
 }
 
-pub(crate) use capi::{
-    measured_holds, measured_set_add, measured_set_boot, measured_set_free, measured_set_log,
-    measured_unmeasured_archives, measured_unmeasured_pins, measured_upatch_of,
-};
+pub(crate) use capi::{measured_set_add, measured_upatch_of};
 
 #[cfg(test)]
 mod tests;
 
 mod capi {
-    use core::ffi::{c_char, c_int, c_void};
+    use core::ffi::{c_char, c_int};
 
-    use super::{ArchiveFn, EachFn, MeasuredSet, PinFn};
     use crate::util::chain::MeasuredUpatch;
     use crate::util::upatch::Upatch;
-
-    /// # Safety
-    ///
-    /// `out` is room for a pointer.
-    pub unsafe extern "C" fn measured_set_boot(out: *mut *mut MeasuredSet) -> c_int {
-        // SAFETY: the caller passes the room.
-        unsafe { super::fold(out, false) }
-    }
-
-    /// # Safety
-    ///
-    /// `out` is room for a pointer.
-    pub unsafe extern "C" fn measured_set_log(out: *mut *mut MeasuredSet) -> c_int {
-        // SAFETY: the caller passes the room.
-        unsafe { super::fold(out, true) }
-    }
-
-    /// # Safety
-    ///
-    /// `s` is a set, and `name` and `payload_hex` C strings.
-    pub unsafe extern "C" fn measured_holds(
-        s: *const MeasuredSet,
-        name: *const c_char,
-        payload_hex: *const c_char,
-    ) -> bool {
-        // SAFETY: the caller passes a set and two C strings.
-        unsafe { super::holds(s, name, payload_hex) }
-    }
-
-    /// # Safety
-    ///
-    /// `s` is NULL or a set, freed once.
-    pub unsafe extern "C" fn measured_set_free(s: *mut MeasuredSet) {
-        // SAFETY: the caller passes NULL or a set.
-        unsafe { super::set_free(s) }
-    }
-
-    /// # Safety
-    ///
-    /// `s` is a set and `cb` accepts its member strings and `ctx`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn measured_each(
-        s: *const MeasuredSet,
-        cb: EachFn,
-        ctx: *mut c_void,
-    ) -> c_int {
-        // SAFETY: the caller passes the set and callback.
-        unsafe { super::each(s, cb, ctx) }
-    }
 
     /// # Safety
     ///
@@ -572,35 +379,11 @@ mod capi {
         // SAFETY: the caller passes the set, its count and two C strings.
         unsafe { super::set_add(set, n, max, name, payload_hex) }
     }
-
-    /// # Safety
-    ///
-    /// `s` is a set, and `cb` NULL or a function that takes `ctx`.
-    pub unsafe extern "C" fn measured_unmeasured_pins(
-        s: *const MeasuredSet,
-        cb: Option<PinFn>,
-        ctx: *mut c_void,
-    ) -> c_int {
-        // SAFETY: the caller passes a set and its function.
-        unsafe { super::unmeasured_pins(s, cb, ctx) }
-    }
-
-    /// # Safety
-    ///
-    /// `s` is a set, and `cb` NULL or a function that takes `ctx`.
-    pub unsafe extern "C" fn measured_unmeasured_archives(
-        s: *const MeasuredSet,
-        cb: Option<ArchiveFn>,
-        ctx: *mut c_void,
-    ) -> c_int {
-        // SAFETY: the caller passes a set and its function.
-        unsafe { super::unmeasured_archives(s, cb, ctx) }
-    }
 }
 
 /// This boot's records as the TPM vouches for them.
 mod verified {
-    use core::ffi::{c_int, c_void};
+    use core::ffi::c_int;
     use std::ffi::CString;
 
     use super::{MEASURED_MAX, set_add};
@@ -610,18 +393,12 @@ mod verified {
         self, ChainLive, MeasuredUpatch, chain_fold, chain_init_event, chain_key_event,
         chain_tree_event, chain_upatch_event, memneq_explicit,
     };
-    use crate::util::eventlog::{self, upatches_record};
+    use crate::util::eventlog::{self, UpatchFn, upatches_record};
     use crate::util::hex;
     use crate::util::json::{JsonField, parse_schema};
     use crate::util::upatch::{NAME_MAX, PAYLOAD_HASH_LEN, member_valid};
 
     const TPM_NAME_LEN: usize = 34;
-    type Callback = unsafe extern "C" fn(
-        c_int,
-        *const core::ffi::c_char,
-        *const core::ffi::c_char,
-        *mut c_void,
-    ) -> c_int;
 
     /// What a record says of the register it was bound to.
     struct Binding {
@@ -845,7 +622,7 @@ mod verified {
     /// this boot's. -ENOENT without such an init record, -EBADMSG when a
     /// record or the fold does not match, -ENODEV without a register this
     /// reset.
-    pub(super) fn upatches(cb: Callback, ctx: *mut c_void) -> c_int {
+    pub(super) fn upatches(cb: UpatchFn<'_>) -> c_int {
         let live = match chain::live() {
             Ok(l) => l,
             Err(err) => return err,
@@ -878,8 +655,7 @@ mod verified {
             let Ok(line) = CString::new(*line) else {
                 return -EINVAL;
             };
-            // SAFETY: the caller's callback and context.
-            let ret = unsafe { upatches_record(&line, k == 0, Some(cb), ctx) };
+            let ret = upatches_record(&line, k == 0, &mut *cb);
             if ret != 0 {
                 return ret;
             }

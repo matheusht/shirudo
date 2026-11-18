@@ -6,7 +6,7 @@
 //! event, extended once and recorded in the eventlog.
 
 use core::ffi::c_int;
-use core::{mem, ptr};
+use core::mem;
 use std::ffi::CString;
 
 use super::{Init, cat, error, hex, info, strerr, warn};
@@ -22,9 +22,7 @@ use crate::util::eventlog;
 use crate::util::hex::hex_decode;
 use crate::util::json::JsonEmit;
 use crate::util::keys;
-use crate::util::measured::{
-    MeasuredSet, measured_holds, measured_set_free, measured_set_log, measured_upatch_of,
-};
+use crate::util::measured::{MeasuredSet, measured_upatch_of};
 use crate::util::seal::seal_owns;
 use crate::util::upatch::{Upatch, upatch_close, upatch_open};
 use crate::util::upatch_pins::loaded_pins;
@@ -68,22 +66,11 @@ fn archived() -> Result<Option<Vec<Vec<u8>>>, c_int> {
     Ok(Some(names))
 }
 
-/// The loads this boot's eventlog records without a later unload,
-/// freed when it goes.
-struct Measured(*mut MeasuredSet);
-
-impl Drop for Measured {
-    fn drop(&mut self) {
-        // SAFETY: the set measured_set_log() made.
-        unsafe { measured_set_free(self.0) };
-    }
-}
-
 /// Re-applies one archived upatch: Ok(Some(member)) when it counts,
 /// Ok(None) when it is not shirudo's to restore, or the error.
 fn restore_one(
     name: &[u8],
-    measured: &Measured,
+    measured: &MeasuredSet,
     recorded: bool,
 ) -> Result<Option<MeasuredUpatch>, c_int> {
     let file = cat!(UPATCHES_DIR, "/", name);
@@ -119,14 +106,7 @@ fn restore_one(
         upatch_close(&mut u);
     }
     let upatch = cstr(&e.name);
-    // SAFETY: the set and two C strings.
-    if !unsafe {
-        measured_holds(
-            measured.0,
-            e.name.as_ptr().cast(),
-            e.payload_hex.as_ptr().cast(),
-        )
-    } {
+    if !measured.holds(cstr(&e.name), cstr(&e.payload_hex)) {
         warn(&cat!(
             "boot-restore: ",
             name,
@@ -200,17 +180,17 @@ fn restore_locked(recorded: bool) -> Result<Vec<MeasuredUpatch>, c_int> {
             return Err(err);
         }
     };
-    let mut set: *mut MeasuredSet = ptr::null_mut();
-    // SAFETY: room for the set.
-    let ret = unsafe { measured_set_log(&mut set) };
-    if ret != 0 {
-        error(&cat!(
-            "boot-restore: cannot read the eventlog's loads: ",
-            strerr(-ret)
-        ));
-        return Err(ret);
-    }
-    let measured = Measured(set);
+    // The loads the eventlog records without a later unload.
+    let measured = match MeasuredSet::log() {
+        Ok(set) => set,
+        Err(ret) => {
+            error(&cat!(
+                "boot-restore: cannot read the eventlog's loads: ",
+                strerr(-ret)
+            ));
+            return Err(ret);
+        }
+    };
     let n = names.len();
     info(&cat!(
         "boot-restore: re-applying ",

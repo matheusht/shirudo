@@ -22,7 +22,7 @@ use crate::util::bpf_info::{Info, LINK_INFO_SIZE};
 use crate::util::chain::memneq_explicit;
 use crate::util::eventlog;
 use crate::util::help::{Help, HelpSection};
-use crate::util::measured::{MeasuredSet, measured_set_boot, measured_set_free};
+use crate::util::measured::MeasuredSet;
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::report::OpReport;
 use crate::util::upatch::{NAME_MAX, ProgSpec, Upatch, upatch_close};
@@ -132,16 +132,8 @@ fn take_lock(rep: &mut OpReport) -> Result<eventlog::Lock, ()> {
 /// The payload this boot's records hold upatch `name` with, when they
 /// hold it with the payload pinned now.
 fn pin_is_measured(name: &[u8]) -> Result<Option<[u8; PAYLOAD_HASH_LEN]>, c_int> {
-    let mut set: *mut MeasuredSet = core::ptr::null_mut();
-    // SAFETY: room for the set.
-    let ret = unsafe { measured_set_boot(&mut set) };
-    if ret != 0 {
-        return Err(ret);
-    }
-    let held = pin_measured(set, name);
-    // SAFETY: the set, freed once.
-    unsafe { measured_set_free(set) };
-    Ok(held)
+    let set = MeasuredSet::boot()?;
+    Ok(pin_measured(&set, name))
 }
 
 fn fail_verify(name: &[u8], err: c_int, rep: &mut OpReport) {

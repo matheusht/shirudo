@@ -170,7 +170,7 @@ fn nothing_pinned_checks_clean() {
         ..Checks::default()
     };
 
-    checks_run(core::ptr::null(), &mut c);
+    checks_run(&MeasuredSet::default(), &mut c);
     assert_eq!(c.nr_changed + c.nr_lost + c.nr_uncovered, 0);
     assert_eq!((c.check_err, c.coverage_err), (0, 0));
 }

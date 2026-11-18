@@ -15,7 +15,7 @@ use crate::errno::{
     E2BIG, EIO, EMFILE, ENAMETOOLONG, ENFILE, ENODEV, ENOENT, ENOMEM, ESTALE, EXDEV,
 };
 use crate::util::chain::{memneq_explicit, sha256_2};
-use crate::util::measured::{MeasuredSet, measured_holds};
+use crate::util::measured::MeasuredSet;
 use crate::util::upatch::{
     ATTACH_XDP, NAME_MAX, ProgSpec, ROLE_ATTACH, Upatch, header_name, name_signed,
     signed_attach_len, specs_free, specs_parse, upatch_close, upatch_data, upatch_loader,
@@ -307,12 +307,10 @@ pub(crate) fn xdp_each_uncovered(
 
 /// The payload the pin directory of `name` records, when the set holds
 /// `name` with it.
-pub(crate) fn pin_measured(s: *const MeasuredSet, name: &[u8]) -> Option<[u8; PAYLOAD_HASH_LEN]> {
+pub(crate) fn pin_measured(s: &MeasuredSet, name: &[u8]) -> Option<[u8; PAYLOAD_HASH_LEN]> {
     let payload = pin_payload(name).ok()?;
-    let hex = CString::new(crate::util::hex::encode(&payload)).ok()?;
-    let name_c = CString::new(name).ok()?;
-    // SAFETY: the caller's set and two C strings.
-    unsafe { measured_holds(s, name_c.as_ptr(), hex.as_ptr()) }.then_some(payload)
+    s.holds(name, &crate::util::hex::encode(&payload))
+        .then_some(payload)
 }
 
 /// A name, a device and why it does not run the upatch.
@@ -351,7 +349,7 @@ fn note_err(slot: &mut c_int, err: c_int) {
 /// One walk of the checks, with the devices read once, when one needs
 /// them.
 struct Walk<'c, 'a> {
-    s: *const MeasuredSet,
+    s: &'c MeasuredSet,
     c: &'c mut Checks<'a>,
     devices: Vec<XdpDevice>,
     devices_tried: bool,
@@ -533,7 +531,7 @@ impl Walk<'_, '_> {
 }
 
 /// The checks of the upatches the set `s` holds, into `c`.
-pub(crate) fn checks_run(s: *const MeasuredSet, c: &mut Checks<'_>) {
+pub(crate) fn checks_run(s: &MeasuredSet, c: &mut Checks<'_>) {
     let mut devices_tried = false;
 
     // Elsewhere the devices are another namespace's, whether or not an

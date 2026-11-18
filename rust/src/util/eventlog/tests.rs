@@ -3,7 +3,6 @@
 
 use super::*;
 use crate::testutil::TempDir;
-use core::ffi::{c_char, c_void};
 
 /// This thread's log, in `dir`.
 fn use_log(dir: &TempDir) {
@@ -125,26 +124,17 @@ struct Seen {
     last: Vec<u8>,
 }
 
-/// # Safety
-///
-/// `ctx` is a `Seen`, and `name` a C string for an event other than init.
-unsafe extern "C" fn count_upatch(
-    event: c_int,
-    name: *const c_char,
-    _payload_hex: *const c_char,
-    ctx: *mut c_void,
-) -> c_int {
-    // SAFETY: the Seen the test passes.
-    let s = unsafe { &mut *ctx.cast::<Seen>() };
-
-    if event == UPATCH_INIT {
-        s.inits += 1;
-        return 0;
-    }
-    s.loads += c_int::from(event == records::UPATCH_LOAD);
-    // SAFETY: the record's name, a C string for the call.
-    s.last = unsafe { CStr::from_ptr(name) }.to_bytes().to_vec();
-    0
+/// The upatch events of this boot's records, counted into `s`.
+fn count_upatches(s: &mut Seen) -> c_int {
+    records::upatches(false, &mut |event, name, _| {
+        if event == UPATCH_INIT {
+            s.inits += 1;
+            return 0;
+        }
+        s.loads += c_int::from(event == records::UPATCH_LOAD);
+        s.last = name.to_vec();
+        0
+    })
 }
 
 fn set_record(ty: &[u8], name: &[u8]) -> Vec<u8> {
@@ -164,14 +154,13 @@ fn set_counts_in_an_init_record_alone() {
     let dir = TempDir::new();
     use_log(&dir);
     let mut s = Seen::default();
-    let ctx = (&raw mut s).cast::<c_void>();
 
     write_log(&lines(&[
         &set_record(b"init", b"fix"),
         &set_record(b"key_revoke", b"ghost"),
     ]));
-    assert_eq!(records::upatches(false, Some(count_upatch), ctx), 0);
+    assert_eq!(count_upatches(&mut s), 0);
     assert_eq!((s.inits, s.loads, s.last.as_slice()), (1, 1, &b"fix"[..]));
     write_log(&lines(&[&set_record(b"init", b"../fix")]));
-    assert_eq!(records::upatches(false, Some(count_upatch), ctx), -EINVAL);
+    assert_eq!(count_upatches(&mut s), -EINVAL);
 }

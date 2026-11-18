@@ -9,7 +9,7 @@
 
 mod keepalive;
 
-use core::ffi::{CStr, c_char, c_int, c_void};
+use core::ffi::{CStr, c_char, c_int};
 use core::{mem, ptr};
 use std::ffi::{CString, OsStr};
 use std::io::Read;
@@ -45,10 +45,7 @@ use crate::util::kernel_btf;
 use crate::util::keyring;
 use crate::util::keys::{self, TrustedSet};
 use crate::util::map_read;
-use crate::util::measured::{
-    MeasuredSet, measured_set_boot, measured_set_free, measured_unmeasured_archives,
-    measured_unmeasured_pins, unpinned,
-};
+use crate::util::measured::MeasuredSet;
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::otel::OtelOpts;
 use crate::util::sysinfo::{self, Sysinfo};
@@ -917,21 +914,6 @@ fn note(names: &mut [u8; UNMEASURED_NAMES], name: &[u8]) {
     }
 }
 
-unsafe extern "C" fn note_pin(name: *const c_char, ctx: *mut c_void) -> c_int {
-    // SAFETY: the names this command passed, and a C string.
-    unsafe { note(&mut *ctx.cast(), ffi::c_str(name)) };
-    0
-}
-
-unsafe extern "C" fn note_archive(
-    name: *const c_char,
-    _path: *const c_char,
-    ctx: *mut c_void,
-) -> c_int {
-    // SAFETY: as note_pin().
-    unsafe { note_pin(name, ctx) }
-}
-
 /// What the checks of the pins against this boot's records found: each
 /// count or -errno, and the names behind it.
 struct Checked {
@@ -968,26 +950,29 @@ fn check_pins() -> Checked {
         coverage_rc: 0,
     };
     let lock = eventlog::lock();
-    let mut set: *mut MeasuredSet = ptr::null_mut();
-    c.unmeasured = if let Err(err) = lock {
-        err
-    } else {
-        // SAFETY: room for the set.
-        unsafe { measured_set_boot(&mut set) }
+    let set = match &lock {
+        Err(err) => Err(*err),
+        Ok(_) => MeasuredSet::boot(),
     };
-    if c.unmeasured == 0 {
-        let ctx: *mut c_void = c.unmeasured_names.as_mut_ptr().cast();
-        // SAFETY: the set read above, a callback and the names it fills.
-        unsafe {
-            c.unmeasured = measured_unmeasured_pins(set, Some(note_pin), ctx);
-            if c.unmeasured >= 0 {
-                let archived = measured_unmeasured_archives(set, Some(note_archive), ctx);
-                c.unmeasured = if archived < 0 {
-                    archived
-                } else {
-                    c.unmeasured + archived
-                };
-            }
+    c.unmeasured = match &set {
+        Err(err) => *err,
+        Ok(_) => 0,
+    };
+    if let Ok(set) = &set {
+        c.unmeasured = set.unmeasured_pins(|name| {
+            note(&mut c.unmeasured_names, name);
+            0
+        });
+        if c.unmeasured >= 0 {
+            let archived = set.unmeasured_archives(|name, _| {
+                note(&mut c.unmeasured_names, name);
+                0
+            });
+            c.unmeasured = if archived < 0 {
+                archived
+            } else {
+                c.unmeasured + archived
+            };
         }
         let (tampered, lost, uncovered) = (
             &mut c.xdp_tampered_names,
@@ -1024,13 +1009,10 @@ fn check_pins() -> Checked {
         let (nr_changed, nr_lost, nr_uncovered) =
             (checks.nr_changed, checks.nr_lost, checks.nr_uncovered);
         let (check_err, coverage_err) = (checks.check_err, checks.coverage_err);
-        // SAFETY: the set read above.
-        let unpinned = unsafe {
-            unpinned(set, &mut |name| {
-                note(&mut c.links_lost_names, name);
-                0
-            })
-        };
+        let unpinned = set.unpinned(|name| {
+            note(&mut c.links_lost_names, name);
+            0
+        });
         c.xdp_tampered = nr_changed;
         c.links_lost = if unpinned < 0 {
             unpinned
@@ -1040,9 +1022,8 @@ fn check_pins() -> Checked {
         c.xdp_uncovered = nr_uncovered;
         c.checks_rc = check_err;
         c.coverage_rc = coverage_err;
-        // SAFETY: the set, freed once.
-        unsafe { measured_set_free(set) };
     }
+    drop(set);
     drop(lock);
     c
 }
