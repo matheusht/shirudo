@@ -7,7 +7,7 @@
 //! command goes through a salted HMAC session bound to the endorsement
 //! key init froze.
 
-use core::ffi::{CStr, c_char, c_int, c_uint, c_void};
+use core::ffi::{CStr, c_char, c_int, c_uint};
 use core::mem::MaybeUninit;
 use core::ptr;
 
@@ -161,11 +161,7 @@ macro_rules! err {
 /// session for commands without an authorization handle, or a policy
 /// session.
 fn session_start(esys: *mut EsysContext, key: EsysTr, ty: u8, session: &mut EsysTr) -> c_int {
-    let sym = SymDef {
-        algorithm: ALG_NULL,
-        key_bits: 0,
-        mode: 0,
-    };
+    let sym = sym_def_null();
     let mut attrs = SESSION_CONTINUESESSION;
 
     if ty == SE_HMAC {
@@ -433,11 +429,11 @@ fn pcr_selection(mask: u32) -> PcrSelectionList {
     let mut sel = PcrSelectionList::zeroed();
 
     sel.count = 1;
-    sel.pcr_selections[0].hash = ALG_SHA256;
-    sel.pcr_selections[0].sizeof_select = PCR_SELECT_LEN;
-    sel.pcr_selections[0].pcr_select[0] = mask as u8;
-    sel.pcr_selections[0].pcr_select[1] = (mask >> 8) as u8;
-    sel.pcr_selections[0].pcr_select[2] = (mask >> 16) as u8;
+    sel.pcrSelections[0].hash = ALG_SHA256;
+    sel.pcrSelections[0].sizeofSelect = PCR_SELECT_LEN;
+    sel.pcrSelections[0].pcrSelect[0] = mask as u8;
+    sel.pcrSelections[0].pcrSelect[1] = (mask >> 8) as u8;
+    sel.pcrSelections[0].pcrSelect[2] = (mask >> 16) as u8;
     sel
 }
 
@@ -489,8 +485,10 @@ fn pcr_extend(t: &Tpm, pcr: u32, digest: &[u8; DIGEST_LEN]) -> c_int {
     if pcr >= 24 {
         return -EINVAL;
     }
-    dv.digests[0].hash_alg = ALG_SHA256;
-    dv.digests[0].digest[..32].copy_from_slice(digest);
+    dv.digests[0].hashAlg = ALG_SHA256;
+    let mut sha256 = [0u8; 32];
+    sha256.copy_from_slice(&digest[..32]);
+    dv.digests[0].digest.sha256 = sha256;
     // SAFETY: the context, handles and the digests.
     let ret = unsafe {
         Esys_PCR_Extend(
@@ -522,10 +520,7 @@ fn read_clock(t: &Tpm) -> Result<(u32, u32), c_int> {
     }
     // SAFETY: the time ESYS gave on success, freed once.
     unsafe {
-        let counts = (
-            (*info).clock_info.reset_count,
-            (*info).clock_info.restart_count,
-        );
+        let counts = ((*info).clockInfo.resetCount, (*info).clockInfo.restartCount);
 
         Esys_Free(info.cast());
         Ok(counts)
@@ -591,15 +586,15 @@ fn nv_info(t: &Tpm, index: u32, info: &mut TpmNvInfo) -> c_int {
     }
     // SAFETY: what ESYS gave on success, each freed once.
     unsafe {
-        let p = &(*public).nv_public;
+        let p = &(*public).nvPublic;
         let n = &*name;
 
         info.defined = true;
         info.written = p.attributes & NV_WRITTEN != 0;
         info.attrs = p.attributes;
-        info.data_size = p.data_size;
-        if p.auth_policy.size == 32 {
-            info.policy.copy_from_slice(&p.auth_policy.buffer[..32]);
+        info.data_size = p.dataSize;
+        if p.authPolicy.size == 32 {
+            info.policy.copy_from_slice(&p.authPolicy.buffer[..32]);
         }
         if usize::from(n.size) <= info.name.len() {
             let len = usize::from(n.size);
@@ -677,12 +672,12 @@ fn nv_define(
     if e != 0 {
         return e;
     }
-    public.nv_public.nv_index = index;
-    public.nv_public.name_alg = ALG_SHA256;
-    public.nv_public.attributes = REGISTER_ATTRS;
-    public.nv_public.auth_policy.size = 32;
-    public.nv_public.auth_policy.buffer[..32].copy_from_slice(policy);
-    public.nv_public.data_size = DIGEST_LEN as u16;
+    public.nvPublic.nvIndex = index;
+    public.nvPublic.nameAlg = ALG_SHA256;
+    public.nvPublic.attributes = REGISTER_ATTRS;
+    public.nvPublic.authPolicy.size = 32;
+    public.nvPublic.authPolicy.buffer[..32].copy_from_slice(policy);
+    public.nvPublic.dataSize = DIGEST_LEN as u16;
     // SAFETY: the context, handles, the index's password and public
     // area, and room for its handle.
     let ret = unsafe {
@@ -863,26 +858,18 @@ fn writer_primary(
     let mut cfg = Scrubbed(MaybeUninit::zeroed());
     let mut in_pub = Tpm2bPublic::zeroed();
     let mut name: *mut Tpm2bName = ptr::null_mut();
-    let outside = Tpm2bDigest::zeroed();
+    let outside = Tpm2bData::zeroed();
 
     *key = ESYS_TR_NONE;
-    let p = &mut in_pub.public_area;
+    let p = &mut in_pub.publicArea;
 
-    p.ty = ALG_RSA;
-    p.name_alg = ALG_SHA256;
-    p.object_attributes = WRITER_ATTRS;
-    p.parameters.rsa = RsaParms {
-        symmetric: SymDef {
-            algorithm: ALG_NULL,
-            key_bits: 0,
-            mode: 0,
-        },
-        scheme: Scheme {
-            scheme: ALG_RSASSA,
-            details: [ALG_SHA256, 0],
-        },
-        key_bits: 3072,
-        _pad: 0,
+    p.type_ = ALG_RSA;
+    p.nameAlg = ALG_SHA256;
+    p.objectAttributes = WRITER_ATTRS;
+    p.parameters.rsaDetail = RsaParms {
+        symmetric: sym_def(ALG_NULL, 0, 0),
+        scheme: rsa_scheme(ALG_RSASSA, ALG_SHA256),
+        keyBits: 3072,
         exponent: 65537,
     };
     let mut rsa = Tpm2bPublicKeyRsa {
@@ -940,18 +927,19 @@ fn writer_primary(
                 break 'out -EPROTO;
             }
             // SAFETY: the public area ESYS gave.
-            let p = unsafe { &(*out_pub).public_area };
+            let p = unsafe { &(*out_pub).publicArea };
             // SAFETY: the RSA variants, integers of which any bits are
             // values, as the C read them whatever the type.
-            let (r, n) = unsafe { (&p.parameters.rsa, &p.unique.rsa) };
-            let bad = p.ty != ALG_RSA
-                || p.name_alg != ALG_SHA256
-                || p.object_attributes != WRITER_ATTRS
-                || p.auth_policy.size != 0
+            let (r, n) = unsafe { (&p.parameters.rsaDetail, &p.unique.rsa) };
+            let bad = p.type_ != ALG_RSA
+                || p.nameAlg != ALG_SHA256
+                || p.objectAttributes != WRITER_ATTRS
+                || p.authPolicy.size != 0
                 || r.symmetric.algorithm != ALG_NULL
                 || r.scheme.scheme != ALG_RSASSA
-                || r.scheme.details[0] != ALG_SHA256
-                || r.key_bits != 3072
+                // SAFETY: every scheme of a key holds its hash first.
+                || unsafe { r.scheme.details.anySig.hashAlg } != ALG_SHA256
+                || r.keyBits != 3072
                 || r.exponent != 65537
                 || usize::from(n.size) != NV_RSA_BYTES;
 
@@ -1004,10 +992,7 @@ fn writer_sign(
     out: &mut [u8; NV_RSA_BYTES],
 ) -> c_int {
     let mut validation: TkHashcheck = zeroed();
-    let scheme = Scheme {
-        scheme: ALG_RSASSA,
-        details: [ALG_SHA256, 0],
-    };
+    let scheme = sig_scheme(ALG_RSASSA, ALG_SHA256);
     let mut signature: *mut Signature = ptr::null_mut();
     let mut digest = Tpm2bDigest::zeroed();
 
@@ -1039,7 +1024,7 @@ fn writer_sign(
         unsafe {
             match signature.as_ref() {
                 Some(s)
-                    if s.sig_alg == ALG_RSASSA
+                    if s.sigAlg == ALG_RSASSA
                         && s.signature.rsassa.hash == ALG_SHA256
                         && usize::from(s.signature.rsassa.sig.size) == NV_RSA_BYTES =>
                 {
@@ -1066,8 +1051,8 @@ fn writer_authorize(
 ) -> Rc {
     let mut policy_ref = Tpm2bDigest::zeroed();
     let mut sig: Signature = zeroed();
-    let mut timeout: *mut c_void = ptr::null_mut();
-    let mut ticket: *mut c_void = ptr::null_mut();
+    let mut timeout: *mut Tpm2bDigest = ptr::null_mut();
+    let mut ticket: *mut TkAuth = ptr::null_mut();
     let mut rsassa = SignatureRsa {
         hash: ALG_SHA256,
         sig: Tpm2bPublicKeyRsa {
@@ -1077,7 +1062,7 @@ fn writer_authorize(
     };
 
     policy_ref.size = NV_POLICY_REF.len() as u16;
-    sig.sig_alg = ALG_RSASSA;
+    sig.sigAlg = ALG_RSASSA;
     rsassa.sig.buffer[..NV_RSA_BYTES].copy_from_slice(signature);
     sig.signature.rsassa = rsassa;
     policy_ref.buffer[..NV_POLICY_REF.len()].copy_from_slice(NV_POLICY_REF);
@@ -1100,8 +1085,8 @@ fn writer_authorize(
             &mut timeout,
             &mut ticket,
         );
-        Esys_Free(timeout);
-        Esys_Free(ticket);
+        Esys_Free(timeout.cast());
+        Esys_Free(ticket.cast());
         ret
     }
 }
@@ -1498,46 +1483,52 @@ fn put2b(out: &mut [u8], data: &[u8]) -> usize {
 fn public_from_tss(p: &Public, out: &mut [u8], len: &mut usize) -> c_int {
     let mut public = TpmPublic::zeroed();
 
-    if p.name_alg != ALG_SHA256 || p.auth_policy.size > 32 {
+    if p.nameAlg != ALG_SHA256 || p.authPolicy.size > 32 {
         return -EINVAL;
     }
-    public.ty = p.ty;
-    public.attrs = p.object_attributes;
-    public.policy_len = usize::from(p.auth_policy.size);
-    public.policy[..public.policy_len].copy_from_slice(&p.auth_policy.buffer[..public.policy_len]);
-    if p.ty == ALG_ECC {
+    public.ty = p.type_;
+    public.attrs = p.objectAttributes;
+    public.policy_len = usize::from(p.authPolicy.size);
+    public.policy[..public.policy_len].copy_from_slice(&p.authPolicy.buffer[..public.policy_len]);
+    if p.type_ == ALG_ECC {
         // SAFETY: an ECC key's variants, read once its type says ECC.
-        let (ecc, point) = unsafe { (&p.parameters.ecc, &p.unique.ecc) };
+        let (ecc, point) = unsafe { (&p.parameters.eccDetail, &p.unique.ecc) };
 
         public.sym_alg = ecc.symmetric.algorithm;
         if public.sym_alg != ALG_NULL {
-            public.sym_bits = ecc.symmetric.key_bits;
-            public.sym_mode = ecc.symmetric.mode;
+            // SAFETY: a symmetric definition's bits and mode, as the C read
+            // them whatever the algorithm.
+            (public.sym_bits, public.sym_mode) =
+                unsafe { (ecc.symmetric.keyBits.sym, ecc.symmetric.mode.sym) };
         }
         public.scheme = ecc.scheme.scheme;
         if public.scheme != ALG_NULL {
-            public.scheme_hash = ecc.scheme.details[0];
+            // SAFETY: every scheme of a key holds its hash first.
+            public.scheme_hash = unsafe { ecc.scheme.details.anySig.hashAlg };
         }
-        public.curve = ecc.curve_id;
+        public.curve = ecc.curveID;
         if ecc.kdf.scheme != ALG_NULL || point.x.size != 32 || point.y.size != 32 {
             return -EINVAL;
         }
         public.x.copy_from_slice(&point.x.buffer[..32]);
         public.y.copy_from_slice(&point.y.buffer[..32]);
-    } else if p.ty == ALG_RSA {
+    } else if p.type_ == ALG_RSA {
         // SAFETY: an RSA key's variants, read once its type says RSA.
-        let (rsa, n) = unsafe { (&p.parameters.rsa, &p.unique.rsa) };
+        let (rsa, n) = unsafe { (&p.parameters.rsaDetail, &p.unique.rsa) };
 
         public.sym_alg = rsa.symmetric.algorithm;
         if public.sym_alg != ALG_NULL {
-            public.sym_bits = rsa.symmetric.key_bits;
-            public.sym_mode = rsa.symmetric.mode;
+            // SAFETY: a symmetric definition's bits and mode, as the C read
+            // them whatever the algorithm.
+            (public.sym_bits, public.sym_mode) =
+                unsafe { (rsa.symmetric.keyBits.sym, rsa.symmetric.mode.sym) };
         }
         public.scheme = rsa.scheme.scheme;
         if public.scheme != ALG_NULL {
-            public.scheme_hash = rsa.scheme.details[0];
+            // SAFETY: every scheme of a key holds its hash first.
+            public.scheme_hash = unsafe { rsa.scheme.details.anySig.hashAlg };
         }
-        public.rsa_bits = rsa.key_bits;
+        public.rsa_bits = rsa.keyBits;
         public.rsa_exponent = rsa.exponent;
         if usize::from(n.size) > public.n.len() {
             return -EINVAL;
@@ -1556,26 +1547,26 @@ fn marshal_signature(sig: &Signature, out: &mut [u8], len: &mut usize) -> c_int 
     // used only once the algorithm says ECDSA.
     let e = unsafe { &sig.signature.ecdsa };
 
-    if sig.sig_alg != ALG_ECDSA
-        || e.signature_r.size > 64
-        || e.signature_s.size > 64
+    if sig.sigAlg != ALG_ECDSA
+        || e.signatureR.size > 64
+        || e.signatureS.size > 64
         || out.len() < 8 + 128
     {
         return -EINVAL;
     }
     let mut off = 0;
 
-    put_be16(&mut out[off..], sig.sig_alg);
+    put_be16(&mut out[off..], sig.sigAlg);
     off += 2;
     put_be16(&mut out[off..], e.hash);
     off += 2;
     off += put2b(
         &mut out[off..],
-        &e.signature_r.buffer[..usize::from(e.signature_r.size)],
+        &e.signatureR.buffer[..usize::from(e.signatureR.size)],
     );
     off += put2b(
         &mut out[off..],
-        &e.signature_s.buffer[..usize::from(e.signature_s.size)],
+        &e.signatureS.buffer[..usize::from(e.signatureS.size)],
     );
     *len = off;
     0
@@ -1589,7 +1580,7 @@ fn endorsement_primary(t: &Tpm, in_pub: &Tpm2bPublic, what: &CStr, key: &mut Tpm
     let creation_pcr = PcrSelectionList::zeroed();
     let mut out_pub: *mut Tpm2bPublic = ptr::null_mut();
     let mut name: *mut Tpm2bName = ptr::null_mut();
-    let outside = Tpm2bDigest::zeroed();
+    let outside = Tpm2bData::zeroed();
     let mut computed = [0u8; NAME_LEN];
     let mut handle: EsysTr = 0;
 
@@ -1636,11 +1627,7 @@ fn endorsement_primary(t: &Tpm, in_pub: &Tpm2bPublic, what: &CStr, key: &mut Tpm
     key.handle = handle;
     // SAFETY: the public area ESYS gave on success, freed once.
     let mut e = unsafe {
-        let e = public_from_tss(
-            &(*out_pub).public_area,
-            &mut key.public,
-            &mut key.public_len,
-        );
+        let e = public_from_tss(&(*out_pub).publicArea, &mut key.public, &mut key.public_len);
 
         Esys_Free(out_pub.cast());
         e
@@ -1685,58 +1672,40 @@ fn endorsement_primary(t: &Tpm, in_pub: &Tpm2bPublic, what: &CStr, key: &mut Tpm
 
 fn ak_create(t: &Tpm, ak: &mut TpmKey) -> c_int {
     let mut in_pub = Tpm2bPublic::zeroed();
-    let p = &mut in_pub.public_area;
+    let p = &mut in_pub.publicArea;
 
-    p.ty = ALG_ECC;
-    p.name_alg = ALG_SHA256;
-    p.object_attributes = OBJECT_FIXEDTPM
+    p.type_ = ALG_ECC;
+    p.nameAlg = ALG_SHA256;
+    p.objectAttributes = OBJECT_FIXEDTPM
         | OBJECT_FIXEDPARENT
         | OBJECT_SENSITIVEDATAORIGIN
         | OBJECT_USERWITHAUTH
         | OBJECT_RESTRICTED
         | OBJECT_SIGN_ENCRYPT;
-    p.parameters.ecc = EccParms {
-        symmetric: SymDef {
-            algorithm: ALG_NULL,
-            key_bits: 0,
-            mode: 0,
-        },
-        scheme: Scheme {
-            scheme: ALG_ECDSA,
-            details: [ALG_SHA256, 0],
-        },
-        curve_id: ECC_NIST_P256,
-        kdf: KdfScheme {
-            scheme: ALG_NULL,
-            details: 0,
-        },
+    p.parameters.eccDetail = EccParms {
+        symmetric: sym_def(ALG_NULL, 0, 0),
+        scheme: ecc_scheme(ALG_ECDSA, ALG_SHA256),
+        curveID: ECC_NIST_P256,
+        kdf: kdf_null(),
     };
     endorsement_primary(t, &in_pub, c"attestation key", ak)
 }
 
 fn ek_create(t: &Tpm, rsa: bool, ek: &mut TpmKey) -> c_int {
     let mut in_pub = Tpm2bPublic::zeroed();
-    let p = &mut in_pub.public_area;
-    let symmetric = SymDef {
-        algorithm: ALG_AES,
-        key_bits: 128,
-        mode: ALG_CFB,
-    };
+    let p = &mut in_pub.publicArea;
+    let symmetric = sym_def(ALG_AES, 128, ALG_CFB);
 
-    p.ty = if rsa { ALG_RSA } else { ALG_ECC };
-    p.name_alg = ALG_SHA256;
-    p.object_attributes = EK_ATTRS;
-    p.auth_policy.size = 32;
-    p.auth_policy.buffer[..32].copy_from_slice(&shirudo_tpm_ek_policy);
+    p.type_ = if rsa { ALG_RSA } else { ALG_ECC };
+    p.nameAlg = ALG_SHA256;
+    p.objectAttributes = EK_ATTRS;
+    p.authPolicy.size = 32;
+    p.authPolicy.buffer[..32].copy_from_slice(&shirudo_tpm_ek_policy);
     if rsa {
-        p.parameters.rsa = RsaParms {
+        p.parameters.rsaDetail = RsaParms {
             symmetric,
-            scheme: Scheme {
-                scheme: ALG_NULL,
-                details: [0; 2],
-            },
-            key_bits: 2048,
-            _pad: 0,
+            scheme: rsa_scheme(ALG_NULL, 0),
+            keyBits: 2048,
             exponent: 0,
         };
         p.unique.rsa = Tpm2bPublicKeyRsa {
@@ -1744,17 +1713,11 @@ fn ek_create(t: &Tpm, rsa: bool, ek: &mut TpmKey) -> c_int {
             buffer: [0; 512],
         };
     } else {
-        p.parameters.ecc = EccParms {
+        p.parameters.eccDetail = EccParms {
             symmetric,
-            scheme: Scheme {
-                scheme: ALG_NULL,
-                details: [0; 2],
-            },
-            curve_id: ECC_NIST_P256,
-            kdf: KdfScheme {
-                scheme: ALG_NULL,
-                details: 0,
-            },
+            scheme: ecc_scheme(ALG_NULL, 0),
+            curveID: ECC_NIST_P256,
+            kdf: kdf_null(),
         };
         let empty = Tpm2bEccParameter {
             size: 32,
@@ -1782,7 +1745,7 @@ fn attestation_copy(attest: &Tpm2bAttest, sig: &Signature, out: &mut TpmAttestat
     if size > out.attest.len() {
         return -E2BIG;
     }
-    out.attest[..size].copy_from_slice(&attest.attestation_data[..size]);
+    out.attest[..size].copy_from_slice(&attest.attestationData[..size]);
     out.attest_len = size;
     marshal_signature(sig, &mut out.signature, &mut out.signature_len)
 }
@@ -1792,8 +1755,8 @@ fn attestation_copy(attest: &Tpm2bAttest, sig: &Signature, out: &mut TpmAttestat
 /// # Safety
 ///
 /// `nonce` holds `nonce_len` bytes.
-unsafe fn qualifying(nonce: *const u8, nonce_len: usize) -> Result<Tpm2bDigest, c_int> {
-    let mut qual = Tpm2bDigest::zeroed();
+unsafe fn qualifying(nonce: *const u8, nonce_len: usize) -> Result<Tpm2bData, c_int> {
+    let mut qual = Tpm2bData::zeroed();
 
     if nonce_len > qual.buffer.len() {
         return Err(-EINVAL);
@@ -1835,10 +1798,7 @@ unsafe fn quote(
     pcr_mask: u32,
     out: &mut TpmAttestation,
 ) -> c_int {
-    let scheme = Scheme {
-        scheme: ALG_NULL,
-        details: [0; 2],
-    };
+    let scheme = sig_scheme(ALG_NULL, 0);
     let mut sig: *mut Signature = ptr::null_mut();
     let mut quoted: *mut Tpm2bAttest = ptr::null_mut();
     // SAFETY: the caller's nonce.
@@ -1882,10 +1842,7 @@ unsafe fn nv_certify(
     nonce_len: usize,
     out: &mut TpmAttestation,
 ) -> c_int {
-    let scheme = Scheme {
-        scheme: ALG_NULL,
-        details: [0; 2],
-    };
+    let scheme = sig_scheme(ALG_NULL, 0);
     let mut sig: *mut Signature = ptr::null_mut();
     let mut info: *mut Tpm2bAttest = ptr::null_mut();
     let mut nv = 0;
@@ -2056,7 +2013,7 @@ fn nv_read_all(t: &Tpm, index: u32, out: &mut [u8], len: &mut usize) -> c_int {
     }
     // SAFETY: the public area ESYS gave on success, freed once.
     let total = unsafe {
-        let total = usize::from((*public).nv_public.data_size);
+        let total = usize::from((*public).nvPublic.dataSize);
 
         Esys_Free(public.cast());
         total

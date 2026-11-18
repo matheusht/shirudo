@@ -12,6 +12,9 @@ publish = false
 # Each crate is vendored in rust/vendor and pinned in Cargo.lock, which
 # .cargo/config.toml takes it from, so that cargo builds offline.
 [dependencies]
+# The ESYS, TCTI loader and marshalling calls of tpm2-tss, through the
+# Parsec project's bindings, with their prebuilt Linux bindings.
+tss-esapi-sys = { version = "0.5", default-features = false }
 # The C library, through the rust-lang bindings (rust/src/sys/libc.rs).
 libc = { version = "0.2", default-features = false }
 # Inflate and deflate for gzip (rust/src/util/gzip.rs), in place of zlib.
