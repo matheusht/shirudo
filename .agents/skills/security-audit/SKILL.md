@@ -1,6 +1,6 @@
 ---
 name: security-audit
-description: Audit shirudo for vulnerabilities against its threat model, and its threat model and proofs against the code. Covers what makes a defect a finding here (the adversary, the control it defeats and the goal it breaks), the surfaces where registry, package, upatch, config, evidence and TPM bytes or root's actions enter, the bug classes that matter in shirudo's C and BPF, checking each claim of the threat model and each CBMC and Lean 4 proof against the tree, refuting a finding before it is reported, showing it with the unit, fuzz, CBMC and VM tiers, looking for the variants of a bug through the whole code base once one is found, and rating and reporting it. Use when asked to audit or security-review shirudo or a change to it, to hunt one class of bug, to check whether a reported issue is real, or to check that the threat model or the proofs still match the code. Needs Claude Mythos 5.2 or newer at xhigh effort in Claude Code, and the GPT-6 cyber model or better in Codex.
+description: Audit shirudo for vulnerabilities against its threat model, and its threat model and proofs against the code. Covers what makes a defect a finding here (the adversary, the control it defeats and the goal it breaks), the surfaces where registry, package, upatch, config, evidence and TPM bytes or root's actions enter, the bug classes that matter in shirudo's Rust and BPF C, checking each claim of the threat model and each CBMC and Lean 4 proof against the tree, refuting a finding before it is reported, showing it with the unit, fuzz, CBMC and VM tiers, looking for the variants of a bug through the whole code base once one is found, and rating and reporting it. Use when asked to audit or security-review shirudo or a change to it, to hunt one class of bug, to check whether a reported issue is real, or to check that the threat model or the proofs still match the code. Needs Claude Mythos 5.2 or newer at xhigh effort in Claude Code, and the GPT-6 cyber model or better in Codex.
 effort: xhigh
 ---
 
@@ -65,8 +65,8 @@ or moves is read first: `git log -S'<the check>'` finds the commit
 that added it and why. Then the threats whose fact boxes name the
 hooks and functions touched, the tests and proofs behind them (`make
 proofs-cbmc CHANGED=<range>` runs the proofs that read a changed
-file), and every caller of a changed `util/` function, since each
-relied on what it did before.
+file), and every caller of a changed `rust/src/util/` function, since
+each relied on what it did before.
 
 For a reported issue, restate it as the five things before reading
 code, then take it through "Refute it".
@@ -75,18 +75,18 @@ code, then take it through "Refute it".
 
 | Entry | Adversary | Code | What must hold |
 |---|---|---|---|
-| Registry responses, TLS | ADV-D | `util/bpm_oci.c`, `util/tls_openssl.c` | size bounded before buffering; digest checked before use |
-| Packages, indexes, tar | ADV-D, ADV-F | `util/bpm_package.c`, `util/bpm_state.c`, `builtin-bpm.c` | signature before trust; no member leaves its directory |
-| Tree publications | ADV-D | `util/bpm_tree.c`, `util/bpm_tree_state.c` | only signed operations, generations only forward (R8 is what remains) |
-| `.upatch` files | ADV-B, ADV-D | `util/upatch*.c`, `builtin-upatch.c` | every offset bounded before the kernel sees the loader |
-| Decoders, map records | ADV-F; ADV-A and ADV-B through what is recorded | `util/upatch_decode.c`, `util/serializer.c` | no `io`, `os`, `ffi` or loaders; instruction and memory budgets; every slot read bounded |
-| Config images, settings | ADV-B | `util/config*.c`, `util/image_*.c`, `util/dm_verity.c` | exact UKI root; mapping read fully before parse |
-| Evidence | the target | `util/attest.c`, `util/eventlog.c`, `builtin-attest.c` | only the quote and NV certify are authenticated |
-| TPM replies | ADV-C (T14) | `util/tpm*.c`, `util/chain.c` | every size field bounded; no success reply taken unauthenticated |
-| Files, pins, xattrs, mounts, `/proc`, environment | ADV-B, ADV-C | `util/seal.c`, `util/paths.c`, `util/io.c`, `builtin-init.c` | act on the object checked; lock spans |
+| Registry responses, TLS | ADV-D | `rust/src/util/bpm_oci/`, `rust/src/util/tls_openssl.rs` | size bounded before buffering; digest checked before use |
+| Packages, indexes, tar | ADV-D, ADV-F | `rust/src/util/bpm_package/`, `rust/src/util/bpm_state.rs`, `rust/src/builtin/bpm/` | signature before trust; no member leaves its directory |
+| Tree publications | ADV-D | `rust/src/util/bpm_tree*.rs` | only signed operations, generations only forward (R8 is what remains) |
+| `.upatch` files | ADV-B, ADV-D | `rust/src/util/upatch*.rs`, `rust/src/builtin/upatch/` | every offset bounded before the kernel sees the loader |
+| Decoders, map records | ADV-F; ADV-A and ADV-B through what is recorded | `rust/src/util/decode.rs`, `rust/src/util/serializer.rs`, `rust/src/util/map_read.rs` | no `io`, `os`, `ffi` or loaders; instruction and memory budgets; every slot read bounded |
+| Config images, settings | ADV-B | `rust/src/util/config*.rs`, `rust/src/util/image_*.rs`, `rust/src/util/dm_verity.rs` | exact UKI root; mapping read fully before parse |
+| Evidence | the target | `rust/src/util/attest.rs`, `rust/src/util/eventlog/`, `rust/src/builtin/attest.rs` | only the quote and NV certify are authenticated |
+| TPM replies | ADV-C (T14) | `rust/src/util/tpm.rs`, `rust/src/util/tpm_wire/`, `rust/src/util/chain.rs` | every size field bounded; no success reply taken unauthenticated |
+| Files, pins, xattrs, mounts, `/proc`, environment | ADV-B, ADV-C | `rust/src/util/seal.rs`, `rust/src/util/paths.rs`, `rust/src/util/io.rs`, `rust/src/builtin/init/` | act on the object checked; lock spans |
 | `bpf()`, LSM hooks | ADV-A, ADV-B | `bpf/bpf2.c`, `bpf/seal.c` | every syscall path to the same effect |
-| Collector replies | ADV-E | `util/upatch_maps_otel.c` | changes no state; text sanitized |
-| Operator inputs, key | ADV-D | `tools/shirudo-build/`, `util/sign.c` | key stays on the operator; stateless; what a registry serves is pinned |
+| Collector replies | ADV-E | `rust/src/util/otel/` | changes no state; text sanitized |
+| Operator inputs, key | ADV-D | `rust/src/shirudo_build/` | key stays on the operator; stateless; what a registry serves is pinned |
 
 The fuzz targets in `testing/fuzz/` list the parsers of outside input,
 and `Documentation/contribute/testing/proof-coverage.rst` says which
@@ -95,16 +95,19 @@ parts CBMC proves: start where neither reaches.
 AGENTS.md lists the invariants that are easy to break. Each still
 builds and passes its tests when broken, so walk them. Some have a
 check to run: `.github/scripts/check-operator-linkage.sh` and
-`check-static-target.sh` for what the binaries link, the `no_exec`
-rule of `testing/coccinelle` for a target subprocess, and for each map
+`check-static-target.sh` for what the binaries link, and for each map
 of `bpf/` the list of who writes and reads it, set against its flags.
+For a target subprocess, search `rust/src` for `exec`, `Command` and
+`posix_spawn`: only `rust/src/builtin/build.rs`,
+`rust/src/shirudo_build/` and the test helpers may start one, and the
+`no_exec` rule of `testing/coccinelle` reads C alone.
 
 ## Bug classes that matter here
 
-Hunt each class in both halves, the BPF programs and the userspace C,
-and with the kernel source open: a checkout of the kernel the test VM
-boots, which `testing/kernel/build-kernel.sh` builds with the carried
-patch set. Neither half can be judged without it. For a hook,
+Hunt each class in the BPF programs, the userspace Rust and the
+remaining userspace C, and with the kernel source open: a checkout of the kernel the test
+VM boots, which `testing/vm/build-kernel.sh` builds, with the patches of
+`kernel/` applied. Neither half can be judged without it. For a hook,
 read the callers of `security_<hook>()`, what each does with the return
 value and what it holds while it calls; for a helper or kfunc, what it
 returns, when it fails and whether it sleeps; for a system call, a
@@ -114,16 +117,18 @@ leaves to the program. A statement about the kernel cites file and line
 of that tree, as one about a guard does.
 
 `testing/coccinelle` has rules for the mechanical shapes of several
-classes below (`openssl_ret`, `errno_clobber`, `alloc_unchecked`,
-`fd_leak`, `double_close`, `use_after_free`, `read_unterminated`,
-`file_as_string`, `name_after_fd`, the `bpf_` rules): a clean
-`check-coccinelle.sh` says those shapes are absent, not the class.
+classes below in the C, the `bpf_` rules for the BPF programs: a clean
+`check-coccinelle.sh` says those shapes are absent, not the class. It
+reads no Rust. Safe Rust rules out a use after free and a double free,
+not a leak or a wrong check; the crate's raw pointers, `c_int`
+descriptors and `unsafe` blocks rule out neither, so read them as C.
 
 - **Parse before verify.** Anything read before its signature or digest
   is checked (`upatch info`, `bpm info`, manifests, indexes, the
   evidence on the verifier) gets the worst input: offsets, counts,
-  integer overflow (`<shirudo/overflow.h>`), recursion, loops and output
-  that grow with input.
+  integer overflow, which the overflow checks turn into an abort and an
+  `as` cast into a silent truncation, recursion, loops and output that
+  grow with input.
 - **Checked is not used.** The bytes verified differ from the bytes
   loaded or applied: reopened by path, read twice, a file root can
   rewrite after the check, a name resolved through a mount root built,
@@ -148,14 +153,14 @@ classes below (`openssl_ret`, `errno_clobber`, `alloc_unchecked`,
   load, a retry where the design refuses (`tampered`), a default when a
   setting is missing, a short read taken for the whole.
 - **Library misuse.** A call that breaks the contract of what it calls,
-  in OpenSSL, libcurl, tpm2-tss, libelf, libbpf, zlib, LuaJIT or libc,
-  or of a BPF helper or kfunc: a result not checked, or read by another
-  library's convention (OpenSSL's 1, 0 and negative, a `TSS2_RC`, a
-  `CURLcode`, libbpf's negative errno or NULL, zlib's `Z_STREAM_END`, a
-  helper's NULL or negative), an object freed by the wrong owner or the
-  wrong function, a buffer or length the callee reads differently, an
-  option left at a default the design rules out, an error queue or
-  `errno` read after another call overwrote it.
+  in OpenSSL, libcurl, tpm2-tss, LuaJIT or libc, through a crate or a
+  declaration of `rust/src/sys/`, or of a BPF helper or kfunc: a result
+  not checked, or read by another library's convention (OpenSSL's 1, 0
+  and negative, a `TSS2_RC`, a `CURLcode`, a helper's NULL or
+  negative), an object freed by the wrong owner or the wrong function, a
+  buffer or length the callee reads differently, an option left at a
+  default the design rules out, an error queue or `errno` read after
+  another call overwrote it.
 - **Error paths.** The paths tests take least. On every return after
   the first resource is taken, check that what was taken is released,
   what was changed is undone in reverse order, the lock is dropped, and
@@ -171,12 +176,13 @@ classes below (`openssl_ret`, `errno_clobber`, `alloc_unchecked`,
   never deleted, arena memory never freed, storage that outlives its
   owner.
 - **Use after free.** A pointer into a buffer that was freed, grown
-  with `xreallocarray()` or handed to a library that owns it now, a
-  field of a parsed document after its body is gone, a second free on
-  an error path, a `__cleanup` that runs before the last use. In BPF, a
-  map value used after its entry was deleted or replaced, a pointer
-  kept across a call that sleeps or leaves the RCU read section, arena
-  memory another run frees (the `bpf-concurrency` skill).
+  with `xreallocarray()` or as a `Vec`, or handed to a library that owns
+  it now, a field of a parsed document after its body is gone, a second
+  free on an error path, a raw pointer kept past the drop of what it
+  points into, as `as_ptr()` of a temporary. In BPF, a map value used
+  after its entry was deleted or replaced, a pointer kept across a call
+  that sleeps or leaves the RCU read section, arena memory another run
+  frees (the `bpf-concurrency` skill).
 - **Logic errors.** The check that is there and wrong: an inverted or
   off-by-one condition, `<` for `<=`, the wrong variable after a copy,
   a `switch` whose default allows, a prefix compared where the whole
@@ -242,19 +248,21 @@ classes below (`openssl_ret`, `errno_clobber`, `alloc_unchecked`,
   or fills the disk on every timer run, or holds the register lock so
   that every upatch command refuses. A crash of a one-shot command on
   its own operator's input is not this.
-- **Text and secrets.** Unverified names printed without
-  `text_sanitize()`; key material not cleared with `memzero_explicit()`
-  on every path out, or compared without `memneq_explicit()`; secrets in
-  logs; what G8 keeps from a task without authority leaving in a log
-  line, `status` output, an error message or an export.
+- **Text and secrets.** Unverified names printed without `sanitize()`
+  of `rust/src/text.rs`; key material left behind on a path out, where
+  the allocator scrubs what it frees but a local, a static or a
+  library's buffer keeps it until `explicit_bzero()`, or compared
+  without `memneq_explicit()`; secrets in logs; what G8 keeps from a
+  task without authority leaving in a log line, `status` output, an
+  error message or an export.
 - **Environment and exec.** The target runs no subprocess. Look for
   variables, search paths and libraries a process with runtime authority
   takes from root (U3, U7), and at what else an exec keeps for it: open
   descriptors, the working and root directory, resource limits, signal
   state, namespaces.
-- **Linked code.** The target links OpenSSL, libcurl, tpm2-tss, libelf,
-  zlib, zstd, LuaJIT and libbpf statically, at the versions
-  `Makefile.target-deps`, `vendor/libbpf` and the build host give
+- **Linked code.** The target links OpenSSL, libcurl, tpm2-tss and
+  LuaJIT statically, and the crates of `rust/vendor`, at the versions
+  `Makefile.target-deps`, `rust/Cargo.lock` and the build host give
   (`.github/scripts/gen-sbom.sh` lists them). A published flaw in one
   is a finding when the build keeps the affected code and an
   adversary's bytes reach it. The proofs stop at these libraries, and a
@@ -295,8 +303,8 @@ From the code to the page: every LSM program of `bpf/`, every tamper
 counter, every `bpf()` command the gates admit, every command, option,
 environment variable, file, unit and linked library stands behind some
 T, A, R or U entry, or is named as support for one. `git log
-<the page's last commit>.. -- bpf util 'builtin-*.c' systemd` lists
-what moved since the page did.
+<the page's last commit>.. -- bpf rust/src systemd` lists what moved
+since the page did.
 
 A disagreement is the page's bug when the code does what the design
 means, and a finding when a goal rests on the claim. Decide which
@@ -344,16 +352,13 @@ cbmc --function harness -I ../../.. -I ../../../include -I ../../../util \
 
 For each Lean 4 model: `Shirudo.lean` imports it, no `axiom`, `sorry`,
 `native_decide` or `unsafe` stands in it (`#print axioms` on a theorem
-a row names shows what it rests on; `run.sh` fails on any axiom
-`testing/proofs/lean4/nanoda.json` does not permit, so check that its
-list still holds only `propext`, `Classical.choice` and `Quot.sound`),
-and each hypothesis of a theorem is something the C or the deployment
-makes true. Where the coverage
+a row names shows what it rests on), and each hypothesis of a theorem
+is something the code or the deployment makes true. Where the coverage
 page links the model to the C by a CBMC harness, that harness and its
-bound are the link. Where it says review, review again: read the C
+bound are the link. Where it says review, review again: read the code
 beside the model step for step, with every constant, the order, each
-branch and each error path, and every commit to the C since the model
-last changed.
+branch and each error path, and every commit to the code since the
+model last changed.
 
 Then the gaps. The coverage page lists the files no harness reads
 under "Files without a proof", each with the reason, which
@@ -371,7 +376,7 @@ A proof out of sync with the code is a security bug, whichever of the
 two is right: a fact box or a coverage row then claims an assurance the
 tree does not have. Report each as a finding: a proof that fails, an
 assumption no caller makes true, a bound the code has outgrown, a model
-the C has left, code a row calls proven that no harness reaches. It is
+the code has left, code a row calls proven that no harness reaches. It is
 the one kind of finding that names no adversary, since what it breaks
 is the evidence the others are judged by. Rate it low while the code
 turns out sound, and by what it breaks where the gap hid a defect. The
@@ -431,7 +436,7 @@ is not reproduced. Only the first two are rated.
 A bug that is found is seldom alone: the mistake behind it was made
 with the same helper, on the same assumption, by the same hand. When a
 bug holds, a security finding or not, look for its variants through the
-whole code base before reporting it: the userspace C, the BPF programs,
+whole code base before reporting it: the Rust, the BPF programs, the remaining C helpers,
 `tools/`, the test helpers and the scripts.
 
 - Name the root cause, why the code is wrong and not where: a result
@@ -453,11 +458,11 @@ Each variant goes through "Refute it" and "Show it" on its own: the
 same shape elsewhere can sit behind a check the first one lacked.
 Report the variants of one root cause together, each with its own path
 and result, and fix them together. A shape that can be matched
-mechanically becomes a rule of `testing/coccinelle` (the
-`bpf-coccinelle` skill for BPF code), a property of a fuzz target or a
-proof, so that the class stays closed. The report says where the
-search went and what it used, so that the next pass does not take a
-narrow search for a clean tree.
+mechanically becomes, in the C, a rule of `testing/coccinelle` (the
+`bpf-coccinelle` skill for BPF code), and in either a property of a
+fuzz target or a proof, so that the class stays closed. The report says
+where the search went and what it used, so that the next pass does not
+take a narrow search for a clean tree.
 
 ## Rate and report
 
@@ -477,9 +482,9 @@ Rate only what was shown, by the goal it breaks:
 
 For each finding give the five things above, the threat-model IDs, the
 reproduction, and the smallest fix at the last trusted decision point,
-in `util/` when other callers need it too, with a regression test that
-fails without it. An audit reports: it changes nothing in the tree
-unless asked to, and a fix is a change of its own, made as the
+in `rust/src/util/` when other callers need it too, with a regression
+test that fails without it. An audit reports: it changes nothing in the
+tree unless asked to, and a fix is a change of its own, made as the
 `coding`, `testing`, `docs`, `proofs` and `pre-submit` skills say. A
 fix updates the threat model: a closed R or U entry leaves it, and a
 new gap that stays open gets an entry. What is worth doing but breaks

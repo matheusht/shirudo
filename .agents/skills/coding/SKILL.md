@@ -1,17 +1,19 @@
 ---
 name: coding
-description: Write or change shirudo's C code, userspace or BPF, and the Rust that replaces its C modules, in the tree's style. Covers the kernel coding style it follows, when and where to split a function that grew too long, how to shape interfaces, resources, errors, types, shared state and hot paths so that a mistake has nowhere to hide, what to delete, where a comment belongs and where it is clutter, the helpers in util/ and include/shirudo/ to use instead of libc or open code, moving code two places need into util/, memory, secrets, JSON and logging, porting a C module to rust/, the commit message that carries the change, with a chart where one explains it faster, and the checks a change passes. Use whenever writing, changing or reviewing C or Rust in shirudo.
+description: Write or change shirudo's code, the Rust of its userspace and the C of its BPF programs, in the tree's style. Covers rustfmt and the kernel coding style the BPF C follows, when and where to split a function that grew too long, how to shape interfaces, resources, errors, types, shared state and hot paths so that a mistake has nowhere to hide, what to delete, where a comment belongs and where it is clutter, the helpers in rust/src/ to use instead of libc or open code, moving code two places need into rust/src/util/, memory, secrets, JSON and logging, unsafe code and the C it calls, the commit message that carries the change, with a chart where one explains it faster, and the checks a change passes. Use whenever writing, changing or reviewing Rust or C in shirudo.
 ---
 
 # Coding
 
-`Documentation/contribute/code/coding-style.rst` is the kernel's coding
-style, and the tree follows it in userspace as well as in BPF: tabs
-eight wide, 80 columns where it reads well and never past 100, K&R
-braces, short functions that do one thing. AGENTS.md lists the
-project's conventions in short; this skill gives them with their
+Most of shirudo's userspace is Rust, the `shirudo` crate under
+`rust/`, laid out as `rustfmt` lays it out. Its BPF programs and
+remaining userspace helpers are C and follow the kernel's coding style, `Documentation/contribute/code/coding-style.rst`:
+tabs eight wide, 80 columns where it reads well and never past 100, K&R
+braces. Both keep functions short and doing one thing. AGENTS.md lists
+the project's conventions in short; this skill gives them with their
 reasons. Read the code around a change first and write like it, and
-write what more than one place needs once, in `util/`.
+write what more than one place needs once, in `rust/src/util/`, or in
+`bpf/lib/` for the BPF programs.
 
 ## Write code that explains itself
 
@@ -85,9 +87,9 @@ A good cut leaves each helper a name that says its job and a handful of
 parameters. A helper that needs six or more, or that takes most of its
 caller's locals, cuts in the wrong place: put the state the steps share
 in a struct they take, or cut elsewhere. A helper with one caller is
-fine and often right, and `static` lets the compiler inline it. Do not
-split a flat `switch` or a table only to make it shorter, and do not
-spread one step over two functions.
+fine and often right, and one private to its file, `static` in C, lets
+the compiler inline it. Do not split a flat `switch` or a table only to
+make it shorter, and do not spread one step over two functions.
 
 A split is a refactor: one function per commit, a message that says
 behavior does not change and how to read the diff (`git show
@@ -137,6 +139,9 @@ a series of its own, not along the way.
   }
   ```
 
+  In Rust, a type that releases what it holds when it is dropped, an
+  `OwnedFd` for a descriptor, releases it on every return.
+
 - Free in the function that allocated. A helper makes all of its
   allocations or none, and hands over ownership by clearing the pointer
   it gave away.
@@ -160,8 +165,9 @@ a series of its own, not along the way.
   reads, a union instead of a cast, one named helper for a cast that
   cannot be avoided, a constant of the type it is compared with.
 - Keep a length in the type it arrives in and make wraparound explicit.
-  Compare bytes as `unsigned char` or with `memcmp()`; never rely on
-  `char` being signed, which it is not on arm64 and riscv64.
+  Compare bytes as `u8`, `unsigned char` in C, or with `memcmp()`; never
+  rely on `char`, or Rust's `c_char`, being signed, which it is not on
+  arm64 and riscv64.
 - Compute in the data's own unit and convert only at the edges. A range
   check subtracts from the limit, where adding to the offset can wrap,
   and accepts an end exactly at the limit:
@@ -277,9 +283,9 @@ review.
   annotation or a dummy value whose only job is to quiet a tool. Where
   no clearer shape exists, start the value at the one the code relies
   on.
-- Before adding an annotation or a check that warns, a `__must_check`, a
-  Coccinelle rule or an analyzer, fix its existing users in the commits
-  before it.
+- Before adding an annotation or a check that warns, a `#[must_use]`, a
+  lint, a Coccinelle rule or an analyzer, fix its existing users in the
+  commits before it.
 - Print nothing nobody will act on. A warning users cannot respond to
   teaches them that warnings are normal, and then they miss the real
   one.
@@ -316,10 +322,11 @@ matter. The userspace commands rarely do.
 
 Code says what it does; a comment is for what it cannot say.
 
-- A `.c` file starts with `// SPDX-License-Identifier: BSD-2-Clause`, a
-  header with `/* SPDX-License-Identifier: BSD-2-Clause */`, followed by
-  the copyright, `Copyright (c) 2026 Authors of shirudo`, and at most
-  five lines on what the file holds. Nothing more at the top.
+- A `.rs` or `.c` file starts with `// SPDX-License-Identifier:` and the
+  licence of its kind (Conventions below), a header with the same line
+  in `/* */`, followed by the copyright, `Copyright (c) 2026 Authors of
+  shirudo`, and at most five lines on what the file holds, `//!` lines
+  in Rust. Nothing more at the top.
 - In a function, almost never. Write one only for the why a reader
   cannot get from the code: an invariant kept elsewhere, a locking rule
   or an order two steps must keep, a kernel or library quirk ("zlib
@@ -334,14 +341,17 @@ Code says what it does; a comment is for what it cannot say.
 - Drop a comment that carries nothing only in the lines the change adds
   or touches. Leave the comments of code the change does not touch
   alone, even where you would write them shorter.
-- A function's contract goes above its declaration in the header, and
-  only when the prototype does not tell it: what it returns on which
-  failure, what it owns or frees, what it refuses.
+- A function's contract goes in the `///` comment above it, above its
+  declaration in a C header, and only when the signature does not tell
+  it: what it returns on which failure, what it owns or frees, what it
+  refuses. An `unsafe fn` says under `# Safety` what its caller must
+  make true.
 - Where a reader once misread code that was right, a comment goes
   exactly there, and names any other code that must stay in step with
   it.
-- Block comments open with `/*` and close with `*/` on lines of their
-  own, every line between starting with ` *`; `//` is for SPDX alone.
+- In C, block comments open with `/*` and close with `*/` on lines of
+  their own, every line between starting with ` *`; `//` is for SPDX
+  alone. Rust comments are `//`, with `///` and `//!` for documentation.
 
 Clutter, to leave out:
 
@@ -361,63 +371,59 @@ Worth writing:
  */
 ```
 
-## Use util/, and grow it
+## Use rust/src/util/, and grow it
 
-Write common code once, in `util/`, and call it. A hash, an encoding, a
-digest's text form, a path, a record format, a file read with its
-checks, the parse of a name or a number: code that does a job like
-these belongs in a helper of `util/`, or of `include/shirudo/` for the
-project's basics, not inline in a builtin or a tool. Write it there
-from the start when a second caller is in sight, rather than waiting
-for the copy. Copies drift apart, and the difference between them is
-usually a bug in one: the `sha256:` digest of a manifest was checked
-and decoded by hand in six places, one with a length check the others
-lacked, and written in ten, each its own way, until
-`sha256_digest_decode()` and `sha256_digest_encode()` in `util/hex.c`
-took the place of them all.
+Write common code once, in `rust/src/util/`, and call it. A hash, an
+encoding, a digest's text form, a path, a record format, a file read
+with its checks, the parse of a name or a number: code that does a job
+like these belongs in a module of `rust/src/util/`, or in
+`rust/src/text.rs` for the string and number basics, not inline in a
+command or a tool. Write it there from the start when a second caller
+is in sight, rather than waiting for the copy. Copies drift apart, and
+the difference between them is usually a bug in one: the `sha256:`
+digest of a manifest was checked and decoded by hand in six places, one
+with a length check the others lacked, and written in ten, each its own
+way, until `sha256_digest_decode()` and `sha256_digest_encode()`, now
+of `rust/src/util/hex.rs`, took the place of them all.
 
 Never write the same logic twice. Before writing a parser, a check, a
 path, a copy loop or a record format, look for one that already does it,
-in `util/`, `include/shirudo/` and the builtins alike: `git grep -n
-'<word>'`. A variant that differs only in a length check, a bound or a
+in `rust/src/util/`, `rust/src/text.rs` and the commands alike: `git grep
+-n '<word>'`. A variant that differs only in a length check, a bound or a
 message is still a copy: make one helper, with a parameter or with the
-extra check left to the caller, and move one found in a builtin into
-`util/` for both. A copy found while working on something else is
-consolidated in a commit of its own, before the change that needed it.
-A review asks of every new block of code whether `util/` has it
-already, or should. The basics:
+extra check left to the caller, and move one found in a command into
+`rust/src/util/` for both. A copy found while working on something else
+is consolidated in a commit of its own, before the change that needed
+it. A review asks of every new block of code whether `rust/src/util/`
+has it already, or should. The basics:
 
 | Need | Use |
 |---|---|
-| Parse a number | `parse_u64()`, `parse_s64()`, `parse_x64()`, `digits()` (`<shirudo/string.h>`) |
-| Copy or format a string | `strscpy()`, `strsprintf()`, `vstrsprintf()`, and check `-E2BIG`; `strscpy_literal()` for a string literal into an array, which fails the build where it does not fit (`<shirudo/string.h>`) |
-| A upatch's pin directory or a pin in it | `upatch_pin_path()` (`util/paths.h`) |
-| A string's prefix, or a span that must be one string | `str_has_prefix()` to test a literal prefix and `str_skip_prefix()` to step past it, `str_after_prefix()` for the rest after a prefix known only at run time, each with a `_nocase` form for a letter in either case; `span_equals()` for a span of known length against a literal, `span_equals_str()` against a string, `span_has_prefix_nocase()` for a span's start; `str_equals_nocase()` for two whole strings in either case (`<shirudo/string.h>`); `strncmp()` and `strncasecmp()`, whose length a caller counts by hand, and `strcasecmp()` are poisoned |
-| A byte of a set, or a string, in the bytes you hold | `span_until()` for the length up to the first byte of a set, `span_find()` for where a string lies in a span, `str_contains()` for whether a string holds another (`<shirudo/string.h>`); `strcspn()`, `strpbrk()` and `strstr()`, which search to a terminator, are poisoned |
-| The lines of a buffer, the words of a line, the entries of a list | `for_each_token()` (`<shirudo/string.h>`), which gives each token as pointer and length and writes nothing; a caller that needs a terminated token ends it in a buffer of its own; `strtok_r()`, `strtok()` and `strsep()` are poisoned |
-| A file name's extension | `name_has_suffix()` (`<shirudo/string.h>`), `upatch_select()` for a scandir of upatches |
-| Text from outside on a terminal | `text_sanitize()`; UTF-8 with `utf8_width()` |
-| Bytes from outside as a string | `span_to_str()` (`<shirudo/string.h>`), which takes their length and refuses a NUL among them; `read_text_line()` for a line of a settings file (`util/io.h`) |
-| Sizes and lengths | `check_add_overflow()` and kin, `size_add()`, `size_mul()`, `struct_size()`, `DIV_ROUND_UP()` (`<shirudo/overflow.h>`) |
-| Smaller or larger | `min()`, `max()` (`<shirudo/misc.h>`) |
-| Memory | `xmalloc()`, `xcalloc()`, `xreallocarray()`, `xstrndup()`, `xasprintf()`, `xfree(p, size)` (`util/malloc.h`) |
-| Secrets | `memzero_explicit()`, `memneq_explicit()` |
-| Files | `read_file()`, `read_fd()`, `write_complete()`, `append_line()`, `lines_len()`, `open_beneath()`, `lock_exclusive()` (`util/io.h`); `open_trusted()` to open by name a file under `/etc/shirudo` or `/var/lib/shirudo` that steers what shirudo trusts, never `open()` and `check_trusted()`, and `check_secret()` once such a file turns out to hold a secret |
-| Sealed state and paths root names | `seal_open()`, `seal_lock()`, `seal_append_line()`, `seal_write_file()`; `seal_output_create()` and `seal_output_commit()` for a report or export (`util/seal.h`) |
-| Bytes on the wire | `get_le32()`, `put_be32()`, `le32_to_cpu()` and kin (`<shirudo/byteorder.h>`), `hex_encode()`, `hex_decode()`, `hex_decode_max()` (`util/hex.h`) |
-| SHA-256 | `sha256_buffer()`, or `sha256_init()`, `sha256_update()` and `sha256_final()` over pieces (`util/crypto.h`); `sha256_digest_encode()` and `sha256_digest_decode()` for the `sha256:<hex>` form (`util/hex.h`), `bpm_sha256_digest()` to hash and write it at once (`util/bpm_oci.h`) |
-| JSON | `util/json.h`: `json_parse()` with a schema, `json_walk()`, `struct json_emit` |
-| Messages | `pr_err()`, `pr_warn()`, `pr_info()`, `pr_audit()` from C (`util/log.h`); `log::err()`, `warn()`, `info()`, `audit()`, `log_c!` from Rust (`rust/src/log.rs`) |
-| A command's options | a table of `struct opt_spec` indexed by the command's enum, `OPT_INIT()`, a switch over `opt_next()`, `opt_u64()`, `OPT_CHOICE()` for a value from a set of names, `opt_usage()` and `EXIT_USAGE` (`util/options.h`); `HELP_OPTIONS()` lists the same table in help, and `--list-opts` for completion; never compare `argv[]` by hand |
+| Parse a number | `parse_u64()`, `parse_s64()`, `parse_x64()`, `digits()` (`rust/src/text.rs`) |
+| Copy a string into a fixed buffer | `strscpy()`, and check `-E2BIG`; `strsprintf()` to join parts, `csprintf!` for a C format (`rust/src/text.rs`) |
+| An upatch's pin directory or a pin in it | `pin_path()` (`rust/src/util/upatch_resolve.rs`) |
+| A string's prefix, or a span that must be one literal | `starts_with()` to test a prefix, `strip_prefix()` to step past it, `==` for a span; never a length counted by hand |
+| A file name's extension | `name_has_suffix()` (`rust/src/text.rs`), and `dir_names()` (`rust/src/util/io.rs`) with it for the files of a directory that have one |
+| Text from outside on a terminal | `sanitize()`; UTF-8 with `utf8_width()` (`rust/src/text.rs`); `rust/src/log.rs` escapes what it logs |
+| Sizes and lengths | `checked_add()`, `checked_mul()` and kin, `div_ceil()` |
+| Memory | `Vec` and `Box`, from the global allocator of `rust/src/heap.rs`; for a raw buffer, its `xmalloc()`, `xcalloc()`, `xreallocarray()`, `xstrndup()` and `xfree(p, size)`, and `libc_free()` for what the C library allocated |
+| Secrets | `explicit_bzero()` (`rust/src/sys/libc.rs`), `memneq_explicit()` (`rust/src/util/chain.rs`) |
+| Files | `read_file()`, `read_fd()`, `write_complete()`, `append_line()`, `read_text_line()`, `dir_names()`, `open_beneath()`, `lock_exclusive()` (`rust/src/util/io.rs`) |
+| Sealed state and paths root names | `seal_open()`, `open_sealed()`, `seal_lock()`, `seal_append_line()`, `seal_write_file()`; `seal_output_create()` and `seal_output_commit()` for a report or export (`rust/src/util/seal.rs`) |
+| Bytes on the wire | `from_le_bytes()`, `to_be_bytes()` and kin; `encode()` and `decode()` for hex, and `hex_encode()`, `hex_decode()`, `hex_decode_max()` over C strings (`rust/src/util/hex.rs`) |
+| SHA-256 | `sha256()` or `sha256_into()` of a slice, or a `Sha256Ctx` through `sha256_init()`, `sha256_update()` and `sha256_final()` over pieces (`rust/src/util/crypto_openssl.rs`); `sha256_digest_encode()` and `sha256_digest_decode()` for the `sha256:<hex>` form (`rust/src/util/hex.rs`), `sha256_hex()` for its bare hex (`rust/src/util/bpm_oci/http.rs`) |
+| JSON | `rust/src/util/json/`: `parse_schema()` over a table of `JsonField`s, and `JsonEmit`, whose `str_lossy()` and `key_lossy()` write text from outside |
+| Messages | `log::err()`, `warn()`, `info()`, `audit()`, and `log_c!` for a C format (`rust/src/log.rs`) |
+| A command's options | a table of `OptSpec` indexed by the command's constant for each option, an `OptParser` and a `match` over its `next()`, `number()` for a value in a range, `choice()` for one from a set of `OptName`s, `usage()` and `EXIT_USAGE` (`rust/src/util/options.rs`); `HelpSection::options()` (`rust/src/util/help.rs`) lists the same table in help, and `--list-opts` for completion; never compare an argument by hand |
 
-Code that a second place needs moves into `util/<m>.c`, declared in
-`util/<m>.h`, or in `include/shirudo/` for the project's basics, with
-cases in its `tests.rs`, and the copies it replaces go in the same
-commit, whose message names each copy and how they differed. Two static
-copies of one helper in two builtins are a bug in waiting: one gets
-fixed and the other does not. A util function takes a length rather
-than trusting a terminator in outside data, returns 0 or a negative
-errno, and leaves the message to its caller.
+Code that a second place needs moves into `rust/src/util/<m>.rs`, or
+into `rust/src/text.rs` for the string and number basics, with cases in
+its `tests.rs`, and the copies it replaces go in the same commit, whose
+message names each copy and how they differed. Two private copies of
+one helper in two commands are a bug in waiting: one gets fixed and the
+other does not. A util function takes a slice rather than trusting a
+terminator in outside data, returns 0 or a negative errno, or a
+`Result` whose error is one, and leaves the message to its caller.
 
 Code the BPF programs share goes in `bpf/lib/` the same way. Where a
 shared helper does not make sense, the copy stays and its commit says
@@ -428,63 +434,44 @@ without a body.
 
 ## Conventions
 
-- Plain C; zero-initialise with `= {}`.
-- Integers are `__u8` to `__u64` and `__s8` to `__s64`; `__u64` prints
-  with `%llu`, and `ptr_to_u64()` gives the `__u64` the bpf() ABI takes.
-  A library interface that takes another type keeps it, and BPF spells
-  hook arguments as the kernel's prototypes do. `check-style.sh` refuses
-  `uint32_t` and its kin, and in userspace `unsigned int`, `long` and
-  the like. System headers that use `uint8_t` and kin go above the first
-  shirudo header, which poisons them.
-- `strtoul()`, `atoi()`, `sscanf()`, `strcpy()`, `sprintf()`,
-  `snprintf()`, `strncmp()`, `strncasecmp()`, `strcasecmp()`,
-  `strcspn()`, `strstr()`, `strtok_r()`, `strtok()`, `strsep()`, the
-  libc allocators and `explicit_bzero()` are poisoned;
-  the table above has what replaces each, and a missing one is wrapped
-  in `util/`, never given an exception. So are the string functions of
-  libc that nothing calls, `strspn()`, `strpbrk()`, `strcoll()`,
-  `strxfrm()`, `strcasestr()`, `strchrnul()`, `strverscmp()`,
-  `stpcpy()`, `strlcat()`, `memccpy()`, `bcmp()`, `bcopy()`, `bzero()`,
-  `rindex()`, `rawmemchr()`, `gets()`, `strdupa()` and their kin: the
-  `#pragma GCC poison` lines of `<shirudo/string.h>` are the list, and
-  one comes off it with the first caller that needs it.
-- A `strsprintf()` that does not fit leaves the buffer empty and a
-  `strscpy()` leaves a cut copy: either way a path or value is refused,
-  a helper formatting display text returns the error, and status shows
-  `"?"`. Constant text is copied, not formatted, and a literal copied
-  into an array takes `strscpy_literal()`, which cannot fail.
-- `xstrdup()` copies a string and `xstrndup(s, n)` at most its first
-  `n` bytes: a prefix, or a bounded copy of what already is a string.
-  Both end the copy at a NUL and say nothing, which is wrong for bytes
-  that come with a length: those become a string through
-  `span_to_str()`, into `len + 1` bytes from `xmalloc()`, which refuses
-  the NUL. `xfree(p, size)` and `xstrfree()` scrub before they free.
-- `min_t()` and `max_t()` cast and can cut a value, so they are for
-  only what `min()` and `max()` refuse; a constant compared with an
-  unsigned value takes a `U` suffix.
-- `ret` holds a return code, `err` an errno kept beside the value a
-  function returns. No `(void)` casts: a result that must be checked
-  comes from a `__must_check` function, and every call checks it.
+- C is plain C, zero-initialised with `= {}`.
+- In C, integers are `__u8` to `__u64` and `__s8` to `__s64`, from
+  `vmlinux.h` in BPF; `__u64` prints with `%llu`. A library interface
+  that takes another type keeps it, and BPF spells hook arguments as the
+  kernel's prototypes do. `check-style.sh` refuses `uint32_t` and its
+  kin.
+- A number from outside is parsed with `parse_u64()` and its kin, which
+  take a bound and refuse a blank, a base prefix and the leading `+`
+  that `str::parse()` takes.
+- A `strsprintf()` or `csprintf!` that does not fit leaves the buffer
+  empty: a path or value is refused, a helper formatting display text
+  returns the error, and status shows `"?"`. Constant text is copied,
+  not formatted.
+- `xstrdup()` measures with `strlen()`, so outside input gets
+  `xstrndup(s, bound)`. `xfree(p, size)` and `xstrfree()` scrub before
+  they free.
+- In C, `ret` holds a return code and `err` an errno kept beside the
+  value a function returns, and there are no `(void)` casts.
 - Internal names carry no `shirudo_` prefix; it stays only where a name
   leaves the code: include guards, BPF object and pin names, environment
-  variables, a clash with libc.
-- Locals in reverse-Christmas-tree order, longest line first, except
-  where an initializer needs an earlier local.
+  variables, the entry points a `main()` object calls, a clash with
+  libc.
+- In C, locals go in reverse-Christmas-tree order, longest line first,
+  except where an initializer needs an earlier local.
 - Never two blank lines in a row. Removing code often brings the blank
   lines around it together: drop one of them. checkpatch checks only
   the lines a patch adds, so it does not see a pair a deletion makes.
-- A frame past 128 KiB fails the build: tables go on the heap, and a
-  helper with a big buffer is `noinline_for_stack`.
-- Scrub a key, a seed, a credential or a buffer that held one with
-  `memzero_explicit()` on every path out, error paths included, and
-  compare it with `memneq_explicit()`. Mark a struct member that holds
-  one `__sensitive`: a check then wants every local of that struct
-  scrubbed the same way, member filled by a parser and all.
-- All JSON goes through `util/json.h`; text from outside is written
-  with its lossy writers. All logging goes through `pr_*()` to syslog;
+- Scrub a key, a seed, a credential or a buffer that held one on every
+  path out, error paths included, and compare it with
+  `memneq_explicit()`. The allocator scrubs what it frees; what it does
+  not hand out, a local, a static or a library's buffer, takes
+  `explicit_bzero()`, from a `Drop` where a type holds the secret, as
+  `Scrubbed` of `rust/src/util/config.rs` does.
+- All JSON goes through `rust/src/util/json/`; text from outside is written
+  with its lossy writers. All logging goes through `rust/src/log.rs` to syslog;
   shirudo writes no log file of its own.
 - Fields of a little- or big-endian format are read and written with
-  `le32_to_cpu()`, `get_le32()` and their kin; sparse refuses the rest.
+  `from_le_bytes()`, `to_be_bytes()` and their kin.
 - Userspace is BSD-2-Clause. Every file a BPF object compiles, and each
   Lua decoder, is `GPL-2.0 OR BSD-2-Clause`, with
   `char _license[] SEC("license") = "Dual BSD/GPL";`. No emojis.
@@ -581,66 +568,86 @@ its point of no return:
 
 ## Rust
 
-The Rust library under `rust/` replaces C modules, re-implemented
-rather than translated line by line, and a module's C interface stays
-its contract while any C caller uses it.
+Most userspace is the `shirudo` crate under `rust/`, a static library
+every binary links. Much of it keeps the shape of the C it replaced:
+raw pointers, `c_int` results and `capi` submodules that hold the
+pointer-shaped interface of a C header that is gone. Write safe code
+over slices and Rust types, and take the pointer forms only where the
+code a change joins still passes pointers.
 
-- The port of `util/<m>.c` is `rust/src/util/<m>.rs`, or the directory
-  `rust/src/util/<m>/` for one that takes more than a file: safe code
-  over slices and Rust types, and a `capi` submodule whose
-  `#[unsafe(no_mangle)] pub unsafe extern "C"` functions keep the names,
-  types and behavior `util/<m>.h` declares, down to what one returns for
-  an empty buffer. The header stays and names the Rust file. The C file
-  goes in the same commit, and every link in `Makefile.shirudo` that
-  took its object takes `$(RUST_LIB)` after the objects and
-  `$(RUST_LDLIBS)` after the libraries, `$(RUST_TEST_LDLIBS)` in a
-  helper, unit or fuzz link and in shirudo-build's, which take a few
-  util objects, as it lets the link drop the Rust it does not reach and
-  the C that Rust calls. A helper that links few libraries also names
-  one the archive calls that it would find only behind another, zlib
-  behind libcrypto: ld refuses such a symbol before `--gc-sections`
-  drops the call. A test or fuzz target that included the C file to
-  reach a static function calls an export of the port instead, which the
-  header declares as one for it, and a test that wrapped a call the port
-  now makes inside Rust drives the same case through the interface or a
-  path or environment override.
+- The commands are `rust/src/builtin/`, one module for each, which the
+  table of `rust/src/builtin/commands.rs` dispatches to; what more than
+  one place needs is `rust/src/util/`; the operator's builder and
+  signer are `rust/src/shirudo_build/`, which only `shirudo-build`
+  reaches; the BPF object model and the loaders it generates are
+  `rust/src/bpf/`. The test helpers are `rust/src/helpers/`, built
+  only with the `test-helpers` feature, and a module's fuzz entry
+  points are its `fuzz.rs`, built only under `cfg(shirudo_fuzz)`. A
+  binary's `main()` is a `no_std` object of its own, `shirudo.rs`,
+  `tools/shirudo-build/shirudo-build.rs`,
+  `tools/quote-check/quote-check.rs` or one made from
+  `testing/helper/main.rs.in`, which hands the command line to the
+  crate, so that the tests can link the crate with a `main()` of their
+  own.
+- A function that can fail returns 0 or a negative errno of
+  `rust/src/errno.rs`, or a `Result` whose error is one.
 - `rust/src/ffi.rs` turns what C hands over into Rust views: `c_str()`
   for a C string, `slice()` for an array that may be NULL when empty,
-  `bytes_mut()` for a C buffer to write into as it is,
-  `zeroed_slice_mut()` for room C has not initialised, and
-  `rust/src/text.rs` gives Rust code the string rules of
-  `include/shirudo/string.h` and the C library, `strscpy()` to
-  `parse_u64()`, over byte slices. Every `unsafe` block says in a
-  `// SAFETY:` comment what part of the C contract makes it sound.
-- What the Rust code calls in C that std does not cover, the `*at()`
-  calls and ioctls, libcurl, zlib, OpenSSL past `util/crypto.h` and the
-  `util/` modules not ported yet, is declared in `rust/src/sys/`, one
-  module for each header, which goes when the C it declares does. A
-  message goes through `pr_err()` and reads as the C's did.
-- Before the C file goes, compare the two: build the old file from git
-  with its functions renamed, link it beside the archive and run both on
-  the same random and corpus inputs until they agree on every result and
-  every byte written; the calls each makes on the way may differ. The
-  tests then hold the port to the rest.
+  `bytes_mut()` for a C buffer to write into as it is, and `c_splice!`
+  for a C string spliced from constants at compile time.
+  `rust/src/text.rs` gives Rust code the string rules of the C library
+  over byte slices, `cstr()` for the string a buffer holds, `strscpy()`
+  to `parse_u64()`.
+- What std does not cover is declared in `rust/src/sys/`: the C library
+  through the `libc` crate, with the few glibc symbols the crate does
+  not bind, libcurl, LuaJIT, tpm2-tss through `tss-esapi-sys`, and the
+  OpenSSL calls that neither the `openssl` crate nor `openssl-sys`
+  covers.
+- Every `unsafe` block says in a `// SAFETY:` comment what part of the
+  contract of what it calls makes it sound, and an `unsafe fn` says
+  under `# Safety` what its caller must make true. `rust/Cargo.toml`
+  denies `unsafe_op_in_unsafe_fn`, so that an unsafe operation takes a
+  block of its own inside an `unsafe fn` too, and clippy's
+  `undocumented_unsafe_blocks`, so that `cargo clippy` fails on a block
+  without its comment.
 - std, and a crate only where it replaces a large binding layer and
-  AGENTS.md's dependency rules admit it, vendored and pinned in
-  `rust/Cargo.lock` so that cargo builds offline. Rust allocations go through the allocator of
-  `rust/src/heap.rs`, which zeroes and scrubs as its `xmalloc()` family
-  for C does; a buffer C frees with `xfree()` comes from that family. A panic reports through `pr_err()`
-  and aborts: the crate unwinds only so that a Lua error can cross a
-  `"C-unwind"` callback. Overflow checks and LTO hold in every release
-  build, and arithmetic that input can overflow is checked.
+  AGENTS.md's dependency rules admit it, vendored in `rust/vendor` and
+  pinned in `rust/Cargo.lock` so that cargo builds offline.
+- Every Rust allocation goes through the global allocator of
+  `rust/src/heap.rs`, which hands out zeroed memory and scrubs a block
+  before it frees it, the old block of one that grows included. A raw
+  buffer comes from its `xmalloc()` family, which zeroes and scrubs the
+  same way, and goes back through `xfree(p, size)`; what the C library
+  allocates, as `scandir()`, `getline()` and `realpath()` do, goes back
+  through `libc_free()`.
+- A panic is a bug: `rust/src/panic.rs` reports it through `log::err()`
+  and aborts. The crate unwinds only so that a Lua error can cross a
+  `"C-unwind"` callback, and a Rust frame such an unwind may cross holds
+  nothing that must be dropped. Overflow checks and LTO hold in every
+  release build, and arithmetic that input can overflow is checked, so
+  that the input is refused rather than the command aborted.
 - `rustfmt` sets the layout. Comments follow the rules above with `//`
   and `///`, and `//!` holds the lines of purpose under the SPDX line
   and the copyright.
 
+## Remaining userspace C
+
+The remaining C helpers under `util/` and `tools/shirudo-build/` keep
+the kernel C style above. Keep their headers, tests, and C callers in
+sync when changing an interface. Check the return from `strscpy()` and
+`strsprintf()`, release allocations on every error path, and use the
+existing zeroing helpers for secrets. New shared userspace logic belongs
+in Rust.
+
 ## Check
 
-A warning fails the build, so fix it rather than silence it. Build with
-GCC and with clang 23 (`make -B` when switching), run the unit suite of
-every `util/` file the change touches, adapt and run the proofs under
+A warning fails the build, rustc's as the C compiler's, so fix it
+rather than silence it. Build with GCC and with clang 23 (`make -B` when
+switching), run the unit suite of every module the change touches
+(`make -C testing unit/<module>`), adapt and run the proofs under
 `testing/proofs/` that reach the code (the `proofs` skill), and run the
-`pre-submit` skill's checks before handing the change over: checkpatch
-in strict mode, Coccinelle, sparse and both sanitizers find what review
-misses, and `cargo fmt --check` and `cargo clippy` keep `rust/` to its
-style and its `// SAFETY:` comments.
+`pre-submit` skill's checks before handing the change over: `cargo fmt
+--check` and `cargo clippy` keep `rust/` to its style and its
+`// SAFETY:` comments, checkpatch in strict mode and Coccinelle keep the
+C to its, and the sanitizers and the fuzz targets find what review
+misses.

@@ -24,7 +24,7 @@ Before you begin
   :src:`.github/scripts/install-clang.sh` installs them on Debian, Ubuntu
   and Fedora.
 - Rust 1.85 or newer, with ``cargo``, and ``rustfmt`` and ``clippy`` for
-  the checks. The library under ``rust/`` replaces C modules, and every
+  the checks. The userspace is the library under ``rust/``, and every
   binary links it. It takes Rust's standard library, and any crate it
   takes is vendored, so cargo builds it offline.
 - The development files that :src:`Makefile.config` probes for with
@@ -191,7 +191,8 @@ variables change it:
        fails every build by default, the BPF objects and the vendored
        libbpf included. Fix the warning instead of keeping this set.
    * - ``CC=clang``
-     - Compiles the userspace objects with clang rather than ``cc``. CI
+     - Links the binaries, and compiles the C of :src:`testing/parity/`
+       and the vendored libbpf it links, with clang rather than ``cc``. CI
        builds with both compilers at the same flags and runs the unit
        tests against each, in the ``gcc`` and ``clang`` jobs of the
        ``Build`` workflow.
@@ -437,8 +438,11 @@ Project layout
        ``status``, ``upatch`` and ``version``. The signed loader under
        ``upatch load``, ``unload`` and boot restore is
        :src:`rust/src/builtin/upatch/loader.rs`.
+   * - :src:`rust/src/util/`
+     - The userspace library the commands and the helper share.
    * - :src:`util/`
-     - The userspace library both binaries link.
+     - ``paths.h`` and ``image_config.h``, which the CBMC proof of
+       :src:`testing/proofs/cbmc/` includes.
    * - :src:`bpf/`
      - The embedded BPF programs: ``bpf2.c`` (admission, mount, image
        and device guards), ``seal.c`` (the seal) and ``unload.c`` (the
@@ -446,12 +450,13 @@ Project layout
    * - :src:`bpf/lib/`
      - The headers more than one BPF program includes: the LSM helpers
        and verity device records of ``bpf2.c`` and ``seal.c``, and,
-       shared with upatches and userspace, decoders, identity,
-       serializers, tamper and integrity counters and common helpers.
+       shared with upatches, decoders, identity, serializers, tamper and
+       integrity counters and common helpers, whose layouts the Rust
+       mirrors.
    * - :src:`include/shirudo/`
-     - Integer types, string and number helpers, the ``.upatch``
-       container layout, TPM types and the enforcement definitions
-       shared between userspace and BPF.
+     - The TPM constants and enforcement definitions the BPF programs
+       include, and the integer types, attributes and ``misc.h`` helpers
+       of the C in :src:`util/` and :src:`testing/`.
    * - :src:`tools/shirudo-build/`
      - The ``main()`` of the operator-only helper, whose commands are in
        :src:`rust/src/shirudo_build/`: compile, sign, unload directives,
@@ -554,9 +559,10 @@ the commit at ``HEAD`` alone without them.
        headers it includes and the decoders a package ships. Takes no
        range.
    * - ``check-unused.sh``
-     - An extern function of the userspace C that nothing calls: the
-       compiler reports an unused ``static`` function, never an extern
-       one. A call from a test counts. Takes no range.
+     - An extern function of the C outside the BPF programs, the
+       fixtures and the proofs that nothing calls: the compiler reports
+       an unused ``static`` function, never an extern one. A call from a
+       test counts. Takes no range.
    * - ``scan-build.sh <vmlinux-btf>``
      - The binary, the shirudo-build helper and the quote checker built
        under clang's static analyzer with its default checkers, failing
@@ -571,11 +577,9 @@ the commit at ``HEAD`` alone without them.
        makes. CI runs it as the ``scan-build`` job of the ``Build``
        workflow and keeps the HTML report of a failed run.
    * - ``check-sparse.sh``
-     - ``make sparse``: sparse over the userspace sources the binaries
-       are built from, failing on any warning. It finds a value moved
-       between host order and ``__le32`` or ``__be32`` without
-       ``cpu_to_le32()``, ``le32_to_cpu()`` or their kin from
-       ``<shirudo/byteorder.h>``. Takes no range.
+     - ``make sparse``: sparse over the userspace C sources the binaries
+       are built from, failing on any warning. The binaries are built
+       from Rust, so the list is empty. Takes no range.
    * - ``check-coccinelle.sh [<rule>...]``
      - Every semantic patch in :src:`testing/coccinelle/`, or the rules
        named, over the C the project writes, failing on any match with
@@ -957,5 +961,5 @@ Next steps
   change shirudo end to end
 - :doc:`/contribute/testing/testing` to run and write tests
 - :doc:`/contribute/code/contributing` for the commit message and the sign-off
-- :doc:`/contribute/code/coding-style` for the C code
+- :doc:`/contribute/code/coding-style` for the BPF C code
 - :doc:`/reference/cli/index` for the commands

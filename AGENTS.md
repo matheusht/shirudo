@@ -8,9 +8,9 @@ not visible from the code.
 ## Before you write code
 
 Read `.agents/skills/coding/SKILL.md` and follow it before you write,
-change or review any C in this tree, userspace, BPF, tests and tools
-alike, and before you write the commit message of such a change. It is
-how code here is written, with
+change or review any code in this tree, the Rust and the BPF C, tests
+and tools alike, and before you write the commit message of such a
+change. It is how code here is written, with
 `Documentation/contribute/code/coding-style.rst` that it builds on.
 Claude Code loads it as the `coding` skill, Codex from `.agents/skills/`,
 and an agent that does not load skills reads the file. Work another
@@ -21,9 +21,9 @@ as well.
 
 A BPF security platform that locks down the `bpf()` syscall so only signed in-kernel
 BPF loader programs can install BPF code, create maps or attach links,
-even for `CAP_SYS_ADMIN`. One binary serves two roles, chosen by what is
-present on the machine, never by separate builds. It is written in C,
-with a Rust library under `rust/` taking over its modules one at a time:
+even for `CAP_SYS_ADMIN`. Most userspace is written in Rust under
+`rust/`; the remaining C helpers and the BPF programs live beside it. One binary serves two roles, chosen
+by what is present on the machine, never by separate builds:
 
 - the *operator* holds the private ML-DSA-87 signing key and produces
   signed `.upatch` artifacts (`shirudo build`, `shirudo bpm build`), and
@@ -60,7 +60,7 @@ Before changing security-relevant code, read
 | `Documentation/upatches/` | Authoring and shipping upatches: attach kinds, maps and serializers, decoders, the Beefile, publishing, debugging a failed load. |
 | `Documentation/reference/` | Every command (`reference/cli/`), the formats (`reference/formats/`, including the `.upatch` container), the settings (`configuration.rst`), the eventlog, failure categories and exit status, files, units, environment variables, the cheat sheet. |
 | `Documentation/contribute/` | Developer guide, test tiers and the test VM (read `testing.rst` before adding or moving a test), test coverage, the kernel coding style, commits and sign-off (read `contributing.rst` before crafting a commit), and the documentation style guide `writing-docs.rst`. |
-| `.agents/skills/` | Skills for coding agents in the `SKILL.md` format of agentskills.io, which Codex reads there and Claude Code through the `.claude/skills` link: `coding` writes C in the tree's style, grows `util/` and writes its commit messages, `testing` runs the test tiers and the test VM, `pre-submit` the checks CI runs on a series, `upatch` writes for the target's preemption model and a low cost, builds, packages and publishes an upatch, `bpf-concurrency` checks upatch code whose runs share state, `bpf-coccinelle` runs and extends the Coccinelle rules for it, `docs` finds and checks the pages a change touches, `fuzz-target` adds a libFuzzer target for a parser, `proofs` runs and writes the CBMC and Lean 4 proofs, `security-audit` audits the tree against the threat model, and the threat model and the proofs against the tree. |
+| `.agents/skills/` | Skills for coding agents in the `SKILL.md` format of agentskills.io, which Codex reads there and Claude Code through the `.claude/skills` link: `coding` writes Rust and BPF C in the tree's style, grows `rust/src/util/` and writes its commit messages, `testing` runs the test tiers and the test VM, `pre-submit` the checks CI runs on a series, `upatch` writes for the target's preemption model and a low cost, builds, packages and publishes an upatch, `bpf-concurrency` checks upatch code whose runs share state, `bpf-coccinelle` runs and extends the Coccinelle rules for it, `docs` finds and checks the pages a change touches, `fuzz-target` adds a libFuzzer target for a parser, `proofs` runs and writes the CBMC and Lean 4 proofs, `security-audit` audits the tree against the threat model, and the threat model and the proofs against the tree. |
 
 The kernel side of the signing design is the kernel's own
 `Documentation/bpf/signing.rst`; `bpf_prog_verify_signature()` runs
@@ -109,71 +109,45 @@ package for `bpm info`.
 
 ## Coding conventions
 
-C follows the kernel coding style,
-`Documentation/contribute/code/coding-style.rst`, in userspace and BPF
-alike, and Rust the style `rustfmt` gives it, as the kernel's Rust does;
-the `coding` skill, which the section above has you load first, gives
-these conventions with their reasons, the helpers to use and the commit
-message that carries a change.
+Rust takes the layout `rustfmt` gives it, as the kernel's Rust does,
+and all C, including the remaining userspace helpers, follows the kernel coding style,
+`Documentation/contribute/code/coding-style.rst`; the `coding` skill,
+which the section above has you load first, gives these conventions
+with their reasons, the helpers to use and the commit message that
+carries a change.
 
-- Rust under `rust/` replaces a C module whole: the module that ports
-  `util/<m>.c` is `rust/src/util/<m>.rs` or `rust/src/util/<m>/`, and
-  the one that ports `builtin-<c>.c` is `rust/src/builtin/<c>.rs` or
-  `rust/src/builtin/<c>/`. It
-  re-implements the module in Rust rather than translating it line by
-  line, and keeps what callers and users see: the C interface of its
-  header, in a `capi` submodule of `#[unsafe(no_mangle)]` functions
-  while C still calls it, the formats it reads and writes, its output
-  and its messages. The C file goes in the same commit, and a test that
-  reached into its internals is reworked to test the same behavior
-  through that interface. The crate takes std, a crate only as the
+- Most userspace is the `shirudo` crate under `rust/`, which every
+  binary links: the commands in `rust/src/builtin/`, what more than one
+  place needs in `rust/src/util/`, and the operator's builder and
+  signer in `rust/src/shirudo_build/`. Each binary's `main()` is a
+  small `no_std` object of its own, as `shirudo.rs` is, that hands the
+  command line to the crate. The crate takes std, a crate only as the
   dependency rules below admit one, vendored and pinned so that cargo
-  builds offline, and what std lacks through `extern` declarations. It
-  builds with overflow checks and LTO, unwinds only so that a Lua error
-  can cross a Rust callback, logs a panic and aborts, allocates through
-  a global allocator that zeroes and scrubs as `xmalloc()` does,
-  and every `unsafe` block says why it is sound in a `// SAFETY:`
-  comment, which clippy enforces. BPF programs stay in C.
-- C, no C++. Zero-initialise with `= {}`. Integers are `__u8` to
-  `__u64` and `__s8` to `__s64`; a system header that uses `uint8_t` and
-  its kin goes above the first shirudo header, which poisons them.
-- Use the helpers of `util/` and `include/shirudo/` over libc and open
-  code: `parse_u64()` and its kin for numbers, `<shirudo/overflow.h>`
-  for sizes, `strscpy()` and `strsprintf()` with their `-E2BIG`
-  checked and `strscpy_literal()` for a literal into an array,
-  `str_has_prefix()`, `str_after_prefix()` and `span_equals()` for a
-  prefix or a span, `span_until()`, `span_find()` and `str_contains()`
-  for a search, `for_each_token()` for the tokens of a buffer, the
-  `xmalloc()` family, `min()` and `max()`,
-  `memzero_explicit()` and `memneq_explicit()` for secrets,
-  `util/json.h` for all JSON, `pr_*()` for C logging and
-  `rust/src/log.rs` for Rust logging. The libc names
-  they replace are poisoned, and so are the string functions of libc
-  that nothing calls; `<shirudo/string.h>` has the list. Code that a
-  second place needs moves into `util/` with unit cases rather than
-  being copied.
-- Bytes from outside come with a length and become a string in one
-  step that refuses a NUL among them and terminates them:
-  `span_to_str()` for a file read whole, a reply, a counted field or a
-  line cut from a text, `read_text_line()` for the lines of a settings
-  file, `json_parse()` for a document. A fixed-size field of a format
-  is a string once its parser found a NUL inside it. `strcmp()`,
-  `strlen()`, `strchr()` and their kin, which no poison can refuse, are
-  for what passed that step, for literals, `argv` and paths; never for
-  a buffer a `read()` filled, a field nobody checked or a pointer that
-  came with a length. A digest over several strings delimits or counts
-  each.
-- `ret` names a return code and `err` an errno kept beside the value a
-  function returns. No `(void)` casts: a result that must be checked
-  comes from a `__must_check` function, and every call checks it.
-  Internal names carry no `shirudo_` prefix. Locals go in
-  reverse-Christmas-tree order.
+  builds offline, and what those lack through the declarations of
+  `rust/src/sys/`. It builds with overflow checks and LTO, unwinds only
+  so that a Lua error can cross a Rust callback, logs a panic and
+  aborts, and allocates through a global allocator that zeroes memory
+  when it hands it out and scrubs it when it is freed. Every `unsafe`
+  block says why it is sound in a `// SAFETY:` comment, which clippy
+  enforces.
+- Use the helpers of `rust/src/` over libc and open code:
+  `parse_u64()` and its kin for numbers, which refuse the `+` that
+  `str::parse()` takes, checked arithmetic for sizes, `strscpy()` with
+  its `-E2BIG` checked, `explicit_bzero()` and `memneq_explicit()` for
+  secrets, `rust/src/util/json/` for all JSON and `rust/src/log.rs` for
+  all logging. Code that a second place needs moves into
+  `rust/src/util/` with unit cases rather than being copied.
+- A function that can fail returns 0 or a negative errno, or a `Result`
+  whose error is one. Internal names carry no `shirudo_` prefix.
+- C zero-initialises with `= {}`, spells integers `__u8` to `__u64` and
+  `__s8` to `__s64`, names a return code `ret` and puts locals in
+  reverse-Christmas-tree order. No `(void)` casts.
 - Write self-documenting code: names that say what a function does and
   what a value holds, and small functions, so that comments stay rare. A
   file starts with its SPDX line, the copyright and at most five lines of
-  purpose; in code a comment says only the why the code cannot, never
-  what it does or how it came to be. Block comments follow section 8 of
-  the style, and in C `//` is for SPDX alone.
+  purpose, `//!` lines in Rust; in code a comment says only the why the
+  code cannot, never what it does or how it came to be. Block comments
+  follow section 8 of the style, and in C `//` is for SPDX alone.
 - Userspace is BSD-2-Clause. Every file compiled into a BPF object, and
   every Lua decoder, is `GPL-2.0 OR BSD-2-Clause`, and a BPF program
   declares `char _license[] SEC("license") = "Dual BSD/GPL";`. No emojis.
