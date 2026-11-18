@@ -445,7 +445,14 @@ fn staged(
             return ret;
         }
     }
-    archive::write(spec, version.to_bytes(), keys.cert.to_bytes(), &fp, out_dir)
+    archive::write(
+        "bpm config update",
+        spec,
+        version.to_bytes(),
+        keys.cert.to_bytes(),
+        &fp,
+        out_dir,
+    )
 }
 
 /// The load artifact at `load` is a load directive named `expected`.

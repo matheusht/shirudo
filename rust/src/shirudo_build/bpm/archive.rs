@@ -22,6 +22,9 @@ use crate::util::timefmt::iso8601;
 
 /// The largest file a package takes in.
 pub(super) const MAX_FILE: usize = 256 * 1024 * 1024;
+/// `BPM_MAX_PACKAGE_BYTES`: what the target's extractor unpacks of a
+/// package at most, its members together.
+const MAX_PACKAGE: u64 = 256 * 1024 * 1024;
 /// Room for the build environment's JSON.
 const MAX_JSON: usize = 256 * 1024;
 const R_OK: c_int = 4;
@@ -30,12 +33,12 @@ fn errno_of(e: &std::io::Error) -> c_int {
     -e.raw_os_error().unwrap_or(EIO)
 }
 
-/// A file read whole, at most `max` bytes.
+/// A file read whole, at most `max` bytes: -EFBIG for a larger one.
 pub(super) fn read_file(p: &[u8], max: usize) -> Result<Vec<u8>, c_int> {
     let mut f = std::fs::File::open(path(p)).map_err(|e| errno_of(&e))?;
     let size = f.metadata().map_err(|e| errno_of(&e))?.len();
     if size > max as u64 {
-        return Err(-E2BIG);
+        return Err(-EFBIG);
     }
     let mut body = vec![0u8; size as usize];
     let mut n = 0;
@@ -50,8 +53,8 @@ pub(super) fn read_file(p: &[u8], max: usize) -> Result<Vec<u8>, c_int> {
 }
 
 /// The gzip stream the archive goes into, as zlib's gzopen(path, "wb9")
-/// writes it.
-struct Tar(GzWrite<std::fs::File>);
+/// writes it, and the bytes of content written so far.
+struct Tar(GzWrite<std::fs::File>, u64);
 
 impl Tar {
     fn write(&mut self, data: &[u8]) -> c_int {
@@ -68,9 +71,15 @@ impl Tar {
     fn entry(&mut self, name: &[u8], data: &[u8], mode: u32, ty: u8) -> c_int {
         let mut h = [0u8; 512];
 
-        if name.len() >= 100 || (ty == b'0' && data.len() as u64 > 0o777_7777_7777) {
+        if name.len() >= 100 {
             return -ENAMETOOLONG;
         }
+        // The sum the target's extractor takes: more would build and
+        // never install.
+        if data.len() as u64 > MAX_PACKAGE - self.1 {
+            return -EFBIG;
+        }
+        self.1 += data.len() as u64;
         h[..name.len()].copy_from_slice(name);
         for (off, size, value) in [
             (100, 8, u64::from(mode & 0o7777)),
@@ -260,6 +269,7 @@ fn entries(tar: &mut Tar, spec: &Spec, top: &[u8], cert: &[u8], env: &[u8]) -> c
 /// The package of `spec` at version `version`, signed with the
 /// certificate at `cert_path`, into `<out_dir>/<name>-<version>.bee`.
 pub(super) fn write(
+    command: &str,
     spec: &Spec,
     version: &[u8],
     cert_path: &[u8],
@@ -283,12 +293,22 @@ pub(super) fn write(
         Err(e) => return -e.raw_os_error().unwrap_or(EIO),
     };
     let mut tar = match GzWrite::new(file, 9, 3) {
-        Ok(gz) => Tar(gz),
+        Ok(gz) => Tar(gz, 0),
         Err(_) => return -EIO,
     };
     let mut ret = entries(&mut tar, spec, &top, &cert, &env);
     if tar.0.finish().is_err() && ret == 0 {
         ret = -EIO;
+    }
+    if ret == -EFBIG {
+        crate::log::err(
+            format!(
+                "{command}: the members of the package are more than {} MiB together, the most a target installs",
+                MAX_PACKAGE >> 20
+            )
+            .as_bytes(),
+        );
+        ret = -EINVAL;
     }
     if ret != 0 {
         let _ = std::fs::remove_file(path(&output));

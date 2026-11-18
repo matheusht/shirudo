@@ -458,6 +458,8 @@ fn push_package(
         &repo,
         b":",
         cstr(&info.0.version),
+        b" ",
+        &package_digest,
     ]
     .concat();
     if reference.len() >= PATH_MAX {

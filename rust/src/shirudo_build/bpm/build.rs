@@ -231,16 +231,30 @@ pub(super) fn cstring(b: &[u8]) -> CString {
     CString::new(b.to_vec()).unwrap_or_default()
 }
 
+/// Whether `path` lies below the directory `dir`.
+fn below(dir: &[u8], path: &[u8]) -> bool {
+    path.len() > dir.len() && path.starts_with(dir) && path[dir.len()] == b'/'
+}
+
 /// A target the archive gets once, and none of the names the package
-/// itself carries.
+/// itself carries. A name is a file or a directory, not both: a target
+/// below another, or below a member bpm build writes itself, would build
+/// and never install.
 fn add_target(seen: &mut Vec<Vec<u8>>, target: &[u8]) -> c_int {
+    const OWN: [&[u8]; 4] = [
+        b"Beefile",
+        b"README.md",
+        b"cert.der",
+        b"build-environment.json",
+    ];
+
     if !target_ok(target) {
         return -EINVAL;
     }
-    if matches!(
-        target,
-        b"Beefile" | b"README.md" | b"cert.der" | b"build-environment.json"
-    ) || seen.iter().any(|s| s == target)
+    if OWN.iter().any(|own| *own == target || below(own, target))
+        || seen
+            .iter()
+            .any(|s| s == target || below(s, target) || below(target, s))
     {
         return -EEXIST;
     }
@@ -799,6 +813,7 @@ fn build(
     );
     if ret == 0 {
         ret = archive::write(
+            "bpm build",
             &spec,
             version.to_bytes(),
             keys.cert.to_bytes(),
