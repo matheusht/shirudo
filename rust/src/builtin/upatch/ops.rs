@@ -49,7 +49,7 @@ use crate::util::measured::{
     measured_unmeasured_pins,
 };
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
-use crate::util::report::{OpReport, report_emit, report_free};
+use crate::util::report::{OpReport, report_emit};
 use crate::util::seal::{seal_mkdir_p, seal_open_read, seal_write_file};
 use crate::util::upatch::{
     self, NAME_MAX, Opened, Upatch, name_valid, pin_name, upatch_open_memory, upatch_signature,
@@ -224,8 +224,8 @@ pub(super) fn fail(
     message: &[u8],
 ) {
     rep.ok = false;
-    rep.phase = phase.as_ptr();
-    rep.category = category.as_ptr();
+    rep.phase = phase;
+    rep.category = Some(category);
     rep.err = err.abs();
     let n = message.len().min(rep.message.len() - 1);
     for (d, &s) in rep.message.iter_mut().zip(&message[..n]) {
@@ -235,8 +235,7 @@ pub(super) fn fail(
 }
 
 fn category_is(rep: &OpReport, category: &[u8]) -> bool {
-    // SAFETY: a static C string, when set.
-    !rep.category.is_null() && unsafe { crate::ffi::c_str(rep.category) } == category
+    rep.category.is_some_and(|c| c.to_bytes() == category)
 }
 
 /// The version gate, which runs first: a caller built from other sources
@@ -704,7 +703,7 @@ fn precheck(a: &OpArgs, rep: &mut OpReport, op: &[u8]) -> Result<(), ()> {
         return Ok(());
     }
     preflight(a.expect_chain, rep).inspect_err(|()| {
-        if rep.category.is_null() {
+        if rep.category.is_none() {
             fail(
                 rep,
                 c"pre_flight",
@@ -1000,11 +999,8 @@ fn set_payload_hex(rep: &mut OpReport, payload: &[u8]) {
 /// Emits the report a caller asked for, and frees it.
 pub(super) fn finish(rep: &mut OpReport, report: Option<&CStr>) {
     if let Some(path) = report {
-        // SAFETY: a C string, and the report, whose strings outlive it.
-        unsafe { report_emit(path.as_ptr(), rep) };
+        report_emit(path, rep);
     }
-    // SAFETY: the report, its log freed once.
-    unsafe { report_free(rep) };
 }
 
 /// A load, after its arguments: 0, 1, or UPATCH_INSTALL_TARGET_MISSING
@@ -1012,7 +1008,7 @@ pub(super) fn finish(rep: &mut OpReport, report: Option<&CStr>) {
 fn load(a: &OpArgs) -> c_int {
     let file = a.file.unwrap_or(c"");
     let mut rep = OpReport::new(c"upatch_load");
-    rep.path = file.as_ptr();
+    rep.path = Some(file.to_owned());
     let mut name = CString::default();
     let mut ret = load_steps(a, file, &mut rep, &mut name);
     if ret == 1 && category_is(&rep, b"attach_target_missing") {
@@ -1033,7 +1029,7 @@ fn load_steps(a: &OpArgs, file: &CStr, rep: &mut OpReport, name_out: &mut CStrin
     let payload = u.hdr.payload_sha256;
     set_payload_hex(rep, &payload);
     *name_out = CString::new(name.clone()).unwrap_or_default();
-    rep.name = name_out.as_ptr();
+    rep.name = Some(name_out.clone());
 
     if precheck(a, rep, b"load").is_err() || eventlog_room(rep, b"load").is_err() {
         return 1;
@@ -1073,7 +1069,7 @@ fn load_steps(a: &OpArgs, file: &CStr, rep: &mut OpReport, name_out: &mut CStrin
                 .concat(),
             );
             rep.ok = true;
-            rep.category = c"already_loaded".as_ptr();
+            rep.category = Some(c"already_loaded");
             return 0;
         }
         log_err(
@@ -1147,7 +1143,7 @@ fn load_steps(a: &OpArgs, file: &CStr, rep: &mut OpReport, name_out: &mut CStrin
         return 1;
     }
     rep.ok = true;
-    rep.phase = c"done".as_ptr();
+    rep.phase = c"done";
     rep.tpm_present = rep.chain_after[0] != 0;
     0
 }
@@ -1168,18 +1164,10 @@ pub(super) fn run_unload(args: &[&CStr]) -> c_int {
     };
     let file = a.file.unwrap_or(c"");
     let mut rep = OpReport::new(c"upatch_unload");
-    rep.path = file.as_ptr();
+    rep.path = Some(file.to_owned());
     let mut name = CString::default();
     let ret = unload_steps(&a, file, &mut rep, &mut name);
     if ret != 0 {
-        let or = |s: *const c_char, d: &'static [u8]| {
-            if s.is_null() {
-                d
-            } else {
-                // SAFETY: the report's static C strings, when set.
-                unsafe { crate::ffi::c_str(s) }
-            }
-        };
         let message = cstr(bytes_of(&rep.message));
         log_err(
             &[
@@ -1190,9 +1178,9 @@ pub(super) fn run_unload(args: &[&CStr]) -> c_int {
                     name.to_bytes()
                 },
                 b" phase=",
-                or(rep.phase, b"(unknown)"),
+                rep.phase.to_bytes(),
                 b" category=",
-                or(rep.category, b"(unknown)"),
+                rep.category.map_or(&b"(unknown)"[..], CStr::to_bytes),
                 b" err=",
                 rep.err.to_string().as_bytes(),
                 b" (",
@@ -1268,7 +1256,7 @@ fn unload_steps(a: &OpArgs, file: &CStr, rep: &mut OpReport, name_out: &mut CStr
     };
     let name = header_name(&u);
     *name_out = CString::new(name.clone()).unwrap_or_default();
-    rep.name = name_out.as_ptr();
+    rep.name = Some(name_out.clone());
     set_payload_hex(rep, &payload);
 
     if !name_valid(Some(&name)) {
@@ -1403,8 +1391,8 @@ fn unload_steps(a: &OpArgs, file: &CStr, rep: &mut OpReport, name_out: &mut CStr
         log_info(&[b"upatch unload: ", &name[..], b" already unloaded (no pin)"].concat());
         log_audit(&[b"upatch unload: name=", &name[..], b" already_unloaded"].concat());
         rep.ok = true;
-        rep.phase = c"done".as_ptr();
-        rep.category = c"already_unloaded".as_ptr();
+        rep.phase = c"done";
+        rep.category = Some(c"already_unloaded");
         fail_message(rep, b"already unloaded");
         return 0;
     }
@@ -1457,7 +1445,7 @@ fn unload_steps(a: &OpArgs, file: &CStr, rep: &mut OpReport, name_out: &mut CStr
     log_info(&[b"upatch unload: ", &name[..], b" detached and unpinned"].concat());
     unarchive();
     rep.ok = true;
-    rep.phase = c"done".as_ptr();
+    rep.phase = c"done";
     rep.tpm_present = rep.chain_after[0] != 0;
     0
 }

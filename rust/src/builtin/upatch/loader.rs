@@ -43,7 +43,7 @@ use crate::util::identity;
 use crate::util::kernel_btf;
 use crate::util::keyring;
 use crate::util::lskel::{Ctx, F_SLEEPABLE, MAP_TYPE_ARRAY, PROG_TYPE_SYSCALL, VERIFIER_LOG_MAX};
-use crate::util::report::{OpReport, report_set_log};
+use crate::util::report::OpReport;
 use crate::util::upatch::{
     self, ATTACH_CGROUP_SKB_EGRESS, ATTACH_CGROUP_SKB_INGRESS, ATTACH_FMOD_RET, ATTACH_KPROBE,
     ATTACH_KRETPROBE, ATTACH_NETFILTER_IPV6_PRE_ROUTING, ATTACH_RAW_TRACEPOINT, ATTACH_UPROBE,
@@ -141,8 +141,7 @@ impl Rep<'_> {
     /// Keeps the verifier's log in the report.
     fn log(&mut self, vlog: &[u8]) {
         if let Some(r) = self.0.as_deref_mut() {
-            // SAFETY: a NUL-terminated log, and the report's own or none.
-            unsafe { report_set_log(r, vlog.as_ptr().cast()) };
+            r.set_log(vlog);
         }
     }
 
