@@ -20,7 +20,6 @@ use std::ffi::CString;
 use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
 
 use super::list::{BPFFS_UPATCHES_DIR, UPATCHES_DIR};
 use super::{hex, log_audit, log_err, log_info, log_warn, strerr};
@@ -52,13 +51,14 @@ use crate::util::measured::{
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::report::{OpReport, report_emit, report_free};
 use crate::util::seal::{seal_mkdir_p, seal_open_read, seal_write_file};
-use crate::util::upatch::{self, NAME_MAX, Opened, Upatch, name_valid, pin_name, upatch_signature};
+use crate::util::upatch::{
+    self, NAME_MAX, Opened, Upatch, name_valid, pin_name, upatch_open_memory, upatch_signature,
+};
 use crate::util::upatch_resolve::XATTR_PAYLOAD;
 use crate::util::upatch_verify::archive_verify;
 
-/// INCOMING_DIR, LSM_LINK_PIN and XATTR_PAYLOAD of util/paths.h, and
-/// UPATCH_FILE_MAX of util/upatch.h.
-const INCOMING_DIR: &CStr = c"/var/lib/shirudo/incoming";
+/// LSM_LINK_PIN and XATTR_PAYLOAD of util/paths.h, and UPATCH_FILE_MAX of
+/// util/upatch.h.
 const UPATCHES_DIR_C: &CStr = c"/var/lib/shirudo/upatches";
 pub(super) const LSM_LINK_PIN: &CStr = c"/run/shirudo/bpffs/lsm_link";
 const UPATCH_FILE_MAX: usize = 16 * 1024 * 1024;
@@ -305,51 +305,18 @@ fn mkdir(path: &CStr) -> c_int {
     unsafe { seal_mkdir_p(path.as_ptr(), 0o700) }
 }
 
-/// The operator's file read once, into a directory only shirudo writes:
-/// the name and payload measured, the program loaded and the copy
-/// archived all come from that one read, so another artifact renamed
-/// over the path midway cannot set them apart.
-fn stage(src: &CStr) -> Result<CString, c_int> {
-    let data = read(src)?;
-    let ret = mkdir(INCOMING_DIR);
-    if ret != 0 {
-        return Err(ret);
-    }
-    let pid = std::process::id();
-    let staged = CString::new(format!(
-        "{}/load-{pid}.upatch",
-        INCOMING_DIR.to_str().unwrap_or_default()
-    ))
-    .map_err(|_| -EINVAL)?;
-    match write(&staged, &data, 0o600) {
-        0 => Ok(staged),
-        err => Err(err),
-    }
-}
-
 fn archive_path(name: &[u8]) -> CString {
     CString::new([UPATCHES_DIR.as_bytes(), b"/", name, b".upatch"].concat()).unwrap_or_default()
 }
 
-/// Archives the staged upatch for boot restore, unless it is already the
-/// archived copy: 0 or -errno.
-fn persist(src: &CStr, name: &[u8]) -> c_int {
+/// Archives the bytes a load read for boot restore: 0 or -errno.
+fn persist(data: &[u8], name: &[u8]) -> c_int {
     let ret = mkdir(UPATCHES_DIR_C);
     if ret != 0 {
         log_err(&[b"mkdir ", UPATCHES_DIR.as_bytes(), b": ", strerr(-ret)].concat());
         return ret;
     }
-    let dst = archive_path(name);
-    let at = |p: &CStr| fs::metadata(os(p.to_bytes())).ok();
-    if let (Some(s), Some(d)) = (at(src), at(&dst)) {
-        if s.ino() == d.ino() && s.dev() == d.dev() {
-            return 0;
-        }
-    }
-    match read(src) {
-        Ok(data) => write(&dst, &data, 0o644),
-        Err(err) => err,
-    }
+    write(&archive_path(name), data, 0o644)
 }
 
 fn os(b: &[u8]) -> &OsStr {
@@ -953,57 +920,68 @@ fn chain_category(err: c_int, measured: bool) -> &'static CStr {
     }
 }
 
-/// The staged copy of the operator's file, removed when dropped.
-struct Staged {
-    path: CString,
+/// The operator's file, read once into memory and parsed there: the name
+/// and payload measured, the program loaded and the copy archived all
+/// come from that one read. A copy on disk, under a name another command
+/// can take, or a file read again, could set them apart.
+struct Artifact {
+    u: Box<Upatch>,
+    // The bytes the container points into, which outlive it.
+    data: Vec<u8>,
 }
 
-impl Drop for Staged {
+impl Artifact {
+    fn read(src: &CStr) -> Result<Self, c_int> {
+        let data = read(src)?;
+        // SAFETY: an all-zero container is a closed one.
+        let mut u: Box<Upatch> = Box::new(unsafe { core::mem::zeroed() });
+        // SAFETY: the bytes, which the artifact keeps while the container
+        // is open, and the container to fill.
+        match unsafe { upatch_open_memory(data.as_ptr().cast(), data.len(), &mut *u) } {
+            0 => Ok(Artifact { u, data }),
+            err => Err(err),
+        }
+    }
+}
+
+impl core::ops::Deref for Artifact {
+    type Target = Upatch;
+
+    fn deref(&self) -> &Upatch {
+        &self.u
+    }
+}
+
+impl Drop for Artifact {
     fn drop(&mut self) {
-        let _ = fs::remove_file(os(self.path.to_bytes()));
+        // SAFETY: the container read() opened, closed once, before the
+        // bytes it points into go.
+        unsafe { upatch::upatch_close(&mut *self.u) };
     }
 }
 
-/// Stages `file` and opens the copy, or reports why not.
-fn open_staged(file: &CStr, rep: &mut OpReport, op: &[u8]) -> Result<(Staged, Opened), ()> {
-    let staged = match stage(file) {
-        Ok(path) => Staged { path },
-        Err(err) => {
-            log_err(
-                &[
-                    b"upatch ",
-                    op,
-                    b": read ",
-                    file.to_bytes(),
-                    b": ",
-                    strerr(-err),
-                ]
-                .concat(),
-            );
-            fail(
-                rep,
-                c"parse",
-                c"parser_rejected",
-                err,
-                b"cannot read .upatch",
-            );
-            return Err(());
-        }
-    };
-    match Opened::open(&staged.path) {
-        Ok(u) => Ok((staged, u)),
-        Err(err) => {
-            log_err(&[b"open ", staged.path.to_bytes(), b": ", strerr(-err)].concat());
-            fail(
-                rep,
-                c"parse",
-                c"parser_rejected",
-                err,
-                b"cannot open .upatch",
-            );
-            Err(())
-        }
-    }
+/// Reads `file` once, or reports why not.
+fn read_artifact(file: &CStr, rep: &mut OpReport, op: &[u8]) -> Result<Artifact, ()> {
+    Artifact::read(file).map_err(|err| {
+        log_err(
+            &[
+                b"upatch ",
+                op,
+                b": read ",
+                file.to_bytes(),
+                b": ",
+                strerr(-err),
+            ]
+            .concat(),
+        );
+        fail(
+            rep,
+            c"parse",
+            c"parser_rejected",
+            err,
+            b"cannot read .upatch",
+        );
+    })
 }
 
 fn header_name(u: &Upatch) -> Vec<u8> {
@@ -1051,12 +1029,11 @@ fn load_steps(a: &OpArgs, file: &CStr, rep: &mut OpReport, name_out: &mut CStrin
     if version_gate(a, rep, b"load").is_err() {
         return 1;
     }
-    let Ok((staged, u)) = open_staged(file, rep, b"load") else {
+    let Ok(u) = read_artifact(file, rep, b"load") else {
         return 1;
     };
     let name = header_name(&u);
     let payload = u.hdr.payload_sha256;
-    drop(u);
     set_payload_hex(rep, &payload);
     *name_out = CString::new(name.clone()).unwrap_or_default();
     rep.name = name_out.as_ptr();
@@ -1119,7 +1096,7 @@ fn load_steps(a: &OpArgs, file: &CStr, rep: &mut OpReport, name_out: &mut CStrin
         );
         return 1;
     }
-    if super::loader::apply_signed(&staged.path, false, Some(&mut *rep)).is_err() {
+    if super::loader::apply(&u, file, false, Some(&mut *rep)).is_err() {
         return 1;
     }
 
@@ -1129,7 +1106,7 @@ fn load_steps(a: &OpArgs, file: &CStr, rep: &mut OpReport, name_out: &mut CStrin
     // is undone, pins and archive, so that no upatch runs unmeasured; a
     // caller who stops this process first gets the same from the next
     // upatch command, and from the next init.
-    let err = persist(&staged.path, &name);
+    let err = persist(&u.data, &name);
     if err != 0 {
         log_err(
             &[
@@ -1251,16 +1228,16 @@ fn unload_steps(a: &OpArgs, file: &CStr, rep: &mut OpReport, name_out: &mut CStr
         return 1;
     }
     // Read once, as a load is: the target and the payload the kernel's
-    // signature check covers must be the bytes read back after it, and a
+    // signature check covers must be the bytes acted on after it, and a
     // file of root's is root's to rewrite between the two.
-    let Ok((staged, u)) = open_staged(file, rep, b"unload") else {
+    let Ok(u) = read_artifact(file, rep, b"unload") else {
         return 1;
     };
     if !upatch::is_unload(&u) {
         log_err(
             &[
                 b"upatch unload: ",
-                staged.path.to_bytes(),
+                file.to_bytes(),
                 b" is a LOAD upatch; use `shirudo upatch load`",
             ]
             .concat(),
@@ -1293,7 +1270,6 @@ fn unload_steps(a: &OpArgs, file: &CStr, rep: &mut OpReport, name_out: &mut CStr
         }
     };
     let name = header_name(&u);
-    drop(u);
     *name_out = CString::new(name.clone()).unwrap_or_default();
     rep.name = name_out.as_ptr();
     set_payload_hex(rep, &payload);
@@ -1321,7 +1297,7 @@ fn unload_steps(a: &OpArgs, file: &CStr, rep: &mut OpReport, name_out: &mut CStr
         return 1;
     }
     // A bad signature fails here, before anything is removed.
-    if super::loader::apply_signed(&staged.path, true, Some(&mut *rep)).is_err() {
+    if super::loader::apply(&u, file, true, Some(&mut *rep)).is_err() {
         log_err(b"upatch unload: signature verification failed; refusing");
         return 1;
     }

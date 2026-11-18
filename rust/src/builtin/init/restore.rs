@@ -169,7 +169,7 @@ fn restore_one(
         ));
         return Err(-EPERM);
     }
-    if loader::apply_signed(&file, false, None).is_err() {
+    if loader::apply_path(&file, false, None).is_err() {
         error(&cat!("boot-restore: failed to apply ", name));
         return Err(-EINVAL);
     }

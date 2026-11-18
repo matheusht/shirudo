@@ -1400,11 +1400,8 @@ fn section(u: &Upatch, off: u32, len: u32) -> &[u8] {
     unsafe { core::slice::from_raw_parts(u.map.add(off as usize), len as usize) }
 }
 
-/// Loads the upatch at `path`, or with `verify_only` has the kernel check
-/// its signature alone: the unload directive's gate, which accepts an
-/// UNLOAD directive and stops before the loader runs. What failed goes
-/// in `rep`.
-pub(crate) fn apply_signed(
+/// Opens the upatch at `path` and applies it: boot restore's way in.
+pub(crate) fn apply_path(
     path: &CStr,
     verify_only: bool,
     rep: Option<&mut OpReport>,
@@ -1418,11 +1415,27 @@ pub(crate) fn apply_signed(
             return Err(());
         }
     };
-    if !verify_only && upatch::is_unload(&u) {
+    apply(&u, path, verify_only, rep.0)
+}
+
+/// Loads `u`, which the caller read once and closes: the name the
+/// signature covers, the loader the kernel verifies and what the caller
+/// then measures and archives are all those bytes, which `label` names
+/// in messages. With `verify_only` the kernel checks the signature
+/// alone: the unload directive's gate, which accepts an UNLOAD directive
+/// and stops before the loader runs. What failed goes in `rep`.
+pub(crate) fn apply(
+    u: &Upatch,
+    label: &CStr,
+    verify_only: bool,
+    rep: Option<&mut OpReport>,
+) -> Result<(), ()> {
+    let mut rep = Rep(rep);
+    if !verify_only && upatch::is_unload(u) {
         log_err(
             &[
                 &b"upatch load: "[..],
-                path.to_bytes(),
+                label.to_bytes(),
                 b" is an UNLOAD directive; use `shirudo upatch unload`",
             ]
             .concat(),
@@ -1432,26 +1445,26 @@ pub(crate) fn apply_signed(
     }
     let (keyring, serial) = trust_anchor(rep.0.as_deref_mut())?;
     let h = &u.hdr;
-    let insns = section(&u, h.loader_insns_off, h.loader_insns_len);
-    let sig = section(&u, h.signature_off, h.signature_len);
-    let data = section(&u, h.data_off, h.data_len);
+    let insns = section(u, h.loader_insns_off, h.loader_insns_len);
+    let sig = section(u, h.signature_off, h.signature_len);
+    let data = section(u, h.data_off, h.data_len);
     let insn_cnt = h.loader_insns_len as usize / 8;
     let mut prog_name = [0u8; 16];
-    upatch::prog_name(&u, &mut prog_name);
+    upatch::prog_name(u, &mut prog_name);
 
     // The pin directory, the archive and unload share the raw name. Boot
     // restore reaches here without the command's check, so it is checked
     // again; and the header's copy, which everything else reads, must be
     // the one the signature covers.
     let mut name = [0u8; NAME_MAX + 1];
-    upatch::header_name(&u, &mut name);
+    upatch::header_name(u, &mut name);
     let name = till_nul(&name);
     if !upatch::name_valid(Some(name)) {
         log_err(&[&b"upatch: refusing unsafe upatch name '"[..], name, b"'"].concat());
         rep.fail(c"parse", c"parser_rejected", 0, b"unsafe upatch name");
         return Err(());
     }
-    if !upatch::name_signed(&u) {
+    if !upatch::name_signed(u) {
         log_err(
             &[
                 &b"upatch: the name of '"[..],
@@ -1846,7 +1859,7 @@ pub(crate) fn apply_signed(
         );
         return Err(());
     }
-    apply_policy_labels(&u);
+    apply_policy_labels(u);
     log_audit(
         &[
             &b"upatch load: "[..],
