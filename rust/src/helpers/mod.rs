@@ -29,6 +29,7 @@ mod keys;
 mod mode_objects;
 mod nv_cphash;
 mod nv_writer;
+mod register;
 mod register_cli;
 mod seal;
 mod seal_output;
