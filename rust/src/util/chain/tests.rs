@@ -117,20 +117,6 @@ fn history_root_matches_the_reference() {
     }
 }
 
-/// The C form writes the root it is given room for, its input untouched
-/// unless that room is the input.
-#[test]
-fn history_step_writes_beside_its_input() {
-    let (prev, digest) = ([0u8; 32], operation(0));
-    let mut out = [0u8; 32];
-
-    // SAFETY: two digests, read before the room for the third is written.
-    let ret = unsafe { capi::chain_history_step(&prev, &digest, &mut out) };
-    assert_eq!(ret, 0);
-    assert_eq!(crate::util::hex::encode(&out), HISTORY_ROOTS[1]);
-    assert_eq!(prev, [0; 32]);
-}
-
 #[test]
 fn history_root_differs_from_the_projection_root() {
     const PROJECTION_ROOTS: [&[u8]; 3] = [

@@ -1268,6 +1268,9 @@ impl Drop for Publication {
     }
 }
 
+#[cfg(test)]
+mod tests;
+
 pub(crate) use capi::{
     tree_parse, tree_publication_append, tree_selector_copy, tree_selector_free,
     tree_selector_kv_add,
