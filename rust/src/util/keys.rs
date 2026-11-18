@@ -695,21 +695,11 @@ pub(crate) fn anchor_digest(sha256: &[[u8; 32]]) -> Result<[u8; 32], c_int> {
 pub(crate) fn install(keys_dir: &CStr, der: &[u8], sig: &[u8]) -> Result<CString, c_int> {
     let fingerprint = digest_der(der)?.fingerprint;
     let dir = path_of(&[keys_dir.to_bytes(), b"/trusted"])?;
-    let ret = seal::mkdir_p(dir.to_bytes(), 0o700);
-
-    if ret != 0 {
-        return Err(ret);
-    }
+    seal::mkdir_p(dir.to_bytes(), 0o700)?;
     let cert = path_for(dir.to_bytes(), &fingerprint, b".der")?;
     let vouch = path_for(dir.to_bytes(), &fingerprint, b".vouch")?;
-    let ret = seal::write_file(vouch.to_bytes(), sig, 0o644);
-
-    if ret != 0 {
-        return Err(ret);
-    }
-    let ret = seal::write_file(cert.to_bytes(), der, 0o644);
-
-    if ret != 0 {
+    seal::write_file(vouch.to_bytes(), sig, 0o644)?;
+    if let Err(ret) = seal::write_file(cert.to_bytes(), der, 0o644) {
         let _ = std::fs::remove_file(std::ffi::OsStr::from_bytes(vouch.to_bytes()));
         return Err(ret);
     }

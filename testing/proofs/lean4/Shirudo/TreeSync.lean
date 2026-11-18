@@ -69,7 +69,7 @@ theorems. `Assumptions` states what the C cannot show.
 
 The model also assumes what review of the C shows: only sync writes these
 files, which the seal ensures; a write is whole or absent, as
-`seal_write_file()` renames and `append_line()` drops a line it did not
+`seal::write_file()` renames and `append_line()` drops a line it did not
 finish, and `tree_outcome_append()` appends the same way, with every reader
 of the record skipping a last line without its newline; syncs run one at a
 time under the BPM lock; the unlink of

@@ -83,13 +83,9 @@ fn ensure_keys_dir(keys_dir: &CStr) -> Result<(), ()> {
         err(&[b"keys dir cannot be /"]);
         return Err(());
     }
-    match mkdir_p(keys_dir.to_bytes(), 0o700) {
-        0 => Ok(()),
-        ret => {
-            err(&[b"mkdir ", keys_dir.to_bytes(), b": ", text(ret).as_bytes()]);
-            Err(())
-        }
-    }
+    mkdir_p(keys_dir.to_bytes(), 0o700).map_err(|ret| {
+        err(&[b"mkdir ", keys_dir.to_bytes(), b": ", text(ret).as_bytes()]);
+    })
 }
 
 /// The effective uid, asked each time the C's conditions asked it.

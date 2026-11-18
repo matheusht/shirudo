@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! test-seal-output: seal_output_create() and seal_output_commit() with
+//! test-seal-output: the seal's Output::create() and Output::commit() with
 //! the write failing, as a file size limit of 0 makes every write to a
 //! regular file fail, and root's move made before it.
 //!
@@ -18,7 +18,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use super::{err, helper_main, out, strerror};
-use crate::util::seal::{SealOutput, seal_output_commit, seal_output_create};
+use crate::util::seal::Output;
 
 helper_main!(shirudo_helper_test_seal_output, run);
 
@@ -78,27 +78,29 @@ fn run(args: &[&CStr]) -> c_int {
     let path = Path::new(OsStr::from_bytes(args[2].to_bytes()));
     let dir = OsStr::from_bytes(args.get(3).map_or(&b""[..], |d| d.to_bytes()));
 
-    let mut output = SealOutput::closed();
-    // SAFETY: room for the output and a C string of main()'s, which
-    // outlives it.
-    let mut ret = unsafe { seal_output_create(&mut output, args[2].as_ptr(), 0o600) };
-    if ret == 0 {
-        let moved = match how {
-            b"swap-dir" => swap_dir(path, dir),
-            b"swap-file" => swap_file(path),
-            _ => Ok(()),
-        };
-        if let Err(e) = moved.and_then(|()| fail_writes()) {
-            let text = strerror(-errno(e));
-            err(&format!(
-                "test-seal-output: {}: {}\n",
-                String::from_utf8_lossy(how),
-                text
-            ));
-        }
-        // SAFETY: the output just created, its path still main()'s.
-        ret = unsafe { seal_output_commit(&mut output, c"{}".as_ptr().cast(), 2) };
-    }
+    let ret = match Output::create(args[2].to_bytes(), 0o600) {
+        Ok(output) => commit(output, how, path, dir),
+        Err(err) => err,
+    };
     out(&format!("{ret}\n"));
     0
+}
+
+/// `output` committed after the move `how` names and with every write
+/// failing: what the commit returned.
+fn commit(output: Output, how: &[u8], path: &Path, dir: &OsStr) -> c_int {
+    let moved = match how {
+        b"swap-dir" => swap_dir(path, dir),
+        b"swap-file" => swap_file(path),
+        _ => Ok(()),
+    };
+    if let Err(e) = moved.and_then(|()| fail_writes()) {
+        let text = strerror(-errno(e));
+        err(&format!(
+            "test-seal-output: {}: {}\n",
+            String::from_utf8_lossy(how),
+            text
+        ));
+    }
+    output.commit(b"{}").err().unwrap_or(0)
 }

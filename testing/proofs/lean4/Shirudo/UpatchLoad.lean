@@ -58,7 +58,7 @@ every move. The assumptions, each a step or the absence of one:
   the log; a link attached but not yet pinned goes with the process.
 - A pin directory is removed whole or not at all, and a failed
   `remove_pin_dir()` leaves it; an archive copy appears whole, by
-  `seal_write_file()`'s rename; a record is appended whole or not at
+  `seal::write_file()`'s rename; a record is appended whole or not at
   all, as `append_line()` drops a torn one; an extend can fail with the
   register moved or not.
 - A reboot kills every process and clears the pins and the register, and
@@ -186,7 +186,7 @@ structure Pin (Payload : Type) where
   deriving DecidableEq
 
 /-- A file of the archive: the name and payload its header carries,
-whether it carries the seal label (`seal_owns()`), and, as a ghost the C
+whether it carries the seal label (`seal::owns()`), and, as a ghost the C
 does not have, whether root rather than shirudo put it there. -/
 structure Entry (Name Payload : Type) where
   name : Name
@@ -523,7 +523,7 @@ inductive Step (V : Variant) :
   /-- `set_pin_payload()` fails and the load goes on regardless. -/
   | loadXattrIgnore (s) (i n p) : s.procs i = some ⟨.load n p, .attached⟩ →
       V.xattrUndo = false → Step V s (s.go i (.load n p) .xattrDone)
-  /-- `persist_upatch()`: `seal_write_file()` renames the copy in. -/
+  /-- `persist_upatch()`: `seal::write_file()` renames the copy in. -/
   | loadPersist (s) (i n p) : s.procs i = some ⟨.load n p, .xattrDone⟩ →
       Step V s { s.go i (.load n p) .persisted with
         arch := upd s.arch n (some ⟨n, p, true, false⟩) }

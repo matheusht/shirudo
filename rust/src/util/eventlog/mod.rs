@@ -84,19 +84,19 @@ pub(crate) fn pending_path() -> &'static CStr {
 /// `line` appended to the log at `path` whole, or nothing of it: a line
 /// cut short would join the next record and fail every reader on it.
 pub(crate) fn append_to(path: &CStr, line: &[u8]) -> c_int {
-    let ret = seal::append(path, line);
+    let Err(ret) = seal::append(path, line) else {
+        return 0;
+    };
 
-    if ret != 0 {
-        crate::log::err(
-            &[
-                &b"eventlog: append to "[..],
-                path.to_bytes(),
-                b": ",
-                text(ret).as_bytes(),
-            ]
-            .concat(),
-        );
-    }
+    crate::log::err(
+        &[
+            &b"eventlog: append to "[..],
+            path.to_bytes(),
+            b": ",
+            text(ret).as_bytes(),
+        ]
+        .concat(),
+    );
     ret
 }
 
@@ -207,10 +207,10 @@ fn read_pending() -> Result<FileBuf, c_int> {
     if pending != DEFAULT_PENDING_PATH {
         return FileBuf::read(pending);
     }
-    let fd = if crate::util::seal::parent_labeled(path().to_bytes()) {
-        crate::util::seal::open_sealed(pending.to_bytes())?
+    let fd = if seal::parent_labeled(path().to_bytes()) {
+        seal::open_sealed(pending.to_bytes())?
     } else {
-        crate::util::seal::open_owned(pending.to_bytes())?
+        seal::open_read(pending.to_bytes())?
     };
     FileBuf::read_fd(fd, pending)
 }
@@ -414,7 +414,7 @@ fn adopt_pending() -> c_int {
 /// their own interleaved extend, extend, append, append and left a log
 /// that replays the events in the other order. Held until it goes.
 pub(crate) struct Lock {
-    _fd: seal::Fd,
+    _fd: std::os::fd::OwnedFd,
 }
 
 pub(crate) fn lock() -> Result<Lock, c_int> {

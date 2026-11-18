@@ -112,7 +112,7 @@ pub(crate) fn archive_verify(
         Ok(p) => p,
         Err(err) => return err,
     };
-    let fd = match crate::util::seal::open_owned(path.as_bytes()) {
+    let fd = match crate::util::seal::open_read(path.as_bytes()) {
         Ok(fd) => fd,
         Err(err) => return stale_unless_resources(err),
     };

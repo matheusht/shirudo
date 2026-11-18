@@ -519,7 +519,7 @@ fn run(init: &mut Init) -> c_int {
         let ret = if src.len() >= PATH_MAX {
             -ENAMETOOLONG
         } else {
-            mark_ancestors(&src)
+            mark_ancestors(&src).err().unwrap_or(0)
         };
         if ret != 0 {
             return phase(ret, "marking the directories above the state root");
