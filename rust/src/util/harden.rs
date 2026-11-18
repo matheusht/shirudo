@@ -4,13 +4,14 @@
 //! The hardening of the process at its start, behind `util/harden.h`:
 //! its standard descriptors, and what it allows of itself.
 
-use core::ffi::{c_int, c_ulong};
+use core::ffi::{CStr, c_int, c_ulong};
 
 use crate::errno::EBADF;
 use crate::sys::libc::{
-    __nss_configure_lookup, _exit, F_GETFD, MCL_CURRENT, MCL_FUTURE, O_RDWR, PR_SET_DUMPABLE,
-    PR_SET_NO_NEW_PRIVS, PR_SET_PTRACER, RLIMIT_CORE, Rlimit, errno, fcntl, mlockall, open, prctl,
-    setrlimit, strerror,
+    __nss_configure_lookup, _exit, F_GETFD, ITIMER_PROF, ITIMER_REAL, ITIMER_VIRTUAL, Itimerval,
+    MCL_CURRENT, MCL_FUTURE, O_RDWR, PER_LINUX, PR_SET_DUMPABLE, PR_SET_NO_NEW_PRIVS,
+    PR_SET_PTRACER, RLIM_INFINITY, RLIMIT_CORE, RLIMIT_CPU, RLIMIT_FSIZE, Rlimit, Timeval, errno,
+    fcntl, mlockall, open, personality, prctl, setitimer, setrlimit, strerror,
 };
 use crate::sys::openssl::{OPENSSL_INIT_NO_LOAD_CONFIG, OPENSSL_init_crypto};
 
@@ -32,6 +33,60 @@ pub(crate) fn harden_stdio() {
     }
 }
 
+/// What could not be hardened, logged under `what`: the -errno.
+fn failed(what: &CStr) -> c_int {
+    let err = -errno();
+
+    // SAFETY: a format of two C strings, and strerror()'s.
+    unsafe {
+        crate::log::log_c!(
+            crate::log::err,
+            c"hardening: %s: %s".as_ptr(),
+            what.as_ptr(),
+            strerror(-err),
+        )
+    };
+    err
+}
+
+/// What the caller passes down through exec and the kernel would act on
+/// midway: the personality, where UNAME26 has uname() report a 2.6
+/// release to the tree selector and READ_IMPLIES_EXEC makes later
+/// mappings executable; the file size and CPU time limits; and the
+/// interval timers, with which the kernel would stop the command by
+/// SIGXFSZ, SIGXCPU or SIGALRM.
+fn drop_inherited() -> c_int {
+    // SAFETY: a call that takes no pointer.
+    if unsafe { personality(PER_LINUX) } < 0 {
+        return failed(c"cannot reset the personality");
+    }
+    let unlimited = Rlimit {
+        cur: RLIM_INFINITY,
+        max: RLIM_INFINITY,
+    };
+    for limit in [RLIMIT_FSIZE, RLIMIT_CPU] {
+        // SAFETY: the limit above.
+        if unsafe { setrlimit(limit, &unlimited) } != 0 {
+            return failed(c"cannot reset the resource limits");
+        }
+    }
+    let none = || Timeval {
+        tv_sec: 0,
+        tv_usec: 0,
+    };
+    let off = Itimerval {
+        interval: none(),
+        value: none(),
+    };
+    for timer in [ITIMER_REAL, ITIMER_VIRTUAL, ITIMER_PROF] {
+        // SAFETY: the timer value above, and no room for the old one.
+        if unsafe { setitimer(timer, &off, core::ptr::null_mut()) } != 0 {
+            return failed(c"cannot disarm the interval timers");
+        }
+    }
+    0
+}
+
 /// No host file may name code for the process to load: an OpenSSL
 /// configuration file can activate a provider module, and nsswitch.conf
 /// can name an NSS module for the host lookups libcurl makes, both
@@ -41,6 +96,11 @@ pub(crate) fn harden_stdio() {
 pub(crate) fn harden_self() -> c_int {
     let no_core = Rlimit { cur: 0, max: 0 };
     let (zero, one): (c_ulong, c_ulong) = (0, 1);
+
+    let ret = drop_inherited();
+    if ret != 0 {
+        return ret;
+    }
 
     // SAFETY: prctl() of numbers alone, the limit above, OpenSSL's
     // initialisation with no settings, and two C strings.
@@ -54,17 +114,7 @@ pub(crate) fn harden_self() -> c_int {
     }
     // SAFETY: a call that takes no pointer.
     if unsafe { mlockall(MCL_CURRENT | MCL_FUTURE) } != 0 {
-        let err = -errno();
-
-        // SAFETY: a format of one C string, and strerror()'s.
-        unsafe {
-            crate::log::log_c!(
-                crate::log::err,
-                c"hardening: cannot lock process memory: %s".as_ptr(),
-                strerror(-err),
-            )
-        };
-        return err;
+        return failed(c"cannot lock process memory");
     }
     0
 }

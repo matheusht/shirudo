@@ -3,7 +3,7 @@
 
 //! The C library, as the C code of the tree calls it.
 
-use core::ffi::{CStr, c_char, c_int, c_void};
+use core::ffi::{CStr, c_char, c_int, c_ulong, c_void};
 
 pub const PATH_MAX: usize = 4096;
 pub const AT_FDCWD: c_int = -100;
@@ -26,6 +26,13 @@ pub const MSG_TRUNC: c_int = 32;
 pub struct Timeval {
     pub tv_sec: i64,
     pub tv_usec: i64,
+}
+
+/// `struct itimerval`.
+#[repr(C)]
+pub struct Itimerval {
+    pub interval: Timeval,
+    pub value: Timeval,
 }
 
 /// `struct iovec`.
@@ -130,7 +137,14 @@ pub const PR_SET_DUMPABLE: c_int = 4;
 pub const PR_SET_NO_NEW_PRIVS: c_int = 38;
 /// Yama's PR_SET_PTRACER, "Yama" in ASCII.
 pub const PR_SET_PTRACER: c_int = 0x59616d61;
+pub const RLIMIT_CPU: c_int = 0;
+pub const RLIMIT_FSIZE: c_int = 1;
 pub const RLIMIT_CORE: c_int = 4;
+pub const RLIM_INFINITY: u64 = u64::MAX;
+pub const ITIMER_REAL: c_int = 0;
+pub const ITIMER_VIRTUAL: c_int = 1;
+pub const ITIMER_PROF: c_int = 2;
+pub const PER_LINUX: c_ulong = 0;
 pub const MCL_CURRENT: c_int = 1;
 pub const MCL_FUTURE: c_int = 2;
 pub const SC_NPROCESSORS_ONLN: c_int = 84;
@@ -345,6 +359,8 @@ unsafe extern "C" {
     pub fn _exit(status: c_int) -> !;
     pub fn prctl(option: c_int, ...) -> c_int;
     pub fn setrlimit(resource: c_int, rlim: *const Rlimit) -> c_int;
+    pub fn setitimer(which: c_int, new: *const Itimerval, old: *mut Itimerval) -> c_int;
+    pub fn personality(persona: c_ulong) -> c_int;
     pub fn mlockall(flags: c_int) -> c_int;
     pub fn getrandom(buf: *mut c_void, len: usize, flags: u32) -> isize;
     pub fn __nss_configure_lookup(db: *const c_char, service: *const c_char) -> c_int;
