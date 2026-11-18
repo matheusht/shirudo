@@ -660,12 +660,14 @@ unsafe extern "C" fn pcr_extend(_: *mut c_void, pcr: u32, event: *const u8) -> c
     unsafe { tpm_pcr_extend(tpm, pcr, event) }
 }
 
-/// Removes a config mapping that is neither the active config's nor one
-/// the guards watched being made: what an interrupted update left.
+/// Removes a config mapping the guards watched shirudo make that is not
+/// the active config's: a candidate an update or a stage is done with,
+/// or one an interrupted update left. One the guards did not watch being
+/// made is not shirudo's, and stays.
 unsafe extern "C" fn collect_mapping(name: *const c_char, device: u64, ctx: *mut c_void) -> c_int {
     // SAFETY: the active config's device, which collect_mappings() gave.
     let active = unsafe { *ctx.cast::<u64>() };
-    if device == active || device_observed(device, None, DEVICE_CONFIG) == 0 {
+    if device == active || device_observed(device, None, DEVICE_CONFIG) != 0 {
         return 0;
     }
     // SAFETY: the mapping's name, a C string.
