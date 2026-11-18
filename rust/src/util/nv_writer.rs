@@ -88,9 +88,6 @@ pub(crate) fn read(seed: &mut [u8; DIGEST_LEN], public: &mut [u8; NV_RSA_BYTES])
 }
 
 pub(crate) use capi::nv_writer_create;
-/// The writer's stored seed and key, which the register helper reads.
-#[cfg(feature = "test-helpers")]
-pub(crate) use capi::nv_writer_read;
 
 mod capi {
     use core::ffi::c_int;

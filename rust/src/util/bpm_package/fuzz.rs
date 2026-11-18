@@ -6,57 +6,34 @@
 //! install can pick the newest by; fuzz-bpm-package: a package's
 //! identity read and its files extracted.
 
-use core::ffi::c_char;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use super::capi::{bpm_index_parse, bpm_pkg_extract, bpm_pkg_load_info, bpm_pkg_read_member_in};
-use super::{IndexEntry, PackageInfo};
+use super::info::load_info;
+use super::{PackageInfo, extract, index_parse, read_member_in, semver_compare};
 use crate::fuzzing::{fuzz_target, input_gzip_file};
 use crate::heap::xfree;
 use crate::text::cstr;
-use crate::util::bpm_oci::MAX_ENTRIES;
 
 fuzz_target!(shirudo_fuzz_bpm_tar, shirudo_fuzz_bpm_tar_init, |data| {
     let Some(input) = input_gzip_file(data) else {
         return;
     };
-    let mut dir = [0 as c_char; 256];
-    let (mut body, mut len): (*mut u8, usize) = (core::ptr::null_mut(), 0);
-    // SAFETY: C strings, no package directory, room for the one found and
-    // for the member, freed after.
-    unsafe {
-        let ret = bpm_pkg_read_member_in(
-            input.path.as_ptr(),
-            c"Beefile".as_ptr(),
-            core::ptr::null(),
-            dir.as_mut_ptr(),
-            dir.len(),
-            &mut body,
-            &mut len,
-            1 << 20,
-        );
-        if ret == 0 {
-            xfree(body.cast(), len + 1);
-        }
-    }
+    let mut dir = [0; 256];
+    let _ = read_member_in(&input.path, b"Beefile", None, Some(&mut dir), 1 << 20);
 });
 
 fuzz_target!(
     shirudo_fuzz_bpm_index,
     shirudo_fuzz_bpm_index_init,
     |data| {
-        let mut entries = vec![IndexEntry::new(); MAX_ENTRIES];
-        let mut n = 0;
-        // SAFETY: the input, room for MAX_ENTRIES entries and their count.
-        if unsafe { bpm_index_parse(data.as_ptr(), data.len(), entries.as_mut_ptr(), &mut n) } != 0
-        {
+        let Ok(entries) = index_parse(data) else {
             return;
-        }
+        };
         // install picks the newest version by this order: it must be one.
-        for w in entries[..n as usize].windows(2) {
-            let ab = super::semver_compare(cstr(&w[0].version), cstr(&w[1].version));
-            let ba = super::semver_compare(cstr(&w[1].version), cstr(&w[0].version));
+        for w in entries.windows(2) {
+            let ab = semver_compare(cstr(&w[0].version), cstr(&w[1].version));
+            let ba = semver_compare(cstr(&w[1].version), cstr(&w[0].version));
             if ab.signum() != -ba.signum() {
                 std::process::abort();
             }
@@ -98,14 +75,11 @@ fuzz_target!(
         };
         // SAFETY: an identity of nothing, for which zeros are the value.
         let mut info: PackageInfo = unsafe { core::mem::zeroed() };
-        // SAFETY: C strings and the identity to fill, its certificate
-        // freed after.
-        unsafe {
-            if bpm_pkg_load_info(input.path.as_ptr(), &mut info) == 0 {
-                xfree(info.cert.cast(), info.cert_len + 1);
-            }
-            bpm_pkg_extract(input.path.as_ptr(), dest.as_ptr());
+        if load_info(input.path.as_ptr(), &mut info) == 0 {
+            // SAFETY: the certificate the read gave, freed once.
+            unsafe { xfree(info.cert.cast(), info.cert_len + 1) };
         }
+        extract(&input.path, &dest);
         if let Ok(entries) = std::fs::read_dir(base) {
             for e in entries.flatten() {
                 let _ =

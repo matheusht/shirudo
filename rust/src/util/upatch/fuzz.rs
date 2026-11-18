@@ -47,26 +47,22 @@ fuzz_target!(shirudo_fuzz_upatch, shirudo_fuzz_upatch_init, |data| {
         return;
     };
     let u: &super::Upatch = &u;
-    // SAFETY: the open container's signed sections, which it holds.
-    unsafe {
-        let mut len = 0u32;
-        let attach = super::capi::upatch_signed_attach(u, &mut len);
-        if !attach.is_null() {
-            specs(
-                crate::ffi::slice(attach.cast::<u8>(), len as usize),
-                u.hdr.nr_maps,
-                u.hdr.nr_progs,
-            );
-        }
-        super::capi::upatch_signed_name(u);
-        super::capi::upatch_signed_unload_payload(u);
-        super::capi::upatch_is_unload(u);
-        if super::capi::upatch_has_decoders(u) {
-            let mut d: super::DecoderView = core::mem::zeroed();
-            let mut i = 0;
-            while super::capi::upatch_decoder_view(u, i, &mut d) == 0 {
-                i += 1;
-            }
+    if !u.map.is_null() && !u.signed_attach.is_null() {
+        // SAFETY: the open container's signed attach section, which it
+        // holds.
+        let attach = unsafe {
+            crate::ffi::slice(u.signed_attach.cast::<u8>(), u.signed_attach_len as usize)
+        };
+        specs(attach, u.hdr.nr_maps, u.hdr.nr_progs);
+    }
+    super::signed_name(u);
+    super::is_unload(u);
+    if super::has_decoders(u) {
+        // SAFETY: a view of nothing, for which zeros are the value.
+        let mut d: super::DecoderView = unsafe { core::mem::zeroed() };
+        let mut i = 0;
+        while super::decoder_view(u, i, &mut d) == 0 {
+            i += 1;
         }
     }
 });

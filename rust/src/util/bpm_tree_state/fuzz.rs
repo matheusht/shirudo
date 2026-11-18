@@ -1,12 +1,18 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! fuzz-tree-state: a tree state file read, with the checks of
-//! bpm_tree_state's fuzz(); fuzz-kconfig: a kernel config read plain
+//! fuzz-tree-state: a tree state file read, as a state, an eventlog
+//! and an outcome record at once; fuzz-kconfig: a kernel config read plain
 //! and gzip for a selector's keys, and a labels file.
 
-use std::os::fd::AsRawFd;
+use core::ffi::CStr;
+use std::os::fd::{AsFd, BorrowedFd, IntoRawFd};
 use std::sync::OnceLock;
+
+use super::{
+    OUTCOME_LINE_MAX, Outcomes, TreeState, event_replay, eventlog_matches_at, outcome_emit,
+    outcome_parse, outcome_valid, state_read,
+};
 
 use crate::util::bpm_tree::{
     MAX_KCONFIG, MAX_LABELS, STRING_MAX, TreeKv, TreeSelector, TreeSelectorKv,
@@ -14,12 +20,57 @@ use crate::util::bpm_tree::{
 
 use crate::fuzzing::{fuzz_target, input_file};
 
+/// The checks on a state, eventlog and outcome record at once, the file
+/// at `path`, open at `fd` and of `size` bytes: the eventlog replays alike
+/// whether or not it matches the state, and matches no state that could
+/// not be read; and each line the outcome reader takes lies within the
+/// record, follows the line before it and is written again as a line it
+/// takes the same. It aborts where one does not hold.
+fn check_file(path: &CStr, fd: BorrowedFd<'_>, size: usize) {
+    let mut state = TreeState::zeroed();
+    let mut root = [0u8; 32];
+
+    // SAFETY: a C string, and rooms for a state and 32 bytes.
+    let (rc, ret) = unsafe {
+        (
+            state_read(path.as_ptr(), &mut state),
+            event_replay(path.as_ptr(), root.as_mut_ptr()),
+        )
+    };
+    let held = match eventlog_matches_at(path, &state, rc) {
+        Ok((again, matches)) => ret == 0 && again == root && !(rc != 0 && matches),
+        Err(err) => err == ret,
+    };
+    if !held {
+        std::process::abort();
+    }
+    // A descriptor of the file for the reader to own.
+    let Ok(dup) = fd.try_clone_to_owned() else {
+        return;
+    };
+    let mut o = Outcomes::new(dup.into_raw_fd());
+    let mut seq = 0i64;
+    while o.next().is_ok() {
+        seq += 1;
+        let mut buf = [0u8; OUTCOME_LINE_MAX];
+        let back = outcome_emit(&o.line, &mut buf).and_then(|len| outcome_parse(&buf[..len]));
+        if o.end > size as u64
+            || o.line.seq != seq
+            || !outcome_valid(o.line.outcome)
+            || back != Ok(o.line)
+        {
+            std::process::abort();
+        }
+    }
+    let _ = o.close();
+}
+
 fuzz_target!(
     shirudo_fuzz_tree_state,
     shirudo_fuzz_tree_state_init,
     |data| {
         if let Some(input) = input_file(data) {
-            super::fuzz(&input.path, input.fd.as_raw_fd(), data.len());
+            check_file(&input.path, input.fd.as_fd(), data.len());
         }
     }
 );

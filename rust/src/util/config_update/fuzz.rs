@@ -4,14 +4,12 @@
 //! fuzz-config-update: a journal record decoded, as the state and as an
 //! event, and the journal's events scanned whole and partial.
 
-use core::ffi::c_char;
 use std::ffi::{CString, OsStr};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::sync::OnceLock;
 
-use super::capi::{config_update_events_scan, config_update_record_decode};
-use super::{ConfigUpdate, ConfigUpdateRecord};
+use super::{ConfigUpdate, ConfigUpdateRecord, events_scan, record_decode};
 use crate::fuzzing::fuzz_target;
 
 /// The journal directory the events are written to, removed at exit.
@@ -56,18 +54,8 @@ fuzz_target!(
         let mut record = ConfigUpdateRecord::zeroed();
         // SAFETY: the input's bytes and room for the record.
         unsafe {
-            config_update_record_decode(
-                data.as_ptr().cast::<c_char>(),
-                data.len(),
-                true,
-                &mut record,
-            );
-            config_update_record_decode(
-                data.as_ptr().cast::<c_char>(),
-                data.len(),
-                false,
-                &mut record,
-            );
+            record_decode(data.as_ptr(), data.len(), true, &mut record);
+            record_decode(data.as_ptr(), data.len(), false, &mut record);
         }
         let events = std::path::Path::new(OsStr::from_bytes(dir.to_bytes())).join("events");
         if std::fs::write(events, data).is_err() {
@@ -81,8 +69,8 @@ fuzz_target!(
         // and rooms for the last record and the value.
         unsafe {
             for partial in [false, true] {
-                config_update_events_scan(
-                    &mut update,
+                events_scan(
+                    &update,
                     &mut last,
                     value.as_mut_ptr(),
                     core::ptr::null_mut(),

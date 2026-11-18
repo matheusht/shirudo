@@ -6,13 +6,12 @@
 //! lookups; the page asked for is the one the first chunk names, as a
 //! consistent serializer wrote it.
 
-use core::ffi::{c_int, c_long};
+use core::ffi::c_long;
 use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
-use super::capi::upatch_maps_read_serial_page;
+use super::read_serial_page;
 use crate::fuzzing::fuzz_target;
 use crate::heap::xfree;
-use crate::sys::upatch_maps::SerialPage;
 use crate::util::serializer::SerialChunk;
 
 const BPF_MAP_LOOKUP_ELEM: c_long = 1;
@@ -81,20 +80,11 @@ fuzz_target!(
             );
             first
         };
-        // SAFETY: a page of nothing, which the read fills, its data freed.
-        unsafe {
-            let mut page: SerialPage = core::mem::zeroed();
-            let ret: c_int = upatch_maps_read_serial_page(
-                0,
-                64,
-                first.page_index,
-                first.cursor,
-                first.invocation_id,
-                &mut page,
-            );
-            if ret == 0 {
-                xfree(page.data, page.bytes as usize);
-            }
+        if let Ok(page) =
+            read_serial_page(0, 64, first.page_index, first.cursor, first.invocation_id)
+        {
+            // SAFETY: the page's data, freed once.
+            unsafe { xfree(page.data, page.bytes as usize) };
         }
     }
 );

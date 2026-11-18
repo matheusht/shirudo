@@ -1098,9 +1098,6 @@ pub(crate) use capi::{
 };
 
 pub(crate) use capi::chain_init_event;
-/// The register's init and status, which the register helper drives.
-#[cfg(feature = "test-helpers")]
-pub(crate) use capi::{chain_init, chain_status};
 
 #[cfg(test)]
 mod tests;

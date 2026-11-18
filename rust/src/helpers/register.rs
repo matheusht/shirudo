@@ -32,8 +32,8 @@ use crate::util::bpf_sys::{
     Attr, BPF_ANY, BPF_MAP_CREATE, bpf_map_freeze, bpf_map_update_elem, bpf_obj_pin,
 };
 use crate::util::chain::{
-    ANCHOR_MAX, ChainInitInfo, ChainStatus, PCR, PCR_MASK, PHASE_PCR, chain_anchor, chain_extend,
-    chain_init, chain_read, chain_status, chain_tree_event, chain_upatch_event,
+    self, ANCHOR_MAX, ChainInitInfo, ChainStatus, PCR, PCR_MASK, PHASE_PCR, chain_anchor,
+    chain_extend, chain_read, chain_tree_event, chain_upatch_event,
 };
 use crate::util::crypto_openssl::sha256;
 use crate::util::eventlog::{
@@ -42,7 +42,7 @@ use crate::util::eventlog::{
 use crate::util::hex::{decode, encode};
 use crate::util::identity::IDENTITY_PIN;
 use crate::util::json::JsonEmit;
-use crate::util::nv_writer::{nv_writer_create, nv_writer_read};
+use crate::util::nv_writer::{self, nv_writer_create};
 use crate::util::tpm::{
     Tpm, TpmAttestation, TpmKey, TpmNvInfo, tpm_ak_create, tpm_close, tpm_ek_create, tpm_key_flush,
     tpm_nv_certify, tpm_nv_define, tpm_nv_extend_first, tpm_nv_info, tpm_nv_read,
@@ -192,8 +192,7 @@ fn append_init(event: &[u8; 32], info: &ChainInitInfo) -> c_int {
 fn print_init(event: &[u8; 32]) -> c_int {
     // SAFETY: a record of numbers and arrays, for which zeros are a value.
     let mut info: ChainInitInfo = unsafe { core::mem::zeroed() };
-    // SAFETY: the event and room for the binding.
-    let ret = unsafe { chain_init(event.as_ptr(), &mut info) };
+    let ret = chain::init(event, &mut info);
     out(&format!("rc={ret}\n"));
     if ret != 0 {
         return 1;
@@ -299,8 +298,7 @@ fn tree(args: &[&CStr]) -> c_int {
 fn status() -> c_int {
     // SAFETY: a status of numbers and arrays, for which zeros are a value.
     let mut st: Box<ChainStatus> = Box::new(unsafe { core::mem::zeroed() });
-    // SAFETY: room for the status.
-    let ret = unsafe { chain_status(&mut *st) };
+    let ret = chain::status(&mut st);
     let b = |v: bool| c_int::from(v);
     out(&format!(
         "rc={ret}\ntpm={} defined={} written={} logged={} anchored={}\nrebound={}\n",
@@ -398,10 +396,7 @@ fn first_write(event_hex: &CStr) -> c_int {
     if boot_init(&mut rec) != 0 {
         return 2;
     }
-    // SAFETY: room for the writer's seed and key.
-    if unsafe { nv_writer_read(seed.as_mut_ptr(), public.as_mut_ptr()) } != 0
-        || public != rec.writer_public
-    {
+    if nv_writer::read(&mut seed, &mut public) != 0 || public != rec.writer_public {
         return 2;
     }
     let values = [rec.pcr_before, rec.phase_before].concat();
@@ -600,8 +595,7 @@ fn forge(args: &[&CStr]) -> c_int {
     }
     let nonce = &nonce[..nonce_len];
     let (mut seed, mut public) = ([0u8; 32], [0u8; NV_RSA_BYTES]);
-    // SAFETY: room for the writer's seed and key.
-    if unsafe { nv_writer_read(seed.as_mut_ptr(), public.as_mut_ptr()) } != 0 {
+    if nv_writer::read(&mut seed, &mut public) != 0 {
         return 1;
     }
     // SAFETY: what the forge fills, all of whose bits zero are a value.
@@ -784,8 +778,7 @@ fn run(args: &[&CStr]) -> c_int {
         }
         (b"writer-public", 2) => {
             let (mut seed, mut public) = ([0u8; 32], [0u8; NV_RSA_BYTES]);
-            // SAFETY: room for the seed and the key.
-            if unsafe { nv_writer_read(seed.as_mut_ptr(), public.as_mut_ptr()) } != 0 {
+            if nv_writer::read(&mut seed, &mut public) != 0 {
                 return 1;
             }
             puthex(&public);

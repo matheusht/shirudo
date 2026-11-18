@@ -1307,53 +1307,6 @@ fn eventlog_matches_at(
     Ok((replay, matches))
 }
 
-/// For the fuzz target, what main's harness checked of the C on a state,
-/// eventlog and outcome record at once, the file at `path`, open at `fd`
-/// and of `size` bytes: the eventlog replays alike whether or not it
-/// matches the state, and matches no state that could not be read; and
-/// each line the outcome reader takes lies within the record, follows
-/// the line before it and is written again as a line it takes the same.
-/// It aborts where one does not hold.
-fn fuzz(path: &CStr, fd: c_int, size: usize) {
-    let mut state = TreeState::zeroed();
-    let mut root = [0u8; 32];
-
-    // SAFETY: a C string, and rooms for a state and 32 bytes.
-    let (rc, ret) = unsafe {
-        (
-            state_read(path.as_ptr(), &mut state),
-            event_replay(path.as_ptr(), root.as_mut_ptr()),
-        )
-    };
-    let held = match eventlog_matches_at(path, &state, rc) {
-        Ok((again, matches)) => ret == 0 && again == root && !(rc != 0 && matches),
-        Err(err) => err == ret,
-    };
-    if !held {
-        std::process::abort();
-    }
-    // SAFETY: the caller's fd, open for the call, duplicated for the
-    // reader to own.
-    let Ok(dup) = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) }.try_clone_to_owned() else {
-        return;
-    };
-    let mut o = Outcomes::new(dup.into_raw_fd());
-    let mut seq = 0i64;
-    while o.next().is_ok() {
-        seq += 1;
-        let mut buf = [0u8; OUTCOME_LINE_MAX];
-        let back = outcome_emit(&o.line, &mut buf).and_then(|len| outcome_parse(&buf[..len]));
-        if o.end > size as u64
-            || o.line.seq != seq
-            || !outcome_valid(o.line.outcome)
-            || back != Ok(o.line)
-        {
-            std::process::abort();
-        }
-    }
-    let _ = o.close();
-}
-
 /// The tree's part of `shirudo status --json`: whether one is configured
 /// and an operation pending, its state, and whether the eventlog replays
 /// to the projection root the state recorded.
@@ -1454,18 +1407,6 @@ mod capi {
 
     use super::{TreeKv, TreeOperation, TreePending, TreeSelector, TreeState};
     use crate::util::json::JsonEmit;
-
-    /// For the fuzz target: the checks of [`super::fuzz`] on the file at
-    /// `path`, open at `fd` and of `size` bytes.
-    ///
-    /// # Safety
-    ///
-    /// `path` is a C string and `fd` open on it.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn tree_state_fuzz(path: *const c_char, fd: c_int, size: usize) {
-        // SAFETY: the caller's C string.
-        super::fuzz(unsafe { core::ffi::CStr::from_ptr(path) }, fd, size)
-    }
 
     /// # Safety
     ///
