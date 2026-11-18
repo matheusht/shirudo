@@ -44,6 +44,7 @@ mod tpm_client;
 mod tpm_preopened;
 mod tpm_session;
 mod tpm_wire;
+mod tpmsim;
 mod upatch_decode;
 mod upatch_link_lockdown;
 mod upatch_map_types;

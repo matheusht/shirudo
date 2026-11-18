@@ -921,9 +921,9 @@ testing/helper/test-keepalive-quote: $(HELPER_MAIN_DIR)/test-keepalive-quote.o \
 	@printf '  LD      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(REGISTER_LIBS)
 
-testing/helper/tpmsim-cmd: testing/helper/tpmsim-cmd.c
-	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS_BASE) -Iinclude $(TPMSIM_CFLAGS) -o $@ $< $(TPMSIM_LIBS) -lcrypto
+testing/helper/tpmsim-cmd: $(HELPER_MAIN_DIR)/tpmsim-cmd.o $(RUST_HELPER_LIB)
+	@printf '  LD      $@\n'
+	$(Q)$(CC) $(CFLAGS_BASE) -o $@ $^ $(TPMSIM_LIBS) -lcrypto $(RUST_TEST_LDLIBS)
 
 testing/helper/test-nv-cphash: $(HELPER_MAIN_DIR)/test-nv-cphash.o \
 		$(VERSION_OBJ) $(LIBBPF_A) $(RUST_HELPER_LIB)
