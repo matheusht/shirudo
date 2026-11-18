@@ -20,7 +20,7 @@ use crate::errno::{EINVAL, EIO, EPERM};
 use crate::heap::xfree;
 use crate::util::attest::{NONCE_MAX, evidence_config};
 use crate::util::chain::PCR_MASK;
-use crate::util::config_attest::{Evidence, Quote, clear, parse, verify};
+use crate::util::config_attest::{Evidence, Quote, parse, verify};
 use crate::util::config_measure::nvpcr;
 use crate::util::config_update::{BootIdentity, ConfigUpdate, ConfigUpdateOps, ConfigUpdateTarget};
 use crate::util::json::MAX_BYTES;
@@ -196,7 +196,8 @@ fn replay(config: &Evidence, args: &[&CStr]) -> c_int {
         nvpcr: is_nvpcr.then_some(&certified),
     };
     let _ = restart; // Kept in the helper CLI for existing replay commands.
-    let (ret, reason) = verify(config, &quote, (!no_root).then_some(&root), pcr);
+    let expected_pcr = u32::try_from(pcr).ok();
+    let (ret, reason) = verify(config, &quote, (!no_root).then_some(&root), expected_pcr);
     out(&format!("reason={}\n", reason.to_string_lossy()));
     ret
 }
@@ -214,20 +215,14 @@ fn run(args: &[&CStr]) -> c_int {
     if args.len() != 3 && args.len() != 8 {
         return 2;
     }
-    // SAFETY: evidence of nothing, for which zeros are the value, cleared
-    // whatever the parse left in it.
-    let mut config: Evidence = unsafe { core::mem::zeroed() };
-    let ret = match read_document(args[2]) {
-        // SAFETY: the document and the evidence to fill.
-        Ok(doc) => match unsafe { parse(&doc, &mut config) } {
-            0 if args.len() == 8 && args[1].to_bytes() == b"replay" => replay(&config, &args[3..]),
-            0 if args[1].to_bytes() != b"parse" => -EINVAL,
-            ret => ret,
-        },
+    let ret = match read_document(args[2]).and_then(|doc| parse(&doc)) {
+        Ok(config) if args.len() == 8 && args[1].to_bytes() == b"replay" => {
+            replay(&config, &args[3..])
+        }
+        Ok(_) if args[1].to_bytes() != b"parse" => -EINVAL,
+        Ok(_) => 0,
         Err(e) => e,
     };
     out(&format!("rc={ret}\n"));
-    // SAFETY: the evidence the parse filled.
-    unsafe { clear(&mut config) };
     c_int::from(ret != 0)
 }

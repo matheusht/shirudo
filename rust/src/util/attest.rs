@@ -29,10 +29,7 @@ use crate::util::chain::{
     chain_anchor, chain_fold, chain_key_event, chain_tree_event, chain_upatch_event,
     memneq_explicit,
 };
-use crate::util::config_attest::{
-    Evidence, config_evidence_clear, config_evidence_collect, config_evidence_emit,
-    config_evidence_parse, config_evidence_verify,
-};
+use crate::util::config_attest::{self, Evidence, Quote};
 use crate::util::config_update::ConfigUpdate;
 use crate::util::crypto_openssl::{
     Cert, CertPubkey, base64_decode, base64_encode, cert_free, cert_pubkey, cert_read_der,
@@ -404,19 +401,17 @@ pub(crate) unsafe fn evidence_config(
     len: &mut usize,
     cap: &mut usize,
 ) -> c_int {
-    let mut config: Evidence = zeroed();
-
     *out = ptr::null_mut();
     *len = 0;
     *cap = 0;
     if nonce_len > NONCE_MAX || pcr_mask == 0 || pcr_mask & !0x00FF_FFFF != 0 {
         return -EINVAL;
     }
-    // SAFETY: the caller's journal or NULL, and the view.
-    let ret = unsafe { config_evidence_collect(update, &mut config) };
-    if ret != 0 {
-        return ret;
-    }
+    // SAFETY: the caller's journal or NULL.
+    let config = match config_attest::collect(unsafe { update.as_ref() }) {
+        Ok(config) => config,
+        Err(ret) => return ret,
+    };
     let mut s: Evidencing = zeroed();
     // SAFETY: the caller's nonce and challenge.
     let ret = unsafe {
@@ -434,14 +429,13 @@ pub(crate) unsafe fn evidence_config(
     };
 
     // SAFETY: what the steps left: the keys and the connection while it
-    // is open, the view, and the allocations by their sizes.
+    // is open, and the allocations by their sizes.
     unsafe {
         if !s.tpm.is_null() {
             tpm_key_flush(s.tpm, &mut s.ek);
             tpm_key_flush(s.tpm, &mut s.ak);
             tpm_close(s.tpm);
         }
-        config_evidence_clear(&mut config);
         let ek_cert_size = if s.ek_cert.is_null() { 0 } else { EK_CERT_MAX };
         xfree(s.ek_cert.cast(), ek_cert_size);
         xfree(s.ek_b64.cast(), s.ek_b64_cap);
@@ -646,7 +640,7 @@ unsafe fn evidence(
         .wrapping_add(s.fw_cap)
         .wrapping_add(s.sd_cap)
         .wrapping_add(s.ek_b64_cap)
-        .wrapping_add(config.n_events.wrapping_mul(160));
+        .wrapping_add(config.n_events().wrapping_mul(160));
     // SAFETY: the eventlog's path, and room for its state.
     if unsafe { statx(AT_FDCWD, eventlog_path(), 0, STATX_BASIC_STATS, &mut st) } == 0
         && st.stx_size as i64 > 0
@@ -742,9 +736,7 @@ unsafe fn evidence(
     // callback touches during the walk.
     unsafe { eventlog_boot_lines(Some(emit_line), (&raw mut e).cast()) };
     e.arr_close();
-    // SAFETY: the emitter and the view.
-    let ret = unsafe { config_evidence_emit(&mut e, config) };
-    if ret != 0 {
+    if let Err(ret) = config_attest::emit(&mut e, config) {
         return ret;
     }
     if s.cred_len != 0 {
@@ -1235,7 +1227,6 @@ unsafe fn verify(
     report_cap: usize,
 ) -> c_int {
     let mut rep = Reporter::new(report, report_cap);
-    let mut config: Evidence = zeroed();
     let mut cred = [0u8; CREDENTIAL_LEN];
 
     if report_cap != 0 {
@@ -1261,12 +1252,11 @@ unsafe fn verify(
     }
     // SAFETY: the caller's evidence, len bytes of it.
     let doc = unsafe { ffi::slice(evidence.cast::<u8>(), len) };
-    // SAFETY: the parse, and the caller's evidence.
-    let ret = unsafe { verify_parsed(&mut rep, p, &mut config, &mut cred, evidence, doc, expect) };
+    // SAFETY: the parse.
+    let ret = unsafe { verify_parsed(&mut rep, p, &mut cred, doc, expect) };
 
-    // SAFETY: the view, the records and the parse, each freed once.
+    // SAFETY: the records and the parse, each freed once.
     unsafe {
-        config_evidence_clear(&mut config);
         xfree((*p).recs.cast(), RECORDS_MAX * size_of::<Record>());
         xfree(p.cast(), size_of::<Parse>());
     }
@@ -1278,13 +1268,11 @@ unsafe fn verify(
 ///
 /// # Safety
 ///
-/// `p` is the parse, and `doc` the `evidence` the caller passed.
+/// `p` is the parse.
 unsafe fn verify_parsed(
     rep: &mut Reporter,
     p: *mut Parse,
-    config: &mut Evidence,
     cred: &mut [u8; CREDENTIAL_LEN],
-    evidence: *const c_char,
     doc: &[u8],
     expect: &AttestExpect,
 ) -> c_int {
@@ -1319,22 +1307,24 @@ unsafe fn verify_parsed(
         Err(ret) => return ret,
     };
 
-    // SAFETY: the caller's evidence, and the view.
-    let ret = unsafe { config_evidence_parse(evidence, doc.len(), config) };
-    if ret == -EKEYREJECTED {
-        say!(
-            rep,
-            false,
-            c"config: the events are one boot event followed by updates in sequence"
-        );
-    }
-    // What json_parse() refuses past a bound is a malformed document.
-    if ret == -E2BIG || ret == -ENOSPC {
-        return -EINVAL;
-    }
-    if ret != 0 {
-        return ret;
-    }
+    let config = match config_attest::parse(doc) {
+        Ok(config) => config,
+        Err(ret) => {
+            if ret == -EKEYREJECTED {
+                say!(
+                    rep,
+                    false,
+                    c"config: the events are one boot event followed by updates in sequence"
+                );
+            }
+            // What json_parse() refuses past a bound is a malformed
+            // document.
+            if ret == -E2BIG || ret == -ENOSPC {
+                return -EINVAL;
+            }
+            return ret;
+        }
+    };
 
     // Freshness: the document must answer this request.
     // SAFETY: a C string the parser wrote, and the room with its size.
@@ -1582,33 +1572,17 @@ unsafe fn verify_parsed(
     }
 
     if config.present || expect.have_config_root || expect.have_config_pcr {
-        let root = if expect.have_config_root {
-            expect.config_root.as_ptr()
-        } else {
-            ptr::null()
+        let quoted = Quote {
+            mask: quote.pcr_mask,
+            reset: quote.reset_count,
+            pcrs: &p.pcrs,
+            nvpcr: None,
         };
-        let pcr = if expect.have_config_pcr {
-            expect.config_pcr as c_int
-        } else {
-            -1
-        };
-        let mut reason: *const c_char = ptr::null();
+        let root = expect.have_config_root.then_some(&expect.config_root);
+        let pcr = expect.have_config_pcr.then_some(expect.config_pcr);
+        let (ret, reason) = config_attest::verify(&config, &quoted, root, pcr);
 
-        // SAFETY: the view, the quoted PCRs, the root or NULL, and where
-        // the reason goes.
-        let ret = unsafe {
-            config_evidence_verify(
-                config,
-                quote.pcr_mask,
-                quote.reset_count,
-                p.pcrs.as_ptr(),
-                ptr::null(),
-                root,
-                pcr,
-                &mut reason,
-            )
-        };
-        say!(rep, ret == 0, c"config: %s", reason);
+        say!(rep, ret == 0, c"config: %s", reason.as_ptr());
         if config.present && !expect.have_config_root {
             note!(
                 rep,
