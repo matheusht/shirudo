@@ -108,30 +108,11 @@ unsafe fn put(text: &[u8], out: *mut u8, cap: usize) -> c_int {
     -E2BIG
 }
 
+#[cfg(test)]
+mod tests;
+
 mod capi {
     use core::ffi::{c_char, c_int};
-
-    use crate::util::tpm::{TpmAttestation, TpmKey};
-
-    /// # Safety
-    ///
-    /// `att` and `ak` are a quote and its key, and `out` room for `cap`
-    /// bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn keepalive_quote_format(
-        att: *const TpmAttestation,
-        ak: *const TpmKey,
-        out: *mut c_char,
-        cap: usize,
-    ) -> c_int {
-        // SAFETY: the caller's quote, key and room.
-        unsafe {
-            match super::format(&*att, &*ak) {
-                Ok(text) => super::put(&text, out.cast(), cap),
-                Err(err) => err,
-            }
-        }
-    }
 
     /// # Safety
     ///

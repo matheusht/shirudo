@@ -220,3 +220,6 @@ pub(crate) fn digest_matches(want: &[u8], hex: &[u8]) -> bool {
 fn c_ptr(buf: &[u8]) -> *const c_char {
     buf.as_ptr().cast()
 }
+
+#[cfg(test)]
+mod tests;

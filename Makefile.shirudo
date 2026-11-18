@@ -1133,8 +1133,6 @@ build/unit/%: testing/unit/%.c testing/unit/unit.c testing/unit/unit.h \
 		$(UNIT_OBJS) -Wl,--start-group $(UNIT_LIB) $(RUST_LIB) -Wl,--end-group \
 		$(LIBBPF_A) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
-build/unit/curl: LDFLAGS += -Wl,--wrap=curl_slist_free_all
-
 # cargo names the binary by a hash, which its JSON says.
 $(UNIT_RUST): $(RUST_SRCS) $(BPF_EMBEDDED)
 	@printf '  CARGO   $@\n'

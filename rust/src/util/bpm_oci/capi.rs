@@ -4,7 +4,6 @@
 //! The C interface of `util/bpm_oci.h`.
 
 use core::ffi::{c_char, c_int, c_void};
-use core::ptr;
 
 use super::{Descriptor, OciClient, auth, copy_string, http, manifest, refs};
 use crate::errno::EINVAL;
@@ -326,34 +325,4 @@ pub unsafe extern "C" fn bpm_oci_upload_location(
         };
         refs::upload_location(&*c, location, ffi::bytes_mut(out.cast(), out_sz))
     }
-}
-
-/// "sha256:<hex>" of the `len` bytes at `data`, the form a registry names
-/// a blob by, into `out`: 0, -ENAMETOOLONG for less room than that,
-/// -EINVAL.
-///
-/// # Safety
-///
-/// `data` holds `len` bytes and `out` has room for `out_sz`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn bpm_sha256_digest(
-    data: *const c_void,
-    len: usize,
-    out: *mut c_char,
-    out_sz: usize,
-) -> c_int {
-    use crate::util::hex::{SHA256_DIGEST_STR_SIZE, sha256_digest_encode};
-
-    if out_sz < SHA256_DIGEST_STR_SIZE {
-        return -crate::errno::ENAMETOOLONG;
-    }
-    // SAFETY: the caller's bytes.
-    let Ok(digest) = crate::util::crypto_openssl::sha256(unsafe { ffi::slice(data.cast(), len) })
-    else {
-        return -EINVAL;
-    };
-    let text = sha256_digest_encode(&digest);
-    // SAFETY: room for the text and its terminator, checked above.
-    unsafe { ptr::copy_nonoverlapping(text.as_ptr(), out.cast(), text.len()) };
-    0
 }

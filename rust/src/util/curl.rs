@@ -23,6 +23,19 @@ struct Node {
 /// `headers` is NULL or a list curl_slist_append() built, freed once,
 /// after the easy handles that used it are done with it.
 pub(crate) unsafe fn slist_free_sensitive(headers: *mut CurlSlist) {
+    // SAFETY: the caller's list, scrubbed and then freed once.
+    unsafe {
+        slist_scrub(headers);
+        curl_slist_free_all(headers);
+    }
+}
+
+/// Zeroes the data of each entry of `headers`, terminators included.
+///
+/// # Safety
+///
+/// `headers` is NULL or a list curl_slist_append() built.
+unsafe fn slist_scrub(headers: *mut CurlSlist) {
     let mut entry = headers.cast::<Node>();
 
     while !entry.is_null() {
@@ -41,19 +54,7 @@ pub(crate) unsafe fn slist_free_sensitive(headers: *mut CurlSlist) {
         }
         entry = node.next;
     }
-    // SAFETY: the caller's list, freed once.
-    unsafe { curl_slist_free_all(headers) };
 }
 
-mod capi {
-    use crate::sys::curl::CurlSlist;
-
-    /// # Safety
-    ///
-    /// As [`super::slist_free_sensitive`].
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn curl_slist_free_sensitive(headers: *mut CurlSlist) {
-        // SAFETY: the caller's list.
-        unsafe { super::slist_free_sensitive(headers) }
-    }
-}
+#[cfg(test)]
+mod tests;

@@ -1228,6 +1228,9 @@ pub(crate) unsafe fn openssl_complain(where_: *const c_char) {
     complain_code(where_, unsafe { ffi::ERR_get_error() });
 }
 
+#[cfg(test)]
+mod tests;
+
 mod capi {
     use core::ffi::{c_char, c_int, c_void};
 

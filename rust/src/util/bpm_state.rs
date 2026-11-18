@@ -227,40 +227,5 @@ pub(crate) fn write(st: &[BpmStateEntry]) -> c_int {
     ret
 }
 
-mod capi {
-    use core::ffi::{c_char, c_int};
-
-    use super::BpmStateEntry;
-    use crate::ffi;
-
-    /// # Safety
-    ///
-    /// `body` holds `len` bytes, `st` has room for `BPM_MAX_STATE`
-    /// entries, and `n` points to an int.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn bpm_state_parse(
-        body: *const c_char,
-        len: usize,
-        st: *mut BpmStateEntry,
-        n: *mut c_int,
-    ) -> c_int {
-        // SAFETY: the caller passes the body, the room and the count.
-        unsafe { super::parse(ffi::slice(body.cast(), len), st, &mut *n) }
-    }
-
-    /// # Safety
-    ///
-    /// `st` holds `n` entries, `buf` has room for `cap` bytes, and `len`
-    /// points to a size.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn bpm_state_emit(
-        st: *const BpmStateEntry,
-        n: c_int,
-        buf: *mut c_char,
-        cap: usize,
-        len: *mut usize,
-    ) -> c_int {
-        // SAFETY: the caller passes the entries, the room and the length.
-        unsafe { super::emit(ffi::slice(st, n.max(0) as usize), buf, cap, &mut *len) }
-    }
-}
+#[cfg(test)]
+mod tests;
