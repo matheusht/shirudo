@@ -101,6 +101,23 @@ const _: () = assert!(core::mem::offset_of!(ChainStatus, init) == 80);
 
 /// memneq_explicit() of include/shirudo/string.h: whether the two
 /// differ, in a time that depends on their length alone.
+/// The history root of a tree after one more operation, whatever its
+/// outcome on this node: SHA-256 of "shirudo-tree-history" with its NUL,
+/// the root before it and the operation's digest. The publisher computes
+/// a segment's base with it, without the TPM.
+pub(crate) fn history_step(
+    prev: &[u8; 32],
+    operation_digest: &[u8; 32],
+) -> Result<[u8; 32], c_int> {
+    const TAG: &[u8] = b"shirudo-tree-history\0";
+    let mut buf = [0u8; TAG.len() + 64];
+
+    buf[..TAG.len()].copy_from_slice(TAG);
+    buf[TAG.len()..TAG.len() + 32].copy_from_slice(prev);
+    buf[TAG.len() + 32..].copy_from_slice(operation_digest);
+    crate::util::crypto_openssl::sha256(&buf)
+}
+
 pub(crate) fn memneq_explicit(a: &[u8], b: &[u8]) -> bool {
     let mut neq = 0u8;
 
@@ -1175,6 +1192,27 @@ mod capi {
     ) -> c_int {
         // SAFETY: the caller passes a digest and the room.
         unsafe { super::tree_event(seq, operation_digest, event) }
+    }
+
+    /// # Safety
+    ///
+    /// `prev` and `operation_digest` hold 32 bytes, and `out` has room for
+    /// 32, which may be `prev`'s.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn chain_history_step(
+        prev: *const [u8; 32],
+        operation_digest: *const [u8; 32],
+        out: *mut [u8; 32],
+    ) -> c_int {
+        // SAFETY: the caller's 32 bytes at each, read before out is
+        // written.
+        let (ret, root) = match unsafe { super::history_step(&*prev, &*operation_digest) } {
+            Ok(root) => (0, root),
+            Err(err) => (err, [0; 32]),
+        };
+        // SAFETY: the caller's room.
+        unsafe { *out = root };
+        ret
     }
 
     /// # Safety

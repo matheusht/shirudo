@@ -12,11 +12,17 @@
 #include <shirudo/string.h>
 
 #include "../../util/bpm_tree.h"
+#include "../../util/crypto.h"
 #include "../../util/io.h"
-static char tree_dir[4200], state_path[4300], outcomes_path[4300];
-static char events_path[4300], pending_path[4300];
+#include "../../util/malloc.h"
 
 #include "unit.h"
+
+/* The longest line the outcome record takes, rust/src/util/bpm_tree_state.rs's. */
+#define OUTCOME_LINE_MAX	256
+
+static char tree_dir[4200], state_path[4300], outcomes_path[4300];
+static char events_path[4300], pending_path[4300];
 
 static char path[4096];
 
@@ -223,6 +229,7 @@ static void use_tree(void)
 			       "%s/tree-eventlog", tree_dir) > 0);
 	ASSERT_TRUE(strsprintf(pending_path, sizeof(pending_path),
 			       "%s/pending.json", tree_dir) > 0);
+	ASSERT_EQ(tree_var_dir_set(tree_dir), 0);
 }
 
 static void drop_tree(void)

@@ -526,7 +526,7 @@ fn append(args: &[&CStr]) -> c_int {
     }
     let (mut payload, mut len): (*mut core::ffi::c_char, usize) = (ptr::null_mut(), 0);
     // SAFETY: the publication and room for its JSON and length.
-    let ret = unsafe { tree_emit_publication(&*publ.0, &mut payload, &mut len) };
+    let ret = unsafe { tree_emit_publication(&*publ.0, ptr::null(), &mut payload, &mut len) };
     if ret != 0 {
         return ret;
     }

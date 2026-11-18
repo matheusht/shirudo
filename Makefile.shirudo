@@ -382,25 +382,43 @@ RUST_SRCS   := $(shell find $(RUST_DIR)/src -name '*.rs') \
 RUST_LDLIBS := -static-libgcc -Wl,--gc-sections
 RUST_TEST_LDLIBS := $(RUST_LDLIBS)
 RUSTFLAGS_WERROR := $(if $(filter 1,$(WERROR)),-D warnings)
-RUST_LIBEXEC_DIR := $(RUST_TARGET)/.libexec-dir
-ifneq ($(SHIRUDO_LIBEXEC_DIR),$(shell cat $(RUST_LIBEXEC_DIR) 2>/dev/null))
-RUST_LIBEXEC_CHANGED := FORCE_RUST_LIBEXEC
+# The tree walk limits of rust/src/util/bpm_tree.rs and the keepalive
+# window. The test VM bundle builds its target with them low,
+# TREE_LIMIT_CFLAGS='-DTREE_MAX_WALK_OPS=<n> -DTREE_MAX_JOIN_OPS=<n>
+# -DKEEPALIVE_WINDOW_OPS=<n>', so that a target test reaches them; the
+# Rust reads them from SHIRUDO_TREE_LIMITS as it builds, and the operator
+# profile ignores them.
+ifeq ($(PROFILE),target)
+TREE_LIMIT_CFLAGS ?=
+else
+override TREE_LIMIT_CFLAGS :=
+endif
+SHIRUDO_TREE_LIMITS := $(strip $(TREE_LIMIT_CFLAGS))
+# The paths the build bakes into the Rust, as it passes the C its -D, and
+# the limits. cargo inherits them from make's environment, and a change
+# rebuilds it, so a build without the limits never keeps them lowered.
+export SHIRUDO_LIBEXEC_DIR SHIRUDO_BPF_INCDIR SHIRUDO_VMLINUX_PATH SHIRUDO_CLANG_PATH
+export SHIRUDO_TREE_LIMITS
+RUST_PATHS := $(SHIRUDO_LIBEXEC_DIR):$(SHIRUDO_BPF_INCDIR):$(SHIRUDO_VMLINUX_PATH):$(SHIRUDO_CLANG_PATH):$(SHIRUDO_TREE_LIMITS)
+RUST_PATHS_STAMP := $(RUST_TARGET)/.paths
+ifneq ($(RUST_PATHS),$(shell cat $(RUST_PATHS_STAMP) 2>/dev/null))
+RUST_PATHS_CHANGED := FORCE_RUST_PATHS
 endif
 
 rust: $(RUST_LIB)
 
-$(RUST_LIB): $(RUST_SRCS) $(BPF_EMBEDDED) $(RUST_LIBEXEC_CHANGED)
+$(RUST_LIB): $(RUST_SRCS) $(BPF_EMBEDDED) $(RUST_PATHS_CHANGED)
 	@printf '  CARGO   $@\n'
 	$(Q)RUSTFLAGS="$(RUSTFLAGS_WERROR)" \
 	    CARGO_PROFILE_RELEASE_DEBUG=$(if $(DEBUG_CFLAGS),true,false) \
 	    SHIRUDO_LIBEXEC_DIR='$(SHIRUDO_LIBEXEC_DIR)' \
 	    $(CARGO) build --quiet --release --locked --offline \
 	    --manifest-path $(RUST_DIR)/Cargo.toml --target-dir $(RUST_TARGET)
-	$(Q)printf '%s\n' '$(SHIRUDO_LIBEXEC_DIR)' > $(RUST_LIBEXEC_DIR)
+	$(Q)printf '%s\n' '$(RUST_PATHS)' > $(RUST_PATHS_STAMP)
 	$(Q)touch $@
 
-.PHONY: FORCE_RUST_LIBEXEC
-FORCE_RUST_LIBEXEC:
+.PHONY: FORCE_RUST_PATHS
+FORCE_RUST_PATHS:
 
 # Build-time only; links the vendored libbpf and dumps BTF as C.
 $(VMLINUX_GEN): tools/gen-vmlinux-h/gen-vmlinux-h.c $(LIBBPF_A)
@@ -446,11 +464,6 @@ build/target/%.o: %.c Makefile.shirudo $(CONFIG_MK_DEP)
 # operator profile ignores it. The objects that read them rebuild whenever the value
 # differs from the one they were built with, so a build without it never
 # keeps the lowered limits.
-ifeq ($(PROFILE),target)
-TREE_LIMIT_CFLAGS ?=
-else
-override TREE_LIMIT_CFLAGS :=
-endif
 TREE_LIMIT_STAMP := build/tree-limits-$(PROFILE)
 TREE_LIMIT_OBJS :=  $(call obj,)
 

@@ -460,11 +460,12 @@ fn sync(args: &[&[u8]]) -> Result {
             return Err(ret);
         }
     }
-    status(publication_follows(
-        p,
-        have_state.then_some(&state),
-        cstr(&manifest_digest),
-    ))?;
+    // A base past the cursor is refused, until bpm tree sync walks back
+    // through the sealed segments.
+    match publication_follows(p, have_state.then_some(&state), cstr(&manifest_digest)) {
+        crate::util::bpm_tree::FOLLOWS_WALK => return Err(-ERANGE),
+        ret => status(ret)?,
+    }
     if !have_state {
         state.schema = 1;
         let _ = strscpy(&mut state.tree_id, cstr(&p.tree_id));

@@ -9,11 +9,14 @@
 use core::ffi::{CStr, c_char, c_int, c_void};
 use core::{mem, ptr};
 
-use crate::errno::{E2BIG, EINVAL, EIO, EKEYREJECTED, ENOMEM, EOPNOTSUPP, ERANGE};
+use crate::errno::{E2BIG, EINVAL, EIO, EKEYREJECTED, ENOMEM, ERANGE};
 use crate::ffi;
-use crate::heap::{xcalloc, xfree, xmalloc, xreallocarray};
+use crate::heap::{xcalloc, xfree, xreallocarray};
 use crate::text::{cstr, strscpy};
+use crate::util::bpm_oci::package_name_ok;
+use crate::util::chain::history_step;
 use crate::util::crypto_openssl::sha256_into;
+use crate::util::hex::{self, sha256_digest_encode};
 use crate::util::json::{JsonArray, JsonEmit, JsonField, JsonMap, MAX_BYTES, parse_schema};
 use crate::util::upatch;
 
@@ -30,6 +33,54 @@ pub(crate) const STRING_MAX: usize = 256;
 
 /// A string of the tree, as C holds it: NUL-terminated in a fixed array.
 pub(crate) type Text = [u8; STRING_MAX];
+
+/// The build's lowered limits, as the C's TREE_LIMIT_CFLAGS gave them:
+/// `-D<NAME>=<n>`, which the Makefile hands cargo in SHIRUDO_TREE_LIMITS
+/// for a target build of the test VM bundle.
+const BUILD_LIMITS: &[u8] = match option_env!("SHIRUDO_TREE_LIMITS") {
+    Some(s) => s.as_bytes(),
+    None => b"",
+};
+
+/// The limit `name` of the build, or `default` where it lowers none.
+pub(crate) const fn build_limit(name: &[u8], default: i64) -> i64 {
+    let s = BUILD_LIMITS;
+    let mut i = 0;
+
+    while i + 3 + name.len() < s.len() {
+        let mut j = 0;
+        let mut at = s[i] == b'-' && s[i + 1] == b'D';
+        while at && j < name.len() {
+            at = s[i + 2 + j] == name[j];
+            j += 1;
+        }
+        if at && s[i + 2 + name.len()] == b'=' {
+            let (mut k, mut v, mut any) = (i + 3 + name.len(), 0i64, false);
+            while k < s.len() && s[k].is_ascii_digit() {
+                v = v * 10 + (s[k] - b'0') as i64;
+                any = true;
+                k += 1;
+            }
+            if any {
+                return v;
+            }
+        }
+        i += 1;
+    }
+    default
+}
+
+/// The most operations a walk back through sealed segments covers from
+/// seq 0, as a node that joins a tree does, and from the cursor of a node
+/// that has processed one: one past is -E2BIG. A running node walks
+/// holding the bpm lock, with its keepalive stopped, so it gets the
+/// lower one.
+pub(crate) const MAX_JOIN_OPS: i64 = build_limit(b"TREE_MAX_JOIN_OPS", 1 << 20);
+pub(crate) const MAX_WALK_OPS: i64 = build_limit(b"TREE_MAX_WALK_OPS", 65536);
+
+/// publication_follows(): the publication's base lies past the node's
+/// cursor, which must walk back through the sealed segments before it.
+pub(crate) const FOLLOWS_WALK: c_int = 1;
 
 /// The canonical operation an operation digest hashes takes at most this.
 const DIGEST_BODY_MAX: usize = 1024 * 1024;
@@ -94,6 +145,10 @@ pub struct TreePublication {
     pub(crate) generation: i64,
     pub(crate) parent_manifest_digest: [u8; 128],
     pub(crate) base_seq: i64,
+    /// Past the first segment: its sealed predecessor, and the history
+    /// at the base.
+    pub(crate) segment_manifest_digest: [u8; 128],
+    pub(crate) history_root: [u8; 65],
     pub(crate) operations: *mut TreeOperation,
     pub(crate) operations_capacity: c_int,
     pub(crate) n_operations: c_int,
@@ -118,15 +173,37 @@ pub struct TreeState {
     pub(crate) projection_root: [u8; 65],
     pub(crate) projection_root_tpm: [u8; 65],
     pub(crate) manifest_digest: [u8; 128],
+    pub(crate) head_seq: i64,
+    pub(crate) segment_base_seq: i64,
 }
+
+impl TreeState {
+    pub(crate) fn zeroed() -> Self {
+        // SAFETY: an all-zero state is an empty one.
+        unsafe { mem::zeroed() }
+    }
+}
+
+/// `struct tree_emit_extra`: what a publisher adds to an operation after
+/// its artifact, outside the operation digest.
+#[repr(C)]
+pub struct TreeEmitExtra {
+    pub(crate) operation:
+        Option<unsafe extern "C" fn(e: *mut JsonEmit, index: c_int, ctx: *mut c_void) -> c_int>,
+    pub(crate) ctx: *mut c_void,
+}
+
+/// What a publisher adds to the operation of an index, into its open
+/// object: the fixes, which no node reads.
+pub(crate) type Extra<'a> = &'a mut dyn FnMut(&mut JsonEmit, usize) -> c_int;
 
 const _: () = assert!(size_of::<TreeKv>() == 512);
 const _: () = assert!(size_of::<TreeSelectorKv>() == 4356);
 const _: () = assert!(size_of::<TreeSelector>() == 12336);
 const _: () = assert!(size_of::<TreeOperation>() == 13640);
-const _: () = assert!(size_of::<TreePublication>() == 432);
+const _: () = assert!(size_of::<TreePublication>() == 632);
 const _: () = assert!(size_of::<TreePending>() == 392);
-const _: () = assert!(size_of::<TreeState>() == 544);
+const _: () = assert!(size_of::<TreeState>() == 560);
 
 /// How many of the `cap` entries of a selector array its count `n`
 /// stands for: none below one, and no more than the array holds.
@@ -611,7 +688,14 @@ unsafe fn parse(body: &[u8], out: *mut TreePublication) -> c_int {
             JsonField::object(c"artifact", artifact.as_mut_ptr(), artifact.len()),
             text_field(c"operation_digest", &raw mut (*o).operation_digest),
         ];
-        let mut base = [JsonField::int(c"seq", &raw mut (*out).base_seq)];
+        let mut base = [
+            JsonField::int(c"seq", &raw mut (*out).base_seq),
+            text_field(
+                c"segment_manifest_digest",
+                &raw mut (*out).segment_manifest_digest,
+            ),
+            text_field(c"history_root", &raw mut (*out).history_root),
+        ];
         let mut head = [JsonField::int(c"seq", &raw mut (*out).head_seq)];
         let mut root = [
             JsonField::int(c"schema", &raw mut schema),
@@ -776,15 +860,16 @@ fn emit_artifact(e: &mut JsonEmit, a: &TreeArtifact) {
     e.obj_close();
 }
 
+/// The five keys the operation digest covers, into an open object.
+///
 /// # Safety
 ///
 /// The operation's selector's pairs are as its counts say.
-unsafe fn emit_operation(e: &mut JsonEmit, op: &TreeOperation, with_digest: bool) -> c_int {
+unsafe fn emit_operation_keys(e: &mut JsonEmit, op: &TreeOperation) -> c_int {
     // SAFETY: the caller's operation.
     if !unsafe { operation_text(op) } {
         return -EINVAL;
     }
-    e.obj_open();
     e.kv_int(b"seq", op.seq);
     e.kv_string(b"op", cstr(&op.op));
     e.kv_string(b"id", cstr(&op.id));
@@ -793,9 +878,30 @@ unsafe fn emit_operation(e: &mut JsonEmit, op: &TreeOperation, with_digest: bool
         return err;
     }
     emit_artifact(e, &op.artifact);
-    if with_digest {
-        e.kv_string(b"operation_digest", cstr(&op.operation_digest));
+    0
+}
+
+/// # Safety
+///
+/// The operation's selector's pairs are as its counts say.
+unsafe fn emit_operation(
+    e: &mut JsonEmit,
+    op: &TreeOperation,
+    index: usize,
+    extra: &mut Option<Extra<'_>>,
+) -> c_int {
+    e.obj_open();
+    // SAFETY: the caller's operation.
+    let mut ret = unsafe { emit_operation_keys(e, op) };
+    if ret == 0 {
+        if let Some(extra) = extra {
+            ret = extra(e, index);
+        }
     }
+    if ret != 0 {
+        return ret;
+    }
+    e.kv_string(b"operation_digest", cstr(&op.operation_digest));
     e.obj_close();
     e.err()
 }
@@ -817,94 +923,44 @@ fn buffer(n: usize) -> Result<Vec<u8>, c_int> {
 ///
 /// The operation's selector's pairs are as its counts say.
 pub(crate) unsafe fn operation_digest(op: &TreeOperation) -> Result<[u8; 72], c_int> {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut body = buffer(DIGEST_BODY_MAX)?;
     let mut e = JsonEmit::fixed(body.as_mut_ptr().cast(), body.len());
     let mut digest = [0; 32];
-    let mut out = [0; 72];
 
+    e.obj_open();
     // SAFETY: the caller's operation.
-    let ret = unsafe { emit_operation(&mut e, op, false) };
+    let ret = unsafe { emit_operation_keys(&mut e, op) };
+    e.obj_close();
+    let ret = if ret != 0 { ret } else { e.err() };
     if ret != 0 {
         return Err(ret);
     }
     if sha256_into(&body[..e.written()], &mut digest) != 0 {
         return Err(-EIO);
     }
-    out[..7].copy_from_slice(b"sha256:");
-    for (i, b) in digest.iter().enumerate() {
-        out[7 + 2 * i] = HEX[usize::from(b >> 4)];
-        out[8 + 2 * i] = HEX[usize::from(b & 0xf)];
-    }
-    Ok(out)
-}
-
-/// The bytes a JSON string of `s` takes at most, quotes and separator
-/// included.
-fn json_bound(s: &[u8]) -> usize {
-    2 * cstr(s).len() + 4
-}
-
-fn pair_bound(kv: &TreeSelectorKv) -> usize {
-    8 + json_bound(&kv.key)
-        + listed(&kv.values, kv.n_values)
-            .map(json_bound)
-            .sum::<usize>()
-}
-
-/// # Safety
-///
-/// The operation's selector's pairs are as its counts say.
-unsafe fn operation_bound(op: &TreeOperation) -> usize {
-    let s = &op.selector;
-    let a = &op.artifact;
-    // SAFETY: the caller's selector.
-    let (kconfig, labels) = unsafe { (s.kconfig(), s.labels()) };
-
-    512 + [
-        &op.op[..],
-        &op.id,
-        &op.operation_digest,
-        &a.repository,
-        &a.manifest_digest,
-        &a.layer_digest,
-        &a.payload_sha256,
-    ]
-    .iter()
-    .map(|t| json_bound(t))
-    .sum::<usize>()
-        + s.lists()
-            .iter()
-            .map(|(_, values, n)| listed(values, *n).map(json_bound).sum::<usize>())
-            .sum::<usize>()
-        + kconfig.iter().chain(labels).map(pair_bound).sum::<usize>()
+    Ok(sha256_digest_encode(&digest))
 }
 
 /// The publication in the field order every publisher has used: schema,
-/// tree_id, generation, parent_manifest_digest when it names one, base,
-/// operations, head; in an xmalloc'd buffer of `.1` bytes holding the
-/// `.2` written.
+/// tree_id, generation, parent_manifest_digest when it names one, base
+/// with its segment keys when it has them, operations, head; in an
+/// xmalloc'd buffer of `.1` bytes holding the `.2` written. `extra`
+/// adds a publisher's keys to each operation.
 ///
 /// # Safety
 ///
 /// The publication's operations and their pairs are as its counts say.
-unsafe fn emit_publication(p: &TreePublication) -> Result<(*mut c_char, usize, usize), c_int> {
+pub(crate) unsafe fn emit_publication(
+    p: &TreePublication,
+    mut extra: Option<Extra<'_>>,
+) -> Result<(*mut c_char, usize, usize), c_int> {
     // SAFETY: the caller's publication.
     let ops = unsafe { p.operations() };
-    // SAFETY: the caller's operations.
-    let cap = 4096
-        + ops
-            .iter()
-            .map(|op| unsafe { operation_bound(op) })
-            .sum::<usize>();
-    // SAFETY: xmalloc() takes any size.
-    let body: *mut c_char = unsafe { xmalloc(cap) }.cast();
+    // One past what tree_parse() takes, so that a document past it is
+    // told from one that fills it.
+    let mut e = JsonEmit::growing(MAX_BYTES + 1);
     let mut ret = 0;
 
-    if body.is_null() {
-        return Err(-ENOMEM);
-    }
-    let mut e = JsonEmit::fixed(body, cap);
     e.obj_open();
     e.kv_int(b"schema", p.schema.into());
     e.kv_string(b"tree_id", cstr(&p.tree_id));
@@ -914,11 +970,17 @@ unsafe fn emit_publication(p: &TreePublication) -> Result<(*mut c_char, usize, u
     }
     e.obj_open_key(b"base");
     e.kv_int(b"seq", p.base_seq);
+    if p.segment_manifest_digest[0] != 0 {
+        e.kv_string(b"segment_manifest_digest", cstr(&p.segment_manifest_digest));
+    }
+    if p.history_root[0] != 0 {
+        e.kv_string(b"history_root", cstr(&p.history_root));
+    }
     e.obj_close();
     e.arr_open(b"operations");
-    for op in ops {
+    for (i, op) in ops.iter().enumerate() {
         // SAFETY: the caller's operation.
-        ret = unsafe { emit_operation(&mut e, op, true) };
+        ret = unsafe { emit_operation(&mut e, op, i, &mut extra) };
         if ret != 0 {
             break;
         }
@@ -931,16 +993,17 @@ unsafe fn emit_publication(p: &TreePublication) -> Result<(*mut c_char, usize, u
     if ret == 0 {
         ret = e.err();
     }
-    // tree_parse() takes MAX_BYTES at most.
     if ret == 0 && e.written() > MAX_BYTES {
         ret = -E2BIG;
     }
+    let (body, cap, len) = e.parts();
     if ret != 0 {
-        // SAFETY: the buffer xmalloc() gave.
+        // SAFETY: the emitter's buffer, which the xmalloc family gave,
+        // or NULL.
         unsafe { xfree(body.cast(), cap) };
         return Err(ret);
     }
-    Ok((body, cap, e.written()))
+    Ok((body, cap, len))
 }
 
 fn nibble(c: u8) -> Option<u8> {
@@ -997,10 +1060,24 @@ pub(crate) unsafe fn operation_validate(op: &TreeOperation) -> c_int {
     }
 }
 
+/// A segment past the first, its base above 0, holds an operation or
+/// more and names a well-formed sealed predecessor digest and history
+/// root; the first names neither.
+fn base_valid(p: &TreePublication) -> bool {
+    match p.base_seq {
+        0 => p.segment_manifest_digest[0] == 0 && p.history_root[0] == 0,
+        b if b < 0 => false,
+        _ => {
+            p.n_operations > 0
+                && digest_bytes(&p.segment_manifest_digest).is_some()
+                && hex::decode(cstr(&p.history_root), &mut [0; 32]).is_ok()
+        }
+    }
+}
+
 /// A publication names a well-formed parent digest if any, and its
 /// operations run from base_seq + 1 to head_seq, or head_seq is base_seq
-/// without them: 0 or -EINVAL, and -ENOTSUP for a base past 0, which
-/// snapshot compaction, a later schema, would need.
+/// without them, past a base as [`base_valid`] has it: 0 or -EINVAL.
 ///
 /// # Safety
 ///
@@ -1009,8 +1086,8 @@ pub(crate) unsafe fn publication_check(p: &TreePublication) -> c_int {
     if p.parent_manifest_digest[0] != 0 && digest_bytes(&p.parent_manifest_digest).is_none() {
         return -EINVAL;
     }
-    if p.base_seq != 0 {
-        return -EOPNOTSUPP;
+    if !base_valid(p) {
+        return -EINVAL;
     }
     // SAFETY: the caller's publication.
     let ops = unsafe { p.operations() };
@@ -1021,19 +1098,51 @@ pub(crate) unsafe fn publication_check(p: &TreePublication) -> c_int {
     if runs { 0 } else { -EINVAL }
 }
 
+/// What tree sync checks of a publication before it applies anything:
+/// its tree ID is a name the node can record, [`publication_check`], and
+/// [`operation_validate`] of each operation. 0, or the first failure
+/// with the index of the operation that failed, if one did.
+///
+/// # Safety
+///
+/// The publication's operations and their pairs are as its counts say.
+pub(crate) unsafe fn publication_verify(p: &TreePublication) -> Result<(), (c_int, Option<usize>)> {
+    // The node records the tree ID in its state, which takes names
+    // alone: one that is not would be applied, measured and logged and
+    // then never recorded, failing every later sync.
+    if !package_name_ok(cstr(&p.tree_id)) {
+        return Err((-EINVAL, None));
+    }
+    // SAFETY: the caller's publication.
+    match unsafe { publication_check(p) } {
+        0 => {}
+        err => return Err((err, None)),
+    }
+    // SAFETY: the caller's publication and operations.
+    for (i, op) in unsafe { p.operations() }.iter().enumerate() {
+        // SAFETY: as above.
+        match unsafe { operation_validate(op) } {
+            0 => {}
+            err => return Err((err, Some(i))),
+        }
+    }
+    Ok(())
+}
+
 /// Whether a publication may follow the state the node recorded, None
 /// for none, with `manifest_digest` its manifest's: the same tree, a
 /// later generation unless it is the same manifest, the parent the node
-/// recorded when it is the next generation and names one, no head
-/// before the node's cursor and no base after it. 0, -EINVAL for another
-/// tree, or -ERANGE.
+/// recorded when it is the next generation and names one, and no head
+/// before the node's cursor. 0, -EINVAL for another tree, -ERANGE, or
+/// [`FOLLOWS_WALK`] when its base lies past the cursor, 0 without a
+/// state, and the node must walk back through the sealed segments.
 pub(crate) fn publication_follows(
     p: &TreePublication,
     state: Option<&TreeState>,
     manifest_digest: &[u8],
 ) -> c_int {
     let Some(s) = state else {
-        return if p.base_seq != 0 { -ERANGE } else { 0 };
+        return if p.base_seq != 0 { FOLLOWS_WALK } else { 0 };
     };
     if cstr(&s.tree_id) != cstr(&p.tree_id) {
         return -EINVAL;
@@ -1051,8 +1160,86 @@ pub(crate) fn publication_follows(
     {
         return -ERANGE;
     }
-    if p.head_seq < s.last_seq || p.base_seq > s.last_seq {
+    if p.head_seq < s.last_seq {
         return -ERANGE;
+    }
+    if p.base_seq > s.last_seq {
+        FOLLOWS_WALK
+    } else {
+        0
+    }
+}
+
+/// One step of the walk back: `pred`, whose manifest hashed to
+/// `pred_manifest_digest`, is the sealed segment `succ` names, of the
+/// same tree, ending where `succ` starts and of a lower generation. 0 or
+/// -ERANGE.
+pub(crate) fn segment_precedes(
+    pred: &TreePublication,
+    pred_manifest_digest: &[u8],
+    succ: &TreePublication,
+) -> c_int {
+    if succ.base_seq <= 0
+        || cstr(&succ.segment_manifest_digest) != pred_manifest_digest
+        || cstr(&pred.tree_id) != cstr(&succ.tree_id)
+        || pred.head_seq != succ.base_seq
+        || pred.generation >= succ.generation
+    {
+        return -ERANGE;
+    }
+    0
+}
+
+/// The limit of that walk: 0 when a node whose cursor is `last_seq` may
+/// walk back to a segment that starts at `base_seq`, [`MAX_JOIN_OPS`]
+/// operations at most from 0 and [`MAX_WALK_OPS`] from any other
+/// cursor; -E2BIG past it, -EINVAL for a negative number.
+pub(crate) fn walk_within(base_seq: i64, last_seq: i64) -> c_int {
+    let limit = if last_seq != 0 {
+        MAX_WALK_OPS
+    } else {
+        MAX_JOIN_OPS
+    };
+
+    if base_seq < 0 || last_seq < 0 {
+        return -EINVAL;
+    }
+    if base_seq - last_seq > limit {
+        -E2BIG
+    } else {
+        0
+    }
+}
+
+/// The history root at `seq` of a publication [`publication_check`]
+/// takes into `root`: its base's, 32 zero bytes at 0, over the digests
+/// of its operations up to `seq`. -EINVAL for a seq outside base to head
+/// or a malformed root or digest, with `root` as far as it got.
+///
+/// # Safety
+///
+/// The publication's operations are as its count says.
+pub(crate) unsafe fn history_at(p: &TreePublication, seq: i64, root: &mut [u8; 32]) -> c_int {
+    *root = [0; 32];
+    if seq < p.base_seq || seq > p.head_seq {
+        return -EINVAL;
+    }
+    if p.base_seq != 0 && hex::decode(cstr(&p.history_root), root).is_err() {
+        return -EINVAL;
+    }
+    // SAFETY: the caller's publication.
+    let ops = unsafe { p.operations() };
+    for op in ops.iter().take_while(|op| op.seq <= seq) {
+        let Some(digest) = digest_bytes(&op.operation_digest) else {
+            return -EINVAL;
+        };
+        match history_step(root, &digest) {
+            Ok(next) => *root = next,
+            Err(err) => {
+                *root = [0; 32];
+                return err;
+            }
+        }
     }
     0
 }
@@ -1089,9 +1276,12 @@ pub(crate) use capi::{
 mod capi {
     use core::ffi::{c_char, c_int};
 
-    use super::{TreeOperation, TreePublication, TreeSelector, TreeSelectorKv, TreeState};
+    use super::{
+        TreeEmitExtra, TreeOperation, TreePublication, TreeSelector, TreeSelectorKv, TreeState,
+    };
     use crate::errno::EINVAL;
     use crate::ffi;
+    use crate::util::json::JsonEmit;
     use crate::util::json::MAX_BYTES;
 
     /// # Safety
@@ -1215,15 +1405,28 @@ mod capi {
     /// # Safety
     ///
     /// `p` is a publication whose operations and pairs are as its counts
-    /// say, and `out` and `out_len` room for the buffer and its length.
+    /// say, `extra` NULL or a publisher's extras, and `out` and `out_len`
+    /// room for the buffer and its length.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn tree_emit_publication(
         p: *const TreePublication,
+        extra: *const TreeEmitExtra,
         out: *mut *mut c_char,
         out_len: *mut usize,
     ) -> c_int {
+        // SAFETY: the caller's extras, NULL or with a callback that takes
+        // the emitter and the index for its context.
+        let mut call = unsafe { extra.as_ref() }.and_then(|x| {
+            let f = x.operation?;
+            Some(move |e: &mut JsonEmit, index: usize| {
+                // SAFETY: the caller's callback, on the emitter and its
+                // own context.
+                unsafe { f(e, index as c_int, x.ctx) }
+            })
+        });
+        let extra: Option<super::Extra<'_>> = call.as_mut().map(|f| f as super::Extra<'_>);
         // SAFETY: the caller's publication and room.
-        match unsafe { super::emit_publication(&*p) } {
+        match unsafe { super::emit_publication(&*p, extra) } {
             Ok((body, _, len)) => {
                 // SAFETY: the caller's room.
                 unsafe {
@@ -1252,6 +1455,60 @@ mod capi {
     pub unsafe extern "C" fn tree_publication_check(p: *const TreePublication) -> c_int {
         // SAFETY: the caller's publication.
         unsafe { super::publication_check(&*p) }
+    }
+
+    /// # Safety
+    ///
+    /// `p` is a publication whose operations and pairs are as its counts
+    /// say, and `bad_op` NULL or room for an index.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn tree_publication_verify(
+        p: *const TreePublication,
+        bad_op: *mut c_int,
+    ) -> c_int {
+        // SAFETY: the caller's publication.
+        let (ret, bad) = match unsafe { super::publication_verify(&*p) } {
+            Ok(()) => (0, -1),
+            Err((err, bad)) => (err, bad.map_or(-1, |i| i as c_int)),
+        };
+        // SAFETY: the caller's room, or NULL.
+        if let Some(b) = unsafe { bad_op.as_mut() } {
+            *b = bad;
+        }
+        ret
+    }
+
+    /// # Safety
+    ///
+    /// `pred` and `succ` are publications and `pred_manifest_digest` a C
+    /// string.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn tree_segment_precedes(
+        pred: *const TreePublication,
+        pred_manifest_digest: *const c_char,
+        succ: *const TreePublication,
+    ) -> c_int {
+        // SAFETY: the caller's publications and string.
+        unsafe { super::segment_precedes(&*pred, ffi::c_str(pred_manifest_digest), &*succ) }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn tree_walk_within(base_seq: i64, last_seq: i64) -> c_int {
+        super::walk_within(base_seq, last_seq)
+    }
+
+    /// # Safety
+    ///
+    /// `p` is a publication whose operations are as its count says, and
+    /// `out` room for 32 bytes.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn tree_history_at(
+        p: *const TreePublication,
+        seq: i64,
+        out: *mut [u8; 32],
+    ) -> c_int {
+        // SAFETY: the caller's publication and room.
+        unsafe { super::history_at(&*p, seq, &mut *out) }
     }
 
     /// # Safety

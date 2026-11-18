@@ -293,5 +293,17 @@ int tree_labels_read(const char *path, struct tree_kv *labels, int *n,
 		     int max);
 int tree_state_read_path(const char *path, struct tree_state *out);
 int tree_event_replay_path(const char *path, __u8 out[32]);
+/*
+ * The directory of the tree's state, eventlog, outcomes and pending
+ * record in place of BPM_TREE_VAR_DIR, for the unit test, which reached
+ * them by redefining the paths when it included the C; NULL restores it.
+ */
+int tree_var_dir_set(const char *dir);
+/*
+ * For the fuzz target: the file at path, open at fd and of size bytes,
+ * read as a state, an eventlog and an outcome record at once, with the
+ * checks its harness made of the C; it aborts where one fails.
+ */
+void tree_state_fuzz(const char *path, int fd, size_t size);
 
 #endif /* SHIRUDO_BPM_TREE_H */

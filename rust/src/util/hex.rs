@@ -171,6 +171,42 @@ mod capi {
             None => -EINVAL,
         }
     }
+
+    /// Whether the `n` bytes at `s` are all lowercase hex digits; it
+    /// reads no further than the first that is not, a terminator
+    /// included.
+    ///
+    /// # Safety
+    ///
+    /// `s` holds `n` bytes, or a byte that is no hex digit before them.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn hex_is_lower(s: *const c_char, n: usize) -> bool {
+        // SAFETY: the caller's bytes, read up to the first that is no
+        // lowercase hex digit.
+        (0..n).all(|i| matches!(unsafe { *s.add(i) } as u8, b'0'..=b'9' | b'a'..=b'f'))
+    }
+
+    /// # Safety
+    ///
+    /// `inp` holds 32 bytes and `out` has room for an OCI digest.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn sha256_digest_encode(inp: *const [u8; 32], out: *mut [u8; 72]) {
+        // SAFETY: the caller's digest and room.
+        unsafe { *out = super::sha256_digest_encode(&*inp) };
+    }
+}
+
+/// `SHA256_DIGEST_STR_SIZE`: an OCI digest and its terminator.
+pub(crate) const SHA256_DIGEST_STR_SIZE: usize = 72;
+
+/// The 32 bytes of `d` as an OCI digest, "sha256:" and 64 lowercase hex
+/// digits, terminated.
+pub(crate) fn sha256_digest_encode(d: &[u8; 32]) -> [u8; SHA256_DIGEST_STR_SIZE] {
+    let mut out = [0u8; SHA256_DIGEST_STR_SIZE];
+
+    out[..7].copy_from_slice(b"sha256:");
+    out[7..71].copy_from_slice(&encode(d));
+    out
 }
 
 pub(crate) use capi::{hex_decode, hex_decode_max, hex_encode, sha256_digest_decode};
