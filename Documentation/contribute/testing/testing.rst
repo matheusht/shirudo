@@ -193,9 +193,10 @@ Test tiers
      - ``make -C testing end2end``
    * - Fuzz
      - :src:`testing/fuzz/`
-     - On the build host, under libFuzzer with ASan and UBSan, or with
-       MSan, and under AFL++
-     - ``make -C testing fuzz``, ``make -C testing afl``
+     - On the build host, under libFuzzer with ASan and UBSan, and
+       under AFL++; their corpora under memcheck
+     - ``make -C testing fuzz``, ``make -C testing afl``,
+       ``make -C testing valgrind``
    * - Proofs
      - :src:`testing/proofs/`
      - On the build host, with CBMC and Lean 4, hours of CPU for all
@@ -416,44 +417,25 @@ break the install. It disables the snapshot's expiry check and keeps
 signature verification. Refresh the snapshot deliberately when updating
 the toolchain; the jobs do not receive package updates automatically.
 
-Run under MemorySanitizer
--------------------------
+Run under memcheck
+------------------
 
-MemorySanitizer reports a read of memory that nothing wrote, which ASan
-and UBSan do not. It takes what code it did not instrument writes as
-never written, so every library the code reads from must be built with
-it too.
+Valgrind's memcheck reports a read of memory that nothing wrote, which
+ASan and UBSan do not, and an access out of bounds or after a free, in
+the Rust and in the C libraries it calls alike, with nothing rebuilt for
+it. ``make -C testing valgrind`` runs the unit tests under it, then each
+fuzz target's seed corpus, every input once, through a build of each Rust
+target without libFuzzer, whose coverage hooks memcheck takes for reads
+of memory never written:
 
-1. Build the instrumented zlib, OpenSSL, libelf, libcurl and tpm2-tss
-   into ``/tmp/shirudo-msan``. The script keeps a copy in
-   ``build/msan-deps`` and copies it back on a later run instead of
-   building again:
+.. code-block:: console
 
-   .. code-block:: console
+   $ make -C testing valgrind
 
-      $ sh .github/scripts/msan-deps.sh
-
-2. Remove the objects of an earlier build:
-
-   .. code-block:: console
-
-      $ make clean
-
-3. Build with ``SANITIZE=memory`` and run the unit tests and every fuzz
-   target, here for 60 seconds each:
-
-   .. code-block:: console
-
-      $ sh .github/scripts/msan-tests.sh 60
-
-Both need clang 23 with its MemorySanitizer and libFuzzer runtimes.
-``SANITIZE=memory`` instruments the vendored libbpf as well. The suite
-leaves out the decoder's unit tests and fuzz target: LuaJIT's
-interpreter is assembly, which no sanitizer instruments, so the values
-it hands back would read as uninitialized. ASan and UBSan cover those.
-The ``MSan`` job of the ``Sanitizers`` workflow runs the same, the fuzz
-targets for 60 seconds on each push and pull request and for ten
-minutes in a run started by hand.
+It needs valgrind and takes a minute or two. :src:`testing/valgrind.sh`
+leaves out the decoder's target: LuaJIT's interpreter reads memory that
+memcheck takes for unwritten. The ``Valgrind`` job of the
+``Sanitizers`` workflow runs the same on each push and pull request.
 
 Run the fuzz targets
 --------------------
@@ -474,7 +456,7 @@ runner.
 
       $ sh testing/fuzz/run.sh 60 <target>
 
-   ``<target>`` is the name of ``testing/fuzz/fuzz-<target>.c``, such as
+   ``<target>`` names a corpus under ``testing/fuzz/corpus/``, such as
    ``json``.
 
 ``FUZZERS`` names the targets ``make -C testing fuzz`` runs, all of them

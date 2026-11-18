@@ -67,8 +67,7 @@ make -B CC=clang && make -B CC=clang shirudo-build &&
 make tests VM=0 BACKEND=0 SANITIZE=address,undefined # CC=gcc and CC=clang,
                                                      # one worktree each
 make tests VM=0 BACKEND=0 SANITIZE=thread CC=clang   # and TSan in a third
-sh .github/scripts/msan-deps.sh &&                   # MSan, a worktree of
-	sh .github/scripts/msan-tests.sh 60          # its own
+make -C testing valgrind                             # memcheck
 make -C testing fuzz FUZZ_SECONDS=60
 make proofs-cbmc CHANGED=$range                      # the proofs that read
 make proofs-lean4                                    # what the series changed

@@ -67,3 +67,70 @@ pub(crate) fn input_gzip_file(data: &[u8]) -> Option<InputFile> {
     }
     input_file(&crate::util::gzip::gzip(data).ok()?)
 }
+
+unsafe extern "C" {
+    fn LLVMFuzzerTestOneInput(data: *const u8, size: usize) -> core::ffi::c_int;
+    fn LLVMFuzzerInitialize(
+        argc: *mut core::ffi::c_int,
+        argv: *mut *mut *mut core::ffi::c_char,
+    ) -> core::ffi::c_int;
+}
+
+/// The files `paths` names, a directory's files sorted by name, each
+/// given once to the target the binary links, without libFuzzer: for
+/// memcheck, which takes the comparisons libFuzzer's coverage traces for
+/// reads of memory never written. 0, or 1 when a path cannot be read.
+fn replay(paths: &[&std::path::Path]) -> core::ffi::c_int {
+    let mut files = Vec::new();
+    for path in paths {
+        match std::fs::read_dir(path) {
+            Ok(dir) => {
+                let mut names: Vec<_> = dir.flatten().map(|e| e.path()).collect();
+                names.sort();
+                files.extend(names.into_iter().filter(|p| p.is_file()));
+            }
+            Err(_) => files.push(path.to_path_buf()),
+        }
+    }
+    // SAFETY: the target's setup, which takes no arguments.
+    unsafe { LLVMFuzzerInitialize(core::ptr::null_mut(), core::ptr::null_mut()) };
+    let mut ret = 0;
+    for file in files {
+        let Ok(data) = std::fs::read(&file) else {
+            eprintln!("replay: cannot read {}", file.display());
+            ret = 1;
+            continue;
+        };
+        // Its own allocation of its length, so that memcheck sees a read
+        // past the end.
+        let data = data.into_boxed_slice();
+        // SAFETY: the input's bytes, of its length.
+        unsafe { LLVMFuzzerTestOneInput(data.as_ptr(), data.len()) };
+    }
+    ret
+}
+
+/// The main() of testing/fuzz/replay.rs: [`replay`] of its arguments.
+///
+/// # Safety
+///
+/// main()'s arguments.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn shirudo_fuzz_replay(
+    argc: core::ffi::c_int,
+    argv: *const *const core::ffi::c_char,
+) -> core::ffi::c_int {
+    use std::os::unix::ffi::OsStrExt;
+    // SAFETY: main()'s argc C strings.
+    let args = unsafe { crate::ffi::slice(argv, usize::try_from(argc).unwrap_or(0)) };
+    let paths: Vec<&std::path::Path> = args
+        .iter()
+        .skip(1)
+        .map(|&a| {
+            // SAFETY: each a C string.
+            let arg = unsafe { crate::ffi::c_str(a) };
+            std::path::Path::new(std::ffi::OsStr::from_bytes(arg))
+        })
+        .collect();
+    replay(&paths)
+}

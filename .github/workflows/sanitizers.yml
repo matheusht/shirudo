@@ -103,33 +103,34 @@ jobs:
           path: build/sanitizer-openssl
           key: ${{ steps.sanitizer-openssl.outputs.cache-primary-key }}
 
-  # MemorySanitizer finds reads of memory never written, which ASan and
-  # UBSan do not, and needs every library the code reads from rebuilt with
-  # it, which msan-deps.sh does and the cache keeps. The suite leaves out
-  # what runs Lua, as LuaJIT's interpreter cannot be instrumented.
-  msan:
-    name: MSan
+  # Valgrind's memcheck finds reads of memory never written, which ASan
+  # and UBSan do not, in the Rust and in the C libraries it calls, with
+  # nothing rebuilt for it: the unit tests, and each fuzz target's seed
+  # corpus run once through a build of the target without libFuzzer,
+  # whose coverage hooks memcheck takes for such reads. What runs Lua is
+  # left out, as LuaJIT's interpreter reads memory memcheck takes for
+  # unwritten.
+  valgrind:
+    name: Valgrind
     runs-on: ubuntu-latest
 
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Restore the MemorySanitizer libraries
-        id: msan-deps
+      - name: Restore the LVH OpenSSL toolchain
+        id: lvh-openssl
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: build/msan-deps
-          key: msan-deps-${{ hashFiles('.github/scripts/msan-deps.sh') }}
+          path: build/host-openssl
+          key: host-openssl-lvh-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/scripts/vm-toolchain.sh') }}
 
-      # The unit tests link the util objects, whose build needs the BTF of
-      # a signed-BPF capable bpf-next kernel, as the other jobs do. A push
-      # or a pull request gets a minute per fuzz target, a run by hand
-      # ten.
-      - name: Build under MSan and run the unit tests and fuzz targets in LVH VM
+      # The unit tests and fuzz targets need the BTF of the signed-BPF
+      # capable LVH kernel, as the other jobs do.
+      - name: Run the unit tests and fuzz corpora under memcheck in LVH VM
         uses: ./.github/actions/lvh
         with:
-          test-name: shirudo-msan
+          test-name: shirudo-valgrind
           image: kind
           image-version: bpf-next-20260603.072225
           kernel-version: bpf-next-main
@@ -143,48 +144,16 @@ jobs:
             }
             systemctl start host.mount
             cd /host
+            .github/scripts/vm-toolchain.sh valgrind
+            . build/vm-toolchain.env
+            make -j"\$(nproc)" -C testing valgrind
 
-            apt-get update
-            apt-get install -y --no-install-recommends \
-              autoconf \
-              autoconf-archive \
-              automake \
-              bison \
-              build-essential \
-              ca-certificates \
-              curl \
-              flex \
-              gawk \
-              git \
-              libltdl-dev \
-              libluajit-5.1-dev \
-              libtool \
-              m4 \
-              pkg-config \
-              python3 \
-              xz-utils
-            sh .github/scripts/install-clang.sh libclang-rt-23-dev
-
-            git config --global --add safe.directory /host
-
-            sh .github/scripts/msan-deps.sh
-            sh .github/scripts/msan-tests.sh \
-              ${{ github.event_name == 'workflow_dispatch' && 600 || 60 }}
-
-      - name: Save the MemorySanitizer libraries
-        if: always() && steps.msan-deps.outputs.cache-hit != 'true' && hashFiles('build/msan-deps/lib/libcrypto.so') != ''
+      - name: Save the LVH OpenSSL toolchain
+        if: always() && steps.lvh-openssl.outputs.cache-hit != 'true' && hashFiles('build/host-openssl/.shirudo-openssl-built') != ''
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: build/msan-deps
-          key: ${{ steps.msan-deps.outputs.cache-primary-key }}
-
-      - name: Upload the crash inputs
-        if: failure()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: msan-crashes
-          path: testing/fuzz/crash-*
-          if-no-files-found: ignore
+          path: build/host-openssl
+          key: ${{ steps.lvh-openssl.outputs.cache-primary-key }}
 
   libfuzzer:
     name: libFuzzer

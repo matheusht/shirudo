@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Authors of shirudo
 #
 # testing/fuzz/run.sh -- run the named libFuzzer targets, or one for each
-# fuzz-*.c here, for the given seconds on their seed corpora and FUZZ_JOBS
+# target corpus here, for the given seconds and FUZZ_JOBS
 # of them at a time, keeping what they find in a scratch directory, or
 # with FUZZ_CORPUS=<dir> in <dir>/<target> for the next run, merged down
 # to the inputs that add coverage. A crash fails the run and leaves the
@@ -24,7 +24,9 @@ shift
 if [ $# -eq 0 ]; then
 	for c in corpus/*/; do
 		t=${c#corpus/}
-		set -- "$@" "${t%/}"
+		t=${t%/}
+		[ -x "./fuzz-$t" ] || continue
+		set -- "$@" "$t"
 	done
 fi
 

@@ -29,7 +29,7 @@ test-vm-arch = $(shell TEST_VM_ARCH='$(TEST_VM_ARCH)'; \
 .DEFAULT_GOAL := all
 .PHONY: all help clean unit ci-checks functional end2end backend build-host build-operator build-unit kernel-btf \
 	test-helpers \
-	fuzz afl bundle test-vm-bundle require-vm-kernel vm vm-console vm-ssh vm-enroll vm-sbom vm-stop vm-clean \
+	fuzz afl valgrind bundle test-vm-bundle require-vm-kernel vm vm-console vm-ssh vm-enroll vm-sbom vm-stop vm-clean \
 	vm-operator-end2end
 
 PACKAGE_FORMAT ?= $(call test-vm-arch,TEST_VM_HOST_PKG_FORMAT)
@@ -452,6 +452,13 @@ afl: | kernel-btf
 		fuzz-targets FUZZ_CC=$(AFL_CC) FUZZ_OUT=build/fuzz-afl-cmplog
 	$(Q)sh $(ROOT)/testing/fuzz/afl.sh $(AFL_SECONDS) $(FUZZERS)
 
+# Valgrind's memcheck over the unit tests and each fuzz target's seed
+# corpus, each input once, for a read of memory never written, which ASan
+# and UBSan do not see, in the Rust and in the C it calls. Needs valgrind.
+valgrind: build-unit
+	+$(Q)flock $(BUILD_LOCK) $(MAKE) -C $(ROOT) -f Makefile.shirudo replay-targets
+	$(Q)sh $(ROOT)/testing/valgrind.sh
+
 bundle: test-vm-bundle
 
 help:
@@ -470,6 +477,7 @@ help:
 	  '  BACKEND=0 leaves out the backend tests, which need docker or podman.' \
 	  '  make -C testing fuzz [FUZZ_SECONDS=60] [FUZZ_CORPUS=<dir>] [FUZZERS=<target>...]' \
 	  '  make -C testing afl [AFL_SECONDS=600] [FUZZ_CORPUS=<dir>] [FUZZERS=<target>...]' \
+	  '  make -C testing valgrind                memcheck over unit tests and fuzz corpora' \
 	  '  make -C testing vm, vm-console, vm-ssh, vm-enroll, vm-sbom, vm-stop, or vm-clean' \
 	  '  VM_KERNEL=bpf-next (default) selects the pinned CI kernel artifact,' \
 	  '  fetched when artifacts/bpf-next-kernel-debs has none' \
