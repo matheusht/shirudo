@@ -9,7 +9,7 @@
 use core::ffi::{CStr, c_char, c_int, c_long, c_ulong};
 use core::mem::MaybeUninit;
 use core::ptr;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 
 use crate::errno::{
     EEXIST, EINTR, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENODEV, ENOENT, EOVERFLOW, ESTALE,
@@ -255,46 +255,43 @@ fn dm_command(fd: c_int, command: c_ulong, buf: &mut DmBuffer) -> c_int {
     0
 }
 
+/// The fd `open()` gave, owned from here, or -errno.
+fn owned(fd: c_int) -> Result<OwnedFd, c_int> {
+    if fd < 0 {
+        return Err(-errno());
+    }
+    // SAFETY: an fd just opened, which nothing else owns.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
 /// The device-mapper control device, a character device 10:236.
-fn dm_control_open() -> c_int {
+fn dm_control_open() -> Result<OwnedFd, c_int> {
     let mut st = Statx::zeroed();
 
     // SAFETY: a C string.
-    let fd = unsafe {
+    let fd = owned(unsafe {
         open(
             c"/dev/mapper/control".as_ptr(),
             O_RDWR | O_CLOEXEC | O_NOFOLLOW,
         )
-    };
-    if fd < 0 {
-        return -errno();
+    })?;
+    if stat_fd(fd.as_raw_fd(), &mut st) != 0 {
+        return Err(-errno());
     }
-    let mut ret = if stat_fd(fd, &mut st) != 0 {
-        -errno()
-    } else {
-        0
-    };
-    if ret == 0 && (file_type(&st) != S_IFCHR || rdev(&st) != makedev(10, 236)) {
-        ret = -ENODEV;
+    if file_type(&st) != S_IFCHR || rdev(&st) != makedev(10, 236) {
+        return Err(-ENODEV);
     }
-    if ret != 0 {
-        // SAFETY: the fd, closed once.
-        unsafe { close(fd) };
-        return ret;
-    }
-    fd
+    Ok(fd)
 }
 
 /// Each device-mapper device's name and number to `f`, until it returns
 /// other than 0: 0, what it returned, or -errno.
 pub(crate) fn list(mut f: impl FnMut(&CStr, u64) -> c_int) -> c_int {
     const CAPACITY: usize = 64 * 1024;
-    let control = dm_control_open();
-    if control < 0 {
-        return control;
-    }
-    // SAFETY: the fd dm_control_open() opened, owned from here.
-    let control = unsafe { OwnedFd::from_raw_fd(control) };
+    let control = match dm_control_open() {
+        Ok(fd) => fd,
+        Err(err) => return err,
+    };
     // Words, for the alignment of the header the kernel reads and writes.
     let mut words = vec![0u64; CAPACITY / 8];
     let io = words.as_mut_ptr().cast::<DmIoctl>();
@@ -366,15 +363,14 @@ fn loop_attach(file_fd: c_int, bytes: u64, out: &mut c_int) -> c_int {
     let mut path = [0u8; 64];
 
     // SAFETY: a C string.
-    let control = unsafe { open(c"/dev/loop-control".as_ptr(), O_RDWR | O_CLOEXEC) };
-    if control < 0 {
-        return -errno();
-    }
+    let control = match owned(unsafe { open(c"/dev/loop-control".as_ptr(), O_RDWR | O_CLOEXEC) }) {
+        Ok(fd) => fd,
+        Err(err) => return err,
+    };
     // SAFETY: the control's fd, and a command without an argument.
-    let n = unsafe { ioctl(control, LOOP_CTL_GET_FREE) };
+    let n = unsafe { ioctl(control.as_raw_fd(), LOOP_CTL_GET_FREE) };
     let ret = if n < 0 { -errno() } else { 0 };
-    // SAFETY: the control's fd, closed once.
-    unsafe { close(control) };
+    drop(control);
     if ret != 0 {
         return ret;
     }
@@ -391,23 +387,20 @@ fn loop_attach(file_fd: c_int, bytes: u64, out: &mut c_int) -> c_int {
         return -ENAMETOOLONG;
     }
     // SAFETY: a C string.
-    let lp = unsafe { open(path.as_ptr().cast(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW) };
-    if lp < 0 {
-        return -errno();
-    }
+    let lp = match owned(unsafe { open(path.as_ptr().cast(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW) }) {
+        Ok(fd) => fd,
+        Err(err) => return err,
+    };
     config.fd = file_fd as u32;
     config.block_size = BLOCK_SIZE as u32;
     config.info.lo_sizelimit = bytes;
     config.info.lo_flags = LO_FLAGS_READ_ONLY | LO_FLAGS_AUTOCLEAR;
     // SAFETY: the loop device's fd, and its configuration.
-    if unsafe { ioctl(lp, LOOP_CONFIGURE, ptr::from_ref(&config)) } != 0 {
-        let ret = -errno();
-
-        // SAFETY: the loop device's fd, closed once.
-        unsafe { close(lp) };
-        return ret;
+    if unsafe { ioctl(lp.as_raw_fd(), LOOP_CONFIGURE, ptr::from_ref(&config)) } != 0 {
+        return -errno();
     }
-    *out = lp;
+    // The mapping keeps it, and close_loops() closes it.
+    *out = lp.into_raw_fd();
     0
 }
 
@@ -587,21 +580,17 @@ pub(crate) fn inspect(name: &CStr, image: &ConfigImage) -> Result<DmVerity, c_in
         bytes: [0; DM_BUFFER_SIZE],
     };
 
-    let control = dm_control_open();
-    if control < 0 {
-        return Err(control);
-    }
+    let control = dm_control_open()?;
     dm_init(&mut buf, name);
     io(&mut buf).flags = DM_STATUS_TABLE_FLAG;
-    let mut ret = dm_command(control, DM_TABLE_STATUS, &mut buf);
+    let mut ret = dm_command(control.as_raw_fd(), DM_TABLE_STATUS, &mut buf);
     if ret == 0 {
         ret = check_table(&mut buf, image, &mut device);
     }
     if ret == 0 {
         ret = device_path(&mut device, io(&mut buf).dev);
     }
-    // SAFETY: the control's fd, closed once.
-    unsafe { close(control) };
+    drop(control);
     if ret != 0 {
         return Err(ret);
     }
@@ -666,17 +655,16 @@ pub(crate) fn remove(device: &mut DmVerity, deferred: bool) -> c_int {
     if !dm_name_ok(name) {
         return -EINVAL;
     }
-    let control = dm_control_open();
-    if control < 0 {
-        return control;
-    }
+    let control = match dm_control_open() {
+        Ok(fd) => fd,
+        Err(err) => return err,
+    };
     dm_init(&mut buf, name);
     if deferred {
         io(&mut buf).flags = DM_DEFERRED_REMOVE;
     }
-    let ret = dm_command(control, DM_DEV_REMOVE, &mut buf);
-    // SAFETY: the control's fd, closed once.
-    unsafe { close(control) };
+    let ret = dm_command(control.as_raw_fd(), DM_DEV_REMOVE, &mut buf);
+    drop(control);
     if ret == 0 {
         close_loops(device);
     }
@@ -812,6 +800,7 @@ pub(crate) fn create(image: &ConfigImageOpen, name: &CStr) -> Result<DmVerity, c
     let mut created = false;
     let mut key: i32 = -1;
     let mut control = -1;
+    let mut _control_fd: Option<OwnedFd> = None;
     let mut ret;
 
     ret = check_files(image.data_fd, image.hash_fd, &image.image);
@@ -891,10 +880,12 @@ pub(crate) fn create(image: &ConfigImageOpen, name: &CStr) -> Result<DmVerity, c
             }
             n += written;
         }
-        control = dm_control_open();
-        if control < 0 {
-            ret = control;
-            break 'out;
+        match dm_control_open() {
+            Ok(fd) => control = _control_fd.insert(fd).as_raw_fd(),
+            Err(err) => {
+                ret = err;
+                break 'out;
+            }
         }
         dm_init(&mut buf, name);
         ret = dm_command(control, DM_DEV_CREATE, &mut buf);
@@ -962,20 +953,16 @@ pub(crate) fn create(image: &ConfigImageOpen, name: &CStr) -> Result<DmVerity, c
         }
         close_loops(&mut device);
     }
-    if control >= 0 {
-        // SAFETY: the control's fd, closed once.
-        unsafe { close(control) };
-    }
     if ret != 0 { Err(ret) } else { Ok(device) }
 }
 
 /// loop_open(): the loop device `device`, a block device of major 7.
-fn loop_open(device: u64) -> c_int {
+fn loop_open(device: u64) -> Result<OwnedFd, c_int> {
     let mut st = Statx::zeroed();
     let mut path = [0u8; 64];
 
     if major(device) != 7 {
-        return -ENODEV;
+        return Err(-ENODEV);
     }
     // SAFETY: the path's room, and the C's format with its argument.
     if unsafe {
@@ -987,32 +974,22 @@ fn loop_open(device: u64) -> c_int {
         )
     } < 0
     {
-        return -ENAMETOOLONG;
+        return Err(-ENAMETOOLONG);
     }
     // SAFETY: a C string.
-    let fd = unsafe {
+    let fd = owned(unsafe {
         open(
             path.as_ptr().cast(),
             O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK,
         )
-    };
-    if fd < 0 {
-        return -errno();
+    })?;
+    if stat_fd(fd.as_raw_fd(), &mut st) != 0 {
+        return Err(-errno());
     }
-    let mut ret = if stat_fd(fd, &mut st) != 0 {
-        -errno()
-    } else {
-        0
-    };
-    if ret == 0 && (file_type(&st) != S_IFBLK || rdev(&st) != device) {
-        ret = -ESTALE;
+    if file_type(&st) != S_IFBLK || rdev(&st) != device {
+        return Err(-ESTALE);
     }
-    if ret != 0 {
-        // SAFETY: the fd, closed once.
-        unsafe { close(fd) };
-        return ret;
-    }
-    fd
+    Ok(fd)
 }
 
 /// loop_check(): whether the loop device reads the file `bytes` long,
@@ -1057,8 +1034,6 @@ pub(crate) fn verify(device: &DmVerity, image: &ConfigImageOpen) -> c_int {
     let mut size = 0u64;
     let mut readonly: c_int = 0;
     let mut offset = 0u64;
-    let hashes;
-    let mut fd = -1;
 
     let mut ret = check_files(image.data_fd, image.hash_fd, &image.image);
     if ret != 0 {
@@ -1075,16 +1050,21 @@ pub(crate) fn verify(device: &DmVerity, image: &ConfigImageOpen) -> c_int {
     {
         return -ESTALE;
     }
-    let data = loop_open(device.data_device);
-    if data < 0 {
-        return data;
-    }
+    let data_fd = match loop_open(device.data_device) {
+        Ok(fd) => fd,
+        Err(err) => return err,
+    };
+    let data = data_fd.as_raw_fd();
+    let mut hashes_fd: Option<OwnedFd> = None;
+    let mut mapped: Option<OwnedFd> = None;
     'out: {
-        hashes = loop_open(device.hash_device);
-        if hashes < 0 {
-            ret = hashes;
-            break 'out;
-        }
+        let hashes = match loop_open(device.hash_device) {
+            Ok(fd) => hashes_fd.insert(fd).as_raw_fd(),
+            Err(err) => {
+                ret = err;
+                break 'out;
+            }
+        };
         ret = loop_check(data, image.data_fd, bytes);
         if ret == 0 {
             ret = loop_check(
@@ -1097,16 +1077,18 @@ pub(crate) fn verify(device: &DmVerity, image: &ConfigImageOpen) -> c_int {
             break 'out;
         }
         // SAFETY: the mapping's path, a C string within its array.
-        fd = unsafe {
+        let fd = match owned(unsafe {
             open(
                 device.path.as_ptr().cast(),
                 O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK | O_DIRECT,
             )
+        }) {
+            Ok(fd) => mapped.insert(fd).as_raw_fd(),
+            Err(err) => {
+                ret = err;
+                break 'out;
+            }
         };
-        if fd < 0 {
-            ret = -errno();
-            break 'out;
-        }
         if stat_fd(fd, &mut st) != 0
             // SAFETY: the device's fd, and room for its size.
             || unsafe { ioctl(fd, BLKGETSIZE64, ptr::from_mut(&mut size)) } != 0
@@ -1161,16 +1143,8 @@ pub(crate) fn verify(device: &DmVerity, image: &ConfigImageOpen) -> c_int {
             );
         }
     }
-    // SAFETY: the fds opened here, each closed once.
-    unsafe {
-        if fd >= 0 {
-            close(fd);
-        }
-        if hashes >= 0 {
-            close(hashes);
-        }
-        close(data);
-    }
+    // The fds close as they go: the mapping's, the hashes', the data's.
+    drop((mapped, hashes_fd, data_fd));
     ret
 }
 
