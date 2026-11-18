@@ -310,7 +310,11 @@ unsafe fn verify_incoming(opened: &ConfigImageOpen, staging: *const c_char) -> c
 /// # Safety
 ///
 /// `source` is a C string.
-unsafe fn fetch(source: *const c_char, target: &mut ConfigUpdateTarget) -> c_int {
+unsafe fn fetch(
+    source: *const c_char,
+    target: &mut ConfigUpdateTarget,
+    verify: &mut dyn FnMut(&ConfigImageOpen) -> c_int,
+) -> c_int {
     // SAFETY: a structure of integers and arrays, which the open fills.
     let mut opened: ConfigImageOpen = unsafe { MaybeUninit::zeroed().assume_init() };
     let mut staging = *b"/var/lib/shirudo/images/incoming-XXXXXX\0";
@@ -372,7 +376,10 @@ unsafe fn fetch(source: *const c_char, target: &mut ConfigUpdateTarget) -> c_int
             if ret != 0 {
                 break 'out;
             }
-            ret = verify_incoming(&opened, staging_p);
+            ret = verify(&opened);
+            if ret == 0 {
+                ret = verify_incoming(&opened, staging_p);
+            }
             if ret == 0 {
                 target.root_hash = opened.image.root_hash;
                 hex_encode(target.root_hash.as_ptr(), 32, hex.as_mut_ptr().cast());
@@ -451,10 +458,20 @@ unsafe fn fetch(source: *const c_char, target: &mut ConfigUpdateTarget) -> c_int
     ret
 }
 
-pub(crate) use capi::image_cache_fetch;
+/// Fetches the config image at `source` into the cache, as `target`
+/// then names it, `verify` authenticating its root before a kernel
+/// mapping is made of it.
+pub(crate) fn fetch_verified(
+    source: &CStr,
+    target: &mut ConfigUpdateTarget,
+    mut verify: impl FnMut(&ConfigImageOpen) -> c_int,
+) -> c_int {
+    // SAFETY: a C string.
+    unsafe { fetch(source.as_ptr(), target, &mut verify) }
+}
 
 mod capi {
-    use core::ffi::{c_char, c_int};
+    use core::ffi::{c_char, c_int, c_void};
 
     use crate::util::config_update::ConfigUpdateTarget;
 
@@ -465,8 +482,16 @@ mod capi {
     pub unsafe extern "C" fn image_cache_fetch(
         source: *const c_char,
         target: *mut ConfigUpdateTarget,
+        verify: Option<
+            unsafe extern "C" fn(image: *const super::ConfigImageOpen, ctx: *mut c_void) -> c_int,
+        >,
+        ctx: *mut c_void,
     ) -> c_int {
-        // SAFETY: the caller passes a C string and the room.
-        unsafe { super::fetch(source, &mut *target) }
+        let Some(verify) = verify else {
+            return -super::EINVAL;
+        };
+        // SAFETY: the caller passes a C string and the room, and a
+        // callback safe to call with its context.
+        unsafe { super::fetch(source, &mut *target, &mut |image| verify(image, ctx)) }
     }
 }

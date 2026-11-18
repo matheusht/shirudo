@@ -146,8 +146,8 @@ fn asymmetric_keys(ring: i32) -> Result<(Vec<i32>, bool), c_int> {
     }
 }
 
-/// Boot keys left the sealed keyring holding the config certificate
-/// alone.
+/// Boot validation checked the complete config verification key set;
+/// init freezes the keys the sealed keyring holds.
 fn dm_verity_anchor(id: &mut Identity) -> c_int {
     let ring = keyring_dm_verity_serial();
 
@@ -159,8 +159,8 @@ fn dm_verity_anchor(id: &mut Identity) -> c_int {
         ));
         return err;
     }
-    let keys = match asymmetric_keys(ring) {
-        Ok((keys, _)) => keys,
+    let (keys, overflow) = match asymmetric_keys(ring) {
+        Ok(found) => found,
         Err(err) => {
             error(&cat!(
                 "list the dm-verity keyring ",
@@ -171,18 +171,18 @@ fn dm_verity_anchor(id: &mut Identity) -> c_int {
             return err;
         }
     };
-    if keys.len() != 1 {
+    if keys.is_empty() || overflow {
         error(&cat!(
             "dm-verity keyring ",
             ring,
-            " holds ",
-            keys.len(),
-            " keys, not the config certificate alone"
+            " has an invalid key count ",
+            keys.len()
         ));
         return -EKEYREJECTED;
     }
     id.dm_verity_ring = ring;
-    id.dm_verity_key = keys[0];
+    id.n_dm_verity_keys = keys.len() as u32;
+    id.dm_verity_keys[..keys.len()].copy_from_slice(&keys);
     0
 }
 

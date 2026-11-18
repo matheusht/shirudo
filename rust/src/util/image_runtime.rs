@@ -16,7 +16,7 @@ use core::cell::RefCell;
 use core::ffi::{CStr, c_char, c_int, c_void};
 use core::ptr;
 use std::ffi::{CString, OsStr};
-use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::ErrorKind;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
@@ -24,8 +24,8 @@ use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt}
 use std::path::Path;
 
 use crate::errno::{
-    E2BIG, EACCES, EBADF, EBUSY, EEXIST, EINPROGRESS, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG,
-    ENODEV, ENOENT, ENOKEY, ENXIO, EPERM, EPROTO, ESTALE, EUCLEAN,
+    E2BIG, EACCES, EBUSY, EEXIST, EINPROGRESS, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENODEV,
+    ENOENT, ENOKEY, ENXIO, EPERM, EPROTO, ESTALE, EUCLEAN,
 };
 use crate::heap::xfree;
 use crate::sys::identity::{DEVICE_CONFIG, DEVICE_RUNTIME, DeviceAuthority, Identity};
@@ -41,8 +41,12 @@ use crate::util::config_image::{
 };
 use crate::util::config_update::{
     ConfigUpdate, ConfigUpdateOps, ConfigUpdateRecord, ConfigUpdateTarget, config_update_begin,
-    config_update_boot, config_update_check, config_update_close, config_update_complete_boot,
-    config_update_open, config_update_read,
+    config_update_boot, config_update_check, config_update_clear_staged, config_update_close,
+    config_update_complete_boot, config_update_open, config_update_read, config_update_stage,
+    config_update_stage_read, config_update_staged,
+};
+use crate::util::crypto_openssl::{
+    key_algorithm, pubkey_digest, verify_detached_x509, x509_from_der,
 };
 use crate::util::dm_verity::{
     DmVerity, dm_verity_close, dm_verity_create, dm_verity_inspect, dm_verity_list,
@@ -52,11 +56,11 @@ use crate::util::identity;
 use crate::util::image_bootstrap::{
     ImageBootstrap, image_bootstrap_read, image_bootstrap_read_fd, path_valid,
 };
-use crate::util::image_cache::{SEAL_LABEL, XATTR_SEAL, image_cache_fetch};
+use crate::util::image_cache::{SEAL_LABEL, XATTR_SEAL, fetch_verified};
 use crate::util::image_config::{image_config_clear, image_config_set};
 use crate::util::image_guards::image_guards_ready;
 use crate::util::image_keys::{self, RUNTIME_CERT_PATH};
-use crate::util::io::kernel_dev;
+use crate::util::io::{kernel_dev, read_fd};
 use crate::util::json::JsonEmit;
 use crate::util::keyring::{
     KeyringCert, keyring_dm_verity_add_cert, keyring_dm_verity_seal, keyring_dm_verity_serial,
@@ -83,6 +87,30 @@ const ST_NOEXEC: u64 = 8;
 /// _IOR(0x12, 128, __u64).
 const BLKGETDISKSEQ: core::ffi::c_ulong = 0x8008_1280;
 
+/// Why a config is prepared: for the boot, in the initrd, as a live
+/// update, or to stage it for the next boot.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Prepare {
+    Boot,
+    Update,
+    Stage,
+}
+
+/// A config verification certificate of the runtime image, read once
+/// from the image the guards watched and kept for the command.
+struct ConfigCertificate {
+    x509: openssl::x509::X509,
+    der: Vec<u8>,
+    fingerprint: [u8; 32],
+}
+
+/// The largest config root signature the image holds,
+/// `CONFIG_IMAGE_SIG_MAX`.
+const CONFIG_IMAGE_SIG_MAX: usize = 16384;
+
+/// An ext4 file system's root directory's inode.
+const EXT4_ROOT_INO: u64 = 2;
+
 /// What the journal's callbacks reach: everything but the journal.
 struct State {
     boot_target: ConfigUpdateTarget,
@@ -93,7 +121,7 @@ struct State {
     bootstrap: ImageBootstrap,
     tpm: *mut Tpm,
     candidate_fd: Option<OwnedFd>,
-    certificate_fd: Option<OwnedFd>,
+    certificates: Vec<ConfigCertificate>,
     /// What current_config() refused status with.
     config_state: c_int,
     loaded: bool,
@@ -115,7 +143,7 @@ impl State {
             bootstrap: unsafe { core::mem::zeroed() },
             tpm: ptr::null_mut(),
             candidate_fd: None,
-            certificate_fd: None,
+            certificates: Vec::new(),
             config_state: 0,
             loaded: false,
             boot_keys_open: false,
@@ -229,12 +257,117 @@ fn mapping_name(root: &[u8; 32]) -> CString {
     CString::new(format!("shirudo-config-{hex}")).unwrap_or_default()
 }
 
-fn open_dir_path(p: &CStr) -> Result<File, c_int> {
-    OpenOptions::new()
+/// The root of the config image on `device` at `dir` as a descriptor,
+/// opened once and checked where it was opened, `bad` when it is not: a
+/// path checked first and opened after is root's to swap between the
+/// two in a mount namespace of its own, and a directory of the image
+/// bound elsewhere has the image's device too, but every relative path
+/// read from it lands elsewhere in the image.
+fn config_root_open(dir: &CStr, device: u64, bad: c_int) -> Result<OwnedFd, c_int> {
+    let f = OpenOptions::new()
         .read(true)
-        .custom_flags(O_PATH | O_DIRECTORY)
-        .open(path(p))
-        .map_err(|e| io_err(&e))
+        .custom_flags(O_PATH | O_DIRECTORY | O_NOFOLLOW)
+        .open(path(dir))
+        .map_err(|e| io_err(&e))?;
+    let st = f.metadata().map_err(|e| io_err(&e))?;
+    if st.dev() == device && st.ino() == EXT4_ROOT_INO {
+        Ok(f.into())
+    } else {
+        Err(bad)
+    }
+}
+
+/// The DER of the certificate open on `fd`, as keys_read_der_fd() reads
+/// it.
+fn der_of_fd(fd: c_int) -> Result<Vec<u8>, c_int> {
+    let (mut der, mut size) = (ptr::null_mut(), 0usize);
+    // SAFETY: the fd and rooms for the bytes keys_read_der_fd() allocates.
+    let ret = unsafe { keys_read_der_fd(fd, &mut der, &mut size) };
+    if ret != 0 {
+        return Err(ret);
+    }
+    // SAFETY: the size bytes keys_read_der_fd() allocated.
+    let bytes = unsafe { crate::ffi::slice(der, size) }.to_vec();
+    // SAFETY: the allocation, freed once.
+    unsafe { xfree(der.cast(), size) };
+    Ok(bytes)
+}
+
+/// The config verification certificate the bootstrap names at `index`,
+/// from the runtime image on `device`: an ML-DSA-87 key, none named
+/// twice.
+fn read_config_certificate(s: &mut State, index: usize, device: u64) -> c_int {
+    let name = CString::new(cstr(&s.bootstrap.certificates[index])).unwrap_or_default();
+    let fd = match open_runtime_file(&name, device) {
+        Ok(fd) => fd,
+        Err(err) => return err,
+    };
+    let der = der_of_fd(fd.as_raw_fd());
+    drop(fd);
+    let cert = der.and_then(|der| {
+        let x509 = x509_from_der(&der)?;
+        if key_algorithm(&x509, 32)?.as_bytes() != b"ML-DSA-87" {
+            return Err(-EKEYREJECTED);
+        }
+        let fingerprint = pubkey_digest(&x509)?;
+        Ok(ConfigCertificate {
+            x509,
+            der,
+            fingerprint,
+        })
+    });
+    match cert {
+        Err(err) => err,
+        Ok(c)
+            if s.certificates
+                .iter()
+                .any(|o| o.fingerprint == c.fingerprint) =>
+        {
+            -EEXIST
+        }
+        Ok(c) => {
+            s.certificates.push(c);
+            0
+        }
+    }
+}
+
+/// Whether a config verification certificate signed the root hash of the
+/// image `opened`: 0, -ENOKEY without a certificate or a signature,
+/// -EKEYREJECTED when none did.
+fn verify_config_root(s: &State, opened: &ConfigImageOpen) -> c_int {
+    if s.bootstrap.n_certificates == 0 || opened.signature_fd < 0 {
+        return -ENOKEY;
+    }
+    let (mut signature, mut size): (*mut u8, usize) = (ptr::null_mut(), 0);
+    // SAFETY: the signature's fd, a label, a bound and rooms for the
+    // bytes read_fd() allocates.
+    let ret = unsafe {
+        read_fd(
+            opened.signature_fd,
+            c"config root signature".as_ptr(),
+            CONFIG_IMAGE_SIG_MAX,
+            (&raw mut signature).cast(),
+            &mut size,
+        )
+    };
+    if ret != 0 {
+        return ret;
+    }
+    let root: String = opened
+        .image
+        .root_hash
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    // SAFETY: the size bytes read_fd() allocated.
+    let sig = unsafe { crate::ffi::slice(signature, size) };
+    let signed = s.certificates[..s.bootstrap.n_certificates.min(s.certificates.len())]
+        .iter()
+        .any(|c| verify_detached_x509(root.as_bytes(), sig, &c.x509) == 0);
+    // SAFETY: read_fd()'s allocation, freed once with its NUL.
+    unsafe { xfree(signature.cast(), size + 1) };
+    if signed { 0 } else { -EKEYREJECTED }
 }
 
 /// Whether the BPF guards observed `device`, the dm-verity mapping with
@@ -343,9 +476,9 @@ fn runtime_device() -> Result<u64, c_int> {
         .map_err(|e| io_err(&e))
 }
 
-/// The settings of the mounted runtime image, its config certificate
-/// held open for key enrolment. Outside the initrd the guards must have
-/// watched the runtime being mapped.
+/// The settings of the mounted runtime image, and its config
+/// certificates, read for this command. Outside the initrd the guards
+/// must have watched the runtime being mapped.
 fn load_runtime_config(s: &mut State, trusted_boot: bool) -> c_int {
     if !trusted_boot {
         let ret = image_guards_ready();
@@ -367,6 +500,7 @@ fn load_runtime_config(s: &mut State, trusted_boot: bool) -> c_int {
         Ok(fd) => fd,
         Err(err) => return err,
     };
+    s.bootstrap.n_certificates = 0;
     // SAFETY: the open file and the bootstrap to fill.
     let mut ret = unsafe { image_bootstrap_read_fd(conf.as_raw_fd(), &mut s.bootstrap, false) };
     if ret == 0 {
@@ -383,7 +517,7 @@ fn load_runtime_config(s: &mut State, trusted_boot: bool) -> c_int {
     if ret != 0 {
         return ret;
     }
-    if s.bootstrap.config[0] == 0 || s.bootstrap.certificate[0] == 0 || !s.bootstrap.have_pcr {
+    if s.bootstrap.config[0] == 0 || s.bootstrap.n_certificates == 0 || !s.bootstrap.have_pcr {
         return -EINVAL;
     }
     // SAFETY: the bootstrap config, without a config image.
@@ -391,10 +525,13 @@ fn load_runtime_config(s: &mut State, trusted_boot: bool) -> c_int {
     if ret != 0 {
         return ret;
     }
-    let certificate = CString::new(cstr(&s.bootstrap.certificate)).unwrap_or_default();
-    match open_runtime_file(&certificate, dev) {
-        Ok(fd) => s.certificate_fd = Some(fd),
-        Err(err) => return err,
+    s.certificates.clear();
+    for i in 0..s.bootstrap.n_certificates {
+        let ret = read_config_certificate(s, i, dev);
+        if ret != 0 {
+            s.certificates.clear();
+            return ret;
+        }
     }
     match open_runtime_file(RUNTIME_CERT_PATH, dev) {
         Ok(fd) => mount_flags(fd.as_raw_fd(), true),
@@ -612,8 +749,15 @@ fn remove_candidate(device: &mut DmVerity) -> c_int {
     retry_busy(|| unsafe { dm_verity_remove(device, false) })
 }
 
-fn candidate_keys(fd: c_int) -> c_int {
-    let ret = image_keys::validate(fd);
+/// The candidate's BPF trust set, valid; for a live update, also all
+/// held by the kernel, which enrols a set only at boot.
+fn candidate_keys(fd: c_int, enrolled: bool) -> c_int {
+    // SAFETY: an all-zero set is an empty one.
+    let mut set: Box<TrustedSet> = Box::new(unsafe { core::mem::zeroed() });
+    let mut ret = image_keys::validate_set(RUNTIME_CERT_PATH, fd, &mut set);
+    if ret == 0 && enrolled {
+        ret = image_keys::check_set(&set);
+    }
     if ret == -ENOKEY {
         error("image: BPF signer was not enrolled at boot; reboot with the new trusted key set required".into());
     }
@@ -645,9 +789,9 @@ fn mount_candidate(s: &mut State) -> c_int {
         }
         CONFIG_CANDIDATE_DIR
     };
-    match open_dir_path(dir) {
-        Ok(f) => {
-            s.candidate_fd = Some(f.into());
+    match config_root_open(dir, s.candidate_device.device, -ESTALE) {
+        Ok(fd) => {
+            s.candidate_fd = Some(fd);
             0
         }
         Err(err) => err,
@@ -655,11 +799,14 @@ fn mount_candidate(s: &mut State) -> c_int {
 }
 
 /// Maps, checks and mounts the config image `target` names as the
-/// candidate, and validates it; outside the initrd, also that the guards
-/// watched its mapping being made and that the kernel holds its keys. A
-/// mapping made for a candidate refused is removed again. The journal is
-/// open whenever this runs.
-fn prepare_config(s: &mut State, target: &ConfigUpdateTarget, trusted_boot: bool) -> c_int {
+/// candidate, a config verification certificate having signed its root,
+/// and validates it; outside the initrd, also that the guards watched
+/// its mapping being made, and for a live update that the kernel holds
+/// its keys. A mapping made for a candidate refused is removed again.
+/// The journal is open whenever this runs.
+fn prepare_config(s: &mut State, target: &ConfigUpdateTarget, purpose: Prepare) -> c_int {
+    let trusted_boot = purpose == Prepare::Boot;
+
     close_candidate(s, true);
     if !trusted_boot {
         collect_mappings(true);
@@ -676,6 +823,10 @@ fn prepare_config(s: &mut State, target: &ConfigUpdateTarget, trusted_boot: bool
     }
     if target.root_hash != s.candidate.image.root_hash {
         return -EKEYREJECTED;
+    }
+    let ret = verify_config_root(s, &s.candidate);
+    if ret != 0 {
+        return ret;
     }
     let name = mapping_name(&target.root_hash);
     let mut created = false;
@@ -707,7 +858,7 @@ fn prepare_config(s: &mut State, target: &ConfigUpdateTarget, trusted_boot: bool
                 ret = crate::util::image_config::validate(fd);
             }
             if ret == 0 && !trusted_boot {
-                ret = candidate_keys(fd);
+                ret = candidate_keys(fd, purpose == Prepare::Update);
             }
         }
     }
@@ -754,15 +905,11 @@ fn activate_config(s: &mut State, boot: bool) -> c_int {
             return ret;
         }
     }
-    let dir = match open_dir_path(CONFIG_IMAGE_DIR) {
-        Ok(f) => f,
+    let dir = match config_root_open(CONFIG_IMAGE_DIR, s.candidate_device.device, -ESTALE) {
+        Ok(fd) => fd,
         Err(err) => return err,
     };
-    let ret = match dir.metadata() {
-        Err(e) => io_err(&e),
-        Ok(m) if m.dev() != s.candidate_device.device => -ESTALE,
-        Ok(_) => mount_flags(dir.as_raw_fd(), false),
-    };
+    let ret = mount_flags(dir.as_raw_fd(), false);
     if ret != 0 {
         return ret;
     }
@@ -773,7 +920,7 @@ fn activate_config(s: &mut State, boot: bool) -> c_int {
 unsafe extern "C" fn prepare_update(_: *mut c_void, target: *const ConfigUpdateTarget) -> c_int {
     // SAFETY: the journal's target.
     let target = unsafe { &*target };
-    with_state(|s| prepare_config(s, target, false))
+    with_state(|s| prepare_config(s, target, Prepare::Update))
 }
 
 unsafe extern "C" fn activate_update(_: *mut c_void, _: *const ConfigUpdateTarget) -> c_int {
@@ -825,8 +972,9 @@ fn open_update() -> c_int {
     ret
 }
 
-/// The config the boot activates: the journal's selection, or the
-/// bootstrap's config without one, as the image there is now.
+/// The config the boot activates: the one staged for it, the journal's
+/// selection, or the bootstrap's config without one, as the image there
+/// is now.
 fn boot_target(target: &mut ConfigUpdateTarget) -> c_int {
     let mut previous = zero_record();
     // SAFETY: the open journal and room for its record.
@@ -834,6 +982,27 @@ fn boot_target(target: &mut ConfigUpdateTarget) -> c_int {
     let selected = ret == 0;
     if ret != 0 && ret != -ENOENT {
         return ret;
+    }
+    if selected {
+        let (mut reset, mut restart) = (0u32, 0u32);
+        let mut staged = zero_target();
+        let tpm = with_state(|s| s.tpm);
+        // SAFETY: the TPM open_update() opened and rooms for its counts.
+        let mut ret = unsafe { tpm_boot_identity(tpm, &mut reset, &mut restart) };
+        if ret == 0 {
+            // SAFETY: the open journal, the record read and room for the
+            // staged target.
+            ret = with_journal(|j| unsafe {
+                config_update_staged(j, &previous, reset, restart, &mut staged)
+            });
+        }
+        if ret < 0 {
+            return ret;
+        }
+        if ret > 0 {
+            *target = staged;
+            return 0;
+        }
     }
     let prefix = if selected {
         cstr(&previous.target.prefix).to_vec()
@@ -864,23 +1033,30 @@ fn boot_keys_error(step: &str, ret: c_int) -> c_int {
     ret
 }
 
-/// The kernel trusts every key in the sealed dm-verity keyring for
-/// config roots, so whether init sealed it now or earlier this boot, it
-/// must hold exactly the config certificate.
-fn seal_config_key(ring: i32, der: &[u8]) -> c_int {
-    // SAFETY: the certificate's bytes.
-    let key = unsafe { keyring_dm_verity_add_cert(der.as_ptr(), der.len()) };
-    if key < 0 && key != -EPERM && key != -EACCES {
-        return boot_keys_error("add config verification certificate", key);
+/// The config verification certificates into the dm-verity keyring,
+/// sealed after them: the kernel trusts every key in it for config
+/// roots, so whether init sealed it now or earlier this boot, it must
+/// hold exactly the runtime image's set.
+fn enroll_config_keys(s: &State) -> c_int {
+    let ring = keyring_dm_verity_serial();
+    if ring < 0 {
+        return boot_keys_error("lookup dm-verity keyring", ring);
     }
-    // SAFETY: the keyring and no certificates.
-    if key < 0 && unsafe { keyring_holds_exactly(ring, ptr::null(), 0) } == 1 {
-        return boot_keys_error(
-            "dm-verity keyring sealed empty at boot; boot with dm_verity.keyring_unsealed=1",
-            -ENOKEY,
-        );
+    let mut certs = Vec::with_capacity(s.certificates.len());
+    let mut added = false;
+    for c in &s.certificates {
+        certs.push(KeyringCert {
+            der: c.der.as_ptr(),
+            len: c.der.len(),
+        });
+        // SAFETY: the certificate's bytes.
+        let key = unsafe { keyring_dm_verity_add_cert(c.der.as_ptr(), c.der.len()) };
+        if key < 0 && key != -EPERM && key != -EACCES {
+            return boot_keys_error("add config verification certificate", key);
+        }
+        added |= key >= 0;
     }
-    if key >= 0 {
+    if added {
         let ret = keyring_dm_verity_seal();
         if ret == -EEXIST {
             return boot_keys_error(
@@ -892,40 +1068,23 @@ fn seal_config_key(ring: i32, der: &[u8]) -> c_int {
             return boot_keys_error("seal dm-verity keyring", ret);
         }
     }
-    let cert = KeyringCert {
-        der: der.as_ptr(),
-        len: der.len(),
-    };
-    // SAFETY: the keyring and the one certificate.
-    let ret = unsafe { keyring_holds_exactly(ring, &cert, 1) };
-    if ret <= 0 {
+    // SAFETY: the keyring and no certificates.
+    if !added && unsafe { keyring_holds_exactly(ring, ptr::null(), 0) } == 1 {
         return boot_keys_error(
-            "check dm-verity keyring holds only the config certificate",
-            if ret != 0 { ret } else { -EKEYREJECTED },
+            "dm-verity keyring sealed empty at boot; boot with dm_verity.keyring_unsealed=1",
+            -ENOKEY,
+        );
+    }
+    // SAFETY: the keyring and the certificates' views, whose bytes the
+    // state holds.
+    let ret = unsafe { keyring_holds_exactly(ring, certs.as_ptr(), certs.len()) };
+    if ret != 1 {
+        return boot_keys_error(
+            "check dm-verity verification keys",
+            if ret < 0 { ret } else { -EKEYREJECTED },
         );
     }
     0
-}
-
-fn enroll_config_key(s: &State) -> c_int {
-    let Some(fd) = s.certificate_fd.as_ref() else {
-        return boot_keys_error("read config verification certificate", -EBADF);
-    };
-    let (mut der, mut size) = (ptr::null_mut(), 0usize);
-    // SAFETY: the open certificate and rooms for its bytes.
-    let ret = unsafe { keys_read_der_fd(fd.as_raw_fd(), &mut der, &mut size) };
-    if ret != 0 {
-        return boot_keys_error("read config verification certificate", ret);
-    }
-    // SAFETY: the size bytes keys_read_der_fd() allocated.
-    let bytes = unsafe { crate::ffi::slice(der, size) }.to_vec();
-    // SAFETY: the allocation, freed once.
-    unsafe { xfree(der.cast(), size) };
-    let ring = keyring_dm_verity_serial();
-    if ring < 0 {
-        return boot_keys_error("lookup dm-verity keyring", ring);
-    }
-    seal_config_key(ring, &bytes)
 }
 
 /// Whether the shirudo commands hold the image state: the runtime
@@ -1035,7 +1194,7 @@ pub(crate) fn boot_keys(set: &mut TrustedSet) -> c_int {
     if ret != 0 {
         return boot_keys_error("mount runtime", ret);
     }
-    let ret = with_state(|s| enroll_config_key(s));
+    let ret = with_state(|s| enroll_config_keys(s));
     if ret != 0 {
         return boot_keys_error("enrol config certificate", ret);
     }
@@ -1050,7 +1209,7 @@ pub(crate) fn boot_keys(set: &mut TrustedSet) -> c_int {
     }
     let ret = with_state(|s| {
         s.boot_target = target;
-        prepare_config(s, &target, true)
+        prepare_config(s, &target, Prepare::Boot)
     });
     if ret != 0 {
         return boot_keys_error("prepare boot config", ret);
@@ -1081,7 +1240,7 @@ pub(crate) fn boot_keys_close() -> c_int {
         }
         image_config_clear();
         s.candidate_fd = None;
-        s.certificate_fd = None;
+        s.certificates.clear();
         let mut ret = 0;
         // SAFETY: a C string.
         if unsafe { umount2(CONFIG_CANDIDATE_DIR.as_ptr(), 0) } != 0 {
@@ -1184,15 +1343,11 @@ fn config_mount_check(s: &State, record: &ConfigUpdateRecord) -> c_int {
         if ret != 0 {
             return ret;
         }
-        let dir = match open_dir_path(CONFIG_IMAGE_DIR) {
-            Ok(f) => f,
+        let dir = match config_root_open(CONFIG_IMAGE_DIR, device.device, -EUCLEAN) {
+            Ok(fd) => fd,
             Err(err) => return err,
         };
-        let ret = match dir.metadata() {
-            Err(e) => io_err(&e),
-            Ok(m) if m.dev() != device.device => -EUCLEAN,
-            Ok(_) => mount_flags(dir.as_raw_fd(), false),
-        };
+        let ret = mount_flags(dir.as_raw_fd(), false);
         if ret != 0 {
             return ret;
         }
@@ -1341,17 +1496,20 @@ pub(crate) fn status(json: bool) -> c_int {
         return -ENODEV;
     }
     let mut record = zero_record();
+    let mut staged = zero_record();
     // SAFETY: the open journal and room for its record.
     let ret = with_journal(|j| unsafe { config_update_read(j, &mut record) });
     if ret != 0 {
         return ret;
     }
-    let root: String = record
-        .target
-        .root_hash
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    // SAFETY: as above, for the record staged for the next boot.
+    let ret = with_journal(|j| unsafe { config_update_stage_read(j, &mut staged) });
+    if ret != 0 && ret != -ENOENT {
+        return ret;
+    }
+    let hex = |root: &[u8; 32]| -> String { root.iter().map(|b| format!("{b:02x}")).collect() };
+    let next_root = (ret == 0).then(|| hex(&staged.target.root_hash));
+    let root = hex(&record.target.root_hash);
     let ret = if record.pending {
         -EINPROGRESS
     } else {
@@ -1366,6 +1524,10 @@ pub(crate) fn status(json: bool) -> c_int {
         let consistent = if ret != 0 { "no" } else { "yes" };
         let lines = [
             ("Config root hash:", root),
+            (
+                "Next boot root hash:",
+                next_root.unwrap_or_else(|| "none".to_owned()),
+            ),
             ("PCR:", record.pcr.to_string()),
             ("Sequence:", (record.sequence as i64).to_string()),
             ("TPM reset count:", record.reset_count.to_string()),
@@ -1378,10 +1540,14 @@ pub(crate) fn status(json: bool) -> c_int {
         }
         return ret;
     }
-    let mut buf = [0u8; 512];
+    let mut buf = [0u8; 768];
     let mut e = JsonEmit::fixed(buf.as_mut_ptr().cast(), buf.len());
     e.obj_open();
     e.kv_string(b"root_hash", root.as_bytes());
+    match &next_root {
+        Some(next) => e.kv_string(b"next_boot_root_hash", next.as_bytes()),
+        None => e.kv_null(b"next_boot_root_hash"),
+    }
     e.kv_int(b"pcr", i64::from(record.pcr));
     e.kv_int(b"sequence", record.sequence as i64);
     e.kv_int(b"reset_count", i64::from(record.reset_count));
@@ -1413,7 +1579,7 @@ pub(crate) fn leave() {
         // SAFETY: the TPM open_update() opened, or null.
         unsafe { tpm_close(s.tpm) };
         s.tpm = ptr::null_mut();
-        s.certificate_fd = None;
+        s.certificates.clear();
         // SAFETY: the bootstrap config's bytes, wiped.
         unsafe { explicit_bzero((&raw mut s.bootstrap_config).cast(), size_of::<Config>()) };
     });
@@ -1432,8 +1598,9 @@ pub(crate) fn update(prefix: &CStr) -> c_int {
         ret = mkdir_owned(IMAGE_CACHE_DIR);
     }
     if ret == 0 {
-        // SAFETY: a C string and the target to fill.
-        ret = unsafe { image_cache_fetch(prefix.as_ptr(), &mut target) };
+        ret = fetch_verified(prefix, &mut target, |image| {
+            with_state(|s| verify_config_root(s, image))
+        });
     }
     if ret == 0 {
         let pcr = with_state(|s| s.bootstrap.pcr);
@@ -1441,6 +1608,47 @@ pub(crate) fn update(prefix: &CStr) -> c_int {
         ret = with_journal(|j| unsafe { config_update_begin(j, &target, pcr) });
     }
     ret
+}
+
+/// Fetches the config image at `prefix` into the cache, prepares it as
+/// a live update would, and stages it for the next boot: 0, -ENODEV
+/// without activation state, or -errno.
+pub(crate) fn stage(prefix: &CStr) -> c_int {
+    if !journal_open() {
+        return -ENODEV;
+    }
+    let mut target = zero_target();
+    let mut ret = current_config();
+    if ret == 0 {
+        ret = mkdir_owned(IMAGE_CACHE_DIR);
+    }
+    if ret == 0 {
+        ret = fetch_verified(prefix, &mut target, |image| {
+            with_state(|s| verify_config_root(s, image))
+        });
+    }
+    if ret == 0 {
+        ret = with_state(|s| prepare_config(s, &target, Prepare::Stage));
+    }
+    if ret == 0 {
+        // SAFETY: the open journal and the prepared target.
+        ret = with_journal(|j| unsafe { config_update_stage(j, &target) });
+    }
+    ret
+}
+
+/// Drops the config staged for the next boot: 0, -ENODEV without
+/// activation state, or -errno.
+pub(crate) fn stage_cancel() -> c_int {
+    if !journal_open() {
+        return -ENODEV;
+    }
+    let ret = current_config();
+    if ret != 0 {
+        return ret;
+    }
+    // SAFETY: the open journal.
+    with_journal(|j| unsafe { config_update_clear_staged(j) })
 }
 
 mod capi {

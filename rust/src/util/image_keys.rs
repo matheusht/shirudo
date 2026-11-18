@@ -284,8 +284,8 @@ fn check_set_with(set: &TrustedSet, mut holds: impl FnMut(&[u8]) -> c_int) -> c_
     0
 }
 
-/// [`check_set_with`] the BPF keyring.
-fn check_set(set: &TrustedSet) -> c_int {
+/// [`check_set_with`] the BPF keyring: keys_check_image_set().
+pub(crate) fn check_set(set: &TrustedSet) -> c_int {
     let ring = keyring_bpf_serial();
     if ring < 0 {
         return ring;

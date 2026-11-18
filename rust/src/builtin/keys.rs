@@ -1409,7 +1409,7 @@ fn keys_show(args: &[&[u8]]) -> c_int {
     let mut id = Identity::zeroed();
     let id_rc = identity::read(&mut id);
     let n_keys = id.n_keys.min(IDENTITY_KEYS_MAX) as usize;
-    let dm_key = [id.dm_verity_key];
+    let n_dm_keys = (id.n_dm_verity_keys as usize).min(IDENTITY_KEYS_MAX as usize);
     let anchors = [
         Anchor {
             label: b".bpf",
@@ -1421,7 +1421,7 @@ fn keys_show(args: &[&[u8]]) -> c_int {
             label: b".dm-verity",
             serial: keyring_dm_verity_serial,
             frozen: id.dm_verity_ring,
-            keys: &dm_key[..usize::from(id.dm_verity_key > 0)],
+            keys: &id.dm_verity_keys[..n_dm_keys],
         },
     ];
     if let Some(e) = &mut out {

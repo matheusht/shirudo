@@ -349,6 +349,29 @@ pub(crate) fn ecdsa_p256_verify(
     }
 }
 
+/// The certificate `der` holds, as cert_read_der() reads it: -EINVAL
+/// for one that does not parse.
+pub(crate) fn x509_from_der(der: &[u8]) -> Result<X509, c_int> {
+    if der.len() > c_long::MAX as usize {
+        return Err(-EINVAL);
+    }
+    X509::from_der(der).map_err(|_| -EINVAL)
+}
+
+/// The provider's name for the certificate's key, as
+/// cert_key_algorithm() gives it into `room` bytes: -ENOPKG without one,
+/// -ENAMETOOLONG for one that does not fit.
+pub(crate) fn key_algorithm(x509: &X509Ref, room: usize) -> Result<CString, c_int> {
+    let Some(name) = x509.public_key().ok().and_then(|k| key_type_name(&k)) else {
+        clear_errors();
+        return Err(-ENOPKG);
+    };
+    if name.as_bytes().len() >= room {
+        return Err(-ENAMETOOLONG);
+    }
+    Ok(name)
+}
+
 /// The certificate in `der` into `cert`: 0 or -EINVAL.
 ///
 /// # Safety
@@ -731,8 +754,18 @@ pub(crate) unsafe fn verify_detached(
     {
         return -EINVAL;
     }
-    // SAFETY: the caller's payload.
-    let payload = unsafe { slice(payload, payload_len) };
+    // SAFETY: the caller's payload and signature.
+    let (payload, signature) =
+        unsafe { (slice(payload, payload_len), slice(signature, signature_len)) };
+    verify_detached_x509(payload, signature, x509)
+}
+
+/// Whether `signature` is a detached CMS signature of `payload` by
+/// `x509`: 0 or -EINVAL, as verify_detached() answers.
+pub(crate) fn verify_detached_x509(payload: &[u8], signature: &[u8], x509: &X509Ref) -> c_int {
+    if payload.len() > c_int::MAX as usize || signature.len() > c_int::MAX as usize {
+        return -EINVAL;
+    }
     let verified = (|| -> Result<(), ErrorStack> {
         let mut store = X509StoreBuilder::new()?;
         store.add_cert(x509.to_owned())?;
@@ -740,7 +773,7 @@ pub(crate) unsafe fn verify_detached(
         let store = store.build();
         let mut signers = Stack::new()?;
         signers.push(x509.to_owned())?;
-        let Some(mut cms) = read_cms(signature, signature_len) else {
+        let Some(mut cms) = read_cms(signature.as_ptr(), signature.len()) else {
             return Err(ErrorStack::get());
         };
         cms.verify(

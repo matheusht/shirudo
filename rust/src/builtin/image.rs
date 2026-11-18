@@ -18,6 +18,8 @@ use crate::util::image_runtime;
 const HELP: &[u8] = b"usage: shirudo image build [image builder options]\n       \
 shirudo image verify <prefix> --cert <certificate>\n       \
 shirudo image update <prefix-or-https-prefix>\n       \
+shirudo image stage <prefix-or-https-prefix>\n       \
+shirudo image stage --cancel\n       \
 shirudo image status [--json]\n";
 
 fn write(stream: *mut crate::sys::libc::File, text: &[u8]) {
@@ -46,7 +48,7 @@ unsafe fn image(argc: c_int, argv: *const *const c_char) -> c_int {
 
     if n == 2 && args[1] == b"--list-cmds" {
         // SAFETY: the C library's stdout.
-        write(unsafe { stdout }, b"build verify update status\n");
+        write(unsafe { stdout }, b"build verify update stage status\n");
         return 0;
     }
     if n < 2 || args[1] == b"--help" || args[1] == b"-h" {
@@ -70,6 +72,9 @@ unsafe fn image(argc: c_int, argv: *const *const c_char) -> c_int {
         }
         // SAFETY: the caller's C string.
         b"update" if n == 3 => image_runtime::update(unsafe { CStr::from_ptr(raw[2]) }),
+        b"stage" if n == 3 && args[2] == b"--cancel" => image_runtime::stage_cancel(),
+        // SAFETY: the caller's C string.
+        b"stage" if n == 3 => image_runtime::stage(unsafe { CStr::from_ptr(raw[2]) }),
         b"status" if n == 2 || (n == 3 && args[2] == b"--json") => {
             let ret = image_runtime::status(n == 3);
             if ret == -ENODEV {

@@ -645,53 +645,57 @@ impl KeyringView {
         k
     }
 
-    /// The config certificate comes from the runtime image's bootstrap.
+    /// The config certificates come from the runtime image's bootstrap.
     fn dm_verity(serial: i32, pinned: i32, ident: &Identity) -> Self {
-        let key = ident.dm_verity_key;
-        let frozen: &[i32] = if pinned >= 1 && key > 0 {
-            core::slice::from_ref(&ident.dm_verity_key)
+        let n_frozen = if pinned >= 1 {
+            (ident.n_dm_verity_keys as usize).min(IDENTITY_KEYS_MAX)
         } else {
-            &[]
+            0
         };
+        let frozen = &ident.dm_verity_keys[..n_frozen];
         let mut k = KeyringView::new(serial, pinned, frozen);
         // SAFETY: an all-zero bootstrap is an empty one.
         let mut boot: Box<ImageBootstrap> = Box::new(unsafe { mem::zeroed() });
-        let (mut der, mut len): (*mut u8, usize) = (ptr::null_mut(), 0);
-        let mut c = CertView {
-            sha256: [0; 32],
-            fingerprint: [0; 32],
-            primary: true,
-            info: Err(0),
-            link: None,
-        };
 
-        if pinned >= 1 && key > 0 {
-            if let Ok(links) = &k.links {
-                k.key_missing = !links.iter().any(|l| l.serial == key);
-            }
+        if let Ok(links) = &k.links {
+            k.key_missing = frozen
+                .iter()
+                .any(|key| !links.iter().any(|l| l.serial == *key));
         }
         // SAFETY: a C string and the bootstrap to fill.
         let mut rc = unsafe { image_bootstrap_read(RUNTIME_CONF_PATH.as_ptr(), &mut *boot, false) };
-        if rc == 0 && boot.certificate[0] == 0 {
+        if rc == 0 && boot.n_certificates == 0 {
             rc = -ENOENT;
         }
-        if rc == 0 {
-            // SAFETY: the certificate path, a C string, and room for the DER.
-            rc = unsafe { keys_read_der(boot.certificate.as_ptr().cast(), &mut der, &mut len) };
-        }
-        if rc == 0 {
-            // SAFETY: the DER read and room for the two digests.
-            rc = unsafe {
-                keys_digest_der(der, len, c.sha256.as_mut_ptr(), c.fingerprint.as_mut_ptr())
+        for path in &boot.certificates[..if rc == 0 { boot.n_certificates } else { 0 }] {
+            let (mut der, mut len): (*mut u8, usize) = (ptr::null_mut(), 0);
+            let mut c = CertView {
+                sha256: [0; 32],
+                fingerprint: [0; 32],
+                primary: true,
+                info: Err(0),
+                link: None,
             };
+
+            // SAFETY: the certificate path, a C string, and room for the DER.
+            rc = unsafe { keys_read_der(path.as_ptr().cast(), &mut der, &mut len) };
+            if rc == 0 {
+                // SAFETY: the DER read and room for the two digests.
+                rc = unsafe {
+                    keys_digest_der(der, len, c.sha256.as_mut_ptr(), c.fingerprint.as_mut_ptr())
+                };
+            }
+            if rc == 0 {
+                // SAFETY: the len bytes read.
+                k.add(c, unsafe { ffi::slice(der, len) });
+            }
+            // SAFETY: keys_read_der()'s buffer of len bytes, or NULL.
+            unsafe { xfree(der.cast(), len) };
+            if rc != 0 {
+                break;
+            }
         }
         k.certs_rc = rc;
-        if rc == 0 {
-            // SAFETY: the len bytes read.
-            k.add(c, unsafe { ffi::slice(der, len) });
-        }
-        // SAFETY: keys_read_der()'s buffer of len bytes, or NULL.
-        unsafe { xfree(der.cast(), len) };
         k
     }
 

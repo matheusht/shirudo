@@ -2,19 +2,20 @@
 // Copyright (c) 2026 Authors of shirudo
 
 //! The bootstrap file behind `util/image_bootstrap.h`: where the runtime
-//! and config images and the config's verification key are, the runtime
+//! and config images and the config's verification keys are, the runtime
 //! image's root hash and the PCR the config is measured into.
 
 use core::ffi::{CStr, c_char, c_int};
 use core::ptr;
 
 use super::config_measure::pcr_valid;
-use crate::errno::{EINVAL, EIO, ENAMETOOLONG, EPERM};
+use crate::errno::{E2BIG, EEXIST, EINVAL, EIO, ENAMETOOLONG, EPERM};
 use crate::ffi;
 use crate::sys::libc::{File, PATH_MAX, fclose, ferror, free};
-use crate::text::{contains, parse_u64, strscpy, trim_blanks};
+use crate::text::{contains, cstr, parse_u64, strscpy, trim_blanks};
 use crate::util::hex::hex_decode;
 use crate::util::io::read_text_line;
+use crate::util::keys::KEYS_MAX;
 
 const RUNTIME_DIR_PREFIX: &[u8] = b"/run/shirudo/runtime/";
 
@@ -23,14 +24,15 @@ const RUNTIME_DIR_PREFIX: &[u8] = b"/run/shirudo/runtime/";
 pub struct ImageBootstrap {
     pub(crate) runtime: [u8; PATH_MAX],
     pub(crate) config: [u8; PATH_MAX],
-    pub(crate) certificate: [u8; PATH_MAX],
+    pub(crate) certificates: [[u8; PATH_MAX]; KEYS_MAX],
+    pub(crate) n_certificates: usize,
     pub(crate) runtime_root: [u8; 32],
     pub(crate) pcr: u32,
     pub(crate) have_root: bool,
     pub(crate) have_pcr: bool,
 }
 
-const _: () = assert!(size_of::<ImageBootstrap>() == 12328);
+const _: () = assert!(size_of::<ImageBootstrap>() == 73776);
 
 /// An absolute path without `.` or `..` components or empty ones, and
 /// not `/`.
@@ -41,6 +43,27 @@ pub(crate) fn path_valid(path: &[u8]) -> bool {
         && !contains(path, b"//")
         && path != b"/"
         && (path.len() < 3 || !path.ends_with(b"/.."))
+}
+
+/// One more config verification certificate, a file of the runtime
+/// image named once.
+fn add_certificate(boot: &mut ImageBootstrap, path: &[u8]) -> c_int {
+    let n = boot.n_certificates;
+
+    if !path.starts_with(RUNTIME_DIR_PREFIX) || !path_valid(path) {
+        return -EPERM;
+    }
+    if n == KEYS_MAX {
+        return -E2BIG;
+    }
+    if boot.certificates[..n].iter().any(|c| cstr(c) == path) {
+        return -EEXIST;
+    }
+    if strscpy(&mut boot.certificates[n], path).is_err() {
+        return -ENAMETOOLONG;
+    }
+    boot.n_certificates += 1;
+    0
 }
 
 /// One `key = value` line, cut in place, into `boot`.
@@ -77,15 +100,7 @@ fn apply(boot: &mut ImageBootstrap, key: &[u8], value: &CStr, initial: bool) -> 
                 0
             }
         }
-        b"config.verification_key" => {
-            if !v.starts_with(RUNTIME_DIR_PREFIX) || !path_valid(v) {
-                -EPERM
-            } else if strscpy(&mut boot.certificate, v).is_err() {
-                -ENAMETOOLONG
-            } else {
-                0
-            }
-        }
+        b"config.verification_key" => add_certificate(boot, v),
         b"config.pcr" => match parse_u64(v, 23) {
             Ok(pcr) if pcr_valid(pcr as u32) == 0 => {
                 boot.pcr = pcr as u32;

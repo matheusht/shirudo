@@ -177,7 +177,7 @@ fn keyring_condition(i: &ConditionsInput, c: &mut Condition) {
         set_detail!(
             c,
             ALERT,
-            c"the config key init froze is gone from the dm-verity keyring"
+            c"a config key init froze is gone from the dm-verity keyring"
         );
     } else if i.ksp_seen != 0 && i.dmvp_seen != 0 {
         set_detail!(

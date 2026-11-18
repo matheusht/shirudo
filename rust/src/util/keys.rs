@@ -508,31 +508,61 @@ unsafe fn verify_vouch(
     if ret != 0 {
         return ret;
     }
-    let mut ret = -EKEYREJECTED;
-
-    for c in &set.certs[..set.n.min(KEYS_MAX)] {
-        if ret == 0 {
-            break;
-        }
-        let mut cert = Cert::new();
-
-        // SAFETY: room for a certificate.
-        if unsafe { cert_read(c, &mut cert) } != 0 {
-            continue;
-        }
-        // SAFETY: the payload, the caller's signature and room, and the
-        // certificate, freed once.
-        unsafe {
-            if verify_detached(payload, payload_sz, sig, sig_sz, &cert) == 0 {
-                ptr::copy_nonoverlapping(c.fingerprint.as_ptr(), voucher, 32);
-                ret = 0;
-            }
-            cert_free(&mut cert);
-        }
-    }
+    // SAFETY: the payload, and the caller's signature and room.
+    let ret = unsafe {
+        verify_signature(
+            set,
+            crate::ffi::slice(payload, payload_sz),
+            crate::ffi::slice(sig, sig_sz),
+            voucher
+                .as_mut()
+                .map(|v| &mut *ptr::from_mut(v).cast::<[u8; 32]>()),
+        )
+    };
     // SAFETY: the payload's allocation, freed once.
     unsafe { xfree(payload.cast(), payload_sz) };
     ret
+}
+
+/// Whether a member of `set` signed `payload` with the detached CMS
+/// signature `sig`: 0 with the member's fingerprint in `signer`,
+/// -EKEYREJECTED when none did, or the error of a member that does not
+/// read.
+pub(crate) fn verify_signature(
+    set: &TrustedSet,
+    payload: &[u8],
+    sig: &[u8],
+    signer: Option<&mut [u8; 32]>,
+) -> c_int {
+    for c in &set.certs[..set.n.min(KEYS_MAX)] {
+        let mut cert = Cert::new();
+
+        // SAFETY: room for a certificate.
+        let ret = unsafe { cert_read(c, &mut cert) };
+        if ret != 0 {
+            return ret;
+        }
+        // SAFETY: the payload, the signature and the certificate, freed
+        // once.
+        let ret = unsafe {
+            let ret = verify_detached(
+                payload.as_ptr(),
+                payload.len(),
+                sig.as_ptr(),
+                sig.len(),
+                &cert,
+            );
+            cert_free(&mut cert);
+            ret
+        };
+        if ret == 0 {
+            if let Some(signer) = signer {
+                *signer = c.fingerprint;
+            }
+            return 0;
+        }
+    }
+    -EKEYREJECTED
 }
 
 impl TrustedCert {
@@ -1664,6 +1694,30 @@ mod capi {
     ///
     /// `set` is a set, `der` and `sig` hold `der_sz` and `sig_sz` bytes,
     /// and `voucher` is room for 32.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn keys_verify_signature(
+        set: *const TrustedSet,
+        payload: *const u8,
+        payload_sz: usize,
+        sig: *const u8,
+        sig_sz: usize,
+        signer: *mut u8,
+    ) -> c_int {
+        // SAFETY: the caller passes a set, the bytes and room or NULL.
+        unsafe {
+            super::verify_signature(
+                &*set,
+                crate::ffi::slice(payload, payload_sz),
+                crate::ffi::slice(sig, sig_sz),
+                signer.cast::<[u8; 32]>().as_mut(),
+            )
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `set` is a trust set, `der` and `sig` hold `der_sz` and `sig_sz`
+    /// bytes, and `voucher` has room for 32.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn keys_verify_vouch(
         set: *const TrustedSet,
