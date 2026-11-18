@@ -13,7 +13,9 @@
 #   .github/scripts/check-spdx.sh
 #
 # Runs from anywhere inside the checkout. Vendored C keeps its upstream
-# tag, which has to name one of the licences listed in vendor_ok().
+# tag, which has to name one of the licences listed in vendor_ok(). A
+# crate vendored in rust/vendor declares its licence in its Cargo.toml,
+# which has to be one listed in crate_ok().
 
 set -eu
 
@@ -54,6 +56,16 @@ vendor_ok() {
 	'(LGPL-2.1 OR BSD-2-Clause)'|'BSD-2-Clause'|\
 	'GPL-2.0 WITH Linux-syscall-note'|\
 	'((GPL-2.0 WITH Linux-syscall-note) OR BSD-3-Clause)')
+		return 0 ;;
+	esac
+	return 1
+}
+
+# The licences a vendored crate may declare: permissive, and offering a
+# branch the binaries can take beside BSD-2-Clause.
+crate_ok() {
+	case "$1" in
+	'MIT OR Zlib OR Apache-2.0'|'0BSD OR MIT OR Apache-2.0')
 		return 0 ;;
 	esac
 	return 1
@@ -188,6 +200,7 @@ expr_of() {
 
 : >"$work/files"
 : >"$work/vendor"
+: >"$work/crates"
 : >"$work/exprs"
 git ls-files | while IFS= read -r f; do
 	excluded "$f" && continue
@@ -196,6 +209,10 @@ git ls-files | while IFS= read -r f; do
 	case "$f" in
 	vendor/*)
 		printf '%s\n' "$f" >>"$work/vendor" ;;
+	rust/vendor/*/Cargo.toml)
+		printf '%s\n' "$f" >>"$work/crates" ;;
+	rust/vendor/*)
+		;;
 	*)
 		printf '%s\n' "$f" >>"$work/files" ;;
 	esac
@@ -221,6 +238,14 @@ while IFS= read -r f; do
 	checked=$((checked + 1))
 	check_vendor "$f"
 done <"$work/vendor"
+
+# A vendored crate's licence is the one its Cargo.toml declares.
+while IFS= read -r f; do
+	checked=$((checked + 1))
+	lic=$(sed -n '/^\[package\]/,/^\[/s/^license[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$f" | head -n 1)
+	crate_ok "$lic" ||
+		report "$f" "crate licence '${lic:-none}' is not one a vendored crate may declare"
+done <"$work/crates"
 
 # Everything clang -target bpf compiles, the LSM and its loaders under
 # bpf/ and every *.bpf.c, plus the headers they include by relative

@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026 Authors of shirudo
+#
+# The crates rust/Cargo.lock pins come from rust/vendor, so that cargo
+# builds offline; `cargo vendor --manifest-path rust/Cargo.toml
+# rust/vendor` refreshes them.
+
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "rust/vendor"

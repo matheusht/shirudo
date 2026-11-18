@@ -209,7 +209,8 @@ CFLAGS += $(LUAJIT_CFLAGS) -DHAVE_LUAJIT
 DYNAMIC_LIBS += $(LUAJIT_LIBS)
 
 # What the binaries link: libelf is libbpf's, which reads ELF for the
-# tests, where the binaries read it themselves (util/elf_file.rs).
+# tests. Rust reads uprobe ELF files and gzip streams itself, while
+# remaining C helpers and vendored libbpf still need these libraries.
 
 ifeq ($(PROFILE),target)
 CFLAGS += -fPIE

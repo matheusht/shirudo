@@ -7,7 +7,7 @@
 # manager cannot see: the target binary links OpenSSL, libcurl, TPM2-TSS
 # and the distribution's zlib and LuaJIT archives
 # statically, including the C and compiler runtimes, and both roles link
-# the vendored libbpf.
+# the vendored libbpf and the crates vendored in rust/vendor.
 #
 #   .github/scripts/gen-sbom.sh <package>...
 #
@@ -92,6 +92,28 @@ libbpf_component() {
 		NOASSERTION "pkg:generic/libbpf@$major.$minor" \
 		"vendored from tools/lib/bpf of the Linux tree at $commit" \
 		"$(cpe libbpf_project libbpf "$major.$minor")"
+}
+
+# The crates rust/Cargo.lock pins, vendored in rust/vendor, each with the
+# licence its Cargo.toml declares.
+crate_components() {
+	awk '
+		/^\[\[package\]\]/ { if (src != "") print name, ver, sum; name = ver = src = sum = "" }
+		/^name = / { name = $3 }
+		/^version = / { ver = $3 }
+		/^source = / { src = $3 }
+		/^checksum = / { sum = $3 }
+		END { if (src != "") print name, ver, sum }
+	' "$root/rust/Cargo.lock" | tr -d '"' |
+	while read -r name ver sum; do
+		toml=$root/rust/vendor/$name/Cargo.toml
+		lic=$(sed -n '/^\[package\]/,/^\[/s/^license[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$toml" | head -n 1)
+		[ -n "$lic" ] || die "cannot read the licence of the vendored crate $name"
+		component "$name" "$ver" "$lic" \
+			"https://crates.io/api/v1/crates/$name/$ver/download" \
+			"pkg:cargo/$name@$ver" \
+			"vendored in rust/vendor from crates.io, sha256 $sum"
+	done
 }
 
 deb_license() {
@@ -184,6 +206,7 @@ target_components() {
 }
 
 libbpf_component >"$work/common"
+crate_components >>"$work/common"
 
 for pkg; do
 	[ -f "$pkg" ] || die "$pkg: no such file"

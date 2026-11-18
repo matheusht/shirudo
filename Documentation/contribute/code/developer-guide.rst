@@ -285,6 +285,21 @@ point ``SHIRUDO_TARGET_PKG_CONFIG_PATH`` and
 ``SHIRUDO_TARGET_STATIC_LIBDIR`` at them. ``make target-deps-clean``
 removes ``build/target-deps``.
 
+Refresh the vendored crates
+---------------------------
+
+:src:`rust/vendor` holds the crates :src:`rust/Cargo.lock` pins, which
+:src:`.cargo/config.toml` points cargo at, so that it builds offline.
+After a change to :src:`rust/Cargo.toml` or the lock file, refresh them:
+
+.. code-block:: console
+
+   $ cargo vendor --manifest-path rust/Cargo.toml rust/vendor
+
+:src:`.github/scripts/check-spdx.sh` checks the licence each crate's
+``Cargo.toml`` declares, and :src:`.github/scripts/gen-sbom.sh` lists the
+crates in each package's SBOM.
+
 Refresh the vendored libbpf
 ---------------------------
 

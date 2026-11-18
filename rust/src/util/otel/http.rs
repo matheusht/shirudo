@@ -24,7 +24,6 @@ use crate::sys::curl::{
     set_callback, set_long, set_off, set_ptr,
 };
 use crate::sys::libc::{Tm, getrandom, strptime, timegm};
-use crate::sys::zlib::{ZStream, compressBound, deflate, deflateEnd, deflateInit2_};
 use crate::text::parse_s64;
 use crate::util::json::{JsonField, parse_schema};
 use crate::util::tls_openssl::tls_curl_policy;
@@ -49,11 +48,6 @@ const CURLOPT_SSLKEY: c_int = 10087;
 const CURLUPART_USER: c_int = 2;
 const CURLUPART_PASSWORD: c_int = 3;
 const CURLE_OPERATION_TIMEDOUT: CurlCode = 28;
-
-const Z_FINISH: c_int = 4;
-const Z_STREAM_END: c_int = 1;
-const Z_DEFAULT_COMPRESSION: c_int = -1;
-const Z_DEFLATED: c_int = 8;
 
 fn say(text: String) {
     let text = CString::new(text).unwrap_or_default();
@@ -595,47 +589,10 @@ pub(super) fn attempt_error(code: CurlCode) -> c_int {
 
 /// The JSON gzipped as one stream.
 fn gzip(data: &[u8]) -> Result<Vec<u8>, c_int> {
-    // zlib counts in uInt; a longer input would be cut short silently.
     if data.len() > u32::MAX as usize {
         return Err(-EFBIG);
     }
-    // SAFETY: a computation.
-    let cap = (unsafe { compressBound(data.len() as _) } as usize).saturating_add(32);
-    if cap > u32::MAX as usize {
-        return Err(-EFBIG);
-    }
-    let mut out = vec![0u8; cap];
-    let mut z = ZStream::zeroed();
-    // SAFETY: the stream, gzip framing, and the zlib it was built for.
-    if unsafe {
-        deflateInit2_(
-            &mut z,
-            Z_DEFAULT_COMPRESSION,
-            Z_DEFLATED,
-            15 + 16,
-            8,
-            0,
-            crate::sys::zlib::ZLIB_VERSION.as_ptr(),
-            size_of::<ZStream>() as c_int,
-        )
-    } != 0
-    {
-        return Err(-EIO);
-    }
-    z.next_in = data.as_ptr().cast_mut();
-    z.avail_in = data.len() as u32;
-    z.next_out = out.as_mut_ptr();
-    z.avail_out = cap as u32;
-    // SAFETY: the stream, its input and output set above.
-    let zr = unsafe { deflate(&mut z, Z_FINISH) };
-    let total = z.total_out as usize;
-    // SAFETY: the stream, ended once.
-    unsafe { deflateEnd(&mut z) };
-    if zr != Z_STREAM_END {
-        return Err(-EIO);
-    }
-    out.truncate(total);
-    Ok(out)
+    crate::util::gzip::gzip(data).map_err(|_| -EIO)
 }
 
 /// An OTLP endpoint for one signal, set up from the options and the

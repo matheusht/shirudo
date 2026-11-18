@@ -9,6 +9,12 @@ rust-version = "1.85"
 license = "BSD-2-Clause"
 publish = false
 
+# Each crate is vendored in rust/vendor and pinned in Cargo.lock, which
+# .cargo/config.toml takes it from, so that cargo builds offline.
+[dependencies]
+# Inflate and deflate for gzip (rust/src/util/gzip.rs), in place of zlib.
+miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
+
 # The C binaries link this archive.
 [lib]
 name = "shirudo_rs"

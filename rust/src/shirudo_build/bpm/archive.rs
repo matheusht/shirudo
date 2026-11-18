@@ -16,7 +16,7 @@ use super::{build, path};
 use crate::errno::{E2BIG, EFBIG, EINVAL, EIO, ENAMETOOLONG, ENOENT};
 use crate::sys::libc::{access, fwrite, stdout};
 use crate::sys::version::shirudo_version;
-use crate::sys::zlib::{GzFileS, gzclose, gzopen, gzwrite};
+use crate::util::gzip::GzWrite;
 use crate::util::json::JsonEmit;
 use crate::util::timefmt::iso8601;
 
@@ -49,8 +49,9 @@ pub(super) fn read_file(p: &[u8], max: usize) -> Result<Vec<u8>, c_int> {
     Ok(body)
 }
 
-/// The gzip stream the archive goes into.
-struct Tar(*mut GzFileS);
+/// The gzip stream the archive goes into, as zlib's gzopen(path, "wb9")
+/// writes it.
+struct Tar(GzWrite<std::fs::File>);
 
 impl Tar {
     fn write(&mut self, data: &[u8]) -> c_int {
@@ -60,9 +61,7 @@ impl Tar {
         if data.len() > i32::MAX as usize {
             return -EFBIG;
         }
-        // SAFETY: the open stream and the bytes.
-        let n = unsafe { gzwrite(self.0, data.as_ptr().cast(), data.len() as u32) };
-        if n == data.len() as c_int { 0 } else { -EIO }
+        if self.0.write(data).is_ok() { 0 } else { -EIO }
     }
 
     /// One ustar entry, its header and its data padded to 512 bytes.
@@ -279,16 +278,16 @@ pub(super) fn write(
     let Ok(cert) = read_file(cert_path, MAX_FILE) else {
         return -ENOENT;
     };
-    let out = CString::new(output.clone()).unwrap_or_default();
-    // SAFETY: a C string and the mode.
-    let gz = unsafe { gzopen(out.as_ptr(), c"wb9".as_ptr()) };
-    if gz.is_null() {
-        return super::last_err();
-    }
-    let mut tar = Tar(gz);
+    let file = match std::fs::File::create(path(&output)) {
+        Ok(f) => f,
+        Err(e) => return -e.raw_os_error().unwrap_or(EIO),
+    };
+    let mut tar = match GzWrite::new(file, 9, 3) {
+        Ok(gz) => Tar(gz),
+        Err(_) => return -EIO,
+    };
     let mut ret = entries(&mut tar, spec, &top, &cert, &env);
-    // SAFETY: the stream opened above, closed once.
-    if unsafe { gzclose(tar.0) } != 0 && ret == 0 {
+    if tar.0.finish().is_err() && ret == 0 {
         ret = -EIO;
     }
     if ret != 0 {

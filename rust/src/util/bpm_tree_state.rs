@@ -6,19 +6,15 @@
 //! record a sync keeps, and the tree eventlog whose projection chain it
 //! replays.
 
-use core::ffi::{CStr, c_char, c_int, c_uint};
+use core::ffi::{CStr, c_char, c_int};
 use core::ptr;
 
-use crate::errno::{E2BIG, EFBIG, EINVAL, ENAMETOOLONG, ENOENT, ENOMEM, ENOSPC};
+use crate::errno::{E2BIG, EINVAL, ENAMETOOLONG, ENOENT, ENOMEM, ENOSPC};
 use crate::ffi;
-use crate::heap::{libc_free, xfree, xreallocarray};
+use crate::heap::{libc_free, xfree, xmalloc};
 use crate::sys::libc::{
     File, O_RDONLY, PATH_MAX, R_OK, Utsname, access, close, errno, fclose, fdopen, fopen, strerror,
     uname,
-};
-use crate::sys::zlib::{
-    MAX_WBITS, Z_MEM_ERROR, Z_NO_FLUSH, Z_OK, Z_STREAM_END, ZLIB_VERSION, ZStream, inflate,
-    inflateEnd, inflateInit2_,
 };
 use crate::text::{cstr, find, strscpy, strsprintf};
 use crate::util::bpm_tree::{
@@ -308,8 +304,9 @@ fn config_line(line: &[u8], kv: &mut KconfigValues<'_>) -> c_int {
 
 /// The one gzip member of `input`, with nothing behind it, into an
 /// allocation of `*cap` bytes holding `*out_len` and a NUL. Not through
-/// gzgets(): zlib 1.3.2 reads on past the end of a member into a next
-/// one, finds that cut short, and has gzclose() fail the whole file.
+/// a gzip file's reads: zlib 1.3.2 reads on past the end of a member
+/// into a next one, finds that cut short, and has gzclose() fail the
+/// whole file.
 ///
 /// # Safety
 ///
@@ -321,76 +318,22 @@ unsafe fn gunzip(
     out_len: &mut usize,
     cap: &mut usize,
 ) -> c_int {
-    let mut have = 0usize;
-    let mut size = 0usize;
-    let mut z = ZStream::zeroed();
-    let mut buf: *mut u8 = ptr::null_mut();
-    let mut ret = 0;
-
-    // SAFETY: a zeroed stream, the window of a gzip member, and the
-    // version and size of the stream shirudo builds with.
-    if unsafe {
-        inflateInit2_(
-            &mut z,
-            16 + MAX_WBITS,
-            ZLIB_VERSION.as_ptr(),
-            size_of::<ZStream>() as c_int,
-        )
-    } != Z_OK
-    {
+    // SAFETY: the caller's len bytes.
+    let input = unsafe { ffi::slice(input, len) };
+    let text = match crate::util::gzip::gunzip_one(input, KCONFIG_MAX) {
+        Ok(t) => t,
+        Err(err) => return -err,
+    };
+    // SAFETY: a size, the text and its NUL.
+    let buf = unsafe { xmalloc(text.len() + 1) }.cast::<u8>();
+    if buf.is_null() {
         return -ENOMEM;
     }
-    z.next_in = input;
-    z.avail_in = len as c_uint;
-    loop {
-        if have == size {
-            if size >= KCONFIG_MAX {
-                ret = -EFBIG;
-                break;
-            }
-            let want = (if size != 0 { size * 2 } else { 65536 }).min(KCONFIG_MAX);
-            let old = if size != 0 { size + 1 } else { 0 };
-            // SAFETY: the buffer so far, of old bytes, or NULL.
-            let grown = unsafe { xreallocarray(buf.cast(), old, want + 1, 1) };
-
-            if grown.is_null() {
-                ret = -ENOMEM;
-                break;
-            }
-            buf = grown.cast();
-            size = want;
-        }
-        // SAFETY: the room left in the buffer.
-        z.next_out = unsafe { buf.add(have) };
-        z.avail_out = (size - have) as c_uint;
-        // SAFETY: the stream, set to read the input into that room.
-        let zret = unsafe { inflate(&mut z, Z_NO_FLUSH) };
-
-        have = size - z.avail_out as usize;
-        if zret == Z_MEM_ERROR {
-            ret = -ENOMEM;
-        } else if zret != Z_OK && zret != Z_STREAM_END {
-            ret = -EINVAL;
-        }
-        if ret != 0 || zret == Z_STREAM_END {
-            break;
-        }
-    }
-    if ret == 0 && z.avail_in != 0 {
-        ret = -EINVAL;
-    }
-    // SAFETY: the stream inflateInit2_() set up, ended once.
-    unsafe { inflateEnd(&mut z) };
-    if ret != 0 {
-        // SAFETY: the buffer, of size + 1 bytes once allocated, or NULL.
-        unsafe { xfree(buf.cast(), if size != 0 { size + 1 } else { 0 }) };
-        return ret;
-    }
-    // SAFETY: the byte after the output, within the size + 1 allocated.
-    unsafe { *buf.add(have) = 0 };
+    // SAFETY: the text.len() + 1 bytes xmalloc() gave, zeroed.
+    unsafe { core::ptr::copy_nonoverlapping(text.as_ptr(), buf, text.len()) };
     *out = buf;
-    *out_len = have;
-    *cap = size + 1;
+    *out_len = text.len();
+    *cap = text.len() + 1;
     0
 }
 

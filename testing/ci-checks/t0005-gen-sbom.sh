@@ -94,10 +94,10 @@ T=shirudo-target_1.0_amd64.deb
 
 test_expect_success 'a target package lists its static closure and libbpf' '
 	run sh "$S" "$W/out/$T" &&
-	doc $T "[.packages[].name] | sort == [\"curl\", \"libbpf\", \"libc6-dev\", \"libelf-dev\", \"libgcc-14-dev\", \"openssl\", \"shirudo-target\", \"tpm2-tss\", \"zlib1g-dev\"]" &&
+	doc $T "[.packages[].name] | sort == [\"adler2\", \"curl\", \"libbpf\", \"libc6-dev\", \"libelf-dev\", \"libgcc-14-dev\", \"miniz_oxide\", \"openssl\", \"shirudo-target\", \"tpm2-tss\", \"zlib1g-dev\"]" &&
 	doc $T ".packages[] | select(.name == \"openssl\") | .versionInfo == \"3.5.9\"" &&
 	doc $T ".packages[] | select(.name == \"tpm2-tss\") | .versionInfo == \"4.1.3\"" &&
-	doc $T "[.relationships[] | select(.relationshipType == \"CONTAINS\")] | length == 8"
+	doc $T "[.relationships[] | select(.relationshipType == \"CONTAINS\")] | length == 10"
 '
 
 test_expect_success 'the document describes the package by its checksum and version' '
@@ -131,10 +131,10 @@ test_expect_success 'a compiler runtime without distribution provenance fails' '
 	grep -q "cannot account for .*unowned.a" "$W/err"
 '
 
-test_expect_success 'an operator package lists libbpf alone and needs no target build' '
+test_expect_success 'an operator package lists libbpf and the vendored crates alone and needs no target build' '
 	run env -u SHIRUDO_TARGET_PKG_CONFIG_PATH -u SHIRUDO_TARGET_STATIC_LIBDIR \
 		sh "$S" "$W/out/shirudo-operator_1.0_amd64.deb" &&
-	doc shirudo-operator_1.0_amd64.deb "[.packages[].name] | sort == [\"libbpf\", \"shirudo-operator\"]"
+	doc shirudo-operator_1.0_amd64.deb "[.packages[].name] | sort == [\"adler2\", \"libbpf\", \"miniz_oxide\", \"shirudo-operator\"]"
 '
 
 test_expect_success 'a static archive no package installed fails' '

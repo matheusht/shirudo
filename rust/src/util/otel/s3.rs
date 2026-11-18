@@ -28,11 +28,11 @@ use crate::sys::curl::{
     curl_easy_getinfo, curl_easy_init, curl_easy_perform, set_callback, set_long, set_off, set_ptr,
 };
 use crate::sys::libc::{fchmod, mkstemp, unlink};
-use crate::sys::zlib::{GzHeader, ZStream, deflate, deflateEnd, deflateInit2_, deflateSetHeader};
 use crate::util::crypto_openssl::{
     Sha256Ctx, base64_encode, sha256_final, sha256_free, sha256_init, sha256_update,
 };
 use crate::util::decode::{upatch_decode_map_file_json_limit, upatch_decode_map_json_limit};
+use crate::util::gzip::GzWrite;
 use crate::util::tls_openssl::tls_curl_policy;
 
 /// S3_URL_MAX and the rest of the C's limits.
@@ -43,7 +43,6 @@ const REGION_MAX: usize = 64;
 const KEY_MAX: usize = 1024;
 const HOST_MAX: usize = 256;
 const DECODER_JSON_MAX: usize = 64 * 1024 * 1024;
-const GZIP_BUFFER: usize = 64 * 1024;
 const PATH_MAX: usize = 4096;
 
 const CURLOPT_UPLOAD: c_int = 46;
@@ -52,11 +51,6 @@ const CURLOPT_READFUNCTION: c_int = 20012;
 const CURLOPT_INFILESIZE_LARGE: c_int = 30115;
 const CURLOPT_USERPWD: c_int = 10005;
 const CURLOPT_AWS_SIGV4: c_int = 10305;
-
-const Z_OK: c_int = 0;
-const Z_STREAM_END: c_int = 1;
-const Z_NO_FLUSH: c_int = 0;
-const Z_FINISH: c_int = 4;
 
 fn env(name: &str) -> Option<Vec<u8>> {
     std::env::var_os(name)
@@ -115,146 +109,100 @@ fn errno() -> c_int {
         .unwrap_or(EIO)
 }
 
+/// Where a snapshot's gzip stream goes: its file, hashed and counted.
+struct Sink {
+    file: File,
+    md: Sha256Ctx,
+    object_bytes: u64,
+}
+
+impl std::io::Write for Sink {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        let total = self
+            .object_bytes
+            .checked_add(data.len() as u64)
+            .ok_or_else(|| std::io::Error::from_raw_os_error(EOVERFLOW))?;
+        if !data.is_empty() {
+            self.file.write_all(data)?;
+            // SAFETY: the context and the bytes.
+            if unsafe { sha256_update(&mut self.md, data.as_ptr().cast(), data.len()) } != 0 {
+                return Err(std::io::Error::from_raw_os_error(EIO));
+            }
+        }
+        self.object_bytes = total;
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Drop for Sink {
+    fn drop(&mut self) {
+        // SAFETY: the context, freed once.
+        unsafe { sha256_free(&mut self.md) };
+    }
+}
+
+/// The -errno of a write to the sink.
+fn sink_err(e: std::io::Error) -> c_int {
+    -e.raw_os_error().unwrap_or(EIO)
+}
+
 /// The gzip stream of a snapshot into its file, hashed as it goes. A
 /// header of time 0 makes the same JSON the same object.
 struct Writer {
-    file: File,
-    z: Box<ZStream>,
-    header: Box<GzHeader>,
-    md: Sha256Ctx,
+    gz: GzWrite<Sink>,
     json_bytes: u64,
-    object_bytes: u64,
-    deflating: bool,
 }
 
 impl Writer {
     fn new(file: File) -> Result<Self, c_int> {
-        let mut w = Writer {
+        let mut sink = Sink {
             file,
-            z: Box::new(ZStream::zeroed()),
-            header: Box::new(GzHeader::zeroed()),
             md: Sha256Ctx::new(),
-            json_bytes: 0,
             object_bytes: 0,
-            deflating: false,
         };
         // SAFETY: the context, set up once.
-        if unsafe { sha256_init(&mut w.md) } != 0 {
+        if unsafe { sha256_init(&mut sink.md) } != 0 {
             return Err(-EIO);
         }
-        // SAFETY: the stream, gzip framing, and the zlib it was built for.
-        let zr = unsafe {
-            deflateInit2_(
-                &mut *w.z,
-                -1,
-                8,
-                15 + 16,
-                8,
-                0,
-                crate::sys::zlib::ZLIB_VERSION.as_ptr(),
-                size_of::<ZStream>() as c_int,
-            )
-        };
-        if zr != Z_OK {
-            return Err(-EIO);
-        }
-        w.deflating = true;
-        w.header.time = 0;
-        w.header.os = 255;
-        // SAFETY: the stream and the header, which outlives it.
-        if unsafe { deflateSetHeader(&mut *w.z, &mut *w.header) } != Z_OK {
-            return Err(-EIO);
-        }
-        Ok(w)
+        let gz = GzWrite::new(sink, -1, 255).map_err(sink_err)?;
+        Ok(Writer { gz, json_bytes: 0 })
     }
 
-    fn write_compressed(&mut self, data: &[u8]) -> Result<(), c_int> {
-        let total = self
-            .object_bytes
-            .checked_add(data.len() as u64)
-            .ok_or(-EOVERFLOW)?;
-        if !data.is_empty() {
-            self.file.write_all(data).map_err(|_| -EIO)?;
-            // SAFETY: the context and the bytes.
-            if unsafe { sha256_update(&mut self.md, data.as_ptr().cast(), data.len()) } != 0 {
-                return Err(-EIO);
-            }
-        }
-        self.object_bytes = total;
-        Ok(())
-    }
-
-    /// One round of deflate() into a buffer, and what it made written.
-    fn round(&mut self, flush: c_int) -> Result<c_int, c_int> {
-        let mut out = vec![0u8; GZIP_BUFFER];
-        self.z.next_out = out.as_mut_ptr();
-        self.z.avail_out = GZIP_BUFFER as u32;
-        // SAFETY: the stream, its input set by the caller and its output
-        // here.
-        let zr = unsafe { deflate(&mut *self.z, flush) };
-        let produced = GZIP_BUFFER - self.z.avail_out as usize;
-        if zr != Z_OK && !(flush == Z_FINISH && zr == Z_STREAM_END) {
-            return Err(-EIO);
-        }
-        self.write_compressed(&out[..produced])?;
-        Ok(zr)
-    }
-
-    fn json(&mut self, mut data: &[u8]) -> Result<(), c_int> {
+    fn json(&mut self, data: &[u8]) -> Result<(), c_int> {
         self.json_bytes = self
             .json_bytes
             .checked_add(data.len() as u64)
             .ok_or(-EOVERFLOW)?;
-        while !data.is_empty() {
-            let chunk = data.len().min(u32::MAX as usize);
-            self.z.next_in = data.as_ptr().cast_mut();
-            self.z.avail_in = chunk as u32;
-            while self.z.avail_in != 0 {
-                self.round(Z_NO_FLUSH)?;
-            }
-            data = &data[chunk..];
-        }
-        Ok(())
+        self.gz.write(data).map_err(sink_err)
     }
 
-    fn finish(mut self) -> Result<Snapshot, c_int> {
-        while self.round(Z_FINISH)? != Z_STREAM_END {}
-        self.deflating = false;
-        // SAFETY: the stream, ended once.
-        if unsafe { deflateEnd(&mut *self.z) } != Z_OK {
-            return Err(-EIO);
-        }
+    fn finish(self) -> Result<Snapshot, c_int> {
+        let json_bytes = self.json_bytes;
+        let mut sink = self.gz.finish().map_err(sink_err)?;
         let mut sha256 = [0u8; 32];
         // SAFETY: the context and room for its digest.
-        if unsafe { sha256_final(&mut self.md, sha256.as_mut_ptr()) } != 0 {
+        if unsafe { sha256_final(&mut sink.md, sha256.as_mut_ptr()) } != 0 {
             return Err(-EIO);
         }
-        self.file.flush().map_err(|_| -EIO)?;
-        self.file.seek(SeekFrom::Start(0)).map_err(|_| -EIO)?;
+        sink.file.flush().map_err(|_| -EIO)?;
+        sink.file.seek(SeekFrom::Start(0)).map_err(|_| -EIO)?;
         let mut b64 = [0u8; 45];
         // SAFETY: the digest and room for its 44 characters and a NUL.
         if unsafe { base64_encode(sha256.as_ptr(), 32, b64.as_mut_ptr().cast(), b64.len()) } != 0 {
             return Err(-EIO);
         }
-        let file = self.file.try_clone().map_err(|_| -EIO)?;
+        let file = sink.file.try_clone().map_err(|_| -EIO)?;
         Ok(Snapshot {
             file,
-            json_bytes: self.json_bytes,
-            object_bytes: self.object_bytes,
+            json_bytes,
+            object_bytes: sink.object_bytes,
             sha256_hex: String::from_utf8_lossy(&super::hex_lower(&sha256)).into_owned(),
             sha256_b64: String::from_utf8_lossy(&b64[..44]).into_owned(),
         })
-    }
-}
-
-impl Drop for Writer {
-    fn drop(&mut self) {
-        if self.deflating {
-            // SAFETY: the stream, ended once.
-            unsafe { deflateEnd(&mut *self.z) };
-        }
-        // SAFETY: the context, freed once.
-        unsafe { sha256_free(&mut self.md) };
     }
 }
 
