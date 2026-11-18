@@ -22,7 +22,7 @@ use openssl::x509::{X509, X509NameRef};
 
 use crate::errno::{EACCES, EINVAL, EIO, EKEYREJECTED, ENODEV, ENOENT, ENOKEY, ESTALE};
 use crate::ffi;
-use crate::heap::{libc_free, xfree};
+use crate::heap::libc_free;
 use crate::sys::identity::Identity;
 use crate::sys::libc::{
     Dirent, O_CLOEXEC, O_RDONLY, PATH_MAX, alphasort, errno, fwrite, open, scandir, stdout,
@@ -49,8 +49,8 @@ use crate::util::io::check_trusted;
 use crate::util::json::JsonEmit;
 use crate::util::keyring;
 use crate::util::keys::{
-    KEYS_MAX, TrustedSet, digest_der, keys_install, keys_is_revoked, keys_load, keys_read_der,
-    members, verify_vouch,
+    KEYS_MAX, TrustedSet, digest_der, install, is_revoked, keys_load, members, read_der,
+    verify_vouch,
 };
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::paths::{key_files, keys_dir, path_exists};
@@ -686,36 +686,6 @@ fn new_set() -> Box<TrustedSet> {
     Box::new(unsafe { core::mem::zeroed() })
 }
 
-/// The bytes keys_read_der() read, freed when they go.
-struct Der(*mut u8, usize);
-
-impl Der {
-    fn bytes(&self) -> &[u8] {
-        if self.0.is_null() {
-            return &[];
-        }
-        // SAFETY: the len bytes read.
-        unsafe { core::slice::from_raw_parts(self.0, self.1) }
-    }
-}
-
-impl Drop for Der {
-    fn drop(&mut self) {
-        // SAFETY: the reader's allocation, or NULL.
-        unsafe { xfree(self.0.cast(), self.1) };
-    }
-}
-
-fn read_der(path: &CStr) -> Result<Der, c_int> {
-    let mut der = Der(ptr::null_mut(), 0);
-
-    // SAFETY: a C string and room for the bytes and their length.
-    match unsafe { keys_read_der(path.as_ptr(), &mut der.0, &mut der.1) } {
-        0 => Ok(der),
-        err => Err(err),
-    }
-}
-
 /// The public key must be one the kernel verifies loaders with.
 fn check_cert_algorithm(der: &[u8], what: &[u8]) -> c_int {
     let mut cert = Cert::new();
@@ -822,12 +792,12 @@ fn keys_add(args: &[&CStr]) -> c_int {
             return 1;
         }
     };
-    let Ok(digests) = digest_der(der.bytes()) else {
+    let Ok(digests) = digest_der(&der) else {
         error(&[b"keys add: ", cert, b" is not a certificate"]);
         return 1;
     };
     let fp = digests.fingerprint;
-    if check_cert_algorithm(der.bytes(), cert) != 0 {
+    if check_cert_algorithm(&der, cert) != 0 {
         return 1;
     }
     let fp_hex = hex(&fp);
@@ -844,8 +814,7 @@ fn keys_add(args: &[&CStr]) -> c_int {
         ]);
         return 1;
     }
-    // SAFETY: a C string and the fingerprint.
-    if unsafe { keys_is_revoked(revoked.as_ptr(), &fp) } {
+    if is_revoked(&revoked, &fp) {
         error(&[b"keys add: ", &fp_hex, b" was revoked on this target"]);
         return 1;
     }
@@ -857,7 +826,7 @@ fn keys_add(args: &[&CStr]) -> c_int {
             return 1;
         }
     };
-    let Ok(by) = verify_vouch(&set, der.bytes(), sig.bytes()) else {
+    let Ok(by) = verify_vouch(&set, &der, &sig) else {
         let n = set.len();
         error(&[
             b"keys add: ",
@@ -903,35 +872,25 @@ fn keys_add(args: &[&CStr]) -> c_int {
         ]);
         return 1;
     }
-    let mut out = [0u8; PATH_MAX];
-    // SAFETY: a C string, the two byte runs and room for the path.
-    let ret = unsafe {
-        keys_install(
-            keys_dir.as_ptr(),
-            der.0,
-            der.1,
-            sig.0,
-            sig.1,
-            out.as_mut_ptr().cast(),
-            out.len(),
-        )
+    let installed = match install(keys_dir, &der, &sig) {
+        Ok(path) => path,
+        Err(ret) => {
+            error(&[
+                b"keys add: install under ",
+                keys_dir.to_bytes(),
+                b"/trusted: ",
+                strerr(-ret),
+            ]);
+            return 1;
+        }
     };
-    if ret != 0 {
-        error(&[
-            b"keys add: install under ",
-            keys_dir.to_bytes(),
-            b"/trusted: ",
-            strerr(-ret),
-        ]);
-        return 1;
-    }
     audit(&[
         b"keys add: fingerprint=",
         &fp_hex,
         b" vouched_by=",
         &by_hex,
         b" path=",
-        cstr(&out),
+        installed.to_bytes(),
     ]);
     info(&[
         b"keys add: ",

@@ -10,7 +10,6 @@ use core::ffi::{CStr, c_int};
 use std::ffi::CString;
 
 use crate::errno::{EINVAL, EKEYREJECTED, ENOENT, ENOKEY, last_errno, text};
-use crate::heap::xfree;
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW, O_NONBLOCK, S_IFMT, S_IFREG, Statx, close, closedir,
@@ -20,7 +19,7 @@ use crate::util::image_config;
 use crate::util::io::stat_fd;
 use crate::util::keyring;
 use crate::util::keys::{
-    TrustedSet, cert_der, digest_der, keys_load_image_root, keys_read_der_fd, members,
+    TrustedSet, cert_der, digest_der, keys_load_image_root, members, read_der_fd,
 };
 
 /// KEYS_DER_MAX: the largest certificate a key file holds.
@@ -115,17 +114,9 @@ fn revoked_cert(dir: c_int, name: &CStr, dev: (u32, u32)) -> Result<Vec<u8>, c_i
     {
         return Err(-EINVAL);
     }
-    let (mut der, mut size) = (core::ptr::null_mut(), 0usize);
-    // SAFETY: the open file and rooms for the bytes and their size.
-    let ret = unsafe { keys_read_der_fd(fd.0, &mut der, &mut size) };
+    let bytes = read_der_fd(fd.0);
     drop(fd);
-    if ret != 0 {
-        return Err(ret);
-    }
-    // SAFETY: the size bytes keys_read_der_fd() allocated.
-    let bytes = unsafe { crate::ffi::slice(der, size) }.to_vec();
-    // SAFETY: the allocation, freed once.
-    unsafe { xfree(der.cast(), size) };
+    let bytes = bytes?;
     if digest_der(&bytes)?.fingerprint != expected {
         return Err(-EKEYREJECTED);
     }

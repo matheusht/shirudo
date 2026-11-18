@@ -6,7 +6,7 @@ use crate::errno::ENOTDIR;
 use crate::testutil::TempDir;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd};
 
 /// A log of `text` in `dir`, open to append to.
 fn log_with(dir: &TempDir, text: &[u8]) -> File {
@@ -104,4 +104,26 @@ fn bpffs_mounted_at_wants_the_root_of_a_bpffs() {
     assert_eq!(mounted(c"/"), 0);
     assert_eq!(mounted(c"/nonexistent/shirudo"), 0);
     assert_eq!(mounted(c"/dev/null"), -ENOTDIR);
+}
+
+#[test]
+fn dir_names_at_reads_as_dir_names_does() {
+    let dir = TempDir::new();
+    for name in ["b.der", "a.der", ".der", "c.vouch", "Z.der"] {
+        File::create(dir.join(name)).unwrap();
+    }
+    std::fs::create_dir(dir.join("d.der")).unwrap();
+    let is_der = |n: &[u8]| crate::text::name_has_suffix(n, b".der");
+    let open = File::open(dir.join("")).unwrap();
+    let names = dir_names_at(open.as_fd(), is_der).unwrap();
+
+    assert_eq!(names, [&b"Z.der"[..], b"a.der", b"b.der", b"d.der"]);
+    assert_eq!(
+        dir_names(dir.join("").as_os_str().as_encoded_bytes(), is_der),
+        Ok(names)
+    );
+    assert_eq!(
+        dir_names_at(File::open("/dev/null").unwrap().as_fd(), is_der),
+        Err(-ENOTDIR)
+    );
 }

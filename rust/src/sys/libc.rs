@@ -119,13 +119,6 @@ unsafe extern "C" {
         filter: Option<DirentFilter>,
         compar: Option<DirentCompare>,
     ) -> c_int;
-    pub fn scandirat(
-        dirfd: c_int,
-        dir: *const c_char,
-        namelist: *mut *mut *mut Dirent,
-        filter: Option<DirentFilter>,
-        compar: Option<DirentCompare>,
-    ) -> c_int;
     pub fn alphasort(a: *mut *const Dirent, b: *mut *const Dirent) -> c_int;
     pub fn strerrorname_np(errnum: c_int) -> *const c_char;
     pub fn __nss_configure_lookup(db: *const c_char, service: *const c_char) -> c_int;

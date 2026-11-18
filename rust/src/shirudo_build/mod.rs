@@ -20,7 +20,6 @@ use std::ffi::CString;
 
 use crate::errno::{EIO, ENAMETOOLONG, EPERM};
 use crate::ffi;
-use crate::heap::xfree;
 use crate::sys::libc::{access, close, fwrite, mkstemps, stderr, stdout, strerror, unlink};
 use crate::text::{cstr, name_has_suffix};
 use crate::util::harden::{harden_self, harden_stdio};
@@ -329,26 +328,6 @@ impl KeyFiles {
             self.cert = cert;
         }
         Ok(())
-    }
-}
-
-/// A buffer the C allocated, freed when it goes.
-struct Bytes(*mut u8, usize);
-
-impl Bytes {
-    fn bytes(&self) -> &[u8] {
-        if self.0.is_null() {
-            return &[];
-        }
-        // SAFETY: the buffer's bytes.
-        unsafe { ffi::slice(self.0, self.1) }
-    }
-}
-
-impl Drop for Bytes {
-    fn drop(&mut self) {
-        // SAFETY: the buffer, of its length, or NULL.
-        unsafe { xfree(self.0.cast(), self.1) };
     }
 }
 

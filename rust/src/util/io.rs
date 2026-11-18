@@ -12,13 +12,14 @@ use crate::ffi;
 use crate::heap::xmalloc;
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
-    AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW, File, LOCK_EX, O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW, O_PATH,
-    O_RDONLY, PATH_MAX, S_IFDIR, S_IFMT, S_IFREG, S_ISVTX, STATX_ATTR_MOUNT_ROOT,
-    STATX_BASIC_STATS, Statfs, Statx, close, errno, flock, fstatfs, fsync, ftruncate, geteuid,
-    getline, open, pread, set_errno, statx, syscall, write,
+    AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW, Dir, File, LOCK_EX, O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW,
+    O_PATH, O_RDONLY, PATH_MAX, S_IFDIR, S_IFMT, S_IFREG, S_ISVTX, STATX_ATTR_MOUNT_ROOT,
+    STATX_BASIC_STATS, Statfs, Statx, close, closedir, errno, fdopendir, flock, fstatfs, fsync,
+    ftruncate, geteuid, getline, open, openat, pread, readdir, set_errno, statx, syscall, write,
 };
 use crate::util::seal::seal_open_read;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use core::ptr::NonNull;
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
 
 /// `ETC_DIR` of util/paths.h.
 const ETC_DIR: &CStr = c"/etc/shirudo";
@@ -119,6 +120,76 @@ pub(crate) fn dir_names(dir: &[u8], keep: impl Fn(&[u8]) -> bool) -> Result<Vec<
     }
     names.sort();
     Ok(names)
+}
+
+/// [`dir_names`] of the directory open as `dir`, read through a
+/// descriptor of its own, as scandirat(dir, ".") reads it.
+pub(crate) fn dir_names_at(
+    dir: BorrowedFd<'_>,
+    keep: impl Fn(&[u8]) -> bool,
+) -> Result<Vec<Vec<u8>>, c_int> {
+    let mut stream = DirStream::open_at(dir)?;
+    let mut names = Vec::new();
+
+    while let Some(name) = stream.next_name()? {
+        if name != b"." && name != b".." && keep(&name) {
+            names.push(name);
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
+/// A directory stream, closed with its descriptor when it goes.
+struct DirStream(NonNull<Dir>);
+
+impl DirStream {
+    /// A stream on the directory open as `dir`, through a descriptor of
+    /// its own: -errno.
+    fn open_at(dir: BorrowedFd<'_>) -> Result<Self, c_int> {
+        // SAFETY: the caller's fd, a C string and flags.
+        let fd = unsafe {
+            openat(
+                dir.as_raw_fd(),
+                c".".as_ptr(),
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(-errno());
+        }
+        // SAFETY: the fd openat() just gave, owned from here.
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        // SAFETY: the fd, which the stream owns once fdopendir() takes it.
+        let stream = NonNull::new(unsafe { fdopendir(fd.as_raw_fd()) }).ok_or_else(|| -errno())?;
+        let _ = fd.into_raw_fd();
+        Ok(DirStream(stream))
+    }
+
+    /// The name of the next entry, None at the end, or -errno.
+    fn next_name(&mut self) -> Result<Option<Vec<u8>>, c_int> {
+        // The end of the stream tells from an error by errno alone.
+        set_errno(0);
+        // SAFETY: the stream's own DIR.
+        let entry = unsafe { readdir(self.0.as_ptr()) };
+        if entry.is_null() {
+            return match errno() {
+                0 => Ok(None),
+                err => Err(-err),
+            };
+        }
+        // SAFETY: the entry readdir() gave, whose name is a C string,
+        // copied before the stream reads on.
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+        Ok(Some(name.to_bytes().to_vec()))
+    }
+}
+
+impl Drop for DirStream {
+    fn drop(&mut self) {
+        // SAFETY: the stream, closed once with its fd.
+        unsafe { closedir(self.0.as_ptr()) };
+    }
 }
 
 pub(crate) fn stat_fd(fd: c_int, st: &mut Statx) -> c_int {
@@ -286,24 +357,6 @@ unsafe fn hand_over(read: Result<Vec<u8>, c_int>, out: *mut c_void, len: *mut us
         *len = body.len();
     }
     0
-}
-
-/// As [`read_whole`], into `*out`, xmalloc'd to `*len + 1` bytes and
-/// NUL-terminated.
-///
-/// # Safety
-///
-/// `label` is a C string, `out` room for a pointer and `len` for a
-/// length.
-pub(crate) unsafe fn read_fd(
-    fd: c_int,
-    label: *const c_char,
-    max: usize,
-    out: *mut c_void,
-    len: *mut usize,
-) -> c_int {
-    // SAFETY: the caller's C string and rooms.
-    unsafe { hand_over(read_whole(fd, CStr::from_ptr(label), max), out, len) }
 }
 
 /// One line of text of at most `max` bytes before its newline, in

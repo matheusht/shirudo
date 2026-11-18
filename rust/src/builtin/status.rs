@@ -15,7 +15,7 @@ use std::ffi::{CString, OsStr};
 use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
 
-use crate::errno::{EINPROGRESS, ENODEV, ENOENT, ENOKEY};
+use crate::errno::{EINPROGRESS, ENAMETOOLONG, ENODEV, ENOENT, ENOKEY};
 use crate::ffi;
 use crate::heap::xfree;
 use crate::sys::identity::Identity;
@@ -44,7 +44,7 @@ use crate::util::io::{bpffs_mounted_at, read_file};
 use crate::util::json::{JsonEmit, JsonField, MAX_BYTES, parse_schema};
 use crate::util::kernel_btf;
 use crate::util::keyring;
-use crate::util::keys::{self, TrustedSet, keys_read_der};
+use crate::util::keys::{self, TrustedSet};
 use crate::util::map_read;
 use crate::util::measured::{
     MeasuredSet, measured_set_boot, measured_set_free, measured_unmeasured_archives,
@@ -669,33 +669,26 @@ impl KeyringView {
             rc = -ENOENT;
         }
         for path in &boot.certificates[..if rc == 0 { boot.n_certificates } else { 0 }] {
-            let (mut der, mut len): (*mut u8, usize) = (ptr::null_mut(), 0);
-            let mut c = CertView {
-                sha256: [0; 32],
-                fingerprint: [0; 32],
+            let read = CStr::from_bytes_until_nul(path)
+                .map_err(|_| -ENAMETOOLONG)
+                .and_then(keys::read_der)
+                .and_then(|der| Ok((keys::digest_der(&der)?, der)));
+            let (digests, der) = match read {
+                Ok(read) => read,
+                Err(err) => {
+                    rc = err;
+                    break;
+                }
+            };
+            let c = CertView {
+                sha256: digests.sha256,
+                fingerprint: digests.fingerprint,
                 primary: true,
                 info: Err(0),
                 link: None,
             };
 
-            // SAFETY: the certificate path, a C string, and room for the DER.
-            rc = unsafe { keys_read_der(path.as_ptr().cast(), &mut der, &mut len) };
-            if rc == 0 {
-                // SAFETY: the len bytes read.
-                let bytes = unsafe { ffi::slice(der, len) };
-                match keys::digest_der(bytes) {
-                    Ok(d) => {
-                        (c.sha256, c.fingerprint) = (d.sha256, d.fingerprint);
-                        k.add(c, bytes);
-                    }
-                    Err(err) => rc = err,
-                }
-            }
-            // SAFETY: keys_read_der()'s buffer of len bytes, or NULL.
-            unsafe { xfree(der.cast(), len) };
-            if rc != 0 {
-                break;
-            }
+            k.add(c, &der);
         }
         k.certs_rc = rc;
         k

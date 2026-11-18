@@ -709,7 +709,7 @@ pub(crate) fn mkdir_p(path: &[u8], mode: u32) -> c_int {
 
 /// `data` written whole to `path` through a labelled temporary file,
 /// synced and renamed into place.
-fn write_file(path: &[u8], data: &[u8], mode: u32) -> c_int {
+pub(crate) fn write_file(path: &[u8], data: &[u8], mode: u32) -> c_int {
     let (dir, name) = match open_parent(path) {
         Ok(p) => p,
         Err(err) => return err,

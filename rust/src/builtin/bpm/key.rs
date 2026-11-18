@@ -20,7 +20,7 @@ use crate::util::crypto_openssl::{
     Cert, cert_free, cert_pubkey_digest, cert_read_file, cert_read_memory,
 };
 use crate::util::json::JsonEmit;
-use crate::util::keys::{DER_MAX, read_der_bytes};
+use crate::util::keys::{DER_MAX, read_der};
 use crate::util::seal::{seal_inherit_path, seal_mkdir_p, seal_open};
 
 fn os(path: &CStr) -> &OsStr {
@@ -67,7 +67,7 @@ fn matches_active(der: &[u8]) -> bool {
 /// [`matches_active`] of the certificate file at `path`, read as a key
 /// file is.
 pub(super) fn file_matches_active(path: &CStr) -> bool {
-    read_der_bytes(path).is_ok_and(|der| matches_active(&der))
+    read_der(path).is_ok_and(|der| matches_active(&der))
 }
 
 /// The lowercase hex fingerprint of the certificate `der`.
@@ -85,7 +85,7 @@ fn fingerprint(der: &[u8]) -> Result<[u8; 64]> {
 
 /// [`fingerprint`] of the key file at `path`.
 fn file_fingerprint(path: &CStr) -> Result<[u8; 64]> {
-    fingerprint(&read_der_bytes(path)?)
+    fingerprint(&read_der(path)?)
 }
 
 /// A new key file of `der`: created, never one replaced, and synced.
@@ -163,7 +163,7 @@ fn install(der: &[u8]) -> Result {
 /// of a package, a download read in memory.
 fn source_read(source: &[u8]) -> Result<Vec<u8>> {
     if !source.starts_with(b"oci://") && !name_has_suffix(source, b".bee") {
-        return read_der_bytes(&message(&[source]));
+        return read_der(&message(&[source]));
     }
     let fd = super::fetch::package_source_open(source)?;
     let cert = read_member_fd(fd.as_fd(), b"cert.der", None, None, DER_MAX)?;

@@ -13,7 +13,7 @@ use std::ffi::CString;
 use super::{err, helper_main, strerror};
 use crate::errno::{EEXIST, EINVAL, EIO, EKEYREJECTED, ENOKEY};
 use crate::util::keyring::{holds_exactly, seal_set, unlink_key};
-use crate::util::keys::{TrustedSet, read_der_bytes};
+use crate::util::keys::{TrustedSet, read_der};
 
 helper_main!(shirudo_helper_test_keyring_seal, run);
 
@@ -196,7 +196,7 @@ fn seal(mode: &[u8], set: &TrustedSet, own: &[u8], other: &[u8]) -> c_int {
 /// The case `mode` with the keys directory's primary, `own`, and
 /// `other`: 0 or -errno.
 fn case(mode: &[u8], keys: &CStr, revoked: &CStr, own: &CStr, other: &CStr) -> c_int {
-    let (own, other) = match (read_der_bytes(own), read_der_bytes(other)) {
+    let (own, other) = match (read_der(own), read_der(other)) {
         (Ok(own), Ok(other)) => (own, other),
         (Err(e), _) | (_, Err(e)) => return e,
     };

@@ -23,7 +23,7 @@ use crate::util::config_update::{
     config_update_close, config_update_complete_boot, config_update_open,
 };
 use crate::util::image_keys::{check_set_with, validate_set};
-use crate::util::keys::{TrustedSet, read_der_bytes};
+use crate::util::keys::{TrustedSet, read_der};
 
 helper_main!(shirudo_helper_test_image_keys, run);
 
@@ -50,7 +50,7 @@ unsafe fn ctx<'a>(opaque: *mut c_void) -> &'a mut Context<'a> {
 /// certificate that does not read.
 fn holds(held: &[&CStr], der: &[u8]) -> c_int {
     for path in held {
-        match read_der_bytes(path) {
+        match read_der(path) {
             Ok(candidate) if candidate == der => return 1,
             Ok(_) => {}
             Err(e) => return e,

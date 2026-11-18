@@ -27,7 +27,6 @@ use crate::errno::{
     E2BIG, EACCES, EBUSY, EEXIST, EINPROGRESS, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENODEV,
     ENOENT, ENOKEY, ENXIO, EPERM, EPROTO, ESTALE, EUCLEAN, last_errno, text,
 };
-use crate::heap::xfree;
 use crate::sys::identity::{DEVICE_CONFIG, DEVICE_RUNTIME, DeviceAuthority, Identity};
 use crate::sys::libc::{
     O_DIRECTORY, O_NOFOLLOW, O_PATH, Statvfs, explicit_bzero, fsetxattr, fstatvfs, fwrite, ioctl,
@@ -56,7 +55,7 @@ use crate::util::image_keys::{self, RUNTIME_CERT_PATH};
 use crate::util::io::{kernel_dev, read_whole};
 use crate::util::json::JsonEmit;
 use crate::util::keyring;
-use crate::util::keys::{KEYS_MAX, TrustedCert, TrustedSet, keys_read_der_fd, members};
+use crate::util::keys::{KEYS_MAX, TrustedCert, TrustedSet, members, read_der_fd};
 use crate::util::seal::seal_label;
 use crate::util::tpm::{Tpm, tpm_boot_identity, tpm_close, tpm_open, tpm_pcr_extend, tpm_pcr_read};
 
@@ -255,22 +254,6 @@ fn config_root_open(dir: &CStr, device: u64, bad: c_int) -> Result<OwnedFd, c_in
     }
 }
 
-/// The DER of the certificate open on `fd`, as keys_read_der_fd() reads
-/// it.
-fn der_of_fd(fd: c_int) -> Result<Vec<u8>, c_int> {
-    let (mut der, mut size) = (ptr::null_mut(), 0usize);
-    // SAFETY: the fd and rooms for the bytes keys_read_der_fd() allocates.
-    let ret = unsafe { keys_read_der_fd(fd, &mut der, &mut size) };
-    if ret != 0 {
-        return Err(ret);
-    }
-    // SAFETY: the size bytes keys_read_der_fd() allocated.
-    let bytes = unsafe { crate::ffi::slice(der, size) }.to_vec();
-    // SAFETY: the allocation, freed once.
-    unsafe { xfree(der.cast(), size) };
-    Ok(bytes)
-}
-
 /// The config verification certificate the bootstrap names at `index`,
 /// from the runtime image on `device`: an ML-DSA-87 key, none named
 /// twice.
@@ -280,7 +263,7 @@ fn read_config_certificate(s: &mut State, index: usize, device: u64) -> c_int {
         Ok(fd) => fd,
         Err(err) => return err,
     };
-    let der = der_of_fd(fd.as_raw_fd());
+    let der = read_der_fd(fd.as_raw_fd());
     drop(fd);
     let cert = der.and_then(|der| {
         let x509 = x509_from_der(&der)?;

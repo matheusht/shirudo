@@ -6,18 +6,17 @@
 //! targets that enrol this key.
 
 use core::ffi::{CStr, c_int};
-use core::ptr;
 use std::ffi::CString;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::IntoRawFd;
 
-use super::{Bytes, KeyFiles, error, hex, info, last_err, print, strerr};
+use super::{KeyFiles, error, hex, info, last_err, print, strerr};
 use crate::errno::{EINVAL, EIO, EKEYREJECTED};
 use crate::sys::libc::close;
 use crate::util::crypto_openssl::{Cert, cert_free, cert_key_algorithm, cert_read_der};
 use crate::util::help::{Help, HelpSection};
-use crate::util::keys::{digest_der, keys_read_der, vouch_payload};
+use crate::util::keys::{digest_der, read_der, vouch_payload};
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 
 /// The room a vouch's CMS signature gets.
@@ -91,17 +90,6 @@ fn write_file(path: &CStr, data: &[u8]) -> c_int {
     ret
 }
 
-/// The DER at `path`.
-fn read_der(path: &CStr) -> Result<Bytes, c_int> {
-    let (mut der, mut len) = (ptr::null_mut(), 0);
-
-    // SAFETY: a C string and room for the buffer and its length.
-    match unsafe { keys_read_der(path.as_ptr(), &mut der, &mut len) } {
-        0 => Ok(Bytes(der, len)),
-        err => Err(err),
-    }
-}
-
 /// The fingerprint of the certificate's key.
 fn fingerprint(der: &[u8]) -> Result<[u8; 32], c_int> {
     digest_der(der).map(|d| d.fingerprint)
@@ -115,11 +103,11 @@ fn vouch(input: &CStr, output: &CStr, keys: &KeyFiles) -> c_int {
             return err;
         }
     };
-    let Ok(fp) = fingerprint(der.bytes()) else {
+    let Ok(fp) = fingerprint(&der) else {
         error(&[b"keys vouch: ", input.to_bytes(), b" is not a certificate"].concat());
         return 1;
     };
-    let ret = algorithm_ok(der.bytes(), input);
+    let ret = algorithm_ok(&der, input);
     if ret != 0 {
         return ret;
     }
@@ -138,7 +126,7 @@ fn vouch(input: &CStr, output: &CStr, keys: &KeyFiles) -> c_int {
             return err;
         }
     };
-    let Ok(own_fp) = fingerprint(own.bytes()) else {
+    let Ok(own_fp) = fingerprint(&own) else {
         error(
             &[
                 b"keys vouch: ",
@@ -160,7 +148,7 @@ fn vouch(input: &CStr, output: &CStr, keys: &KeyFiles) -> c_int {
         );
         return -EINVAL;
     }
-    let payload = match vouch_payload(der.bytes()) {
+    let payload = match vouch_payload(&der) {
         Ok(payload) => payload,
         Err(ret) => return ret,
     };
