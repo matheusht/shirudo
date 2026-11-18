@@ -8,10 +8,9 @@
 use crate::fuzzing::fuzz_target;
 
 fuzz_target!(shirudo_fuzz_beefile, shirudo_fuzz_beefile_init, |data| {
-    let mut spec = super::Spec::default();
-    if super::parse(data, &mut spec) != 0 {
+    let Ok(spec) = super::parse(data) else {
         return;
-    }
+    };
     for u in &spec.upatches {
         let fixes = &u.tree.fixes;
         if fixes.len() > super::MAX_FIXES

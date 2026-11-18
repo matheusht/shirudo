@@ -15,8 +15,8 @@ use std::process::Command;
 use super::beefile::{MAX_ENTRIES, PATH_MAX, Rodata, Spec, target_ok};
 use super::{archive, error, hex, last_err, name_has_suffix, path, strerr};
 use crate::errno::{E2BIG, EEXIST, EINVAL, EIO, ENAMETOOLONG, ENOENT};
-use crate::shirudo_build::{KeyFiles, compile, package};
-use crate::util::crypto_openssl::{Cert, cert_free, cert_pubkey_digest, cert_read_file};
+use crate::shirudo_build::{Certificate, KeyFiles, compile, package};
+use crate::util::crypto_openssl::cert_pubkey_digest;
 use crate::util::help::{Help, HelpSection};
 use crate::util::options::{
     EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OPT_REPEAT, OptParser, OptSpec,
@@ -362,46 +362,34 @@ pub(crate) fn upatch_name(source: &[u8]) -> Result<Vec<u8>, c_int> {
 /// The artifacts are signed into a directory of their own under names of
 /// their own, so no target name can reach a file of the operator's and
 /// the build leaves nothing behind.
-pub(super) fn stage_open(spec: &mut Spec) -> c_int {
+pub(super) fn stage_open(spec: &mut Spec) -> Result<(), c_int> {
     let tmpdir = std::env::var_os("TMPDIR")
         .filter(|t| !t.is_empty())
         .map_or(b"/tmp".to_vec(), |t| t.as_bytes().to_vec());
     let template = [&tmpdir[..], b"/shirudo-bpm-build.XXXXXX\0"].concat();
 
     if template.len() > PATH_MAX {
-        return -ENAMETOOLONG;
+        return Err(-ENAMETOOLONG);
     }
     let mut buf = template;
     // SAFETY: the template, which mkdtemp() fills in.
     if unsafe { crate::sys::libc::mkdtemp(buf.as_mut_ptr().cast()) }.is_null() {
-        return last_err();
+        return Err(last_err());
     }
     let made = crate::text::cstr(&buf).to_vec();
     match realpath(&made) {
         Ok(r) if r.len() < PATH_MAX => {
             spec.stage = r;
-            0
+            Ok(())
         }
         Ok(r) => {
             let _ = std::fs::remove_dir(path(&r));
-            -ENAMETOOLONG
+            Err(-ENAMETOOLONG)
         }
         Err(err) => {
             let _ = std::fs::remove_dir(path(&made));
-            err
+            Err(err)
         }
-    }
-}
-
-/// Removes what the build signed and the stage, whatever it holds.
-pub(super) fn stage_close(spec: &Spec) {
-    for u in spec.upatches.iter().filter(|u| !u.load_path.is_empty()) {
-        let _ = std::fs::remove_file(path(&[&u.load_path[..], b".bpf.o"].concat()));
-        let _ = std::fs::remove_file(path(&u.load_path));
-        let _ = std::fs::remove_file(path(&u.unload_path));
-    }
-    if !spec.stage.is_empty() {
-        let _ = std::fs::remove_dir_all(path(&spec.stage));
     }
 }
 
@@ -549,21 +537,17 @@ pub(super) fn digest_of(hex_digest: &[u8]) -> [u8; 32] {
 /// name, payload digest and type. Refuses an unload directive and, with
 /// `named`, one whose name is empty.
 pub(super) fn record_payload(spec: &mut Spec, i: usize, load: &[u8], update: bool) -> c_int {
-    // SAFETY: an all-zero container is a closed one.
-    let mut u: upatch::Upatch = unsafe { core::mem::zeroed() };
     let p = cstring(load);
-    // SAFETY: a C string and the container to fill.
-    if unsafe { upatch::upatch_open(p.as_ptr(), &mut u) } != 0 {
+    let Ok(u) = upatch::Opened::open(&p) else {
         return -EINVAL;
-    }
+    };
     let refused = upatch::is_unload(&u) || (!update && u.hdr.name[0] == 0);
     let mut name = [0u8; upatch::NAME_MAX + 1];
     if !refused {
         upatch::header_name(&u, &mut name);
     }
     let digest = u.hdr.payload_sha256;
-    // SAFETY: the container opened above.
-    unsafe { upatch::upatch_close(&mut u) };
+    drop(u);
     if refused {
         return -EINVAL;
     }
@@ -583,19 +567,10 @@ pub(super) fn version_ok(v: &CStr) -> bool {
 
 /// The SPKI SHA-256 of the certificate at `cert_path`, in hex.
 pub(super) fn fingerprint(cert_path: &CStr) -> Result<Vec<u8>, c_int> {
-    let mut cert = Cert::new();
+    let cert = Certificate::open(cert_path).map_err(|_| -ENOENT)?;
     let mut digest = [0u8; 32];
-
-    // SAFETY: a C string and the cert to fill.
-    if unsafe { cert_read_file(cert_path.as_ptr(), &mut cert) } != 0 {
-        return Err(-ENOENT);
-    }
-    // SAFETY: the cert read above and room for its digest; then freed.
-    let ret = unsafe {
-        let ret = cert_pubkey_digest(&cert, digest.as_mut_ptr());
-        cert_free(&mut cert);
-        ret
-    };
+    // SAFETY: cert holds a live certificate and digest can hold its SHA-256.
+    let ret = unsafe { cert_pubkey_digest(cert.as_cert(), digest.as_mut_ptr()) };
     if ret != 0 { Err(ret) } else { Ok(hex(&digest)) }
 }
 
@@ -604,16 +579,18 @@ pub(super) fn fingerprint(cert_path: &CStr) -> Result<Vec<u8>, c_int> {
 pub(super) fn load_spec(file: &[u8], allow_missing: bool, what: &str) -> Result<Spec, c_int> {
     let resolved = realpath(file)?;
     let slash = resolved.iter().rposition(|&c| c == b'/').ok_or(-EINVAL)?;
-    let mut spec = Spec {
-        scope: resolved[..slash].to_vec(),
-        ..Spec::default()
-    };
     let body = archive::read_file(&resolved, archive::MAX_FILE)?;
-    let mut ret = super::beefile::parse(&body, &mut spec);
-    if ret == 0 && !what.is_empty() {
-        ret = validate(&spec, allow_missing);
-    }
-    if ret != 0 {
+    let loaded = super::beefile::parse(&body).and_then(|mut spec| {
+        spec.scope = resolved[..slash].to_vec();
+        if !what.is_empty() {
+            let ret = validate(&spec, allow_missing);
+            if ret != 0 {
+                return Err(ret);
+            }
+        }
+        Ok(spec)
+    });
+    loaded.inspect_err(|_| {
         if !what.is_empty() {
             error(
                 format!(
@@ -623,9 +600,7 @@ pub(super) fn load_spec(file: &[u8], allow_missing: bool, what: &str) -> Result<
                 .as_bytes(),
             );
         }
-        return Err(ret);
-    }
-    Ok(spec)
+    })
 }
 
 /// `bpm build`, from `build` on.
@@ -834,9 +809,8 @@ fn build(
     if let Err(e) = std::env::set_current_dir(path(&spec.scope)) {
         return -e.raw_os_error().unwrap_or(EIO);
     }
-    let ret = stage_open(&mut spec);
-    if ret != 0 {
-        return ret;
+    if let Err(err) = stage_open(&mut spec) {
+        return err;
     }
     let mut ret = build_upatches(
         &mut spec,
@@ -855,6 +829,6 @@ fn build(
             &out_dir,
         );
     }
-    stage_close(&spec);
+    drop(spec);
     ret
 }

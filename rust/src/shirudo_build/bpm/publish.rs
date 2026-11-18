@@ -15,7 +15,6 @@ use super::config_update::Info;
 use super::{archive, error, print, strerr};
 use crate::errno::{E2BIG, EEXIST, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT};
 use crate::shirudo_build::check_keys;
-use crate::sys::curl::{CURL_GLOBAL_DEFAULT, curl_global_cleanup, curl_global_init};
 use crate::util::bpm_oci::{
     Client, Descriptor, MANIFEST_MEDIA, bpm_oci_emit_descriptor, bpm_oci_push_blob,
     bpm_oci_put_manifest, digest_matches, manifest_layers, sha256_hex,
@@ -287,14 +286,12 @@ fn push_index(
         Some(i) => i,
         None if entries.len() >= MAX_ENTRIES => return -E2BIG,
         None => {
-            // SAFETY: an all-zero entry is an empty one.
-            entries.push(unsafe { core::mem::zeroed() });
+            entries.push(IndexEntry::new());
             entries.len() - 1
         }
     };
     let e = &mut entries[i];
-    // SAFETY: an all-zero entry is an empty one.
-    *e = unsafe { core::mem::zeroed() };
+    *e = IndexEntry::new();
     e.package_size = layer.size();
     copy(&mut e.name, name);
     copy(&mut e.version, version);
@@ -594,13 +591,11 @@ pub(super) fn run(args: &[&CStr]) -> c_int {
             return 1;
         }
     }
-    // SAFETY: once, before any transfer.
-    if unsafe { curl_global_init(CURL_GLOBAL_DEFAULT) } != 0 {
+    let Ok(curl) = super::Curl::init() else {
         return fail("initialize curl", -EIO);
-    }
+    };
     let ret = push_package(package, repo.to_bytes(), keys, new_index);
-    // SAFETY: after every transfer.
-    unsafe { curl_global_cleanup() };
+    drop(curl);
     match ret {
         Ok(reference) => {
             print(true, &[&reference[..], b"\n"].concat());

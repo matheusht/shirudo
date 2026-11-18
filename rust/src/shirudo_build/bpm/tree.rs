@@ -25,7 +25,6 @@ use crate::errno::{
     E2BIG, EACCES, EBUSY, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT, ENOMEM, EOVERFLOW,
 };
 use crate::shirudo_build::check_keys;
-use crate::sys::curl::{CURL_GLOBAL_DEFAULT, curl_global_cleanup, curl_global_init};
 use crate::text::cstr;
 use crate::util::bpm_oci::{
     Client, Descriptor, MANIFEST_MEDIA, digest_matches, package_name_ok, trim,
@@ -246,36 +245,55 @@ impl Drop for Later {
     }
 }
 
-/// The classes of a load upatch, none for one without an XDP program.
-fn upatch_xdp_classes(body: &[u8]) -> Result<u32, c_int> {
-    let parsed = super::super::package::MemoryUpatch::open(body)?;
-    let u = parsed.parsed();
-    let mut specs: *mut ProgSpec = ptr::null_mut();
-    let (nr_maps, nr_progs) = (u.hdr.nr_maps, u.hdr.nr_progs);
-    let ret = if u.signed_attach.is_null() {
-        -EINVAL
-    } else {
-        // SAFETY: the signed metadata of the open container, and room
-        // for the specs.
-        unsafe {
+/// Owns the program specifications and nested data from the shared parser.
+struct Specs {
+    programs: *mut ProgSpec,
+    count: u32,
+}
+
+impl Specs {
+    fn parse(parsed: &super::super::package::MemoryUpatch<'_>) -> Result<Self, c_int> {
+        let u = parsed.parsed();
+        let mut programs = ptr::null_mut();
+        // SAFETY: the parsed artifact owns the attach slice, or it is absent.
+        // The parser allocates its own specifications and initializes programs.
+        let ret = unsafe {
             specs_parse(
                 u.signed_attach.cast(),
                 u.signed_attach_len,
-                nr_maps,
-                nr_progs,
-                &mut specs,
+                u.hdr.nr_maps,
+                u.hdr.nr_progs,
+                &mut programs,
             )
+        };
+        if ret != 0 {
+            return Err(ret);
         }
-    };
-    let classes = (ret == 0).then(|| {
-        // SAFETY: the nr_progs specs specs_parse() gave, freed once.
-        unsafe {
-            let c = specs_xdp_classes(crate::ffi::slice(specs, nr_progs as usize));
-            specs_free(specs, nr_progs);
-            c
-        }
-    });
-    classes.ok_or(ret)
+        Ok(Self {
+            programs,
+            count: u.hdr.nr_progs,
+        })
+    }
+
+    fn classes(&self) -> Result<u32, c_int> {
+        let count = usize::try_from(self.count).map_err(|_| -EOVERFLOW)?;
+        // SAFETY: parse allocated count entries which this guard owns.
+        let programs = unsafe { crate::ffi::slice(self.programs, count) };
+        Ok(specs_xdp_classes(programs))
+    }
+}
+
+impl Drop for Specs {
+    fn drop(&mut self) {
+        // SAFETY: these are the specifications allocated by the parser.
+        unsafe { specs_free(self.programs, self.count) };
+    }
+}
+
+/// The classes of a load upatch, none for one without an XDP program.
+fn upatch_xdp_classes(body: &[u8]) -> Result<u32, c_int> {
+    let parsed = super::super::package::MemoryUpatch::open(body)?;
+    Specs::parse(&parsed)?.classes()
 }
 
 /// The classes of the artifact of `op`, fetched from its repository,
@@ -862,14 +880,16 @@ impl Append<'_> {
                 }
             };
         self.package_dir = cstr(&dir).to_vec();
-        let ret = parse(beefile.bytes(), &mut self.spec);
-        if ret != 0 {
-            err(format!(
-                "bpm tree append: cannot parse the Beefile of {}",
-                lossy(self.package.to_bytes())
-            ));
-            return ret;
-        }
+        self.spec = match parse(beefile.bytes()) {
+            Ok(spec) => spec,
+            Err(ret) => {
+                err(format!(
+                    "bpm tree append: cannot parse the Beefile of {}",
+                    lossy(self.package.to_bytes())
+                ));
+                return ret;
+            }
+        };
         self.entries = self.spec.upatches.iter().filter(|u| u.tree.present).count();
         0
     }
@@ -1379,13 +1399,11 @@ pub(super) fn run(args: &[&CStr]) -> c_int {
             EXIT_USAGE
         };
     }
-    // SAFETY: once, before any transfer.
-    if unsafe { curl_global_init(CURL_GLOBAL_DEFAULT) } != 0 {
+    let Ok(curl) = super::Curl::init() else {
         return fail("initialize curl", -EIO);
-    }
+    };
     let ret = append(args);
-    // SAFETY: after every transfer.
-    unsafe { curl_global_cleanup() };
+    drop(curl);
     if ret == EXIT_USAGE {
         return EXIT_USAGE;
     }

@@ -130,11 +130,20 @@ fn copy_member(package: &CStr, member: &[u8], output: &[u8]) -> c_int {
     }
 }
 
-/// The package an `oci://` reference names, into a temporary file whose
-/// path it returns, checked against the digest its manifest gives.
-/// The package of the manifest whose digest the operator named, `want`,
-/// into a file of /tmp, removed again on a failure once it was made.
-fn download(reference: &[u8], want: &[u8]) -> Result<Vec<u8>, c_int> {
+/// A base package downloaded into a file of /tmp, private to this
+/// command and removed when this goes, whatever the update made of it.
+struct Download(Vec<u8>);
+
+impl Drop for Download {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(path(&self.0));
+    }
+}
+
+/// The package an `oci://` reference names, into a temporary file,
+/// checked against the digest its manifest gives: the package of the
+/// manifest whose digest the operator named, `want`.
+fn download(reference: &[u8], want: &[u8]) -> Result<Download, c_int> {
     let mut c = Client::new();
     let (repo, tag) = c.parse_pull_ref(reference)?;
     let url = c.url(&repo, b"manifests", &tag)?;
@@ -170,30 +179,21 @@ fn download(reference: &[u8], want: &[u8]) -> Result<Vec<u8>, c_int> {
     if fd < 0 {
         return Err(super::last_err());
     }
-    let tmp = crate::text::cstr(&tmpl).to_vec();
-    let fail = |err: c_int| {
-        let _ = std::fs::remove_file(path(&tmp));
-        Err(err)
+    let tmp = Download(crate::text::cstr(&tmpl).to_vec());
+    let transferred = c.get_file(&url, PACKAGE_MEDIA, fd, layer.size());
+    // SAFETY: mkstemp returned this descriptor, which is closed once.
+    let closed = unsafe { crate::sys::libc::close(fd) };
+    let closed = if closed == 0 {
+        Ok(())
+    } else {
+        Err(super::last_err())
     };
-    let mut ret = c
-        .get_file(&url, PACKAGE_MEDIA, fd, layer.size())
-        .err()
-        .unwrap_or(0);
-    // SAFETY: the descriptor mkstemp() opened.
-    if unsafe { crate::sys::libc::close(fd) } != 0 && ret == 0 {
-        ret = super::last_err();
-    }
-    if ret != 0 {
-        return fail(ret);
-    }
-    let body = match archive::read_file(&tmp, archive::MAX_FILE) {
-        Ok(b) => b,
-        Err(err) => return fail(err),
-    };
+    transferred.and(closed)?;
+    let body = archive::read_file(&tmp.0, archive::MAX_FILE)?;
     let mut hex = [0u8; 65];
     if sha256_hex(&body, &mut hex) != 0 || !digest_matches(layer.digest(), crate::text::cstr(&hex))
     {
-        return fail(-EKEYREJECTED);
+        return Err(-EKEYREJECTED);
     }
     Ok(tmp)
 }
@@ -342,13 +342,21 @@ pub(super) fn run(args: &[&CStr]) -> c_int {
         );
         return -EINVAL;
     }
-    let (package, downloaded) = match base_digest {
+    let download_guard;
+    let local_path;
+    let package = match base_digest {
         Some(want) => match download(base.to_bytes(), want.to_bytes()) {
-            Ok(p) => (p, true),
+            Ok(p) => {
+                download_guard = p;
+                &download_guard.0
+            }
             Err(err) => return err,
         },
         None => match std::fs::canonicalize(path(base.to_bytes())) {
-            Ok(p) => (p.as_os_str().as_bytes().to_vec(), false),
+            Ok(p) => {
+                local_path = p;
+                local_path.as_os_str().as_bytes()
+            }
             Err(e) => {
                 let err = e.raw_os_error().unwrap_or(EIO);
                 p.usage(
@@ -364,11 +372,7 @@ pub(super) fn run(args: &[&CStr]) -> c_int {
             }
         },
     };
-    let ret = update(&cstring(&package), file, version, keys_arg, &overrides);
-    if downloaded {
-        let _ = std::fs::remove_file(path(&package));
-    }
-    ret
+    update(&cstring(package), file, version, keys_arg, &overrides)
 }
 
 fn update(
@@ -407,7 +411,7 @@ fn update(
     );
     if !spec.stage.is_empty() {
         let back = std::env::set_current_dir(path(&out_dir));
-        build::stage_close(&spec);
+        drop(spec);
         if let (Err(e), 0) = (back, ret) {
             return -e.raw_os_error().unwrap_or(EIO);
         }
@@ -428,9 +432,8 @@ fn staged(
 ) -> c_int {
     let from_package = file.is_none();
     let build_file = if from_package {
-        let ret = build::stage_open(spec);
-        if ret != 0 {
-            return ret;
+        if let Err(err) = build::stage_open(spec) {
+            return err;
         }
         let source_dir = [&spec.stage[..], b"/source"].concat();
         if let Err(e) = std::fs::DirBuilder::new()
@@ -511,9 +514,8 @@ fn staged(
         return -e.raw_os_error().unwrap_or(EIO);
     }
     if spec.stage.is_empty() {
-        let ret = build::stage_open(spec);
-        if ret != 0 {
-            return ret;
+        if let Err(err) = build::stage_open(spec) {
+            return err;
         }
     }
     for i in 0..spec.upatches.len() {
@@ -573,20 +575,15 @@ fn staged(
 
 /// The load artifact at `load` is a load directive named `expected`.
 fn name_matches(load: &[u8], expected: &[u8]) -> c_int {
-    // SAFETY: an all-zero container is a closed one.
-    let mut u: upatch::Upatch = unsafe { core::mem::zeroed() };
     let p = cstring(load);
-    // SAFETY: a C string and the container to fill.
-    let ret = unsafe { upatch::upatch_open(p.as_ptr(), &mut u) };
-    if ret != 0 {
-        return ret;
-    }
+    let u = match upatch::Opened::open(&p) {
+        Ok(u) => u,
+        Err(err) => return err,
+    };
     let name = &u.hdr.name;
     let n = expected.len().min(name.len());
     let same =
         name[..n] == expected[..n] && (expected.len() >= name.len() || name[expected.len()] == 0);
     let bad = upatch::is_unload(&u) || !same;
-    // SAFETY: the container opened above.
-    unsafe { upatch::upatch_close(&mut u) };
     if bad { -EINVAL } else { 0 }
 }

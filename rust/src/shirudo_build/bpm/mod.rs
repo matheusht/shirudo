@@ -15,11 +15,10 @@ mod show;
 mod tree;
 
 use core::ffi::{CStr, c_int};
-use std::ffi::{CString, OsStr};
 use std::os::unix::ffi::OsStrExt;
 
 use crate::errno::{EINVAL, EIO};
-use crate::text::cstr;
+use crate::sys::curl::{CURL_GLOBAL_DEFAULT, curl_global_cleanup, curl_global_init};
 use crate::text::name_has_suffix;
 use crate::util::help::{Help, print_help};
 use crate::util::options::EXIT_USAGE;
@@ -30,55 +29,27 @@ pub(crate) use build::upatch_name;
 /// BPM_MAX_ENDPOINT: the longest registry and repository.
 const MAX_ENDPOINT: usize = 512;
 
-fn say(level: fn(&[u8]), text: &[u8]) {
-    let msg = CString::new(cstr(text).to_vec()).unwrap_or_default();
+use super::{error, hex, last_err, path, print, strerr};
 
-    level(msg.to_bytes());
-}
+/// Keeps libcurl initialized for the lifetime of one operator command.
+struct Curl;
 
-fn error(text: &[u8]) {
-    say(crate::log::err, text);
-}
-
-#[allow(dead_code)]
-fn info(text: &[u8]) {
-    say(crate::log::info, text);
-}
-
-fn strerr(err: c_int) -> &'static [u8] {
-    // SAFETY: strerror() gives a C string that outlives the message.
-    unsafe { crate::ffi::c_str(crate::sys::libc::strerror(err)) }
-}
-
-fn last_err() -> c_int {
-    -std::io::Error::last_os_error()
-        .raw_os_error()
-        .unwrap_or(EIO)
-}
-
-fn print(to_stdout: bool, text: &[u8]) {
-    // SAFETY: the bytes, to one of the C library's streams.
-    unsafe {
-        let f = if to_stdout {
-            crate::sys::libc::stdout
+impl Curl {
+    fn init() -> Result<Self, c_int> {
+        // SAFETY: called before opening any libcurl handles.
+        if unsafe { curl_global_init(CURL_GLOBAL_DEFAULT) } == 0 {
+            Ok(Self)
         } else {
-            crate::sys::libc::stderr
-        };
-        crate::sys::libc::fwrite(text.as_ptr().cast(), 1, text.len(), f);
+            Err(-EIO)
+        }
     }
 }
 
-fn hex(bytes: &[u8]) -> Vec<u8> {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-
-    bytes
-        .iter()
-        .flat_map(|b| [HEX[usize::from(b >> 4)], HEX[usize::from(b & 0xf)]])
-        .collect()
-}
-
-fn path(p: &[u8]) -> &OsStr {
-    OsStr::from_bytes(p)
+impl Drop for Curl {
+    fn drop(&mut self) {
+        // SAFETY: the command has dropped all handles before this guard.
+        unsafe { curl_global_cleanup() };
+    }
 }
 
 /// The keys directory: `arg`, else SHIRUDO_KEYS_DIR or the default, with

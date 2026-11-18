@@ -104,25 +104,24 @@ fn read_source(m: &Manifest, src_path: Option<&[u8]>) -> Result<Vec<u8>, c_int> 
         .and_then(|s| s.iter().rposition(|&c| c == b'/').map(|slash| &s[..=slash]))
         .unwrap_or_default();
     let path = CString::new([dir, &m.source].concat()).map_err(|_| -EINVAL)?;
-    let (source, mut err) = match crate::util::io::read(&path, SOURCE_MAX) {
-        Ok(source) => (source, 0),
-        Err(err) => (Vec::new(), err),
-    };
-    if err == 0 && source.is_empty() {
-        err = -EINVAL;
-    }
-    if err != 0 {
-        let p = String::from_utf8_lossy(path.to_bytes());
-        error(
-            format!(
-                "read decoder source {p}: {}",
-                String::from_utf8_lossy(strerr(-err))
-            )
-            .as_bytes(),
-        );
-        return Err(err);
-    }
-    Ok(source)
+    crate::util::io::read(&path, SOURCE_MAX)
+        .and_then(|source| {
+            if source.is_empty() {
+                Err(-EINVAL)
+            } else {
+                Ok(source)
+            }
+        })
+        .inspect_err(|&err| {
+            let p = String::from_utf8_lossy(path.to_bytes());
+            error(
+                format!(
+                    "read decoder source {p}: {}",
+                    String::from_utf8_lossy(strerr(-err))
+                )
+                .as_bytes(),
+            );
+        })
 }
 
 /// The decoders of `obj`'s .rodata, every 4 bytes a candidate manifest.

@@ -12,9 +12,8 @@ use std::ffi::CString;
 use std::os::unix::fs::MetadataExt;
 
 use super::beefile::{PATH_MAX, Spec};
-use super::{build, path};
+use super::{build, path, print};
 use crate::errno::{E2BIG, EFBIG, EINVAL, EIO, ENAMETOOLONG, ENOENT};
-use crate::sys::libc::{access, fwrite, stdout};
 use crate::sys::version::shirudo_version;
 use crate::util::gzip::GzWrite;
 use crate::util::json::JsonEmit;
@@ -27,7 +26,6 @@ pub(super) const MAX_FILE: usize = 256 * 1024 * 1024;
 const MAX_PACKAGE: u64 = 256 * 1024 * 1024;
 /// Room for the build environment's JSON.
 const MAX_JSON: usize = 256 * 1024;
-const R_OK: c_int = 4;
 
 fn errno_of(e: &std::io::Error) -> c_int {
     -e.raw_os_error().unwrap_or(EIO)
@@ -40,7 +38,7 @@ pub(super) fn read_file(p: &[u8], max: usize) -> Result<Vec<u8>, c_int> {
     if size > max as u64 {
         return Err(-EFBIG);
     }
-    let mut body = vec![0u8; size as usize];
+    let mut body = vec![0u8; usize::try_from(size).map_err(|_| -EFBIG)?];
     let mut n = 0;
     while n < body.len() {
         match std::io::Read::read(&mut f, &mut body[n..]) {
@@ -57,40 +55,41 @@ pub(super) fn read_file(p: &[u8], max: usize) -> Result<Vec<u8>, c_int> {
 struct Tar(GzWrite<std::fs::File>, u64);
 
 impl Tar {
-    fn write(&mut self, data: &[u8]) -> c_int {
+    fn write(&mut self, data: &[u8]) -> Result<(), c_int> {
         if data.is_empty() {
-            return 0;
+            return Ok(());
         }
-        if data.len() > i32::MAX as usize {
-            return -EFBIG;
+        if c_int::try_from(data.len()).is_err() {
+            return Err(-EFBIG);
         }
-        if self.0.write(data).is_ok() { 0 } else { -EIO }
+        self.0.write(data).map_err(|_| -EIO)
     }
 
     /// One ustar entry, its header and its data padded to 512 bytes.
-    fn entry(&mut self, name: &[u8], data: &[u8], mode: u32, ty: u8) -> c_int {
+    fn entry(&mut self, name: &[u8], data: &[u8], mode: u32, ty: u8) -> Result<(), c_int> {
         let mut h = [0u8; 512];
 
         if name.len() >= 100 {
-            return -ENAMETOOLONG;
+            return Err(-ENAMETOOLONG);
         }
         // The sum the target's extractor takes: more would build and
         // never install.
-        if data.len() as u64 > MAX_PACKAGE - self.1 {
-            return -EFBIG;
+        let size = u64::try_from(data.len()).map_err(|_| -EFBIG)?;
+        if size > MAX_PACKAGE - self.1 {
+            return Err(-EFBIG);
         }
-        self.1 += data.len() as u64;
+        self.1 += size;
         h[..name.len()].copy_from_slice(name);
         for (off, size, value) in [
             (100, 8, u64::from(mode & 0o7777)),
             (108, 8, 0),
             (116, 8, 0),
-            (124, 12, data.len() as u64),
+            (124, 12, size),
             (136, 12, 0),
         ] {
             let digits = format!("{value:0w$o}", w = size - 1);
             if digits.len() > size - 1 {
-                return -E2BIG;
+                return Err(-E2BIG);
             }
             h[off..off + digits.len()].copy_from_slice(digits.as_bytes());
         }
@@ -101,32 +100,27 @@ impl Tar {
         let sum: u32 = h.iter().map(|&b| u32::from(b)).sum();
         let sum = format!("{sum:06o} ");
         if sum.len() > 7 {
-            return -E2BIG;
+            return Err(-E2BIG);
         }
         h[148..148 + sum.len()].copy_from_slice(sum.as_bytes());
         h[148 + sum.len()] = 0;
-        if self.write(&h) != 0 || self.write(data) != 0 {
-            return -EIO;
-        }
+        self.write(&h)
+            .and_then(|()| self.write(data))
+            .map_err(|_| -EIO)?;
         if ty == b'0' && data.len() & 511 != 0 {
             return self.write(&[0u8; 512][..512 - (data.len() & 511)]);
         }
-        0
+        Ok(())
     }
 
     /// The regular file at `file` as entry `name`, with its mode.
-    fn file(&mut self, name: &[u8], file: &[u8]) -> c_int {
-        let meta = match std::fs::metadata(path(file)) {
-            Ok(m) => m,
-            Err(e) => return errno_of(&e),
-        };
+    fn file(&mut self, name: &[u8], file: &[u8]) -> Result<(), c_int> {
+        let meta = std::fs::metadata(path(file)).map_err(|e| errno_of(&e))?;
         if !meta.is_file() {
-            return -EINVAL;
+            return Err(-EINVAL);
         }
-        match read_file(file, MAX_FILE) {
-            Ok(body) => self.entry(name, &body, meta.mode(), b'0'),
-            Err(err) => err,
-        }
+        let body = read_file(file, MAX_FILE)?;
+        self.entry(name, &body, meta.mode(), b'0')
     }
 }
 
@@ -150,7 +144,7 @@ fn environment(spec: &Spec, version: &[u8], fingerprint: &[u8]) -> Result<Vec<u8
     let mut stamp = [0u8; 32];
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64);
+        .map_or(Ok(0), |d| i64::try_from(d.as_secs()).map_err(|_| -EIO))?;
     // SAFETY: an all-zero utsname is room for one.
     let mut un: crate::sys::libc::Utsname = unsafe { core::mem::zeroed() };
     // SAFETY: room for the names.
@@ -207,64 +201,35 @@ fn environment(spec: &Spec, version: &[u8], fingerprint: &[u8]) -> Result<Vec<u8
     Ok(buf)
 }
 
-fn entries(tar: &mut Tar, spec: &Spec, top: &[u8], cert: &[u8], env: &[u8]) -> c_int {
-    let named = |entry: &[u8], f: &mut dyn FnMut(&[u8]) -> c_int| match entry_name(top, entry) {
-        Ok(n) => f(&n),
-        Err(err) => err,
-    };
-    let mut ret = named(b"", &mut |n| tar.entry(n, &[], 0o755, b'5'));
-    if ret == 0 {
-        ret = named(b"Beefile", &mut |n| {
-            tar.entry(n, &spec.build_file, 0o644, b'0')
-        });
-    }
+fn entries(tar: &mut Tar, spec: &Spec, top: &[u8], cert: &[u8], env: &[u8]) -> Result<(), c_int> {
+    let named = |entry: &[u8]| entry_name(top, entry);
+    tar.entry(&named(b"")?, &[], 0o755, b'5')?;
+    tar.entry(&named(b"Beefile")?, &spec.build_file, 0o644, b'0')?;
     for f in &spec.files {
-        if ret != 0 {
-            break;
-        }
-        ret = match build::resolve_source(spec, &f.source) {
-            Ok(resolved) => named(&f.target, &mut |n| tar.file(n, &resolved)),
-            Err(err) => err,
-        };
+        let resolved = build::resolve_source(spec, &f.source)?;
+        tar.file(&named(&f.target)?, &resolved)?;
     }
     for u in &spec.upatches {
-        if ret != 0 {
-            break;
-        }
-        ret = named(&u.load_target, &mut |n| tar.file(n, &u.load_path));
-        if ret == 0 {
-            ret = named(&u.unload_target, &mut |n| tar.file(n, &u.unload_path));
-        }
+        tar.file(&named(&u.load_target)?, &u.load_path)?;
+        tar.file(&named(&u.unload_target)?, &u.unload_path)?;
     }
-    if ret == 0 {
-        let readme = [&spec.scope[..], b"/README.md"].concat();
-        if readme.len() >= PATH_MAX {
-            return -ENAMETOOLONG;
-        }
-        match std::fs::metadata(path(&readme)) {
-            Ok(_) if !build::within(&spec.scope, &readme) => return -EINVAL,
-            Ok(_) => {}
-            Err(e) if e.raw_os_error() == Some(ENOENT) => {}
-            Err(e) => return errno_of(&e),
-        }
-        let r = CString::new(readme.clone()).unwrap_or_default();
-        // SAFETY: a C string.
-        if unsafe { access(r.as_ptr(), R_OK) } == 0 {
-            ret = named(b"README.md", &mut |n| tar.file(n, &readme));
-        }
+    let readme = [&spec.scope[..], b"/README.md"].concat();
+    if readme.len() >= PATH_MAX {
+        return Err(-ENAMETOOLONG);
     }
-    if ret == 0 {
-        ret = named(b"cert.der", &mut |n| tar.entry(n, cert, 0o644, b'0'));
+    match std::fs::metadata(path(&readme)) {
+        Ok(_) if !build::within(&spec.scope, &readme) => return Err(-EINVAL),
+        Ok(_) => {}
+        Err(e) if e.raw_os_error() == Some(ENOENT) => {}
+        Err(e) => return Err(errno_of(&e)),
     }
-    if ret == 0 {
-        ret = named(b"build-environment.json", &mut |n| {
-            tar.entry(n, env, 0o644, b'0')
-        });
+    let r = CString::new(readme.clone()).unwrap_or_default();
+    if super::super::compile::readable(&r) {
+        tar.file(&named(b"README.md")?, &readme)?;
     }
-    if ret == 0 {
-        ret = tar.write(&[0u8; 1024]);
-    }
-    ret
+    tar.entry(&named(b"cert.der")?, cert, 0o644, b'0')?;
+    tar.entry(&named(b"build-environment.json")?, env, 0o644, b'0')?;
+    tar.write(&[0u8; 1024])
 }
 
 /// The package of `spec` at version `version`, signed with the
@@ -297,10 +262,9 @@ pub(super) fn write(
         Ok(gz) => Tar(gz, 0),
         Err(_) => return -EIO,
     };
-    let mut ret = entries(&mut tar, spec, &top, &cert, &env);
-    if tar.0.finish().is_err() && ret == 0 {
-        ret = -EIO;
-    }
+    let written = entries(&mut tar, spec, &top, &cert, &env);
+    let finished = tar.0.finish().map(|_| ()).map_err(|_| -EIO);
+    let mut ret = written.and(finished).err().unwrap_or(0);
     if ret == -EFBIG {
         crate::log::err(
             format!(
@@ -315,8 +279,7 @@ pub(super) fn write(
         let _ = std::fs::remove_file(path(&output));
     } else {
         let line = [&output[..], b"\n"].concat();
-        // SAFETY: the bytes, to the C library's stdout.
-        unsafe { fwrite(line.as_ptr().cast(), 1, line.len(), stdout) };
+        print(true, &line);
     }
     ret
 }

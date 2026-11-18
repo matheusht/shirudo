@@ -45,10 +45,10 @@ pub(super) fn fix_id_ok(id: &[u8]) -> bool {
 
 /// The `fixes` of an [upatches.tree]: 1 to MAX_FIXES IDs, each once,
 /// sorted so that equal Beefiles publish equally.
-fn parse_fixes(value: &[u8], fixes: &mut Vec<Vec<u8>>) -> c_int {
+fn parse_fixes(value: &[u8], fixes: &mut Vec<Vec<u8>>) -> Result<(), c_int> {
     let fail = |msg: String, err: c_int| {
         crate::log::err(msg.as_bytes());
-        err
+        Err(err)
     };
 
     if !fixes.is_empty() {
@@ -100,7 +100,7 @@ fn parse_fixes(value: &[u8], fixes: &mut Vec<Vec<u8>>) -> c_int {
         );
     }
     *fixes = ids;
-    0
+    Ok(())
 }
 
 pub(super) struct Policy {
@@ -177,6 +177,19 @@ pub(super) struct Spec {
     pub(super) build_file: Vec<u8>,
     pub(super) files: Vec<FileEntry>,
     pub(super) upatches: Vec<Upatch>,
+}
+
+impl Drop for Spec {
+    fn drop(&mut self) {
+        for u in self.upatches.iter().filter(|u| !u.load_path.is_empty()) {
+            let _ = std::fs::remove_file(super::path(&[&u.load_path[..], b".bpf.o"].concat()));
+            let _ = std::fs::remove_file(super::path(&u.load_path));
+            let _ = std::fs::remove_file(super::path(&u.unload_path));
+        }
+        if !self.stage.is_empty() {
+            let _ = std::fs::remove_dir_all(super::path(&self.stage));
+        }
+    }
 }
 
 /// isspace() of the C locale.
@@ -330,27 +343,36 @@ fn text(s: &[u8]) -> Text {
 fn parse_selector_kv(
     key: &[u8],
     value: &[u8],
-    kvs: &mut *mut TreeSelectorKv,
-    n: &mut c_int,
-    max: usize,
-) -> c_int {
+    selector: &mut Selector,
+    kconfig: bool,
+) -> Result<(), c_int> {
+    let (kvs, n, max) = if kconfig {
+        (
+            &mut selector.0.kconfig,
+            &mut selector.0.n_kconfig,
+            MAX_KCONFIG,
+        )
+    } else {
+        (&mut selector.0.labels, &mut selector.0.n_labels, MAX_LABELS)
+    };
     let key = match key {
         [q @ (b'"' | b'\''), inner @ .., last] if q == last => inner,
         _ => key,
     };
     if key.is_empty() || key.len() >= STRING_MAX {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
     // SAFETY: the pairs the selector holds.
     let held = unsafe { crate::util::bpm_tree::pairs(*kvs, *n, max) };
     if held.iter().any(|kv| crate::text::cstr(&kv.key) == key) {
-        return -EEXIST;
+        return Err(-EEXIST);
     }
     let mut kv: *mut TreeSelectorKv = ptr::null_mut();
     // SAFETY: the selector's pairs, their count and room for the new one.
-    let ret = unsafe { tree_selector_kv_add(kvs, n, max as c_int, &mut kv) };
+    let ret =
+        unsafe { tree_selector_kv_add(kvs, n, c_int::try_from(max).map_err(|_| -E2BIG)?, &mut kv) };
     if ret != 0 {
-        return ret;
+        return Err(ret);
     }
     // SAFETY: the pair just added.
     let kv = unsafe { &mut *kv };
@@ -360,10 +382,10 @@ fn parse_selector_kv(
             for (dst, v) in kv.values.iter_mut().zip(&values) {
                 *dst = text(v);
             }
-            kv.n_values = values.len() as c_int;
-            0
+            kv.n_values = c_int::try_from(values.len()).map_err(|_| -E2BIG)?;
+            Ok(())
         }
-        Err(_) => -EINVAL,
+        Err(_) => Err(-EINVAL),
     }
 }
 
@@ -405,7 +427,7 @@ pub(super) fn target_ok(target: &[u8]) -> bool {
 }
 
 /// upatches/<base>.upatch and its .unload.upatch, unless given.
-fn default_targets(u: &mut Upatch) -> c_int {
+fn default_targets(u: &mut Upatch) -> Result<(), c_int> {
     let src = &u.source;
     let mut base = &src[src.iter().rposition(|&c| c == b'/').map_or(0, |s| s + 1)..];
 
@@ -415,7 +437,7 @@ fn default_targets(u: &mut Upatch) -> c_int {
         base = &base[..dot];
     }
     if base.is_empty() {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
     for (target, suffix) in [
         (&mut u.load_target, &b".upatch"[..]),
@@ -424,12 +446,12 @@ fn default_targets(u: &mut Upatch) -> c_int {
         if target.is_empty() {
             let t = [b"upatches/", base, suffix].concat();
             if t.len() >= PATH_MAX {
-                return -ENAMETOOLONG;
+                return Err(-ENAMETOOLONG);
             }
             *target = t;
         }
     }
-    0
+    Ok(())
 }
 
 /// Where the next key = value line goes.
@@ -442,13 +464,13 @@ enum At {
     Policy(usize, usize),
 }
 
-fn set(dst: &mut Vec<u8>, value: &[u8], cap: usize) -> c_int {
+fn set(dst: &mut Vec<u8>, value: &[u8], cap: usize) -> Result<(), c_int> {
     match parse_string(value, cap) {
         Ok(v) => {
             *dst = v;
-            0
+            Ok(())
         }
-        Err(_) => -EINVAL,
+        Err(_) => Err(-EINVAL),
     }
 }
 
@@ -460,25 +482,25 @@ fn header(
     at: &mut At,
     tree_owner: &mut Option<usize>,
     tree_section: &mut bool,
-) -> c_int {
+) -> Result<(), c_int> {
     let array = s.get(1) == Some(&b'[');
     let (start, close): (usize, &[u8]) = if array { (2, b"]]") } else { (1, b"]") };
     let body = &s[start..];
     let Some(end) = body.windows(close.len()).position(|w| w == close) else {
-        return -EINVAL;
+        return Err(-EINVAL);
     };
     if end + close.len() != body.len() {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
     if end >= SECTION_MAX {
-        return -ENAMETOOLONG;
+        return Err(-ENAMETOOLONG);
     }
     *section = trim(&body[..end]).to_vec();
     // TOML spells [upatches.tree] with blanks or quotes around its parts
     // too: such a header could name a tree table this reader would pass
     // over.
     if !bare_key(section, true) {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
     *at = At::Nothing;
     *tree_section = !array
@@ -492,7 +514,7 @@ fn header(
     match (array, section.as_slice()) {
         (true, b"files") => {
             if spec.files.len() >= MAX_ENTRIES {
-                return -E2BIG;
+                return Err(-E2BIG);
             }
             spec.files.push(FileEntry {
                 source: Vec::new(),
@@ -503,7 +525,7 @@ fn header(
         }
         (true, b"upatches") => {
             if spec.upatches.len() >= MAX_ENTRIES {
-                return -E2BIG;
+                return Err(-E2BIG);
             }
             spec.upatches.push(Upatch::default());
             *at = At::Upatch(spec.upatches.len() - 1);
@@ -511,7 +533,7 @@ fn header(
         }
         (true, b"upatches.rodata") => {
             let Some(o) = tree_owner.filter(|&o| spec.upatches[o].rodata.len() < MAX_RODATA) else {
-                return -E2BIG;
+                return Err(-E2BIG);
             };
             let u = &mut spec.upatches[o];
             u.rodata.push(Rodata {
@@ -525,7 +547,7 @@ fn header(
         (true, b"upatches.policy") => {
             let Some(o) = tree_owner.filter(|&o| spec.upatches[o].policies.len() < MAX_POLICIES)
             else {
-                return -E2BIG;
+                return Err(-E2BIG);
             };
             let u = &mut spec.upatches[o];
             u.policies.push(Policy {
@@ -535,21 +557,21 @@ fn header(
             });
             *at = At::Policy(o, u.policies.len() - 1);
         }
-        (true, _) => return -EINVAL,
+        (true, _) => return Err(-EINVAL),
         _ if *tree_section => {
             // The tree tables qualify the preceding [[upatches]].
             let Some(o) = *tree_owner else {
-                return -EINVAL;
+                return Err(-EINVAL);
             };
             let t = &mut spec.upatches[o].tree;
             t.present = true;
             t.selector.get_or_insert_with(Selector::new);
         }
         // A selector the builder cannot read would widen the rollout.
-        _ if section.starts_with(b"upatches.tree") => return -EINVAL,
+        _ if section.starts_with(b"upatches.tree") => return Err(-EINVAL),
         _ => *tree_owner = None,
     }
-    0
+    Ok(())
 }
 
 /// One `key = value` line.
@@ -560,20 +582,22 @@ fn assignment(
     at: At,
     tree_owner: Option<usize>,
     tree_section: bool,
-) -> c_int {
+) -> Result<(), c_int> {
     let Some(eq) = s.iter().position(|&c| c == b'=') else {
-        return -EINVAL;
+        return Err(-EINVAL);
     };
     let (key, value) = (trim(&s[..eq]), trim(&s[eq + 1..]));
 
     if section == b"package" {
         return match key {
             b"name" => set(&mut spec.name, value, NAME_CAP),
-            b"description" | b"license" => {
-                parse_value(value, MAX_VALUE, false).map_or(-EINVAL, |_| 0)
-            }
-            b"authors" => parse_value(value, MAX_VALUE, true).map_or(-EINVAL, |_| 0),
-            _ => -EINVAL,
+            b"description" | b"license" => parse_value(value, MAX_VALUE, false)
+                .map(|_| ())
+                .map_err(|_| -EINVAL),
+            b"authors" => parse_value(value, MAX_VALUE, true)
+                .map(|_| ())
+                .map_err(|_| -EINVAL),
+            _ => Err(-EINVAL),
         };
     }
     match at {
@@ -582,7 +606,7 @@ fn assignment(
             match key {
                 b"source" => set(&mut f.source, value, PATH_MAX),
                 b"target" => set(&mut f.target, value, PATH_MAX),
-                _ => -EINVAL,
+                _ => Err(-EINVAL),
             }
         }
         At::Upatch(i) => {
@@ -592,7 +616,7 @@ fn assignment(
                 b"type" => set(&mut u.ty, value, TYPE_CAP),
                 b"load_target" => set(&mut u.load_target, value, PATH_MAX),
                 b"unload_target" => set(&mut u.unload_target, value, PATH_MAX),
-                _ => -EINVAL,
+                _ => Err(-EINVAL),
             }
         }
         At::Policy(o, j) => {
@@ -606,34 +630,34 @@ fn assignment(
                     };
                     let bit = parse_x64(number, u64::MAX).unwrap_or(0);
                     if bit == 0 || bit & (bit - 1) != 0 {
-                        return -EINVAL;
+                        return Err(-EINVAL);
                     }
                     p.bit = bit;
-                    0
+                    Ok(())
                 }
                 b"paths" if p.paths.is_empty() => match parse_string_array(value, MAX_POLICY_PATHS)
                 {
                     Ok(v) => {
                         p.paths = v;
-                        0
+                        Ok(())
                     }
-                    Err(_) => -EINVAL,
+                    Err(_) => Err(-EINVAL),
                 },
-                _ => -EINVAL,
+                _ => Err(-EINVAL),
             }
         }
         At::Rodata(o, j) => {
             let r = &mut spec.upatches[o].rodata[j];
             let command = |dst: &mut Vec<Vec<u8>>| {
                 if !dst.is_empty() {
-                    return -EINVAL;
+                    return Err(-EINVAL);
                 }
                 match parse_string_array(value, MAX_COMMAND_ARGS) {
                     Ok(v) => {
                         *dst = v;
-                        0
+                        Ok(())
                     }
-                    Err(_) => -EINVAL,
+                    Err(_) => Err(-EINVAL),
                 }
             };
             match key {
@@ -641,12 +665,12 @@ fn assignment(
                 b"input" => set(&mut r.input, value, PATH_MAX),
                 b"generator" => command(&mut r.generator),
                 b"update" => command(&mut r.update),
-                _ => -EINVAL,
+                _ => Err(-EINVAL),
             }
         }
         At::Nothing if tree_section => {
             let Some(o) = tree_owner else {
-                return -EINVAL;
+                return Err(-EINVAL);
             };
             let t = &mut spec.upatches[o].tree;
             match section {
@@ -655,18 +679,21 @@ fn assignment(
                     // but a dotted key or an inline table would be the
                     // selector spelled another way.
                     if !bare_key(key, false) || key == b"selector" {
-                        return -EINVAL;
+                        return Err(-EINVAL);
                     }
                     match key {
                         b"id" => set(&mut t.id, value, TREE_ID_CAP),
                         b"load_artifact" => set(&mut t.load_artifact, value, PATH_MAX),
                         b"unload_artifact" => set(&mut t.unload_artifact, value, PATH_MAX),
                         b"fixes" => parse_fixes(value, &mut t.fixes),
-                        _ => 0,
+                        _ => Ok(()),
                     }
                 }
                 b"upatches.tree.selector" => {
-                    let sel = &mut t.selector.as_mut().expect("tree tables have a selector").0;
+                    let Some(sel) = t.selector.as_mut() else {
+                        return Err(-EINVAL);
+                    };
+                    let sel = &mut sel.0;
                     let (dst, n) = match key {
                         b"kernel_release_prefix" => (
                             &mut sel.kernel_release_prefix,
@@ -676,57 +703,48 @@ fn assignment(
                             (&mut sel.kernel_build_id, &mut sel.n_kernel_build_id)
                         }
                         b"architecture" => (&mut sel.architecture, &mut sel.n_architecture),
-                        _ => return -EINVAL,
+                        _ => return Err(-EINVAL),
                     };
                     if *n != 0 {
-                        return -EINVAL;
+                        return Err(-EINVAL);
                     }
                     match parse_string_array(value, MAX_VALUES) {
                         Ok(v) => {
                             for (d, s) in dst.iter_mut().zip(&v) {
                                 *d = text(s);
                             }
-                            *n = v.len() as c_int;
-                            0
+                            *n = c_int::try_from(v.len()).map_err(|_| -EINVAL)?;
+                            Ok(())
                         }
-                        Err(_) => -EINVAL,
+                        Err(_) => Err(-EINVAL),
                     }
                 }
                 _ => {
-                    let sel = &mut t.selector.as_mut().expect("tree tables have a selector").0;
-                    let ret = if section == b"upatches.tree.selector.kconfig" {
-                        parse_selector_kv(
-                            key,
-                            value,
-                            &mut sel.kconfig,
-                            &mut sel.n_kconfig,
-                            MAX_KCONFIG,
-                        )
-                    } else {
-                        parse_selector_kv(
-                            key,
-                            value,
-                            &mut sel.labels,
-                            &mut sel.n_labels,
-                            MAX_LABELS,
-                        )
+                    let Some(sel) = t.selector.as_mut() else {
+                        return Err(-EINVAL);
                     };
-                    if ret != 0 { -EINVAL } else { 0 }
+                    parse_selector_kv(
+                        key,
+                        value,
+                        sel,
+                        section == b"upatches.tree.selector.kconfig",
+                    )
+                    .map_err(|_| -EINVAL)
                 }
             }
         }
-        At::Nothing => 0,
+        At::Nothing => Ok(()),
     }
 }
 
 /// The checks and defaults once every line is read.
-fn finish(spec: &mut Spec) -> c_int {
+fn finish(spec: &mut Spec) -> Result<(), c_int> {
     if !name_ok(&spec.name) {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
     for f in &mut spec.files {
         if f.source.is_empty() {
-            return -EINVAL;
+            return Err(-EINVAL);
         }
         if f.target.is_empty() {
             f.target = f.source.clone();
@@ -734,14 +752,14 @@ fn finish(spec: &mut Spec) -> c_int {
     }
     for u in &mut spec.upatches {
         if u.source.is_empty() {
-            return -EINVAL;
+            return Err(-EINVAL);
         }
         if u.ty.is_empty() {
             u.ty = b"bpf".to_vec();
         }
         u.ty.make_ascii_lowercase();
-        if u.ty != b"bpf" || default_targets(u) != 0 {
-            return -EINVAL;
+        if u.ty != b"bpf" || default_targets(u).is_err() {
+            return Err(-EINVAL);
         }
         for r in &u.rodata {
             if r.symbol.is_empty()
@@ -752,7 +770,7 @@ fn finish(spec: &mut Spec) -> c_int {
                 || r.input.windows(3).any(|w| w == b"../")
                 || r.input == b".."
             {
-                return -EINVAL;
+                return Err(-EINVAL);
             }
         }
         let t = &mut u.tree;
@@ -760,7 +778,7 @@ fn finish(spec: &mut Spec) -> c_int {
             continue;
         }
         if t.id.is_empty() || !upatch::name_valid(Some(&t.id)) {
-            return -EINVAL;
+            return Err(-EINVAL);
         }
         if t.load_artifact.is_empty() {
             t.load_artifact = u.load_target.clone();
@@ -769,17 +787,18 @@ fn finish(spec: &mut Spec) -> c_int {
             t.unload_artifact = u.unload_target.clone();
         }
         if !target_ok(&t.load_artifact) || !target_ok(&t.unload_artifact) {
-            return -EINVAL;
+            return Err(-EINVAL);
         }
     }
-    0
+    Ok(())
 }
 
-/// The Beefile `body` into `spec`: 0 or -errno.
-pub(super) fn parse(body: &[u8], spec: &mut Spec) -> c_int {
+/// The parsed Beefile, including the bytes to put in the archive.
+pub(super) fn parse(body: &[u8]) -> Result<Spec, c_int> {
     if body.contains(&0) {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
+    let mut spec = Spec::default();
     spec.build_file = body.to_vec();
     let mut section = Vec::new();
     let (mut at, mut tree_owner, mut tree_section) = (At::Nothing, None, false);
@@ -789,23 +808,21 @@ pub(super) fn parse(body: &[u8], spec: &mut Spec) -> c_int {
         if s.is_empty() {
             continue;
         }
-        let ret = if s[0] == b'[' {
+        if s[0] == b'[' {
             header(
-                spec,
+                &mut spec,
                 s,
                 &mut section,
                 &mut at,
                 &mut tree_owner,
                 &mut tree_section,
-            )
+            )?;
         } else {
-            assignment(spec, s, &section, at, tree_owner, tree_section)
-        };
-        if ret != 0 {
-            return ret;
+            assignment(&mut spec, s, &section, at, tree_owner, tree_section)?;
         }
     }
-    finish(spec)
+    finish(&mut spec)?;
+    Ok(spec)
 }
 
 #[cfg(shirudo_fuzz)]

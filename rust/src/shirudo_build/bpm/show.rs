@@ -10,7 +10,6 @@ use core::ffi::{CStr, c_int};
 use std::io::Write;
 
 use crate::errno::{EINVAL, EIO, EKEYREJECTED};
-use crate::sys::curl::{CURL_GLOBAL_DEFAULT, curl_global_cleanup, curl_global_init};
 use crate::text::cstr;
 use crate::util::bpm_oci::Client;
 use crate::util::bpm_package::fetch_document;
@@ -310,14 +309,12 @@ fn show(args: &[&CStr]) -> c_int {
 
 /// `bpm tree show`, from `show` on.
 pub(super) fn run(args: &[&CStr]) -> c_int {
-    // SAFETY: once, before any transfer.
-    if unsafe { curl_global_init(CURL_GLOBAL_DEFAULT) } != 0 {
+    let Ok(curl) = super::Curl::init() else {
         error(format!("bpm tree show: {}", strerr(EIO)));
         return 1;
-    }
+    };
     let ret = show(args);
-    // SAFETY: after every transfer.
-    unsafe { curl_global_cleanup() };
+    drop(curl);
     if ret == EXIT_USAGE {
         return EXIT_USAGE;
     }
