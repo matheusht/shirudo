@@ -1023,13 +1023,13 @@ testing/helper/test-exec-churn: $(HELPER_MAIN_DIR)/test-exec-churn.o \
 	@printf '  LD      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(RUST_TEST_LDLIBS)
 
-testing/end2end/exec-paths: testing/end2end/exec_paths.c
-	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) -pthread -o $@ $^
+testing/end2end/exec-paths: $(HELPER_MAIN_DIR)/exec-paths.o $(RUST_HELPER_LIB)
+	@printf '  LD      $@\n'
+	$(Q)$(CC) $(CFLAGS) -pthread -o $@ $^ $(RUST_TEST_LDLIBS)
 
-testing/end2end/policy-exec: testing/end2end/policy_exec.c
-	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) -o $@ $^
+testing/end2end/policy-exec: $(HELPER_MAIN_DIR)/policy-exec.o $(RUST_HELPER_LIB)
+	@printf '  LD      $@\n'
+	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(RUST_TEST_LDLIBS)
 
 testing/helper/test-config-image: $(HELPER_MAIN_DIR)/test-config-image.o \
 		$(RUST_HELPER_LIB)
