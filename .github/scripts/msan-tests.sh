@@ -39,9 +39,9 @@ for f in testing/unit/*.c; do
 	[ "$s" = unit ] || listed "$s" "$lua_units" || units="$units unit/$s"
 done
 fuzzers=
-for f in testing/fuzz/fuzz-*.c; do
-	t=${f##*/fuzz-}
-	t=${t%.c}
+for d in testing/fuzz/corpus/*/; do
+	t=${d%/}
+	t=${t##*/}
 	listed "$t" "$lua_fuzzers" || fuzzers="$fuzzers $t"
 done
 
