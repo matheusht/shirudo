@@ -25,8 +25,7 @@ use crate::sys::version::shirudo_version_id;
 use crate::text::capi::{digits, parse_u64, parse_x64, strscpy as c_strscpy};
 use crate::text::{cstr, strscpy};
 use crate::util::chain::{
-    ANCHOR_MAX, PCR as CHAIN_PCR, PCR_MASK as CHAIN_PCR_MASK, PHASE_PCR as CHAIN_PHASE_PCR,
-    chain_anchor, chain_fold, chain_key_event, chain_tree_event, chain_upatch_event,
+    self, ANCHOR_MAX, PCR as CHAIN_PCR, PCR_MASK as CHAIN_PCR_MASK, PHASE_PCR as CHAIN_PHASE_PCR,
     memneq_explicit,
 };
 use crate::util::config_attest::{self, Evidence, Quote};
@@ -879,16 +878,7 @@ fn on_record(p: &mut Parse) -> Result<(), c_int> {
         }
         let _ = strscpy(&mut r.label, cstr(&p.upatch_name));
         if hex_into(&p.upatch_payload_hex, &mut payload)
-            // SAFETY: the tag, a C string the parser wrote, the payload's
-            // digest and room for the event.
-            && unsafe {
-                chain_upatch_event(
-                    tag.as_ptr(),
-                    p.upatch_name.as_ptr().cast(),
-                    payload.as_ptr(),
-                    event.as_mut_ptr(),
-                )
-            } == 0
+            && chain::upatch_event(tag, &p.upatch_name, &payload, &mut event) == 0
         {
             r.derived = !memneq_explicit(&event, &r.digest);
         }
@@ -914,8 +904,7 @@ fn on_record(p: &mut Parse) -> Result<(), c_int> {
             && unsafe {
                 sha256_digest_decode(p.tree_digest_hex.as_ptr().cast(), operation.as_mut_ptr())
             } == 0
-            // SAFETY: the operation's digest, and room for the event.
-            && unsafe { chain_tree_event(p.tree_seq, operation.as_ptr(), event.as_mut_ptr()) } == 0
+            && chain::tree_event(p.tree_seq, &operation, &mut event) == 0
         {
             r.derived = !memneq_explicit(&event, &r.digest);
             // SAFETY: the label's room, and the C's format with its
@@ -939,11 +928,7 @@ fn on_record(p: &mut Parse) -> Result<(), c_int> {
 
         // Nor the fingerprint: name the measured certificate.
         if hex_into(&p.key_sha_hex, &mut sha)
-            // SAFETY: the tag, the certificate's digest and room for the
-            // event.
-            && unsafe {
-                chain_key_event(c"shirudo-key-revoke".as_ptr(), sha.as_ptr(), event.as_mut_ptr())
-            } == 0
+            && chain::key_event(c"shirudo-key-revoke", &sha, &mut event) == 0
         {
             r.derived = !memneq_explicit(&event, &r.digest);
             // SAFETY: the label's room, and the C's format with its
@@ -1720,8 +1705,7 @@ unsafe fn verify_parsed(
     // SAFETY: the records the parse holds.
     let recs = unsafe { ffi::slice(p.recs, p.n_recs) };
     for (i, r) in recs.iter().enumerate() {
-        // SAFETY: the register replayed so far, and a record's digest.
-        if unsafe { chain_fold(chain.as_mut_ptr(), r.digest.as_ptr()) } != 0 {
+        if chain::fold(&mut chain, &r.digest) != 0 {
             replayed = false;
         }
         if i != 0 {
@@ -1754,14 +1738,7 @@ unsafe fn verify_parsed(
 
     {
         let mut anchor = [0u8; ANCHOR_MAX];
-        // SAFETY: the recorded name, and the anchor's room.
-        let mut named = unsafe {
-            chain_anchor(
-                p.init.name.as_ptr(),
-                anchor.as_mut_ptr().cast(),
-                anchor.len(),
-            )
-        } == 0
+        let mut named = chain::anchor(&p.init.name, &mut anchor) == 0
             && sha256_into(cstr(&anchor), &mut anchor_digest) == 0;
 
         say!(
@@ -1770,9 +1747,7 @@ unsafe fn verify_parsed(
             c"anchor: record digest matches the index name"
         );
         let mut pcr_expected = p.init.pcr_before;
-        // SAFETY: the value, and the anchor's digest folded into it.
-        named =
-            unsafe { chain_fold(pcr_expected.as_mut_ptr(), anchor_digest.as_ptr()) } == 0 && named;
+        named = chain::fold(&mut pcr_expected, &anchor_digest) == 0 && named;
         if p.pcr_have & (1 << CHAIN_PCR) != 0 {
             let exact = named && !memneq_explicit(&pcr_expected, &p.pcrs[CHAIN_PCR as usize]);
 
@@ -1810,8 +1785,7 @@ unsafe fn verify_parsed(
         );
     } else if expect.have_init {
         let mut predicted = [0u8; 32];
-        // SAFETY: the value, and the expected init event folded into it.
-        let folded = unsafe { chain_fold(predicted.as_mut_ptr(), expect.init_event.as_ptr()) } == 0;
+        let folded = chain::fold(&mut predicted, &expect.init_event) == 0;
 
         if runtime == 0 {
             say!(

@@ -922,8 +922,7 @@ fn status_on(tpm: &mut Tpm, st: &mut ChainStatus) -> c_int {
 }
 
 pub(crate) use capi::{
-    chain_anchor, chain_bound, chain_extend, chain_fold, chain_key_event, chain_tree_event,
-    chain_upatch_event,
+    chain_bound, chain_extend, chain_fold, chain_key_event, chain_tree_event, chain_upatch_event,
 };
 
 pub(crate) use capi::chain_init_event;
@@ -1064,21 +1063,6 @@ mod capi {
     pub unsafe extern "C" fn chain_extend(event: *const u8, out_chain: *mut u8) -> c_int {
         // SAFETY: the caller passes a digest and NULL or the room.
         unsafe { super::extend(digest(event), out_chain.cast::<[u8; DIGEST_LEN]>().as_mut()) }
-    }
-
-    /// # Safety
-    ///
-    /// `name` holds a register name and `out` room for `cap` bytes.
-    pub unsafe extern "C" fn chain_anchor(name: *const u8, out: *mut c_char, cap: usize) -> c_int {
-        // SAFETY: the caller's name.
-        let name = unsafe { core::slice::from_raw_parts(name, super::NAME_LEN) };
-        let out: &mut [u8] = if cap == 0 {
-            &mut []
-        } else {
-            // SAFETY: the caller's room.
-            unsafe { core::slice::from_raw_parts_mut(out.cast(), cap) }
-        };
-        super::anchor(name, out)
     }
 
     pub extern "C" fn chain_bound() -> bool {

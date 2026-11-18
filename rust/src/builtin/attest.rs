@@ -21,8 +21,7 @@ use crate::util::attest::{
     attest_parse_pcr_value, attest_parse_pcrs, attest_verify,
 };
 use crate::util::chain::{
-    ANCHOR_MAX, MeasuredUpatch, PCR, PCR_MASK as CHAIN_PCR_MASK, PHASE_PCR, chain_anchor,
-    chain_fold, chain_init_event, chain_key_event, chain_tree_event, chain_upatch_event,
+    self, ANCHOR_MAX, MeasuredUpatch, PCR, PCR_MASK as CHAIN_PCR_MASK, PHASE_PCR,
 };
 use crate::util::config_measure::pcr_valid;
 use crate::util::crypto_openssl::sha256_into;
@@ -479,6 +478,11 @@ impl Members {
         Members { set, n: 0 }
     }
 
+    /// The members added so far.
+    fn members(&mut self) -> &mut [MeasuredUpatch] {
+        self.set.get_mut(..self.n).unwrap_or_default()
+    }
+
     fn add(&mut self, name: &CStr, payload_hex: &CStr) -> c_int {
         // SAFETY: the set's room, its count and two C strings.
         unsafe {
@@ -614,8 +618,8 @@ fn cert_add(p: &OptParser<'_>, v: &[u8], certs: &mut Vec<[u8; 32]>) -> Result<()
     Ok(())
 }
 
-/// Folds a `<kind>:<name>=<hex>` event into `chain`.
-fn apply_event(spec: &[u8], chain: &mut [u8; 32]) -> Result<(), c_int> {
+/// Folds a `<kind>:<name>=<hex>` event into `register`.
+fn apply_event(spec: &[u8], register: &mut [u8; 32]) -> Result<(), c_int> {
     let colon = spec.iter().position(|&c| c == b':').ok_or(-EINVAL)?;
     let (kind, rest) = (&spec[..colon], &spec[colon + 1..]);
     let mut name = [0u8; upatch::NAME_MAX + 1];
@@ -630,42 +634,21 @@ fn apply_event(spec: &[u8], chain: &mut [u8; 32]) -> Result<(), c_int> {
     {
         return Err(-EINVAL);
     }
-    let name_c = message(&[cstr(&name)]);
-    // SAFETY: C strings, the digest and room for the event.
-    let failed = unsafe {
-        match kind {
-            b"load" => chain_upatch_event(
-                c"shirudo-upatch".as_ptr(),
-                name_c.as_ptr(),
-                digest.as_ptr(),
-                event.as_mut_ptr(),
-            ),
-            b"unload" => chain_upatch_event(
-                c"shirudo-unload".as_ptr(),
-                name_c.as_ptr(),
-                digest.as_ptr(),
-                event.as_mut_ptr(),
-            ),
-            b"tree" => {
-                let seq = parse_u64(cstr(&name), i64::MAX as u64)
-                    .ok()
-                    .filter(|&s| s >= 1)
-                    .ok_or(-EINVAL)?;
-                chain_tree_event(seq as i64, digest.as_ptr(), event.as_mut_ptr())
-            }
-            b"revoke" => chain_key_event(
-                c"shirudo-key-revoke".as_ptr(),
-                digest.as_ptr(),
-                event.as_mut_ptr(),
-            ),
-            _ => return Err(-EINVAL),
+    let ret = match kind {
+        b"load" => chain::upatch_event(c"shirudo-upatch", &name, &digest, &mut event),
+        b"unload" => chain::upatch_event(c"shirudo-unload", &name, &digest, &mut event),
+        b"tree" => {
+            let seq = parse_u64(cstr(&name), i64::MAX as u64)
+                .ok()
+                .and_then(|s| i64::try_from(s).ok())
+                .filter(|&s| s >= 1)
+                .ok_or(-EINVAL)?;
+            chain::tree_event(seq, &digest, &mut event)
         }
-    } != 0;
-    if failed {
-        return Err(-EIO);
-    }
-    // SAFETY: the chain and the event.
-    if unsafe { chain_fold(chain.as_mut_ptr(), event.as_ptr()) } != 0 {
+        b"revoke" => chain::key_event(c"shirudo-key-revoke", &digest, &mut event),
+        _ => return Err(-EINVAL),
+    };
+    if ret != 0 || chain::fold(register, &event) != 0 {
         return Err(-EIO);
     }
     Ok(())
@@ -801,20 +784,15 @@ fn predict(args: &[&CStr]) -> c_int {
         e.obj_open();
         e.kv_int(b"schema", 1);
     }
-    let (mut set_digest, mut init, mut chain) = ([0u8; 32], [0u8; 32], [0u8; 32]);
+    let (mut set_digest, mut init, mut register) = ([0u8; 32], [0u8; 32], [0u8; 32]);
     let ok = anchor_digest(&certs).is_some_and(|cert_sha| {
-        // SAFETY: the digest, the set, the root and the rooms.
-        let ret = unsafe {
-            chain_init_event(
-                cert_sha.as_ptr(),
-                m.set.as_mut_ptr(),
-                m.n,
-                tree_root.as_ptr(),
-                set_digest.as_mut_ptr(),
-                init.as_mut_ptr(),
-            )
-        };
-        ret == 0
+        chain::init_event(
+            &cert_sha,
+            m.members(),
+            &tree_root,
+            &mut set_digest,
+            &mut init,
+        ) == 0
     });
     if !ok {
         error(&[b"attest predict: cannot hash the init event"]);
@@ -822,20 +800,19 @@ fn predict(args: &[&CStr]) -> c_int {
     }
     out.kv(b"set_digest", &hex::encode(&set_digest));
     out.kv(b"init_event", &hex::encode(&init));
-    // SAFETY: the chain and the event.
-    if unsafe { chain_fold(chain.as_mut_ptr(), init.as_ptr()) } != 0 {
+    if chain::fold(&mut register, &init) != 0 {
         error(&[b"attest predict: cannot hash the register at boot"]);
         return EXIT_USAGE;
     }
-    out.kv(b"register_at_boot", &hex::encode(&chain));
+    out.kv(b"register_at_boot", &hex::encode(&register));
     for ev in &events {
-        if apply_event(ev, &mut chain).is_err() {
+        if apply_event(ev, &mut register).is_err() {
             error(&[b"attest predict: bad --event '", ev, b"'"]);
             return EXIT_USAGE;
         }
     }
     if !events.is_empty() {
-        out.kv(b"register_after_events", &hex::encode(&chain));
+        out.kv(b"register_after_events", &hex::encode(&register));
     }
     if have_bind[0] && have_bind[1] {
         let (mut written, mut initial, mut policy) = ([0u8; 32], [0u8; 32], [0u8; 32]);
@@ -878,8 +855,7 @@ fn predict(args: &[&CStr]) -> c_int {
             return 1;
         }
         out.kv(b"register_name", &hex::encode(&name));
-        // SAFETY: the name and room for the anchor.
-        if unsafe { chain_anchor(name.as_ptr(), anchor.as_mut_ptr().cast(), anchor.len()) } != 0 {
+        if chain::anchor(&name, &mut anchor) != 0 {
             error(&[b"attest predict: the anchor does not fit"]);
             return EXIT_USAGE;
         }
@@ -888,8 +864,7 @@ fn predict(args: &[&CStr]) -> c_int {
             error(&[b"attest predict: cannot hash the anchor"]);
             return EXIT_USAGE;
         }
-        // SAFETY: the PCR value and the digest.
-        if unsafe { chain_fold(bind[0].as_mut_ptr(), anchor_digest.as_ptr()) } != 0 {
+        if chain::fold(&mut bind[0], &anchor_digest) != 0 {
             error(&[
                 format!("attest predict: cannot hash PCR {CHAIN_PCR} after the anchor").as_bytes(),
             ]);
@@ -1082,18 +1057,13 @@ fn verify_against(args: &[&CStr], x: &mut AttestExpect) -> Result<c_int, c_int> 
     if !certs.is_empty() {
         let mut set_digest = [0u8; 32];
         let ok = anchor_digest(&certs).is_some_and(|cert_sha| {
-            // SAFETY: the digest, the set, the root and the rooms.
-            let ret = unsafe {
-                chain_init_event(
-                    cert_sha.as_ptr(),
-                    m.set.as_mut_ptr(),
-                    m.n,
-                    tree_root.as_ptr(),
-                    set_digest.as_mut_ptr(),
-                    x.init_event.as_mut_ptr(),
-                )
-            };
-            ret == 0
+            chain::init_event(
+                &cert_sha,
+                m.members(),
+                &tree_root,
+                &mut set_digest,
+                &mut x.init_event,
+            ) == 0
         });
         if !ok {
             error(&[b"attest verify: cannot hash the init event"]);
