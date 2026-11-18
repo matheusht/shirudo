@@ -61,6 +61,13 @@ NODE_ROUND=
 say() { printf 'end2end: %s\n' "$*"; }
 die() { printf 'end2end: %s\n' "$*" >&2; exit 1; }
 
+# The operator signs with the key the bundle's fixtures were signed with,
+# which the targets trust. Another private directory, root's for a run
+# under sudo without TEST_VM_HOST_PRIVATE_DIR, holds another key, and
+# every signature the operator makes would fail on the targets.
+cmp -s "$KEYS/cert.der" "$TEST_VM_HOST_BUNDLE/fixtures/cert.der" ||
+	die "the operator key in $KEYS did not sign the bundle's fixtures; set TEST_VM_HOST_PRIVATE_DIR to the directory the bundle was built with"
+
 down() {
 	node_down edge "$NODE_EDGE_PID"
 	NODE_EDGE_PID=
