@@ -16,9 +16,9 @@ use crate::sys::libc::{fwrite, stdout, strerror};
 use crate::sys::tss2::NV_WRITTEN;
 use crate::text::{cstr, parse_u64};
 use crate::util::attest::{
-    AttestChallenge, AttestChallengePolicy, AttestExpect, NONCE_MAX, PCR_DEFAULT,
-    attest_challenge_make, attest_challenge_read, attest_evidence_config, attest_verify,
-    parse_name_digest, parse_pcr_value, parse_pcrs,
+    self, AttestChallenge, AttestChallengePolicy, AttestExpect, NONCE_MAX, PCR_DEFAULT, Report,
+    attest_challenge_make, attest_challenge_read, attest_evidence_config, parse_name_digest,
+    parse_pcr_value, parse_pcrs,
 };
 use crate::util::chain::{
     self, ANCHOR_MAX, MeasuredUpatch, PCR, PCR_MASK as CHAIN_PCR_MASK, PHASE_PCR,
@@ -445,9 +445,11 @@ fn nonce_of(p: &OptParser<'_>, v: &[u8], nonce: &mut [u8; NONCE_MAX]) -> Result<
 }
 
 /// A key name of `v`, of the option `what`: 2 * NAME_LEN hex digits.
-fn name_of(p: &OptParser<'_>, what: &str, v: &[u8], out: &mut [u8; NAME_LEN]) -> Result<(), c_int> {
-    if hex::decode(v, out).is_ok() {
-        return Ok(());
+fn name_of(p: &OptParser<'_>, what: &str, v: &[u8]) -> Result<[u8; NAME_LEN], c_int> {
+    let mut name = [0u8; NAME_LEN];
+
+    if hex::decode(v, &mut name).is_ok() {
+        return Ok(name);
     }
     Err(usage(
         p,
@@ -455,9 +457,11 @@ fn name_of(p: &OptParser<'_>, what: &str, v: &[u8], out: &mut [u8; NAME_LEN]) ->
     ))
 }
 
-fn parse_hex32(what: &[u8], text: &[u8], out: &mut [u8; 32]) -> Result<(), c_int> {
-    if hex::decode(text, out).is_ok() {
-        return Ok(());
+fn parse_hex32(what: &[u8], text: &[u8]) -> Result<[u8; 32], c_int> {
+    let mut value = [0u8; 32];
+
+    if hex::decode(text, &mut value).is_ok() {
+        return Ok(value);
     }
     error(&[b"attest: ", what, b" must be 64 hex characters"]);
     Err(EXIT_USAGE)
@@ -668,7 +672,7 @@ fn pcr_expect(
 ) -> Result<(), c_int> {
     let (n, value) = parse_pcr_value(v).map_err(|_| EXIT_USAGE)?;
 
-    parse_hex32(format!("{what} value").as_bytes(), value, &mut values[n])?;
+    values[n] = parse_hex32(format!("{what} value").as_bytes(), value)?;
     if *mask & (1 << n) != 0 {
         return Err(usage(p, format!("{what} {n} given twice")));
     }
@@ -696,7 +700,7 @@ fn predict(args: &[&CStr]) -> c_int {
             PREDICT_CERT => cert_add(&p, v, &mut certs)?,
             PREDICT_UPATCH => m.add_file(v)?,
             PREDICT_EXPECT => m.add_spec(v)?,
-            PREDICT_TREE_ROOT => parse_hex32(b"--tree-root", v, &mut tree_root)?,
+            PREDICT_TREE_ROOT => tree_root = parse_hex32(b"--tree-root", v)?,
             PREDICT_EVENT => {
                 if events.len() >= EVENTS_MAX {
                     return Err(usage(&p, format!("at most {EVENTS_MAX} --event")));
@@ -715,7 +719,7 @@ fn predict(args: &[&CStr]) -> c_int {
                     let s = [CHAIN_PCR, CHAIN_PHASE_PCR]
                         .iter()
                         .position(|&pcr| pcr == n as u64)?;
-                    parse_hex32(b"--bind-pcr value", value, &mut bind[s]).ok()?;
+                    bind[s] = parse_hex32(b"--bind-pcr value", value).ok()?;
                     Some((n, s))
                 });
                 let Some((n, s)) = slot else {
@@ -901,13 +905,11 @@ fn read_evidence(path: &[u8]) -> Result<File, c_int> {
 }
 
 fn verify(args: &[&CStr]) -> c_int {
-    // SAFETY: an all-zero expectation expects nothing.
-    let mut x: Box<AttestExpect> = Box::new(unsafe { core::mem::zeroed() });
-    let ret = verify_against(args, &mut x).unwrap_or_else(|code| code);
+    // On the heap, so that the credential it may hold is scrubbed when it
+    // goes.
+    let mut x: Box<AttestExpect> = Box::default();
 
-    // SAFETY: the expectation, scrubbed before it goes.
-    unsafe { ptr::write_bytes(&raw mut *x, 0, 1) };
-    ret
+    verify_against(args, &mut x).unwrap_or_else(|code| code)
 }
 
 /// attest verify with the expectation `x` its options fill.
@@ -928,33 +930,25 @@ fn verify_against(args: &[&CStr], x: &mut AttestExpect) -> Result<c_int, c_int> 
             OPT_END => break,
             VERIFY_EVIDENCE => evidence_path = Some(v),
             VERIFY_NONCE => nonce_len = nonce_of(&p, v, &mut nonce)?,
-            VERIFY_AK_NAME => {
-                name_of(&p, "--ak-name", v, &mut x.ak_name)?;
-                x.have_ak_name = true;
-            }
+            VERIFY_AK_NAME => x.ak_name = Some(name_of(&p, "--ak-name", v)?),
             VERIFY_CERT => cert_add(&p, v, &mut certs)?,
             VERIFY_UPATCH => m.add_file(v)?,
             VERIFY_EXPECT => m.add_spec(v)?,
             VERIFY_TREE_ROOT => {
-                parse_hex32(b"--tree-root", v, &mut tree_root)?;
+                tree_root = parse_hex32(b"--tree-root", v)?;
                 have_tree_root = true;
             }
             VERIFY_EXPECT_CONFIG_ROOT => {
-                parse_hex32(b"--expect-config-root", v, &mut x.config_root)?;
-                x.have_config_root = true;
+                x.config_root = Some(parse_hex32(b"--expect-config-root", v)?);
             }
             VERIFY_EXPECT_CONFIG_PCR => {
                 let pcr = p.number(0, 15).map_err(|_| EXIT_USAGE)? as u32;
                 if pcr_valid(pcr) != 0 {
                     return Err(usage(&p, "--expect-config-pcr cannot be 9 or 11"));
                 }
-                x.config_pcr = pcr;
-                x.have_config_pcr = true;
+                x.config_pcr = Some(pcr);
             }
-            VERIFY_EXPECT_CHAIN => {
-                parse_hex32(b"--expect-chain", v, &mut x.chain)?;
-                x.have_chain = true;
-            }
+            VERIFY_EXPECT_CHAIN => x.chain = Some(parse_hex32(b"--expect-chain", v)?),
             VERIFY_EXPECT_PCR => {
                 pcr_expect(&p, "--expect-pcr", v, &mut x.pcrs, &mut x.pcr_expect_mask)?;
             }
@@ -962,13 +956,9 @@ fn verify_against(args: &[&CStr], x: &mut AttestExpect) -> Result<c_int, c_int> 
             VERIFY_ALLOW_RUNTIME_EVENTS => x.allow_runtime_events = true,
             VERIFY_STRICT_ANCHOR => x.strict_anchor = true,
             VERIFY_EXPECT_CREDENTIAL => {
-                parse_hex32(b"--expect-credential", v, &mut x.credential)?;
-                x.have_credential = true;
+                x.credential = Some(parse_hex32(b"--expect-credential", v)?);
             }
-            VERIFY_EK_NAME => {
-                name_of(&p, "--ek-name", v, &mut x.ek_name)?;
-                x.have_ek_name = true;
-            }
+            VERIFY_EK_NAME => x.ek_name = Some(name_of(&p, "--ek-name", v)?),
             VERIFY_EXPECT_BIND_PCR => {
                 pcr_expect(
                     &p,
@@ -987,7 +977,7 @@ fn verify_against(args: &[&CStr], x: &mut AttestExpect) -> Result<c_int, c_int> 
             _ => return Err(EXIT_USAGE),
         }
     }
-    if x.have_config_root && !x.have_config_pcr {
+    if x.config_root.is_some() && x.config_pcr.is_none() {
         return Err(usage(
             &p,
             "--expect-config-root requires --expect-config-pcr",
@@ -1005,48 +995,40 @@ fn verify_against(args: &[&CStr], x: &mut AttestExpect) -> Result<c_int, c_int> 
     // The credential proves that the pinned attestation key sits beside
     // the endorsement key; recovered on the target, its value says
     // nothing about which key signed the evidence.
-    if x.have_credential && !x.have_ak_name {
+    if x.credential.is_some() && x.ak_name.is_none() {
         error(&[
             b"attest verify: --expect-credential needs the key the challenge was made for; give --ak-name",
         ]);
         return Err(EXIT_USAGE);
     }
-    if !x.have_ak_name {
+    if x.ak_name.is_none() {
         warn(&[b"attest verify: no --ak-name; the signer is not pinned"]);
     }
-    x.nonce = nonce.as_ptr();
-    x.nonce_len = nonce_len;
+    x.nonce = nonce[..nonce_len].to_vec();
     if !certs.is_empty() {
-        let mut set_digest = [0u8; 32];
+        let (mut set_digest, mut init) = ([0u8; 32], [0u8; 32]);
         let ok = anchor_digest(&certs).is_some_and(|cert_sha| {
             chain::init_event(
                 &cert_sha,
                 m.members(),
                 &tree_root,
                 &mut set_digest,
-                &mut x.init_event,
+                &mut init,
             ) == 0
         });
         if !ok {
             error(&[b"attest verify: cannot hash the init event"]);
             return Err(EXIT_USAGE);
         }
-        x.have_init = true;
+        x.init_event = Some(init);
     }
     let evidence = read_evidence(evidence_path)?;
-    let mut report = vec![0u8; REPORT_MAX];
-    let doc = evidence.bytes();
-    // SAFETY: the evidence, the expectation and room for the report.
-    let err = unsafe {
-        attest_verify(
-            doc.as_ptr().cast(),
-            doc.len(),
-            x,
-            report.as_mut_ptr().cast(),
-            report.len(),
-        )
+    let mut report = Report::new(REPORT_MAX);
+    let err = match attest::verify(evidence.bytes(), x, &mut report) {
+        Ok(()) => 0,
+        Err(err) => err,
     };
-    let report = cstr(&report);
+    let report = report.text();
     if err == -EINVAL {
         if !json {
             print(report);
@@ -1093,11 +1075,11 @@ fn challenge_into(args: &[&CStr], credential: &mut [u8; CREDENTIAL_LEN]) -> Resu
             CHALLENGE_EVIDENCE => evidence_path = Some(v),
             CHALLENGE_EK_CA => ek_ca = p.value(),
             CHALLENGE_AK_NAME => {
-                name_of(&p, "--ak-name", v, &mut ak_name)?;
+                ak_name = name_of(&p, "--ak-name", v)?;
                 have_ak = true;
             }
             CHALLENGE_EK_NAME => {
-                name_of(&p, "--ek-name", v, &mut ek_name)?;
+                ek_name = name_of(&p, "--ek-name", v)?;
                 have_ek = true;
             }
             CHALLENGE_TRUST_PRESENTED_EK => trust_presented = true,

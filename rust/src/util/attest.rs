@@ -14,7 +14,7 @@ use crate::errno::{
     EUCLEAN,
 };
 use crate::ffi;
-use crate::heap::{xcalloc, xfree, xmalloc};
+use crate::heap::{xfree, xmalloc};
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     AT_FDCWD, O_CLOEXEC, O_RDONLY, STATX_BASIC_STATS, Statx, close, errno, explicit_bzero,
@@ -22,8 +22,9 @@ use crate::sys::libc::{
 };
 use crate::sys::tss2::NV_WRITTEN;
 use crate::sys::version::shirudo_version_id;
-use crate::text::capi::{parse_x64, strscpy as c_strscpy};
-use crate::text::{cstr, digits, parse_u64, strscpy};
+use crate::text::capi::strscpy as c_strscpy;
+use crate::text::{cstr, digits, parse_u64, parse_x64};
+use crate::util::bpm_tree::digest_bytes;
 use crate::util::chain::{
     self, ANCHOR_MAX, PCR as CHAIN_PCR, PCR_MASK as CHAIN_PCR_MASK, PHASE_PCR as CHAIN_PHASE_PCR,
     memneq_explicit,
@@ -37,7 +38,7 @@ use crate::util::crypto_openssl::{
 use crate::util::eventlog::{
     NV_INDEX, eventlog_boot_id, eventlog_boot_lines, eventlog_path, eventlog_timestamp,
 };
-use crate::util::hex::{decode, hex_decode, hex_decode_max, hex_encode, sha256_digest_decode};
+use crate::util::hex::{decode, decode_max, hex_decode_max, hex_encode};
 use crate::util::io::read_file;
 use crate::util::json::{JsonEmit, JsonField, MAX_BYTES as JSON_MAX_BYTES, parse_schema};
 use crate::util::tpm::{
@@ -52,7 +53,7 @@ use crate::util::tpm_wire::{
     attest_parse, attest_signer, attest_verify as signature_verify, credential_protect,
     ecc_public_parse, kdfe, nv_name, object_name, public_parse, register_policy,
 };
-use crate::util::upatch::{NAME_MAX as UPATCH_NAME_MAX, upatch_name_valid};
+use crate::util::upatch::{self, NAME_MAX as UPATCH_NAME_MAX};
 
 const FIRMWARE_LOG_PATH: &CStr = c"/sys/kernel/security/tpm0/binary_bios_measurements";
 const SYSTEMD_LOG_PATH: &CStr = c"/run/log/systemd/tpm2-measure.log";
@@ -99,60 +100,50 @@ pub struct AttestChallengePolicy {
     pub(crate) trust_presented: bool,
 }
 
-/// `struct attest_expect`: what the operator expects the evidence to
-/// show.
-#[repr(C)]
-pub struct AttestExpect {
-    pub(crate) nonce: *const u8,
-    pub(crate) nonce_len: usize,
-    pub(crate) have_ak_name: bool,
-    pub(crate) ak_name: [u8; NAME_LEN],
-    pub(crate) have_chain: bool,
-    pub(crate) chain: [u8; 32],
-    /// Cert, set and tree root known.
-    pub(crate) have_init: bool,
-    pub(crate) init_event: [u8; 32],
-    pub(crate) allow_runtime_events: bool,
-    pub(crate) strict_anchor: bool,
-    pub(crate) pcr_expect_mask: u32,
-    pub(crate) pcrs: [[u8; 32]; 24],
-    pub(crate) have_credential: bool,
-    pub(crate) credential: [u8; CREDENTIAL_LEN],
-    pub(crate) have_ek_name: bool,
-    pub(crate) ek_name: [u8; NAME_LEN],
-    /// The binding must be the initrd's.
-    pub(crate) require_initrd: bool,
-    /// PCR values at binding time.
-    pub(crate) bind_expect_mask: u32,
-    pub(crate) bind_values: [[u8; 32]; 24],
-    pub(crate) have_config_root: bool,
-    pub(crate) config_root: [u8; 32],
-    pub(crate) have_config_pcr: bool,
-    pub(crate) config_pcr: u32,
-}
-
 const _: () = assert!(size_of::<AttestChallenge>() == 376);
 const _: () = assert!(size_of::<AttestChallengePolicy>() == 32);
-const _: () = assert!(size_of::<AttestExpect>() == 1776);
 
-/// `struct record`: an eventlog record as the report names it.
-#[repr(C)]
+/// What the operator expects the evidence to show.
+#[derive(Default)]
+pub(crate) struct AttestExpect {
+    /// The nonce the evidence was requested with.
+    pub(crate) nonce: Vec<u8>,
+    pub(crate) ak_name: Option<[u8; NAME_LEN]>,
+    /// The register's value after the expected events.
+    pub(crate) chain: Option<[u8; 32]>,
+    /// The init event of the certificates, set and tree root known.
+    pub(crate) init_event: Option<[u8; 32]>,
+    pub(crate) allow_runtime_events: bool,
+    pub(crate) strict_anchor: bool,
+    /// The PCRs whose values the quote must carry, and the values.
+    pub(crate) pcr_expect_mask: u32,
+    pub(crate) pcrs: [[u8; 32]; 24],
+    pub(crate) credential: Option<[u8; CREDENTIAL_LEN]>,
+    pub(crate) ek_name: Option<[u8; NAME_LEN]>,
+    /// The binding must be the initrd's.
+    pub(crate) require_initrd: bool,
+    /// The PCRs whose values at binding time are pinned, and the values.
+    pub(crate) bind_expect_mask: u32,
+    pub(crate) bind_values: [[u8; 32]; 24],
+    pub(crate) config_root: Option<[u8; 32]>,
+    pub(crate) config_pcr: Option<u32>,
+}
+
+/// An eventlog record as the report names it.
 struct Record {
-    ty: [u8; 16],
-    label: [u8; UPATCH_NAME_MAX + 64],
+    ty: Vec<u8>,
+    label: Vec<u8>,
     digest: [u8; 32],
     /// The digest follows from the record's fields.
     derived: bool,
 }
 
-/// `struct init_record`: the boot's last init record.
-#[repr(C)]
+/// The boot's last init record.
 struct InitRecord {
     writer_public: [u8; NV_RSA_BYTES],
     present: bool,
-    have_reset_count: bool,
     initrd: bool,
-    reset_count: u32,
+    reset_count: Option<u32>,
     pcr: u32,
     phase_pcr: u32,
     digest: [u8; 32],
@@ -160,13 +151,28 @@ struct InitRecord {
     phase_before: [u8; 32],
     name: [u8; NAME_LEN],
     anchor_digest: [u8; 32],
-    chain: [u8; 32],
-    anchor: [u8; ANCHOR_MAX],
 }
 
-/// `struct parse`: what the evidence's schema reads into, laid out as
-/// the C's, whose size it is allocated by.
-#[repr(C)]
+impl InitRecord {
+    const fn new() -> Self {
+        InitRecord {
+            writer_public: [0; NV_RSA_BYTES],
+            present: false,
+            initrd: false,
+            reset_count: None,
+            pcr: 0,
+            phase_pcr: 0,
+            digest: [0; 32],
+            pcr_before: [0; 32],
+            phase_before: [0; 32],
+            name: [0; NAME_LEN],
+            anchor_digest: [0; 32],
+        }
+    }
+}
+
+/// What the evidence's schema reads into: the text of each value, in
+/// room that bounds it, and what its arrays of PCRs and records give.
 struct Parse {
     writer_public_hex: [u8; 2 * NV_RSA_BYTES + 1],
     nonce_hex: [u8; 2 * NONCE_MAX + 1],
@@ -210,8 +216,7 @@ struct Parse {
     tree_seq: i64,
     key_fingerprint: [u8; 65],
     key_sha_hex: [u8; 65],
-    recs: *mut Record,
-    n_recs: usize,
+    recs: Vec<Record>,
     /// Init records this boot.
     inits: u32,
     /// Those for the last reset count.
@@ -219,9 +224,58 @@ struct Parse {
     init: InitRecord,
 }
 
-const _: () = assert!(size_of::<Record>() == 369);
-const _: () = assert!(size_of::<InitRecord>() == 724);
-const _: () = assert!(size_of::<Parse>() == 11064);
+impl Parse {
+    /// Nothing parsed yet, a record's numbers not given.
+    const fn new() -> Self {
+        Parse {
+            writer_public_hex: [0; 2 * NV_RSA_BYTES + 1],
+            nonce_hex: [0; 2 * NONCE_MAX + 1],
+            pcr_mask: 0,
+            ak_public_hex: [0; 2 * PUBLIC_MAX + 1],
+            ak_name_hex: [0; 2 * NAME_LEN + 1],
+            quote_attest_hex: [0; 2 * ATTEST_MAX + 1],
+            quote_sig_hex: [0; 2 * SIGNATURE_MAX + 1],
+            ek_type: [0; 8],
+            ek_public_hex: [0; 2 * PUBLIC_MAX + 1],
+            ek_name_hex: [0; 2 * NAME_LEN + 1],
+            cred_hex: [0; 2 * CREDENTIAL_LEN + 1],
+            reg_index: [0; 16],
+            reg_pcr: 0,
+            reg_name_hex: [0; 2 * NAME_LEN + 1],
+            reg_value_hex: [0; 65],
+            reg_attest_hex: [0; 2 * ATTEST_MAX + 1],
+            reg_sig_hex: [0; 2 * SIGNATURE_MAX + 1],
+            pcr_index: 0,
+            pcr_value_hex: [0; 65],
+            pcr_have: 0,
+            pcrs: [[0; 32]; 24],
+            ty: [0; 16],
+            digest_hex: [0; 65],
+            pcr_before_hex: [0; 65],
+            phase_before_hex: [0; 65],
+            bound_in: [0; 8],
+            nv_name_hex: [0; 2 * NAME_LEN + 1],
+            anchor: [0; ANCHOR_MAX],
+            anchor_digest_hex: [0; 65],
+            chain_hex: [0; 65],
+            rec_pcr: -1,
+            rec_phase_pcr: -1,
+            rec_reset: -1,
+            upatch_name: [0; UPATCH_NAME_MAX + 1],
+            upatch_payload_hex: [0; 65],
+            tree_id: [0; UPATCH_NAME_MAX + 1],
+            tree_op: [0; 16],
+            tree_digest_hex: [0; 8 + 64],
+            tree_seq: 0,
+            key_fingerprint: [0; 65],
+            key_sha_hex: [0; 65],
+            recs: Vec::new(),
+            inits: 0,
+            inits_epoch: 0,
+            init: InitRecord::new(),
+        }
+    }
+}
 
 /// A structure all of whose bits zeroed are a value of it, as `= {}` and
 /// memset() give it in C.
@@ -782,12 +836,15 @@ unsafe fn evidence(
 
 /// What the array of PCRs calls with each: its value, under its index.
 fn on_pcr(p: &mut Parse) -> Result<(), c_int> {
-    if !(0..24).contains(&p.pcr_index)
-        || !hex_into(&p.pcr_value_hex, &mut p.pcrs[p.pcr_index as usize])
-    {
+    let index = usize::try_from(p.pcr_index)
+        .ok()
+        .filter(|&i| i < p.pcrs.len())
+        .ok_or(-EINVAL)?;
+
+    if !hex_into(&p.pcr_value_hex, &mut p.pcrs[index]) {
         return Err(-EINVAL);
     }
-    p.pcr_have |= 1u32 << p.pcr_index;
+    p.pcr_have |= 1u32 << index;
     Ok(())
 }
 
@@ -799,157 +856,158 @@ fn record_word(s: &[u8]) -> bool {
     s.iter().all(|&c| c.is_ascii_lowercase() || c == b'_')
 }
 
-/// hex_decode() of the C string in `hex` into all of `out`.
+/// The hex of the C string in `hex` decoded into all of `out`.
 fn hex_into(hex: &[u8], out: &mut [u8]) -> bool {
-    // SAFETY: a C string the parser wrote, and room for out.len() bytes.
-    unsafe { hex_decode(hex.as_ptr().cast(), out.as_mut_ptr(), out.len()) == 0 }
+    decode(cstr(hex), out).is_ok()
+}
+
+/// The bytes the hex of the C string in `hex` spells, as the start of
+/// `room`: -EINVAL for more than it holds or for what is not hex.
+fn hex_text<'a>(hex: &[u8], room: &'a mut [u8]) -> Result<&'a [u8], c_int> {
+    let n = decode_max(cstr(hex), room)?;
+
+    room.get(..n).ok_or(-EINVAL)
+}
+
+/// At most the first `n` bytes of `s`, as `%.<n>s` prints them.
+fn first(s: &[u8], n: usize) -> &[u8] {
+    s.get(..n).unwrap_or(s)
+}
+
+/// The init record the parse holds, of the digest `digest`, as the
+/// boot's last: -EINVAL for a field out of range or not hex.
+fn take_init(p: &mut Parse, digest: &[u8; 32]) -> Result<(), c_int> {
+    let prev_reset = p.init.reset_count;
+    let mut init = InitRecord::new();
+    // Checked, as the record must carry it, but not used.
+    let mut chain = [0u8; 32];
+
+    let (Ok(pcr), Ok(phase_pcr)) = (u32::try_from(p.rec_pcr), u32::try_from(p.rec_phase_pcr))
+    else {
+        return Err(-EINVAL);
+    };
+    if pcr >= 24
+        || phase_pcr <= pcr
+        || phase_pcr >= 24
+        || p.rec_reset > i64::from(u32::MAX)
+        || !hex_into(&p.pcr_before_hex, &mut init.pcr_before)
+        || !hex_into(&p.phase_before_hex, &mut init.phase_before)
+        || !hex_into(&p.nv_name_hex, &mut init.name)
+        || !hex_into(&p.anchor_digest_hex, &mut init.anchor_digest)
+        || !hex_into(&p.chain_hex, &mut chain)
+        || !hex_into(&p.writer_public_hex, &mut init.writer_public)
+    {
+        return Err(-EINVAL);
+    }
+    init.digest = *digest;
+    init.pcr = pcr;
+    init.phase_pcr = phase_pcr;
+    init.initrd = cstr(&p.bound_in) == b"initrd";
+    init.reset_count = u32::try_from(p.rec_reset).ok();
+    init.present = true;
+    // Records are of one TPM reset unless both carry a count and the
+    // counts differ; a second record for one reset is a register bound
+    // again after boot.
+    p.inits = p.inits.wrapping_add(1);
+    let reset_changed =
+        matches!((init.reset_count, prev_reset), (Some(now), Some(before)) if now != before);
+    if p.inits == 1 || reset_changed {
+        p.inits_epoch = 1;
+    } else {
+        p.inits_epoch = p.inits_epoch.wrapping_add(1);
+    }
+    p.init = init;
+    Ok(())
+}
+
+/// Whether the digest of the load or unload `r` follows from its name
+/// and payload, which the tag `tag` measures: -EINVAL for a name that is
+/// not an upatch's.
+fn derive_upatch(p: &Parse, tag: &CStr, r: &mut Record) -> Result<(), c_int> {
+    let name = cstr(&p.upatch_name);
+    let mut payload = [0u8; 32];
+    let mut event = [0u8; 32];
+
+    if !upatch::name_valid(Some(name)) {
+        return Err(-EINVAL);
+    }
+    r.label = name.to_vec();
+    if hex_into(&p.upatch_payload_hex, &mut payload)
+        && chain::upatch_event(tag, name, &payload, &mut event) == 0
+    {
+        r.derived = !memneq_explicit(&event, &r.digest);
+    }
+    Ok(())
+}
+
+/// Whether the digest of the tree operation `r` follows from its
+/// sequence and operation digest.
+fn derive_tree_op(p: &Parse, r: &mut Record) {
+    let mut event = [0u8; 32];
+
+    // verify cannot tie op and id to the digest: leave them out.
+    r.label = format!("seq {}", p.tree_seq).into_bytes();
+    if p.tree_seq > 0
+        && let Some(operation) = digest_bytes(&p.tree_digest_hex)
+        && chain::tree_event(p.tree_seq, &operation, &mut event) == 0
+    {
+        r.derived = !memneq_explicit(&event, &r.digest);
+        // The digest's hex after its "sha256:".
+        let hex = cstr(&p.tree_digest_hex).get(7..).unwrap_or_default();
+        r.label = [
+            format!("seq {} operation ", p.tree_seq).as_bytes(),
+            first(hex, 12),
+        ]
+        .concat();
+    }
+}
+
+/// Whether the digest of the revocation `r` follows from the
+/// certificate's digest.
+fn derive_key_revoke(p: &Parse, r: &mut Record) {
+    let mut sha = [0u8; 32];
+    let mut event = [0u8; 32];
+
+    // Nor the fingerprint: name the measured certificate.
+    if hex_into(&p.key_sha_hex, &mut sha)
+        && chain::key_event(c"shirudo-key-revoke", &sha, &mut event) == 0
+    {
+        r.derived = !memneq_explicit(&event, &r.digest);
+        r.label = [b"certificate ", first(cstr(&p.key_sha_hex), 12)].concat();
+    }
 }
 
 /// What the eventlog's array calls with each record.
 fn on_record(p: &mut Parse) -> Result<(), c_int> {
-    if p.n_recs >= RECORDS_MAX {
+    if p.recs.len() >= RECORDS_MAX {
         return Err(-E2BIG);
     }
-    if !record_word(cstr(&p.ty)) {
+    let ty = cstr(&p.ty).to_vec();
+    if !record_word(&ty) {
         return Err(-EINVAL);
     }
-    // SAFETY: a record of the parse's RECORDS_MAX, apart from the parse.
-    let mut r = unsafe { &mut *p.recs.add(p.n_recs) };
-    *r = zeroed();
-    let _ = strscpy(&mut r.ty, cstr(&p.ty));
+    let mut r = Record {
+        ty: ty.clone(),
+        label: Vec::new(),
+        digest: [0; 32],
+        derived: false,
+    };
     if !hex_into(&p.digest_hex, &mut r.digest) {
         return Err(-EINVAL);
     }
-    let ty = cstr(&p.ty);
-    if ty == b"init" {
-        let inr = &mut p.init;
-        let prev_reset = inr.reset_count;
-        let prev_have = inr.have_reset_count;
-
-        *inr = zeroed();
-        if p.rec_pcr < 0
-            || p.rec_pcr >= 24
-            || p.rec_phase_pcr <= p.rec_pcr
-            || p.rec_phase_pcr >= 24
-            || p.rec_reset > i64::from(u32::MAX)
-            || cstr(&p.nv_name_hex).len() != 2 * NAME_LEN
-            || !hex_into(&p.pcr_before_hex, &mut inr.pcr_before)
-            || !hex_into(&p.phase_before_hex, &mut inr.phase_before)
-            || !hex_into(&p.nv_name_hex, &mut inr.name)
-            || !hex_into(&p.anchor_digest_hex, &mut inr.anchor_digest)
-            || !hex_into(&p.chain_hex, &mut inr.chain)
-            || !hex_into(&p.writer_public_hex, &mut inr.writer_public)
-        {
-            return Err(-EINVAL);
+    match ty.as_slice() {
+        b"init" => {
+            take_init(p, &r.digest)?;
+            // This boot's register starts here.
+            p.recs.clear();
         }
-        inr.digest = r.digest;
-        inr.pcr = p.rec_pcr as u32;
-        inr.phase_pcr = p.rec_phase_pcr as u32;
-        inr.initrd = cstr(&p.bound_in) == b"initrd";
-        inr.have_reset_count = p.rec_reset >= 0;
-        inr.reset_count = p.rec_reset as u32;
-        let _ = strscpy(&mut inr.anchor, cstr(&p.anchor));
-        inr.present = true;
-        // Records are of one TPM reset unless both carry a count and the
-        // counts differ; a second record for one reset is a register
-        // bound again after boot.
-        p.inits = p.inits.wrapping_add(1);
-        if p.inits == 1 || (inr.have_reset_count && prev_have && inr.reset_count != prev_reset) {
-            p.inits_epoch = 1;
-        } else {
-            p.inits_epoch = p.inits_epoch.wrapping_add(1);
-        }
-        // This boot's register starts here.
-        p.n_recs = 0;
-        // SAFETY: the parse's first record.
-        r = unsafe { &mut *p.recs };
-        *r = zeroed();
-        let _ = strscpy(&mut r.ty, b"init");
-        r.digest = p.init.digest;
-    } else if ty == b"upatch_load" || ty == b"upatch_unload" {
-        let tag = if ty[7] == b'l' {
-            c"shirudo-upatch"
-        } else {
-            c"shirudo-unload"
-        };
-        let mut payload = [0u8; 32];
-        let mut event = [0u8; 32];
-
-        // SAFETY: a C string the parser wrote.
-        if !unsafe { upatch_name_valid(p.upatch_name.as_ptr().cast()) } {
-            return Err(-EINVAL);
-        }
-        let _ = strscpy(&mut r.label, cstr(&p.upatch_name));
-        if hex_into(&p.upatch_payload_hex, &mut payload)
-            && chain::upatch_event(tag, &p.upatch_name, &payload, &mut event) == 0
-        {
-            r.derived = !memneq_explicit(&event, &r.digest);
-        }
-    } else if ty == b"tree_op" {
-        let mut operation = [0u8; 32];
-        let mut event = [0u8; 32];
-
-        // verify cannot tie op and id to the digest: leave them out.
-        // SAFETY: the label's room, and the C's format with its argument.
-        if unsafe {
-            crate::text::csprintf!(
-                r.label.as_mut_ptr().cast(),
-                r.label.len(),
-                c"seq %lld".as_ptr(),
-                p.tree_seq,
-            )
-        } < 0
-        {
-            return Err(-E2BIG);
-        }
-        if p.tree_seq > 0
-            // SAFETY: a C string the parser wrote, and room for a digest.
-            && unsafe {
-                sha256_digest_decode(p.tree_digest_hex.as_ptr().cast(), operation.as_mut_ptr())
-            } == 0
-            && chain::tree_event(p.tree_seq, &operation, &mut event) == 0
-        {
-            r.derived = !memneq_explicit(&event, &r.digest);
-            // SAFETY: the label's room, and the C's format with its
-            // arguments: the digest's hex after its "sha256:".
-            if unsafe {
-                crate::text::csprintf!(
-                    r.label.as_mut_ptr().cast(),
-                    r.label.len(),
-                    c"seq %lld operation %.12s".as_ptr(),
-                    p.tree_seq,
-                    p.tree_digest_hex.as_ptr().add(7),
-                )
-            } < 0
-            {
-                return Err(-E2BIG);
-            }
-        }
-    } else if ty == b"key_revoke" {
-        let mut sha = [0u8; 32];
-        let mut event = [0u8; 32];
-
-        // Nor the fingerprint: name the measured certificate.
-        if hex_into(&p.key_sha_hex, &mut sha)
-            && chain::key_event(c"shirudo-key-revoke", &sha, &mut event) == 0
-        {
-            r.derived = !memneq_explicit(&event, &r.digest);
-            // SAFETY: the label's room, and the C's format with its
-            // argument.
-            if unsafe {
-                crate::text::csprintf!(
-                    r.label.as_mut_ptr().cast(),
-                    r.label.len(),
-                    c"certificate %.12s".as_ptr(),
-                    p.key_sha_hex.as_ptr(),
-                )
-            } < 0
-            {
-                return Err(-E2BIG);
-            }
-        }
+        b"upatch_load" => derive_upatch(p, c"shirudo-upatch", &mut r)?,
+        b"upatch_unload" => derive_upatch(p, c"shirudo-unload", &mut r)?,
+        b"tree_op" => derive_tree_op(p, &mut r),
+        b"key_revoke" => derive_key_revoke(p, &mut r),
+        _ => {}
     }
-    p.n_recs += 1;
+    p.recs.push(r);
     // Reset the per-element scratch the next element may not set.
     p.ty[0] = 0;
     p.upatch_name[0] = 0;
@@ -967,6 +1025,66 @@ fn on_record(p: &mut Parse) -> Result<(), c_int> {
     p.rec_phase_pcr = -1;
     p.rec_reset = -1;
     Ok(())
+}
+
+/// The tag of a line of the report, as long as each tag.
+const TAG_LEN: usize = 8;
+const TAG_OK: &[u8; TAG_LEN] = b"  OK    ";
+const TAG_FAIL: &[u8; TAG_LEN] = b"  FAIL  ";
+const TAG_NOTE: &[u8; TAG_LEN] = b"  NOTE  ";
+
+/// A report of checks and notes, a line each, in at most `cap` bytes
+/// and the NUL after them, as the C's buffer of that size held it, and
+/// how many of the checks failed.
+pub(crate) struct Report {
+    text: Vec<u8>,
+    cap: usize,
+    failed: u32,
+}
+
+impl Report {
+    /// A report of at most `cap` bytes, its NUL included.
+    pub(crate) fn new(cap: usize) -> Self {
+        Report {
+            text: Vec::new(),
+            cap,
+            failed: 0,
+        }
+    }
+
+    /// The lines of the report.
+    pub(crate) fn text(&self) -> &[u8] {
+        &self.text
+    }
+
+    /// A line: its tag, then `text` where it fits whole with a NUL after
+    /// it, then a line feed where room is left, and nothing once the
+    /// room left would not hold a tag and its NUL.
+    fn line(&mut self, tag: &[u8; TAG_LEN], text: &[u8]) {
+        if self.text.len() + TAG_LEN >= self.cap {
+            return;
+        }
+        self.text.extend_from_slice(tag);
+        if self.text.len() + text.len() < self.cap {
+            self.text.extend_from_slice(text);
+        }
+        if self.text.len() + 1 < self.cap {
+            self.text.push(b'\n');
+        }
+    }
+
+    /// A check, which counts when it failed.
+    fn check(&mut self, ok: bool, text: &[u8]) {
+        if !ok {
+            self.failed = self.failed.saturating_add(1);
+        }
+        self.line(if ok { TAG_OK } else { TAG_FAIL }, text);
+    }
+
+    /// A remark, which is no check.
+    fn note(&mut self, text: &[u8]) {
+        self.line(TAG_NOTE, text);
+    }
 }
 
 /// `struct reporter`: the caller's report, its room, what it holds, and
@@ -1052,72 +1170,94 @@ macro_rules! note {
     };
 }
 
-/// The attestation in `attest_hex`, which `sig_hex` signs, checked against
-/// the attestation key `ak` of the name `ak_name` and the nonce: its
-/// bytes into `attest`, what they hold into `parsed`. -EINVAL for hex
-/// that does not decode, -EKEYREJECTED for a structure that does not
-/// parse, else 0 and the checks in the report.
-#[allow(clippy::too_many_arguments)]
+/// The attestation key that signs the evidence's attestations, its name,
+/// and the nonce they must carry.
+struct Signer<'a> {
+    key: &'a TpmEccPublic,
+    name: &'a [u8; NAME_LEN],
+    nonce: &'a [u8],
+}
+
+/// An attestation of the evidence: its bytes, and what they hold as far
+/// as they parse.
+struct Signed {
+    bytes: Vec<u8>,
+    attest: TpmAttest,
+    /// The attestation and its signature parse, and were checked.
+    checked: bool,
+}
+
+/// The attestation in `attest_hex`, which `sig_hex` signs, checked
+/// against the signer, every check into the report as `what`'s: -EINVAL
+/// for hex that does not decode.
 fn check_signed(
-    rep: &mut Reporter,
-    what: &CStr,
+    rep: &mut Report,
+    signer: &Signer,
+    what: &[u8],
     attest_hex: &[u8],
     sig_hex: &[u8],
-    ak: &TpmEccPublic,
-    ak_name: &[u8; NAME_LEN],
-    nonce: &[u8],
-    attest: &mut [u8; ATTEST_MAX],
-    attest_len: &mut usize,
-    parsed: &mut TpmAttest,
-) -> c_int {
+) -> Result<Signed, c_int> {
+    let mut bytes = vec![0u8; ATTEST_MAX];
     let mut sig = [0u8; SIGNATURE_MAX];
-    let mut sig_len = 0usize;
-    let what = what.as_ptr();
+    let mut attest = TpmAttest::zeroed();
 
-    // SAFETY: C strings the parser wrote, and the rooms with their sizes.
-    if unsafe {
-        hex_decode_max(
-            attest_hex.as_ptr().cast(),
-            attest.as_mut_ptr(),
-            attest.len(),
-            attest_len,
-        ) != 0
-            || hex_decode_max(
-                sig_hex.as_ptr().cast(),
-                sig.as_mut_ptr(),
-                sig.len(),
-                &mut sig_len,
-            ) != 0
-    } {
-        return -EINVAL;
+    let attest_len = decode_max(cstr(attest_hex), &mut bytes)?;
+    let sig = hex_text(sig_hex, &mut sig)?;
+    bytes.truncate(attest_len);
+    let checked = check_attest(rep, signer, what, &bytes, sig, &mut attest);
+    Ok(Signed {
+        bytes,
+        attest,
+        checked,
+    })
+}
+
+/// The checks of check_signed() on the attestation `bytes`, parsed into
+/// `attest`, and its signature `sig`: whether they parse.
+fn check_attest(
+    rep: &mut Report,
+    signer: &Signer,
+    what: &[u8],
+    bytes: &[u8],
+    sig: &[u8],
+    attest: &mut TpmAttest,
+) -> bool {
+    if attest_parse(bytes, attest) != 0 {
+        rep.check(
+            false,
+            &[what, b": attestation structure unparseable"].concat(),
+        );
+        return false;
     }
-    let attest = &attest[..*attest_len];
-    if attest_parse(attest, parsed) != 0 {
-        say!(rep, false, c"%s: attestation structure unparseable", what);
-        return -EKEYREJECTED;
-    }
-    let ret = signature_verify(attest, &sig[..sig_len], &ak.x, &ak.y);
+    let ret = signature_verify(bytes, sig, &signer.key.x, &signer.key.y);
     if ret == -EBADMSG {
-        say!(rep, false, c"%s: signature structure unparseable", what);
-        return -EKEYREJECTED;
+        rep.check(
+            false,
+            &[what, b": signature structure unparseable"].concat(),
+        );
+        return false;
     }
-    say!(
-        rep,
+    rep.check(
         ret == 0,
-        c"%s: ECDSA signature by the attestation key",
-        what
+        &[what, b": ECDSA signature by the attestation key"].concat(),
     );
-    say!(
-        rep,
-        attest_signer(parsed, ak_name) == Ok(true),
-        c"%s: signed by the key as an endorsement primary",
-        what
+    rep.check(
+        attest_signer(attest, signer.name) == Ok(true),
+        &[what, b": signed by the key as an endorsement primary"].concat(),
     );
-    let carried = parsed.extra_in(attest).is_some_and(|extra| {
+    let nonce = signer.nonce;
+    let carried = attest.extra_in(bytes).is_some_and(|extra| {
         extra.len() == nonce.len() && (nonce.is_empty() || !memneq_explicit(extra, nonce))
     });
-    say!(rep, carried, c"%s: carries the nonce", what);
-    0
+    rep.check(carried, &[what, b": carries the nonce"].concat());
+    true
+}
+
+/// Whether `public` is an endorsement key of the TCG default template.
+fn endorsement_template(public: &TpmPublic) -> bool {
+    public.attrs == EK_ATTRS
+        && public.policy_len == 32
+        && !memneq_explicit(&public.policy, &EK_POLICY)
 }
 
 /// parse_schema() of the evidence into the parse: whether it carries an
@@ -1199,384 +1339,328 @@ fn parse_evidence(p: &mut Parse, evidence: &[u8]) -> Result<(bool, bool), c_int>
     Ok((ek_sub.iter().all(JsonField::seen), cred_sub[0].seen()))
 }
 
-/// attest_verify(): the evidence checked against what the operator
-/// expects, every check into the report. 0 when each passed,
-/// -EKEYREJECTED when one failed, -EINVAL for a malformed document.
-///
-/// # Safety
-///
-/// `evidence` holds `len` bytes and `report` has room for `report_cap`.
-unsafe fn verify(
-    evidence: *const c_char,
-    len: usize,
+/// attest verify: the evidence checked against what the operator
+/// expects, every check into the report: -EKEYREJECTED when one failed,
+/// -EINVAL for a malformed document.
+pub(crate) fn verify(
+    evidence: &[u8],
     expect: &AttestExpect,
-    report: *mut c_char,
-    report_cap: usize,
-) -> c_int {
-    let mut rep = Reporter::new(report, report_cap);
-    let mut cred = [0u8; CREDENTIAL_LEN];
+    rep: &mut Report,
+) -> Result<(), c_int> {
+    let mut p = Box::new(Parse::new());
 
-    if report_cap != 0 {
-        // SAFETY: the caller's report.
-        unsafe { *report = 0 };
-    }
-    // SAFETY: an allocation of the parse, freed below by its size.
-    let p = unsafe { xcalloc(1, size_of::<Parse>()) }.cast::<Parse>();
-    if p.is_null() {
-        return -ENOMEM;
-    }
-    // SAFETY: the parse, zeroed, which is a value of it, and the records'
-    // allocation, freed below by its size.
-    unsafe {
-        (*p).recs = xcalloc(RECORDS_MAX, size_of::<Record>()).cast();
-        if (*p).recs.is_null() {
-            xfree(p.cast(), size_of::<Parse>());
-            return -ENOMEM;
-        }
-        (*p).rec_pcr = -1;
-        (*p).rec_phase_pcr = -1;
-        (*p).rec_reset = -1;
-    }
-    // SAFETY: the caller's evidence, len bytes of it.
-    let doc = unsafe { ffi::slice(evidence.cast::<u8>(), len) };
-    // SAFETY: the parse.
-    let ret = unsafe { verify_parsed(&mut rep, p, &mut cred, doc, expect) };
-
-    // SAFETY: the records and the parse, each freed once.
-    unsafe {
-        xfree((*p).recs.cast(), RECORDS_MAX * size_of::<Record>());
-        xfree(p.cast(), size_of::<Parse>());
-    }
-    scrub(&mut cred);
-    ret
-}
-
-/// The checks of attest_verify(), with the parse allocated.
-///
-/// # Safety
-///
-/// `p` is the parse.
-unsafe fn verify_parsed(
-    rep: &mut Reporter,
-    p: *mut Parse,
-    cred: &mut [u8; CREDENTIAL_LEN],
-    doc: &[u8],
-    expect: &AttestExpect,
-) -> c_int {
-    let mut quote = TpmAttest::zeroed();
-    let mut certify = TpmAttest::zeroed();
-    let mut ak_pub = TpmEccPublic::zeroed();
-    let mut ak_public = [0u8; PUBLIC_MAX];
-    let mut ak_name = [0u8; NAME_LEN];
-    let mut reg_name = [0u8; NAME_LEN];
-    let mut reg_value = [0u8; 32];
-    let mut attest = [0u8; ATTEST_MAX];
-    let mut nonce = [0u8; NONCE_MAX];
-    let mut chain = [0u8; 32];
-    let mut branch_written = [0u8; 32];
-    let mut branch_init = [0u8; 32];
-    let mut policy = [0u8; 32];
-    let mut bind = [0u8; 64];
-    let mut expected_name = [0u8; NAME_LEN];
-    let mut anchor_digest = [0u8; 32];
-    let mut ak_public_len = 0usize;
-    let mut nonce_len = 0usize;
-    let mut attest_len = 0usize;
-    let mut cred_len = 0usize;
-    let mut reg_index = 0u64;
-    let mut runtime = 0usize;
-    let mut replayed = true;
-
-    // SAFETY: the caller's parse, which nothing else touches.
-    let p = unsafe { &mut *p };
-    let (have_ek, have_cred) = match parse_evidence(p, doc) {
-        Ok(found) => found,
-        Err(ret) => return ret,
-    };
-
-    let config = match config_attest::parse(doc) {
-        Ok(config) => config,
-        Err(ret) => {
-            if ret == -EKEYREJECTED {
-                say!(
-                    rep,
-                    false,
-                    c"config: the events are one boot event followed by updates in sequence"
-                );
-            }
-            // What json_parse() refuses past a bound is a malformed
-            // document.
-            if ret == -E2BIG || ret == -ENOSPC {
-                return -EINVAL;
-            }
-            return ret;
-        }
-    };
+    p.recs.try_reserve_exact(RECORDS_MAX).map_err(|_| -ENOMEM)?;
+    let (have_ek, have_cred) = parse_evidence(&mut p, evidence)?;
+    let config = parse_config(rep, evidence)?;
 
     // Freshness: the document must answer this request.
-    // SAFETY: a C string the parser wrote, and the room with its size.
-    if unsafe {
-        hex_decode_max(
-            p.nonce_hex.as_ptr().cast(),
-            nonce.as_mut_ptr(),
-            nonce.len(),
-            &mut nonce_len,
-        )
-    } != 0
-    {
-        return -EINVAL;
-    }
-    let fresh = expect.nonce_len == nonce_len
-        && (nonce_len == 0
-            // SAFETY: the caller's nonce, nonce_len bytes of it.
-            || !memneq_explicit(&nonce[..nonce_len], unsafe {
-                ffi::slice(expect.nonce, nonce_len)
-            }));
-    say!(rep, fresh, c"nonce matches the request");
+    let mut nonce = [0u8; NONCE_MAX];
+    let nonce = hex_text(&p.nonce_hex, &mut nonce)?;
+    let fresh = expect.nonce.len() == nonce.len()
+        && (nonce.is_empty() || !memneq_explicit(nonce, &expect.nonce));
+    rep.check(fresh, b"nonce matches the request");
 
-    // SAFETY: a C string the parser wrote, and the room with its size.
-    if unsafe {
-        hex_decode_max(
-            p.ak_public_hex.as_ptr().cast(),
-            ak_public.as_mut_ptr(),
-            ak_public.len(),
-            &mut ak_public_len,
-        )
-    } != 0
-        || !hex_into(&p.ak_name_hex, &mut ak_name)
-    {
-        return -EINVAL;
-    }
-    let ak_public = &ak_public[..ak_public_len];
-    if ecc_public_parse(ak_public, &mut ak_pub) != 0 {
-        say!(
-            rep,
-            false,
-            c"attestation key: public area is not a P-256 ECDSA key"
-        );
-        return -EKEYREJECTED;
-    }
-    say!(
+    let (ak_pub, ak_name) = check_ak(rep, &p, expect)?;
+    check_ek(rep, &p, expect, have_ek)?;
+    check_credential(rep, &p, expect, have_cred)?;
+
+    let signer = Signer {
+        key: &ak_pub,
+        name: &ak_name,
+        nonce,
+    };
+    let quote = check_signed(
         rep,
+        &signer,
+        b"quote",
+        &p.quote_attest_hex,
+        &p.quote_sig_hex,
+    )?;
+    check_quote(rep, &mut p, &quote);
+    let certify = check_signed(rep, &signer, b"register", &p.reg_attest_hex, &p.reg_sig_hex)?;
+    let register = read_register(&p)?;
+    check_certify(rep, &register, &certify);
+    // A restart clears the register as a reset does.
+    if quote.checked && certify.checked {
+        let (q, c) = (&quote.attest, &certify.attest);
+        rep.check(
+            q.reset_count == c.reset_count
+                && q.restart_count == c.restart_count
+                && q.firmware_version == c.firmware_version,
+            b"quote and certification are of one TPM boot",
+        );
+    }
+    check_config(rep, &p, expect, &config, &quote.attest);
+
+    check_binding(rep, &p, expect, &register)?;
+    check_epoch(rep, &p, &certify);
+    check_replay(rep, &p, &register.value);
+    check_anchor(rep, &p, expect);
+    check_state(rep, &p, expect, &register.value);
+    for bit in 0..24u32 {
+        if expect.pcr_expect_mask & (1 << bit) == 0 {
+            continue;
+        }
+        let i = bit as usize;
+        rep.check(
+            p.pcr_have & (1 << bit) != 0 && !memneq_explicit(&p.pcrs[i], &expect.pcrs[i]),
+            format!("PCR {bit} matches the expected value").as_bytes(),
+        );
+    }
+    if rep.failed != 0 {
+        return Err(-EKEYREJECTED);
+    }
+    Ok(())
+}
+
+/// The config's history the evidence carries, the failure of a history
+/// out of order into the report.
+fn parse_config(rep: &mut Report, evidence: &[u8]) -> Result<Evidence, c_int> {
+    config_attest::parse(evidence).map_err(|ret| {
+        if ret == -EKEYREJECTED {
+            rep.check(
+                false,
+                b"config: the events are one boot event followed by updates in sequence",
+            );
+        }
+        // What json_parse() refuses past a bound is a malformed document.
+        if ret == -E2BIG || ret == -ENOSPC {
+            return -EINVAL;
+        }
+        ret
+    })
+}
+
+/// The attestation key the evidence names, checked: its public area and
+/// its name, or -EKEYREJECTED for a key that is not a P-256 ECDSA key.
+fn check_ak(
+    rep: &mut Report,
+    p: &Parse,
+    expect: &AttestExpect,
+) -> Result<(TpmEccPublic, [u8; NAME_LEN]), c_int> {
+    let mut ak_public = [0u8; PUBLIC_MAX];
+    let mut ak_name = [0u8; NAME_LEN];
+    let mut ak_pub = TpmEccPublic::zeroed();
+    let mut computed = [0u8; NAME_LEN];
+
+    let ak_public = hex_text(&p.ak_public_hex, &mut ak_public)?;
+    if !hex_into(&p.ak_name_hex, &mut ak_name) {
+        return Err(-EINVAL);
+    }
+    if ecc_public_parse(ak_public, &mut ak_pub) != 0 {
+        rep.check(
+            false,
+            b"attestation key: public area is not a P-256 ECDSA key",
+        );
+        return Err(-EKEYREJECTED);
+    }
+    rep.check(
         ak_pub.attrs & AK_ATTRS_REQUIRED == AK_ATTRS_REQUIRED,
-        c"attestation key: restricted, fixed to this TPM"
+        b"attestation key: restricted, fixed to this TPM",
     );
-    {
-        let mut computed = [0u8; NAME_LEN];
-        let named = object_name(ak_public, &mut computed) == 0;
-
-        say!(
-            rep,
-            named && !memneq_explicit(&computed, &ak_name),
-            c"attestation key: name matches its public area"
-        );
+    let named = object_name(ak_public, &mut computed) == 0;
+    rep.check(
+        named && !memneq_explicit(&computed, &ak_name),
+        b"attestation key: name matches its public area",
+    );
+    match &expect.ak_name {
+        Some(pinned) => rep.check(
+            !memneq_explicit(&ak_name, pinned),
+            b"attestation key: the pinned key",
+        ),
+        None => rep.note(&[b"attestation key not pinned: name ", cstr(&p.ak_name_hex)].concat()),
     }
-    if expect.have_ak_name {
-        say!(
-            rep,
-            !memneq_explicit(&ak_name, &expect.ak_name),
-            c"attestation key: the pinned key"
-        );
-    } else {
-        note!(
-            rep,
-            c"attestation key not pinned: name %s",
-            p.ak_name_hex.as_ptr()
-        );
-    }
+    Ok((ak_pub, ak_name))
+}
 
+/// The endorsement key the evidence carries, if any, checked, and
+/// against the one pinned.
+fn check_ek(
+    rep: &mut Report,
+    p: &Parse,
+    expect: &AttestExpect,
+    have_ek: bool,
+) -> Result<(), c_int> {
     if have_ek {
         let mut ek_public = [0u8; PUBLIC_MAX];
         let mut ek_name = [0u8; NAME_LEN];
         let mut computed = [0u8; NAME_LEN];
         let mut ek_pub = TpmPublic::zeroed();
-        let mut ek_public_len = 0usize;
 
-        // SAFETY: a C string the parser wrote, and the room with its size.
-        if unsafe {
-            hex_decode_max(
-                p.ek_public_hex.as_ptr().cast(),
-                ek_public.as_mut_ptr(),
-                ek_public.len(),
-                &mut ek_public_len,
-            )
-        } != 0
-            || !hex_into(&p.ek_name_hex, &mut ek_name)
-        {
-            return -EINVAL;
+        let ek_public = hex_text(&p.ek_public_hex, &mut ek_public)?;
+        if !hex_into(&p.ek_name_hex, &mut ek_name) {
+            return Err(-EINVAL);
         }
-        let ek_public = &ek_public[..ek_public_len];
         let parsed = public_parse(ek_public, &mut ek_pub) == 0;
         let named = parsed
             && object_name(ek_public, &mut computed) == 0
             && !memneq_explicit(&computed, &ek_name);
-        say!(rep, named, c"endorsement key: name matches its public area");
-        say!(
-            rep,
-            parsed
-                && ek_pub.attrs == EK_ATTRS
-                && ek_pub.policy_len == 32
-                && !memneq_explicit(&ek_pub.policy, &EK_POLICY),
-            c"endorsement key: TCG default template under the endorsement policy"
+        rep.check(named, b"endorsement key: name matches its public area");
+        rep.check(
+            parsed && endorsement_template(&ek_pub),
+            b"endorsement key: TCG default template under the endorsement policy",
         );
     } else {
-        note!(rep, c"no endorsement key in the evidence");
+        rep.note(b"no endorsement key in the evidence");
     }
-    if expect.have_ek_name {
+    if let Some(pinned) = &expect.ek_name {
         let mut ek_name = [0u8; NAME_LEN];
-        let pinned = have_ek
-            && hex_into(&p.ek_name_hex, &mut ek_name)
-            && !memneq_explicit(&ek_name, &expect.ek_name);
+        let ok =
+            have_ek && hex_into(&p.ek_name_hex, &mut ek_name) && !memneq_explicit(&ek_name, pinned);
 
-        say!(rep, pinned, c"endorsement key: the pinned key");
+        rep.check(ok, b"endorsement key: the pinned key");
     }
-    if have_cred
-        // SAFETY: a C string the parser wrote, and the room with its size.
-        && unsafe {
-            hex_decode_max(
-                p.cred_hex.as_ptr().cast(),
-                cred.as_mut_ptr(),
-                cred.len(),
-                &mut cred_len,
-            )
-        } != 0
-    {
-        return -EINVAL;
-    }
-    if expect.have_credential {
-        say!(
-            rep,
-            have_cred && cred_len == CREDENTIAL_LEN && !memneq_explicit(cred, &expect.credential),
-            c"attestation key: activated the credential made for it under the endorsement key"
-        );
-    } else if have_cred {
-        note!(
-            rep,
-            c"a credential was activated but none is expected (--expect-credential)"
-        );
-    }
+    Ok(())
+}
 
-    let qrc = check_signed(
-        rep,
-        c"quote",
-        &p.quote_attest_hex,
-        &p.quote_sig_hex,
-        &ak_pub,
-        &ak_name,
-        &nonce[..nonce_len],
-        &mut attest,
-        &mut attest_len,
-        &mut quote,
-    );
-    if qrc == -EINVAL {
-        return qrc;
-    }
-    if qrc == 0 {
-        let complete = quote.ty == ST_ATTEST_QUOTE
-            && p.pcr_mask == i64::from(quote.pcr_mask)
-            && p.pcr_have == quote.pcr_mask;
-
-        say!(rep, complete, c"quote: covers the PCRs the document lists");
-        let vouched = complete
-            && pcr_values_digest(quote.pcr_mask, &p.pcrs)
-                .is_some_and(|d| !memneq_explicit(&d, &quote.pcr_digest));
-        say!(rep, vouched, c"quote: PCR digest matches the listed values");
-        if !vouched {
-            p.pcr_have = 0;
-        }
+/// The credential the target activated, if any, against the one the
+/// challenge carried.
+fn check_credential(
+    rep: &mut Report,
+    p: &Parse,
+    expect: &AttestExpect,
+    have_cred: bool,
+) -> Result<(), c_int> {
+    // On the heap, so that it is scrubbed when it goes.
+    let mut room = vec![0u8; CREDENTIAL_LEN];
+    let cred = if have_cred {
+        hex_text(&p.cred_hex, &mut room)?
     } else {
+        &[]
+    };
+
+    match &expect.credential {
+        Some(want) => rep.check(
+            have_cred && cred.len() == CREDENTIAL_LEN && !memneq_explicit(cred, want),
+            b"attestation key: activated the credential made for it under the endorsement key",
+        ),
+        None if have_cred => {
+            rep.note(b"a credential was activated but none is expected (--expect-credential)")
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+/// The quote's checks against the PCRs the document lists, which stand
+/// as quoted only when they pass.
+fn check_quote(rep: &mut Report, p: &mut Parse, quote: &Signed) {
+    if !quote.checked {
+        p.pcr_have = 0;
+        return;
+    }
+    let q = &quote.attest;
+    let complete =
+        q.ty == ST_ATTEST_QUOTE && p.pcr_mask == i64::from(q.pcr_mask) && p.pcr_have == q.pcr_mask;
+    rep.check(complete, b"quote: covers the PCRs the document lists");
+    let vouched = complete
+        && pcr_values_digest(q.pcr_mask, &p.pcrs)
+            .is_some_and(|d| !memneq_explicit(&d, &q.pcr_digest));
+    rep.check(vouched, b"quote: PCR digest matches the listed values");
+    if !vouched {
         p.pcr_have = 0;
     }
+}
 
-    let crc = check_signed(
-        rep,
-        c"register",
-        &p.reg_attest_hex,
-        &p.reg_sig_hex,
-        &ak_pub,
-        &ak_name,
-        &nonce[..nonce_len],
-        &mut attest,
-        &mut attest_len,
-        &mut certify,
-    );
-    if crc == -EINVAL {
-        return crc;
-    }
-    let index = cstr(&p.reg_index);
-    if !hex_into(&p.reg_name_hex, &mut reg_name)
-        || !hex_into(&p.reg_value_hex, &mut reg_value)
-        || !index.starts_with(b"0x")
-        // SAFETY: the index's digits after its 0x, and room for their
-        // value.
-        || unsafe {
-            parse_x64(
-                p.reg_index.as_ptr().add(2).cast(),
-                index.len() - 2,
-                0xffff_ffff,
-                &mut reg_index,
-            )
-        } != 0
+/// The register as the document lists it.
+struct Register {
+    index: u64,
+    name: [u8; NAME_LEN],
+    value: [u8; 32],
+}
+
+/// The register the document lists: -EINVAL for a field malformed.
+fn read_register(p: &Parse) -> Result<Register, c_int> {
+    let mut register = Register {
+        index: 0,
+        name: [0; NAME_LEN],
+        value: [0; 32],
+    };
+
+    if !hex_into(&p.reg_name_hex, &mut register.name)
+        || !hex_into(&p.reg_value_hex, &mut register.value)
         || !(0..24).contains(&p.reg_pcr)
     {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
-    if crc == 0 {
-        say!(
-            rep,
-            certify.ty == ST_ATTEST_NV
-                && certify.index_name_len == NAME_LEN
-                && !memneq_explicit(&certify.index_name, &reg_name),
-            c"register: certification names the listed index"
-        );
-        let contents = certify.ty == ST_ATTEST_NV
-            && certify.offset == 0
-            && certify.nv_len == 32
-            && certify
-                .nv_data_in(&attest[..attest_len])
-                .is_some_and(|data| !memneq_explicit(data, &reg_value));
-        say!(
-            rep,
-            contents,
-            c"register: certified contents match the listed value"
-        );
-    }
-    // A restart clears the register as a reset does.
-    if qrc == 0 && crc == 0 {
-        say!(
-            rep,
-            quote.reset_count == certify.reset_count
-                && quote.restart_count == certify.restart_count
-                && quote.firmware_version == certify.firmware_version,
-            c"quote and certification are of one TPM boot"
-        );
-    }
+    let digits = cstr(&p.reg_index).strip_prefix(b"0x").ok_or(-EINVAL)?;
+    register.index = parse_x64(digits, 0xffff_ffff).map_err(|_| -EINVAL)?;
+    Ok(register)
+}
 
-    if config.present || expect.have_config_root || expect.have_config_pcr {
-        let quoted = Quote {
-            mask: quote.pcr_mask,
-            reset: quote.reset_count,
-            pcrs: &p.pcrs,
-            nvpcr: None,
-        };
-        let root = expect.have_config_root.then_some(&expect.config_root);
-        let pcr = expect.have_config_pcr.then_some(expect.config_pcr);
-        let (ret, reason) = config_attest::verify(&config, &quoted, root, pcr);
-
-        say!(rep, ret == 0, c"config: %s", reason.as_ptr());
-        if config.present && !expect.have_config_root {
-            note!(
-                rep,
-                c"config root has no operator approval; use --expect-config-root with --expect-config-pcr"
-            );
-        }
-        if config.present {
-            note!(
-                rep,
-                c"config records a selection; direct TPM writer protection is deferred"
-            );
-        }
+/// The certification's checks against the register the document lists.
+fn check_certify(rep: &mut Report, register: &Register, certify: &Signed) {
+    if !certify.checked {
+        return;
     }
+    let c = &certify.attest;
+    rep.check(
+        c.ty == ST_ATTEST_NV
+            && c.index_name_len == NAME_LEN
+            && !memneq_explicit(&c.index_name, &register.name),
+        b"register: certification names the listed index",
+    );
+    let contents = c.ty == ST_ATTEST_NV
+        && c.offset == 0
+        && c.nv_len == 32
+        && c.nv_data_in(&certify.bytes)
+            .is_some_and(|data| !memneq_explicit(data, &register.value));
+    rep.check(
+        contents,
+        b"register: certified contents match the listed value",
+    );
+}
+
+/// The config's history against the quote, where the evidence carries
+/// one or the operator expects one.
+fn check_config(
+    rep: &mut Report,
+    p: &Parse,
+    expect: &AttestExpect,
+    config: &Evidence,
+    quote: &TpmAttest,
+) {
+    if !config.present && expect.config_root.is_none() && expect.config_pcr.is_none() {
+        return;
+    }
+    let quoted = Quote {
+        mask: quote.pcr_mask,
+        reset: quote.reset_count,
+        pcrs: &p.pcrs,
+        nvpcr: None,
+    };
+    let (ret, reason) = config_attest::verify(
+        config,
+        &quoted,
+        expect.config_root.as_ref(),
+        expect.config_pcr,
+    );
+
+    rep.check(ret == 0, &[b"config: ", reason.to_bytes()].concat());
+    if config.present && expect.config_root.is_none() {
+        rep.note(
+            b"config root has no operator approval; use --expect-config-root with --expect-config-pcr",
+        );
+    }
+    if config.present {
+        rep.note(b"config records a selection; direct TPM writer protection is deferred");
+    }
+}
+
+/// The binding of the register: -EKEYREJECTED without an init record or
+/// for recorded values its policy cannot be computed of.
+fn check_binding(
+    rep: &mut Report,
+    p: &Parse,
+    expect: &AttestExpect,
+    register: &Register,
+) -> Result<(), c_int> {
+    let init = &p.init;
+    let mut branch_written = [0u8; 32];
+    let mut branch_init = [0u8; 32];
+    let mut policy = [0u8; 32];
+    let mut bind = [0u8; 64];
+    let mut expected_name = [0u8; NAME_LEN];
 
     // The binding: the certified index must have the public area a
     // register bound to the recorded PCR values has, which is what makes
@@ -1585,31 +1669,26 @@ unsafe fn verify_parsed(
     // handle and the PCRs are the register's, never the document's: taken
     // from the record, a target could certify an index of its own under a
     // policy over PCRs it can extend and reset at will.
-    say!(
-        rep,
-        p.init.present,
-        c"eventlog: this boot has an init record"
-    );
-    if !p.init.present {
-        return -EKEYREJECTED;
+    rep.check(init.present, b"eventlog: this boot has an init record");
+    if !init.present {
+        return Err(-EKEYREJECTED);
     }
-    say!(
-        rep,
-        reg_index == u64::from(NV_INDEX)
-            && p.reg_pcr as u32 == CHAIN_PCR
-            && p.init.pcr == CHAIN_PCR
-            && p.init.phase_pcr == CHAIN_PHASE_PCR,
-        c"register: the document names index 0x%08X and PCRs %u and %u",
-        NV_INDEX,
-        CHAIN_PCR,
-        CHAIN_PHASE_PCR
+    rep.check(
+        register.index == u64::from(NV_INDEX)
+            && p.reg_pcr == i64::from(CHAIN_PCR)
+            && init.pcr == CHAIN_PCR
+            && init.phase_pcr == CHAIN_PHASE_PCR,
+        format!(
+            "register: the document names index 0x{NV_INDEX:08X} and PCRs {CHAIN_PCR} and {CHAIN_PHASE_PCR}"
+        )
+        .as_bytes(),
     );
-    bind[..32].copy_from_slice(&p.init.pcr_before);
-    bind[32..].copy_from_slice(&p.init.phase_before);
+    bind[..32].copy_from_slice(&init.pcr_before);
+    bind[32..].copy_from_slice(&init.phase_before);
     let ret = register_policy(
         CHAIN_PCR_MASK,
         &bind,
-        &p.init.writer_public,
+        &init.writer_public,
         RegisterPolicy {
             branch_written: &mut branch_written,
             branch_init: &mut branch_init,
@@ -1617,14 +1696,10 @@ unsafe fn verify_parsed(
         },
     );
     if ret != 0 {
-        say!(
-            rep,
-            false,
-            c"register: cannot compute the signed write policy"
-        );
+        rep.check(false, b"register: cannot compute the signed write policy");
         // Malformed recorded values are the document's failure, not a
         // parse error.
-        return if ret == -EINVAL { -EKEYREJECTED } else { ret };
+        return Err(if ret == -EINVAL { -EKEYREJECTED } else { ret });
     }
     let ret = nv_name(
         NV_INDEX,
@@ -1634,194 +1709,184 @@ unsafe fn verify_parsed(
         &mut expected_name,
     );
     if ret != 0 {
-        say!(rep, false, c"register: cannot compute the index name");
-        return ret;
+        rep.check(false, b"register: cannot compute the index name");
+        return Err(ret);
     }
-    say!(
-        rep,
-        !memneq_explicit(&expected_name, &reg_name)
-            && !memneq_explicit(&expected_name, &p.init.name),
-        c"register: public area is bound to PCRs %u and %u as recorded",
-        CHAIN_PCR,
-        CHAIN_PHASE_PCR
+    rep.check(
+        !memneq_explicit(&expected_name, &register.name)
+            && !memneq_explicit(&expected_name, &init.name),
+        format!(
+            "register: public area is bound to PCRs {CHAIN_PCR} and {CHAIN_PHASE_PCR} as recorded"
+        )
+        .as_bytes(),
     );
     for bit in 0..24u32 {
         if expect.bind_expect_mask & (1 << bit) == 0 {
             continue;
         }
-        let held = if bit == CHAIN_PCR {
-            Some(&p.init.pcr_before)
-        } else if bit == CHAIN_PHASE_PCR {
-            Some(&p.init.phase_before)
-        } else {
-            None
+        let held = match bit {
+            CHAIN_PCR => Some(&init.pcr_before),
+            CHAIN_PHASE_PCR => Some(&init.phase_before),
+            _ => None,
         };
-        say!(
-            rep,
+        rep.check(
             held.is_some_and(|h| !memneq_explicit(h, &expect.bind_values[bit as usize])),
-            c"binding: PCR %u held the expected value",
-            bit
+            format!("binding: PCR {bit} held the expected value").as_bytes(),
         );
     }
     if expect.require_initrd {
-        say!(rep, p.init.initrd, c"binding: made while the initrd ran");
+        rep.check(init.initrd, b"binding: made while the initrd ran");
     } else {
-        let place = if p.init.initrd {
-            c"initrd"
+        let place: &[u8] = if init.initrd {
+            b"initrd"
         } else {
-            c"root file system"
+            b"root file system"
         };
 
-        note!(rep, c"binding: made in the %s", place.as_ptr());
+        rep.note(&[b"binding: made in the ", place].concat());
     }
+    Ok(())
+}
 
-    // The epoch: one binding per TPM reset, and the one on record is of
-    // the reset the TPM certifies in, so no register bound again after
-    // boot can pass as the boot's.
-    say!(
-        rep,
+/// The epoch: one binding per TPM reset, and the one on record is of
+/// the reset the TPM certifies in, so no register bound again after
+/// boot can pass as the boot's.
+fn check_epoch(rep: &mut Report, p: &Parse, certify: &Signed) {
+    rep.check(
         p.inits_epoch == 1,
-        c"eventlog: one init record for this TPM reset (%u this boot)",
-        p.inits
+        format!(
+            "eventlog: one init record for this TPM reset ({} this boot)",
+            p.inits
+        )
+        .as_bytes(),
     );
-    if crc == 0 {
-        say!(
-            rep,
-            p.init.have_reset_count && p.init.reset_count == certify.reset_count,
-            c"register: init record is of the TPM's current reset count"
+    if certify.checked {
+        rep.check(
+            p.init.reset_count == Some(certify.attest.reset_count),
+            b"register: init record is of the TPM's current reset count",
         );
     }
+}
 
-    // SAFETY: the records the parse holds.
-    let recs = unsafe { ffi::slice(p.recs, p.n_recs) };
-    for (i, r) in recs.iter().enumerate() {
-        if chain::fold(&mut chain, &r.digest) != 0 {
+/// The records replayed to the certified value, and each one after the
+/// init record whose digest its fields do not give.
+fn check_replay(rep: &mut Report, p: &Parse, value: &[u8; 32]) {
+    let mut register = [0u8; 32];
+    let mut replayed = true;
+
+    for r in &p.recs {
+        if chain::fold(&mut register, &r.digest) != 0 {
             replayed = false;
         }
-        if i != 0 {
-            runtime += 1;
-        }
     }
-    let plural = if recs.len() == 1 { c"" } else { c"s" };
-    say!(
-        rep,
-        replayed && !memneq_explicit(&chain, &reg_value),
-        c"eventlog: %zu record%s replay to the certified value",
-        recs.len(),
-        plural.as_ptr()
+    let n = p.recs.len();
+    let plural = if n == 1 { "" } else { "s" };
+    rep.check(
+        replayed && !memneq_explicit(&register, value),
+        format!("eventlog: {n} record{plural} replay to the certified value").as_bytes(),
     );
     // A digest the record's own fields do not produce is a record
     // relabelled after the fact: the replay still closes, but what the
     // events say happened is not what was measured.
-    for (i, r) in recs.iter().enumerate().skip(1) {
+    for (i, r) in p.recs.iter().enumerate().skip(1) {
         if !r.derived {
-            say!(
-                rep,
+            rep.check(
                 false,
-                c"eventlog: event %zu (%s %s) digest does not derive from its fields",
-                i,
-                r.ty.as_ptr(),
-                r.label.as_ptr()
+                &[
+                    format!("eventlog: event {i} (").as_bytes(),
+                    &r.ty,
+                    b" ",
+                    &r.label,
+                    b") digest does not derive from its fields",
+                ]
+                .concat(),
             );
         }
     }
+}
 
-    {
-        let mut anchor = [0u8; ANCHOR_MAX];
-        let mut named = chain::anchor(&p.init.name, &mut anchor) == 0
-            && sha256_into(cstr(&anchor), &mut anchor_digest) == 0;
+/// The anchor: the init record's digest of it and the anchoring PCR.
+fn check_anchor(rep: &mut Report, p: &Parse, expect: &AttestExpect) {
+    let mut anchor = [0u8; ANCHOR_MAX];
+    let mut anchor_digest = [0u8; 32];
 
-        say!(
-            rep,
-            named && !memneq_explicit(&anchor_digest, &p.init.anchor_digest),
-            c"anchor: record digest matches the index name"
+    let mut named = chain::anchor(&p.init.name, &mut anchor) == 0
+        && sha256_into(cstr(&anchor), &mut anchor_digest) == 0;
+    rep.check(
+        named && !memneq_explicit(&anchor_digest, &p.init.anchor_digest),
+        b"anchor: record digest matches the index name",
+    );
+    let mut pcr_expected = p.init.pcr_before;
+    named = chain::fold(&mut pcr_expected, &anchor_digest) == 0 && named;
+    if p.pcr_have & (1 << CHAIN_PCR) == 0 {
+        rep.check(
+            false,
+            format!("anchor: PCR {CHAIN_PCR} is not in the quote").as_bytes(),
         );
-        let mut pcr_expected = p.init.pcr_before;
-        named = chain::fold(&mut pcr_expected, &anchor_digest) == 0 && named;
-        if p.pcr_have & (1 << CHAIN_PCR) != 0 {
-            let exact = named && !memneq_explicit(&pcr_expected, &p.pcrs[CHAIN_PCR as usize]);
-
-            if exact || expect.strict_anchor {
-                say!(
-                    rep,
-                    exact,
-                    c"anchor: PCR %u equals the recorded value extended by the anchor",
-                    CHAIN_PCR
-                );
-            } else {
-                note!(
-                    rep,
-                    c"anchor: PCR %u carries further measurements after the anchor; replay the logs to confirm it",
-                    CHAIN_PCR
-                );
-            }
-        } else {
-            say!(rep, false, c"anchor: PCR %u is not in the quote", CHAIN_PCR);
-        }
+        return;
     }
-
-    if expect.have_init {
-        say!(
-            rep,
-            !memneq_explicit(&p.init.digest, &expect.init_event),
-            c"state: init event covers the expected certificate, set and tree root"
+    let exact = named && !memneq_explicit(&pcr_expected, &p.pcrs[CHAIN_PCR as usize]);
+    if exact || expect.strict_anchor {
+        rep.check(
+            exact,
+            format!("anchor: PCR {CHAIN_PCR} equals the recorded value extended by the anchor")
+                .as_bytes(),
+        );
+    } else {
+        rep.note(
+            format!(
+                "anchor: PCR {CHAIN_PCR} carries further measurements after the anchor; replay the logs to confirm it"
+            )
+            .as_bytes(),
         );
     }
-    if expect.have_chain {
-        say!(
-            rep,
-            !memneq_explicit(&reg_value, &expect.chain),
-            c"state: register equals the expected value"
+}
+
+/// The register's state against the one expected, and the events after
+/// boot named.
+fn check_state(rep: &mut Report, p: &Parse, expect: &AttestExpect, value: &[u8; 32]) {
+    let runtime = p.recs.len().saturating_sub(1);
+
+    if let Some(init_event) = &expect.init_event {
+        rep.check(
+            !memneq_explicit(&p.init.digest, init_event),
+            b"state: init event covers the expected certificate, set and tree root",
         );
-    } else if expect.have_init {
+    }
+    if let Some(chain_value) = &expect.chain {
+        rep.check(
+            !memneq_explicit(value, chain_value),
+            b"state: register equals the expected value",
+        );
+    } else if let Some(init_event) = &expect.init_event {
         let mut predicted = [0u8; 32];
-        let folded = chain::fold(&mut predicted, &expect.init_event) == 0;
+        let folded = chain::fold(&mut predicted, init_event) == 0;
 
         if runtime == 0 {
-            say!(
-                rep,
-                folded && !memneq_explicit(&reg_value, &predicted),
-                c"state: register equals the value predicted for the set at boot"
+            rep.check(
+                folded && !memneq_explicit(value, &predicted),
+                b"state: register equals the value predicted for the set at boot",
             );
         } else {
-            let plural = if runtime == 1 { c"" } else { c"s" };
+            let plural = if runtime == 1 { "" } else { "s" };
 
-            say!(
-                rep,
+            rep.check(
                 expect.allow_runtime_events,
-                c"state: %zu event%s after boot change the register",
-                runtime,
-                plural.as_ptr()
+                format!("state: {runtime} event{plural} after boot change the register").as_bytes(),
             );
         }
     } else {
-        note!(
-            rep,
-            c"no expected state given; the register value is %s",
-            p.reg_value_hex.as_ptr()
+        rep.note(
+            &[
+                b"no expected state given; the register value is ",
+                cstr(&p.reg_value_hex),
+            ]
+            .concat(),
         );
     }
-    for r in recs.iter().skip(1) {
-        note!(
-            rep,
-            c"event after boot: %s %s",
-            r.ty.as_ptr(),
-            r.label.as_ptr()
-        );
+    for r in p.recs.iter().skip(1) {
+        rep.note(&[b"event after boot: ", &r.ty[..], b" ", &r.label].concat());
     }
-    for bit in 0..24u32 {
-        if expect.pcr_expect_mask & (1 << bit) == 0 {
-            continue;
-        }
-        let i = bit as usize;
-        say!(
-            rep,
-            p.pcr_have & (1 << bit) != 0 && !memneq_explicit(&p.pcrs[i], &expect.pcrs[i]),
-            c"PCR %u matches the expected value",
-            bit
-        );
-    }
-    if rep.failed != 0 { -EKEYREJECTED } else { 0 }
 }
 
 /// What a challenge's document gives, in hex.
@@ -2387,9 +2452,7 @@ pub(crate) fn parse_name_digest(spec: &[u8]) -> Result<(&[u8], [u8; 32]), c_int>
     Ok((name, digest))
 }
 
-pub(crate) use capi::{
-    attest_challenge_make, attest_challenge_read, attest_evidence_config, attest_verify,
-};
+pub(crate) use capi::{attest_challenge_make, attest_challenge_read, attest_evidence_config};
 
 #[cfg(shirudo_fuzz)]
 mod fuzz;
@@ -2399,7 +2462,7 @@ mod tests;
 mod capi {
     use core::ffi::{c_char, c_int};
 
-    use super::{AttestChallenge, AttestChallengePolicy, AttestExpect};
+    use super::{AttestChallenge, AttestChallengePolicy};
     use crate::util::config_update::ConfigUpdate;
 
     /// # Safety
@@ -2469,21 +2532,5 @@ mod capi {
                 report_cap,
             )
         }
-    }
-
-    /// # Safety
-    ///
-    /// `evidence` holds `len` bytes, `expect` is an expectation, and
-    /// `report` has room for `report_cap` bytes.
-    pub unsafe extern "C" fn attest_verify(
-        evidence: *const c_char,
-        len: usize,
-        expect: *const AttestExpect,
-        report: *mut c_char,
-        report_cap: usize,
-    ) -> c_int {
-        // SAFETY: the caller passes the evidence, the expectation and the
-        // report's room.
-        unsafe { super::verify(evidence, len, &*expect, report, report_cap) }
     }
 }

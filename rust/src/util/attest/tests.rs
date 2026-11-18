@@ -59,3 +59,40 @@ fn name_digest_is_a_name_and_64_digits() {
     );
     assert_eq!(name_digest(&format!("{longest}n={D64}")), Err(-EINVAL));
 }
+
+#[test]
+fn report_lines_are_a_tag_the_text_and_a_line_feed() {
+    let mut rep = Report::new(64);
+
+    rep.check(true, b"abc");
+    rep.check(false, b"def");
+    rep.note(b"ghi");
+    assert_eq!(rep.text(), b"  OK    abc\n  FAIL  def\n  NOTE  ghi\n");
+    assert_eq!(rep.failed, 1);
+}
+
+#[test]
+fn report_is_bounded_as_the_c_buffer_was() {
+    // A text that does not fit whole with a NUL after it is left out,
+    // the line feed kept while there is room for it and the NUL.
+    let mut rep = Report::new(24);
+    rep.check(false, b"x");
+    rep.note(b"too long a text");
+    assert_eq!(rep.text(), b"  FAIL  x\n  NOTE  \n");
+    // No line once a tag and its NUL would not fit, though the failure
+    // still counts.
+    rep.check(false, b"y");
+    assert_eq!(rep.text(), b"  FAIL  x\n  NOTE  \n");
+    assert_eq!(rep.failed, 2);
+
+    // A text that ends at the last byte before the NUL leaves no room for
+    // the line feed, nor for another line.
+    let mut rep = Report::new(12);
+    rep.check(true, b"abc");
+    rep.note(b"d");
+    assert_eq!(rep.text(), b"  OK    abc");
+
+    let mut rep = Report::new(0);
+    rep.check(true, b"abc");
+    assert_eq!(rep.text(), b"");
+}

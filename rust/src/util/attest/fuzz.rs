@@ -6,38 +6,34 @@
 
 use core::ffi::c_char;
 
-use super::capi::{attest_challenge_make, attest_challenge_read, attest_verify};
-use super::{AttestChallenge, AttestChallengePolicy, AttestExpect};
+use super::capi::{attest_challenge_make, attest_challenge_read};
+use super::{AttestChallenge, AttestChallengePolicy, AttestExpect, Report, verify};
 use crate::fuzzing::{fuzz_target, input_file};
 use crate::heap::xfree;
 use crate::util::tpm_wire::CREDENTIAL_LEN;
 
 const NONCE: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+const REPORT_MAX: usize = 4096;
 
 fuzz_target!(shirudo_fuzz_attest, shirudo_fuzz_attest_init, |data| {
-    // SAFETY: a policy and an expectation of nothing, for which zeros are
-    // the value, filled as the C target set them.
-    let (mut pol, mut expect): (AttestChallengePolicy, Box<AttestExpect>) =
-        unsafe { (core::mem::zeroed(), Box::new(core::mem::zeroed())) };
+    // SAFETY: a policy of nothing, for which zeros are the value, filled
+    // as the C target set it.
+    let mut pol: AttestChallengePolicy = unsafe { core::mem::zeroed() };
     pol.trust_presented = true;
-    expect.nonce = NONCE.as_ptr();
-    expect.nonce_len = NONCE.len();
-    expect.allow_runtime_events = true;
-    let mut report = [0 as c_char; 4096];
+    let expect = AttestExpect {
+        nonce: NONCE.to_vec(),
+        allow_runtime_events: true,
+        ..AttestExpect::default()
+    };
+    let _ = verify(data, &expect, &mut Report::new(REPORT_MAX));
+    let mut report = [0 as c_char; REPORT_MAX];
     let mut credential = [0u8; CREDENTIAL_LEN];
     let (mut out, mut out_len, mut cap): (*mut c_char, usize, usize) =
         (core::ptr::null_mut(), 0, 0);
     let evidence = data.as_ptr().cast::<c_char>();
-    // SAFETY: the evidence's bytes, the policy and expectation, and rooms
-    // for the report, credential and challenge, which is freed.
+    // SAFETY: the evidence's bytes, the policy, and rooms for the report,
+    // credential and challenge, which is freed.
     unsafe {
-        attest_verify(
-            evidence,
-            data.len(),
-            &*expect,
-            report.as_mut_ptr(),
-            report.len(),
-        );
         if attest_challenge_make(
             evidence,
             data.len(),
