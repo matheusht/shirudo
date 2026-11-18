@@ -343,9 +343,11 @@ a change needs a newer libbpf or UAPI:
 ``<kernel-tree>`` is a kernel checkout. Without ``KERNEL_SRC``,
 :src:`tools/bpf-deps/bpf-deps.sh` makes a shallow clone of bpf-next.
 
-The source revision is recorded in ``vendor/libbpf/COMMIT``. After
+The source revision is recorded in ``vendor/libbpf/COMMIT``. The build
+still links libbpf for its C code, while :src:`tools/gen-vmlinux-h` now
+dumps BTF using Rust. The BPF programs use the vendored headers. After
 refreshing, reapply the local changes :src:`vendor/libbpf/README.md`
-lists.
+lists and check the Rust BTF reader against the new libbpf.
 
 Other make targets
 ------------------

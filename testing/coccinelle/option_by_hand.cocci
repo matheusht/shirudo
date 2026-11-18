@@ -36,8 +36,7 @@ try:
     text = ast.literal_eval(S)
 except (ValueError, SyntaxError):
     text = ""
-exempt = ("util/options.c", "util/help.c", "util/image_runtime.c",
-          "tools/gen-vmlinux-h/", "testing/")
+exempt = ("testing/",)
 if text.startswith("-") and len(text) > 1 and \
    not p[0].file.startswith(exempt):
     coccilib.report.print_report(p[0],

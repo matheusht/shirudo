@@ -393,11 +393,10 @@ $(RUST_LIB): $(RUST_SRCS) $(BPF_EMBEDDED) $(RUST_PATHS_CHANGED)
 .PHONY: FORCE_RUST_PATHS
 FORCE_RUST_PATHS:
 
-# Build-time only; links the vendored libbpf and dumps BTF as C.
-$(VMLINUX_GEN): tools/gen-vmlinux-h/gen-vmlinux-h.c $(LIBBPF_A)
-	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS_BASE) $(INCLUDES) $(LDFLAGS) -o $@ $< $(LIBBPF_A) \
-	    $(LIBELF_LIBS) $(ZLIB_LIBS)
+# Build-time only: dump BTF as C with the standalone Rust generator.
+$(VMLINUX_GEN): tools/gen-vmlinux-h/gen-vmlinux-h.rs rust/src/bpf/btf.rs
+	@printf '  RUSTC   $@\n'
+	$(Q)$(RUSTC) --edition 2024 -O $(RUSTFLAGS_WERROR) -o $@ $<
 
 # ----- phase 2: generated headers ---------------------------------
 

@@ -471,6 +471,7 @@ test_expect_success 'test-vm imports the host-built payload' '
 		vm/guest.sh &&
 	grep -Fq "LIBBPF_VENDOR    := vendor/libbpf" ../Makefile.shirudo &&
 	grep -Fq "\$(LIBBPF_A)" ../Makefile.shirudo &&
+	grep -Fq "tools/gen-vmlinux-h/gen-vmlinux-h.rs" ../Makefile.shirudo &&
 	grep -Fq "VMLINUX_GEN      := tools/gen-vmlinux-h/gen-vmlinux-h" \
 		../Makefile.shirudo
 '
