@@ -896,10 +896,9 @@ testing/helper/test-keys: testing/helper/test-keys.c \
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(REGISTER_LIBS)
 
-testing/helper/test-seal: testing/helper/test-seal.c   \
-                          util/log.o util/string.o util/malloc.o \
-                           $(RUST_LIB)
-	@printf '  CC      $@\n'
+testing/helper/test-seal: $(HELPER_MAIN_DIR)/test-seal.o \
+		$(RUST_HELPER_LIB)
+	@printf '  LD      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(RUST_TEST_LDLIBS)
 
 testing/helper/test-eventlog: testing/helper/test-eventlog.c $(REGISTER_OBJS)
@@ -949,9 +948,9 @@ testing/helper/test-config: testing/helper/test-config.c   util/log.o  \
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(RUST_TEST_LDLIBS)
 
-testing/helper/test-bpm-source: testing/helper/test-bpm-source.c util/string.o util/log.o \
-                                $(RUST_LIB)
-	@printf '  CC      $@\n'
+testing/helper/test-bpm-source: $(HELPER_MAIN_DIR)/test-bpm-source.o \
+		$(RUST_HELPER_LIB)
+	@printf '  LD      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(RUST_TEST_LDLIBS)
 
 testing/helper/test-bpf-load: testing/helper/test-bpf-load.c
@@ -1083,10 +1082,9 @@ testing/helper/test-image-config: testing/helper/test-image-config.c \
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(LIBCRYPTO_LIBS) $(LIBSSL_LIBS) $(ZLIB_LIBS) \
 		$(RUST_TEST_LDLIBS)
 
-testing/helper/test-image-cli: testing/helper/test-image-cli.c \
-		 \
-		$(UTIL_OBJS) $(VERSION_OBJ) $(LIBBPF_A) $(RUST_LIB)
-	@printf '  CC      $@\n'
+testing/helper/test-image-cli: $(HELPER_MAIN_DIR)/test-image-cli.o \
+		$(VERSION_OBJ) $(LIBBPF_A) $(RUST_HELPER_LIB)
+	@printf '  LD      $@\n'
 	$(Q)$(CC) $(CFLAGS) $(LDFLAGS) $(RPATH_LDFLAGS) -o $@ \
 		$^ \
 		-Wl,--wrap=keys_load_image_root -Wl,--wrap=keys_check_image_set \

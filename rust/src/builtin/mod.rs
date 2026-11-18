@@ -22,9 +22,12 @@ mod status;
 mod upatch;
 mod version;
 
-/// The commands the register CLI test helper runs.
+/// The commands and the parts of them the test helpers run.
 #[cfg(feature = "test-helpers")]
-pub(crate) use {attest::cmd_attest, status::cmd_status};
+pub(crate) use {
+    attest::cmd_attest, bpm::cmd_bpm, bpm::source_key_open, config::cmd_config, keys::cmd_keys,
+    status::cmd_status,
+};
 
 /// The `argc` words of a command line at `argv`.
 ///

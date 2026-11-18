@@ -303,14 +303,14 @@ unsafe fn bpm(argc: c_int, argv: *const *const c_char) -> c_int {
 
 /// For the image CLI test: the key file registered source `name`
 /// verifies with, open as `bpm repo update` opens it, or -errno.
-fn source_key_open(name: &[u8]) -> c_int {
+pub(crate) fn source_key_open(name: &[u8]) -> c_int {
     match source::load(name) {
         Ok(s) => s.key_open(),
         Err(err) => err,
     }
 }
 
-pub(super) use capi::cmd_bpm;
+pub(crate) use capi::cmd_bpm;
 
 mod capi {
     use core::ffi::{c_char, c_int};

@@ -1476,7 +1476,7 @@ unsafe fn keys(argc: c_int, argv: *const *const c_char) -> c_int {
     }
 }
 
-pub(super) use capi::cmd_keys;
+pub(crate) use capi::cmd_keys;
 
 mod capi {
     use core::ffi::{c_char, c_int};
