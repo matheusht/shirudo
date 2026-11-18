@@ -419,60 +419,13 @@ pub(crate) fn check_lsm_hooks(hooks: &LsmHooks) -> Result<(), Vec<u8>> {
     }
 }
 
-/// A detail into the caller's room: -EOPNOTSUPP, the detail "?" when it
-/// does not fit.
-///
-/// # Safety
-///
-/// `detail` is NULL or room for `detail_sz` bytes.
-unsafe fn fail_with(detail: *mut c_char, detail_sz: usize, text: &[u8]) -> c_int {
-    if !detail.is_null() && detail_sz != 0 {
-        // SAFETY: the caller's room.
-        let room = unsafe { core::slice::from_raw_parts_mut(detail.cast::<u8>(), detail_sz) };
-        if crate::text::strscpy(room, text).is_err() {
-            let _ = crate::text::strscpy(room, b"?");
-        }
-    }
-    -EOPNOTSUPP
-}
-
-/// The result of a hook check into the caller's room.
-///
-/// # Safety
-///
-/// `detail` is NULL or room for `detail_sz` bytes.
-unsafe fn report_hooks(r: Result<(), Vec<u8>>, detail: *mut c_char, detail_sz: usize) -> c_int {
-    if !detail.is_null() && detail_sz != 0 {
-        // SAFETY: the caller's room.
-        unsafe { *detail = 0 };
-    }
-    match r {
-        Ok(()) => 0,
-        // SAFETY: the caller's room.
-        Err(text) => unsafe { fail_with(detail, detail_sz, &text) },
-    }
-}
-
 pub(crate) use capi::kernel_abi_check;
+
+#[cfg(test)]
+mod tests;
 
 mod capi {
     use core::ffi::{c_char, c_int};
-
-    use crate::bpf::btf::Btf;
-
-    /// # Safety
-    ///
-    /// `btf` is NULL or a BTF shirudo_btf_new() made, and `detail` NULL
-    /// or room for `detail_sz` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn kernel_abi_validate_btf(
-        btf: *const Btf,
-        detail: *mut c_char,
-        detail_sz: usize,
-    ) -> c_int {
-        // SAFETY: the caller passes a BTF or NULL, and the room.
-        unsafe { super::validate_btf(btf.as_ref(), detail, detail_sz) }
-    }
 
     /// # Safety
     ///
@@ -480,40 +433,5 @@ mod capi {
     pub unsafe extern "C" fn kernel_abi_check(detail: *mut c_char, detail_sz: usize) -> c_int {
         // SAFETY: the caller passes the room.
         unsafe { super::check(detail, detail_sz) }
-    }
-
-    /// # Safety
-    ///
-    /// `obj` is an embedded object and `hooks` a hook list.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn kernel_abi_lsm_hooks(
-        obj: *const super::EmbeddedBpf,
-        hooks: *mut super::LsmHooks,
-    ) -> c_int {
-        // SAFETY: the caller passes an object and a list.
-        unsafe { super::lsm_hooks(&*obj, &mut *hooks) }
-            .err()
-            .unwrap_or(0)
-    }
-
-    /// # Safety
-    ///
-    /// `btf` is NULL or a BTF shirudo_btf_new() made, `hooks` a hook
-    /// list, and `detail` NULL or room for `detail_sz` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn kernel_abi_validate_lsm_hooks(
-        btf: *const Btf,
-        hooks: *const super::LsmHooks,
-        detail: *mut c_char,
-        detail_sz: usize,
-    ) -> c_int {
-        // SAFETY: the caller passes a BTF or NULL, a list and the room.
-        unsafe {
-            super::report_hooks(
-                super::validate_lsm_hooks(btf.as_ref(), &*hooks),
-                detail,
-                detail_sz,
-            )
-        }
     }
 }
