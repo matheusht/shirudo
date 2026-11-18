@@ -7,7 +7,7 @@
 use core::ffi::c_int;
 
 use crate::errno::EINVAL;
-use crate::util::crypto_openssl::sha256_buffer;
+use crate::util::crypto_openssl::{sha256, sha256_into};
 
 /// `enum config_event_kind`.
 pub(crate) const EVENT_BOOT: c_int = 1;
@@ -23,8 +23,7 @@ pub(crate) fn nvpcr(pcr: u32) -> bool {
 
 pub(crate) fn nvpcr_initial(out: &mut [u8; 32]) -> c_int {
     let zero = [0u8; 64];
-    // SAFETY: 64 input bytes and a 32-byte output digest.
-    unsafe { sha256_buffer(zero.as_ptr().cast(), zero.len(), out.as_mut_ptr()) }
+    sha256_into(&zero, out)
 }
 
 /// A static config PCR or the config NvPCR: 0 or -EINVAL.
@@ -37,16 +36,16 @@ pub(crate) fn pcr_valid(pcr: u32) -> c_int {
 }
 
 /// The event that measures a config root: SHA-256 of the domain with its
-/// NUL, the kind as a big-endian u32, and the root.
-pub(crate) fn event(kind: c_int, root_hash: &[u8; 32], out: *mut u8) -> c_int {
+/// NUL, the kind as a big-endian u32, and the root; -EINVAL for another
+/// kind.
+pub(crate) fn event(kind: c_int, root_hash: &[u8; 32]) -> Result<[u8; 32], c_int> {
     let mut data = [0u8; DOMAIN.len() + 4 + 32];
 
     if kind != EVENT_BOOT && kind != EVENT_UPDATE {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
     data[..DOMAIN.len()].copy_from_slice(DOMAIN);
     data[DOMAIN.len() + 3] = kind as u8;
     data[DOMAIN.len() + 4..].copy_from_slice(root_hash);
-    // SAFETY: the bytes of data, and the caller's room for a digest.
-    unsafe { sha256_buffer(data.as_ptr().cast(), data.len(), out) }
+    sha256(&data)
 }

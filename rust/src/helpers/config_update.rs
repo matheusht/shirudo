@@ -378,12 +378,13 @@ fn inspect(c: &Context<'_>) {
 
 fn describe(t: &ConfigUpdateTarget) -> c_int {
     out(&format!("root_hash={}\n", hex(&t.root_hash)));
-    let mut e = [0u8; 32];
-    let ret = event(EVENT_BOOT, &t.root_hash, e.as_mut_ptr());
-    if ret == 0 {
-        out(&format!("boot_event={}\n", hex(&e)));
+    match event(EVENT_BOOT, &t.root_hash) {
+        Ok(e) => {
+            out(&format!("boot_event={}\n", hex(&e)));
+            0
+        }
+        Err(_) => 1,
     }
-    c_int::from(ret != 0)
 }
 
 /// The step `how`, on the journal open in `c`.

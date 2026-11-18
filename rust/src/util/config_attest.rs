@@ -11,7 +11,7 @@ use core::ffi::{CStr, c_int, c_void};
 use crate::errno::{E2BIG, EINVAL, EKEYREJECTED, ENOMEM, EOVERFLOW, EUCLEAN};
 use crate::heap::{xfree, xreallocarray};
 use crate::text::cstr;
-use crate::util::chain::chain_fold;
+use crate::util::chain::fold;
 use crate::util::config_measure::{
     EVENT_BOOT, EVENT_UPDATE, event as measure_event, nvpcr, nvpcr_initial, pcr_valid,
 };
@@ -114,7 +114,6 @@ fn events(view: &Evidence) -> &[EvidenceEvent] {
 /// The PCR the events fold to from the initial value: 0, -EINVAL for no
 /// events, -EKEYREJECTED for a history out of order.
 fn replay(view: &Evidence, out: &mut [u8; 32]) -> c_int {
-    let mut digest = [0u8; 32];
     let mut sequence = 0u64;
 
     if view.events.is_null() || view.n_events == 0 || view.n_events > EVENTS_MAX {
@@ -131,12 +130,11 @@ fn replay(view: &Evidence, out: &mut [u8; 32]) -> c_int {
         {
             return -EKEYREJECTED;
         }
-        let mut ret = measure_event(event.kind, &event.root_hash, digest.as_mut_ptr());
-
-        if ret == 0 {
-            // SAFETY: the register value and the event digest.
-            ret = unsafe { chain_fold(out.as_mut_ptr(), digest.as_ptr()) };
-        }
+        let digest = match measure_event(event.kind, &event.root_hash) {
+            Ok(digest) => digest,
+            Err(err) => return err,
+        };
+        let ret = fold(out, &digest);
         if ret != 0 {
             return ret;
         }

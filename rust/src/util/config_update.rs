@@ -825,7 +825,13 @@ unsafe fn events_scan(
             running = record.initial_pcr;
         }
         if ret == 0 {
-            ret = config_measure::event(record.kind, &record.target.root_hash, digest.as_mut_ptr());
+            ret = match config_measure::event(record.kind, &record.target.root_hash) {
+                Ok(event) => {
+                    digest = event;
+                    0
+                }
+                Err(err) => err,
+            };
         }
         if ret == 0 {
             // SAFETY: two digests.
@@ -1099,7 +1105,13 @@ unsafe fn begin_event(
         // SAFETY: the caller's target.
         let root = unsafe { &(*target).root_hash };
 
-        ret = config_measure::event(kind, root, event.as_mut_ptr());
+        ret = match config_measure::event(kind, root) {
+            Ok(digest) => {
+                event = digest;
+                0
+            }
+            Err(err) => err,
+        };
     }
     let mut expected = before;
     if ret == 0 {
