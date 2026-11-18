@@ -39,7 +39,7 @@ use crate::util::keyring::{self, keyring_bpf_serial};
 use crate::util::keys::{self, TrustedSet};
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::preflight::{PreflightResult, preflight_run};
-use crate::util::seal::{seal_label, seal_label_tree, seal_mkdir_p};
+use crate::util::seal::{mark_ancestors, seal_label, seal_label_tree, seal_mkdir_p};
 
 const VAR_LIB: &CStr = c"/var/lib/shirudo";
 const RUN_DIR: &CStr = c"/run/shirudo";
@@ -383,6 +383,16 @@ fn init_bpffs() -> c_int {
 /// path the same and lets config recovery record its selection
 /// durably. The bind is detached when init leaves. The private bpffs is
 /// under /run, which systemd carries across the switch.
+/// Where the state tree is on the root file system, which the initrd
+/// binds.
+fn state_source(initrd: bool) -> Vec<u8> {
+    if initrd {
+        cat!(initrd::sysroot().to_bytes(), VAR_LIB)
+    } else {
+        VAR_LIB.to_bytes().to_vec()
+    }
+}
+
 fn initrd_enter() -> c_int {
     let mut root = Statfs::zeroed();
 
@@ -398,7 +408,7 @@ fn initrd_enter() -> c_int {
         return -ENOTBLK;
     }
     let sysroot = initrd::sysroot().to_bytes();
-    let src = cat!(sysroot, VAR_LIB);
+    let src = state_source(true);
     if src.len() >= PATH_MAX {
         return -ENAMETOOLONG;
     }
@@ -507,6 +517,17 @@ fn run(init: &mut Init) -> c_int {
     let ret = seal_label_tree(bootstrap);
     if ret != 0 {
         return phase(ret, "sealing persistent state");
+    }
+    if bootstrap {
+        let src = state_source(init.initrd);
+        let ret = if src.len() >= PATH_MAX {
+            -ENAMETOOLONG
+        } else {
+            mark_ancestors(&src)
+        };
+        if ret != 0 {
+            return phase(ret, "marking the directories above the state root");
+        }
     }
     let ret = eventlog_adopt_pending();
     if ret != 0 {

@@ -103,6 +103,77 @@ impl Drop for Fd {
     }
 }
 
+/// XATTR_ANCESTOR: the mark of a directory above the state root.
+const XATTR_ANCESTOR: &CStr = c"security.bpf.shirudo.ancestor";
+
+/// The parent of directory `dir`, opened, and its status.
+fn open_dir_parent(dir: &std::fs::File) -> Result<(std::fs::File, std::fs::Metadata), c_int> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    // SAFETY: the directory's descriptor and a C string.
+    let fd = unsafe {
+        openat(
+            dir.as_raw_fd(),
+            c"..".as_ptr(),
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(-errno());
+    }
+    // SAFETY: the descriptor just opened, owned here alone.
+    let parent = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+    let st = parent
+        .metadata()
+        .map_err(|e| -e.raw_os_error().unwrap_or(EINVAL))?;
+    Ok((parent, st))
+}
+
+/// Marks each directory above the state root at `root`, up to the root
+/// of its file system, so that the seal refuses to rename them: 0 or
+/// -errno. A directory whose parent is another file system, or itself,
+/// is the root of its own: renaming it does not move the state tree off
+/// the device the next boot mounts there.
+pub(crate) fn mark_ancestors(root: &[u8]) -> c_int {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let walk = || -> Result<(), c_int> {
+        let io = |e: std::io::Error| -e.raw_os_error().unwrap_or(EINVAL);
+        let root = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(O_DIRECTORY | O_NOFOLLOW)
+            .open(OsStr::from_bytes(root))
+            .map_err(io)?;
+        let dev = root.metadata().map_err(io)?.dev();
+        let (mut dir, mut cur) = open_dir_parent(&root)?;
+        drop(root);
+        while cur.dev() == dev {
+            let (parent, up) = open_dir_parent(&dir)?;
+            if up.dev() != cur.dev() || up.ino() == cur.ino() {
+                break;
+            }
+            // SAFETY: the directory's descriptor, a C string and the
+            // value's one byte.
+            if unsafe {
+                fsetxattr(
+                    dir.as_raw_fd(),
+                    XATTR_ANCESTOR.as_ptr(),
+                    b"1".as_ptr().cast(),
+                    1,
+                    0,
+                )
+            } != 0
+            {
+                return Err(-errno());
+            }
+            (dir, cur) = (parent, up);
+        }
+        Ok(())
+    };
+    walk().err().unwrap_or(0)
+}
+
 /// The label of `path` itself, a symbolic link's own inode rather than
 /// its target's: 0 or -errno.
 fn label(path: &CStr) -> c_int {

@@ -42,10 +42,10 @@ unsafe impl Sync for ImageGuard {}
 // SAFETY: the pin points at a static C string, which nothing writes.
 unsafe impl Sync for GuardMap {}
 
-pub(crate) const SEAL_HOOK_COUNT: usize = 27;
+pub(crate) const SEAL_HOOK_COUNT: usize = 29;
 pub(crate) const IMAGE_SEAL_HOOK_COUNT: usize = 2;
 pub(crate) const MOUNT_HOOK_COUNT: usize = 5;
-pub(crate) const OBSERVER_HOOK_COUNT: usize = 9;
+pub(crate) const OBSERVER_HOOK_COUNT: usize = 10;
 pub(crate) const IMAGE_OBSERVER_HOOK_COUNT: usize = 4;
 /// `enum gate_guard`.
 pub(crate) const GUARD_UNLINK: usize = 0;
@@ -54,9 +54,10 @@ pub(crate) const GUARD_REMOVEXATTR: usize = 2;
 pub(crate) const GUARD_KEY_PERMISSION: usize = 3;
 pub(crate) const GUARD_TPM_COMMAND: usize = 4;
 pub(crate) const GUARD_BPF_MAP: usize = 5;
-pub(crate) const GUARD_PROG_LOAD: usize = 6;
-pub(crate) const GUARD_BPF: usize = 7;
-pub(crate) const GATE_HOOK_COUNT: usize = 8;
+pub(crate) const GUARD_BPF_PROG: usize = 6;
+pub(crate) const GUARD_PROG_LOAD: usize = 7;
+pub(crate) const GUARD_BPF: usize = 8;
+pub(crate) const GATE_HOOK_COUNT: usize = 9;
 /// `enum guard_map_index`.
 pub(crate) const GUARD_TASKS: usize = 1;
 pub(crate) const GUARD_ROOTS: usize = 3;
@@ -102,6 +103,10 @@ pub(crate) static GATE_GUARDS: [ImageGuard; GATE_HOOK_COUNT] = [
         c"/run/shirudo/bpffs/bpf2_bpf_map_link",
     ),
     guard(
+        c"shirudo_lsm_bpf_prog",
+        c"/run/shirudo/bpffs/bpf2_bpf_prog_link",
+    ),
+    guard(
         c"shirudo_lsm_bpf_prog_load",
         c"/run/shirudo/bpffs/bpf2_bpf_prog_load_link",
     ),
@@ -144,6 +149,10 @@ pub(crate) static OBSERVER_GUARDS: [ImageGuard; OBSERVER_HOOK_COUNT] = [
     guard(
         c"shirudo_lsm_kernel_read_file",
         c"/run/shirudo/bpffs/kernel_read_file_link",
+    ),
+    guard(
+        c"shirudo_lsm_locked_down",
+        c"/run/shirudo/bpffs/locked_down_link",
     ),
 ];
 
@@ -272,12 +281,20 @@ pub(crate) static SEAL_GUARDS: [ImageGuard; SEAL_HOOK_COUNT] = [
         c"/run/shirudo/bpffs/seal_ptrace_access_check_link",
     ),
     guard(
+        c"shirudo_seal_mm_read_access",
+        c"/run/shirudo/bpffs/seal_mm_read_access_link",
+    ),
+    guard(
         c"shirudo_seal_perf_event_alloc",
         c"/run/shirudo/bpffs/seal_perf_event_alloc_link",
     ),
     guard(
         c"shirudo_seal_task_kill",
         c"/run/shirudo/bpffs/seal_task_kill_link",
+    ),
+    guard(
+        c"shirudo_seal_task_setrlimit",
+        c"/run/shirudo/bpffs/seal_task_setrlimit_link",
     ),
 ];
 

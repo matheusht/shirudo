@@ -28,8 +28,8 @@ use crate::sys::libc::{
 use crate::util::bpf_sys::bpf_map_freeze;
 use crate::util::identity;
 use crate::util::image_guards::{
-    GATE_GUARDS, GATE_HOOK_COUNT, GUARD_BPF, GUARD_BPF_MAP, GUARD_KEY_PERMISSION, GUARD_MAPS,
-    GUARD_PROG_LOAD, GUARD_REMOVEXATTR, GUARD_ROOTS, GUARD_SETXATTR, GUARD_TASKS,
+    GATE_GUARDS, GATE_HOOK_COUNT, GUARD_BPF, GUARD_BPF_MAP, GUARD_BPF_PROG, GUARD_KEY_PERMISSION,
+    GUARD_MAPS, GUARD_PROG_LOAD, GUARD_REMOVEXATTR, GUARD_ROOTS, GUARD_SETXATTR, GUARD_TASKS,
     GUARD_TPM_COMMAND, GUARD_UNLINK, IMAGE_OBSERVER_GUARDS, IMAGE_SEAL_GUARDS, ImageGuard,
     MOUNT_GUARDS, OBSERVER_GUARDS, SEAL_GUARDS,
 };
@@ -280,6 +280,7 @@ struct Attached {
 const GATE_RELEASE: [usize; GATE_HOOK_COUNT] = [
     GUARD_BPF,
     GUARD_BPF_MAP,
+    GUARD_BPF_PROG,
     GUARD_PROG_LOAD,
     GUARD_KEY_PERMISSION,
     GUARD_TPM_COMMAND,
@@ -462,16 +463,7 @@ impl Attached {
             return err;
         }
         let mut progs = Vec::new();
-        for g in [
-            GUARD_UNLINK,
-            GUARD_SETXATTR,
-            GUARD_REMOVEXATTR,
-            GUARD_PROG_LOAD,
-            GUARD_BPF_MAP,
-            GUARD_KEY_PERMISSION,
-            GUARD_TPM_COMMAND,
-            GUARD_BPF,
-        ] {
+        for g in 0..GATE_HOOK_COUNT {
             let Some(p) = obj.prog(text(gate(g).prog)) else {
                 error(b"expected programs missing in bpf2 object");
                 return -ENOENT;
@@ -515,6 +507,7 @@ impl Attached {
         }
         for (guard, hook) in [
             (GUARD_BPF_MAP, "bpf_map"),
+            (GUARD_BPF_PROG, "bpf_prog"),
             (GUARD_PROG_LOAD, "bpf_prog_load"),
             (GUARD_BPF, "bpf"),
         ] {
@@ -583,8 +576,12 @@ pub(super) fn attach() -> c_int {
         info(&cat!("bpf2 already attached (", text(bpf_gate), " exists)"));
         return 0;
     }
-    // A pin without the links behind it is what a failed attempt leaves.
-    for pin in [IDENTITY_PIN, TAMPER_PIN, INTEGRITY_PIN] {
+    // A failed attempt removes its own pins, a crash does not. Once the
+    // identity map is pinned, the image bootstrap refuses a re-run
+    // before it gets here, so map pins are all a crash can have left.
+    for m in &GUARD_MAPS {
+        // SAFETY: a static C string of the table.
+        let pin = unsafe { CStr::from_ptr(m.pin) };
         // SAFETY: a C string.
         if unsafe { unlink(pin.as_ptr()) } != 0 {
             let err = last_err();
