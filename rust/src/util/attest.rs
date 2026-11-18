@@ -71,7 +71,7 @@ const EK_CERT_B64_MAX: usize = 4 * EK_CERT_MAX.div_ceil(3) + 1;
 /// restricted | sign | fixedTPM | fixedParent | sensitiveDataOrigin
 const AK_ATTRS_REQUIRED: u32 = 0x0005_0032;
 /// `ATTEST_NONCE_MAX` of util/attest.h.
-const NONCE_MAX: usize = 64;
+pub(crate) const NONCE_MAX: usize = 64;
 /// `ATTEST_CHALLENGE_MAX` of util/attest.h.
 const CHALLENGE_MAX: usize = 16 * 1024;
 /// The label of a credential's seed, which the TPM takes with its NUL.
@@ -393,7 +393,7 @@ fn scrub_key(k: &mut TpmKey) {
 /// `nonce` holds `nonce_len` bytes, `c` is NULL or a challenge, and
 /// `update` NULL or a journal.
 #[allow(clippy::too_many_arguments)]
-unsafe fn evidence_config(
+pub(crate) unsafe fn evidence_config(
     nonce: *const u8,
     nonce_len: usize,
     pcr_mask: u32,
@@ -1657,8 +1657,8 @@ unsafe fn verify_parsed(
                 config,
                 quote.pcr_mask,
                 quote.reset_count,
-                quote.restart_count,
                 p.pcrs.as_ptr(),
+                ptr::null(),
                 root,
                 pcr,
                 &mut reason,

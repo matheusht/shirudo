@@ -18,10 +18,10 @@ use crate::util::seal::{seal_inherit, seal_mkdir_p};
 
 /// `SERIAL_MAGIC`, "SRLZ" little-endian, and `SERIAL_VERSION` of
 /// bpf/lib/serializer.h.
-const SERIAL_MAGIC: u32 = 0x5a4c_5253;
-const SERIAL_VERSION: u32 = 1;
+pub(crate) const SERIAL_MAGIC: u32 = 0x5a4c_5253;
+pub(crate) const SERIAL_VERSION: u32 = 1;
 /// `SERIAL_CHUNK_PAYLOAD`: the bytes of a chunk after its header.
-const SERIAL_CHUNK_PAYLOAD: u32 = 4032;
+pub(crate) const SERIAL_CHUNK_PAYLOAD: u32 = 4032;
 
 /// LOCKS_DIR of util/paths.h.
 const LOCKS_DIR: &CStr = c"/var/lib/shirudo/locks";
@@ -51,7 +51,7 @@ const _: () = assert!(size_of::<SerialChunk>() == 4096);
 /// The lock of map `map_id` in `dir`, created sealed when it is not
 /// there and held exclusively until the fd returned is closed; -EBUSY
 /// when another holds it, or another -errno.
-fn lock_acquire_at(dir: &CStr, map_id: u32) -> c_int {
+pub(crate) fn lock_acquire_at(dir: &CStr, map_id: u32) -> c_int {
     let mut name = [0u8; 64];
     let mut id = [0u8; 20];
 

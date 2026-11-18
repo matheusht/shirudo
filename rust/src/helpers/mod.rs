@@ -13,6 +13,7 @@ use crate::sys::libc::{fwrite, stderr, stdout};
 mod bpm_source;
 mod conditions;
 mod config;
+mod config_attest;
 mod config_image;
 mod eventlog;
 mod exec_churn;
@@ -29,6 +30,7 @@ mod seal;
 mod seal_output;
 mod upatch_decode;
 mod upatch_map_types;
+mod upatch_serializer_pages;
 
 /// The arguments the C runtime gave main(), as C strings.
 ///

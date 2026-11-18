@@ -32,6 +32,7 @@ use crate::util::bpf_sys::{
 };
 use crate::util::kernel_btf;
 use crate::util::map_format::{is_percpu, type_def, type_name, value_stride};
+use crate::util::serializer::{SERIAL_CHUNK_PAYLOAD, SERIAL_MAGIC, SERIAL_VERSION};
 use crate::util::serializer::{
     SerialChunk, chunk_validate, new_invocation_id, serializer_lock_acquire,
 };
@@ -41,13 +42,10 @@ use crate::util::upatch_resolve::{BPFFS_UPATCHES_DIR, pin_path, resolve_location
 
 /// What bpf/lib/serializer.h fixes of the serializer protocol.
 const SERIAL_MAP_NAME: &[u8] = b"shirudo_ser";
-const SERIAL_MAGIC: u32 = 0x5a4c_5253;
-const SERIAL_VERSION: u32 = 1;
 const SERIAL_MAX_CHUNKS: u32 = 256;
 const SERIAL_MAX_PAGES: u32 = 256;
 const SERIAL_F_DONE: u32 = 1;
 const SERIAL_CTX_F_PEEK: u32 = 1;
-const SERIAL_CHUNK_PAYLOAD: u32 = 4032;
 const SERIAL_MAX_BYTES: u32 = SERIAL_MAX_CHUNKS * SERIAL_CHUNK_PAYLOAD;
 const SERIAL_MAX_TOTAL_BYTES: u64 = SERIAL_MAX_PAGES as u64 * SERIAL_MAX_BYTES as u64;
 

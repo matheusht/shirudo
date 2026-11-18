@@ -15,9 +15,21 @@ pub(crate) const EVENT_UPDATE: c_int = 2;
 
 const DOMAIN: &[u8] = b"shirudo-config-root-v1\0";
 
-/// A PCR below 16 other than the register's 9 and 11: 0 or -EINVAL.
+pub(crate) const CONFIG_NVPCR_INDEX: u32 = 0x0181_8e04;
+
+pub(crate) fn nvpcr(pcr: u32) -> bool {
+    pcr == CONFIG_NVPCR_INDEX
+}
+
+pub(crate) fn nvpcr_initial(out: &mut [u8; 32]) -> c_int {
+    let zero = [0u8; 64];
+    // SAFETY: 64 input bytes and a 32-byte output digest.
+    unsafe { sha256_buffer(zero.as_ptr().cast(), zero.len(), out.as_mut_ptr()) }
+}
+
+/// A static config PCR or the config NvPCR: 0 or -EINVAL.
 pub(crate) fn pcr_valid(pcr: u32) -> c_int {
-    if pcr < 16 && pcr != 9 && pcr != 11 {
+    if (pcr < 16 && pcr != 9 && pcr != 11) || nvpcr(pcr) {
         0
     } else {
         -EINVAL

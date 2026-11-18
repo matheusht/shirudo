@@ -12,7 +12,9 @@ use crate::errno::{E2BIG, EINVAL, EKEYREJECTED, ENOMEM, EOVERFLOW, EUCLEAN};
 use crate::heap::{xfree, xreallocarray};
 use crate::text::cstr;
 use crate::util::chain::chain_fold;
-use crate::util::config_measure::{EVENT_BOOT, EVENT_UPDATE, event as measure_event, pcr_valid};
+use crate::util::config_measure::{
+    EVENT_BOOT, EVENT_UPDATE, event as measure_event, nvpcr, nvpcr_initial, pcr_valid,
+};
 use crate::util::config_update::{
     ConfigUpdate, ConfigUpdateRecord, config_update_check, config_update_events,
 };
@@ -152,7 +154,7 @@ unsafe extern "C" fn collect_event(
     // while the walk runs.
     let (r, view) = unsafe { (&*record, &mut *opaque.cast::<Evidence>()) };
 
-    if r.reset_count != view.reset_count || r.restart_count != view.restart_count {
+    if r.reset_count != view.reset_count {
         return 0;
     }
     if r.pcr != view.pcr || r.sequence > i64::MAX as u64 || r.initial_pcr != view.initial_pcr {
@@ -223,7 +225,7 @@ unsafe fn collect(update: *mut ConfigUpdate, out: *mut Evidence) -> c_int {
 ///
 /// `view` is NULL or points to a view whose events are NULL or from
 /// xreallocarray().
-unsafe fn clear(view: *mut Evidence) {
+pub(crate) unsafe fn clear(view: *mut Evidence) {
     if view.is_null() {
         return;
     }
@@ -320,7 +322,7 @@ unsafe extern "C" fn on_event(opaque: *mut c_void) -> c_int {
 /// # Safety
 ///
 /// `out` points to room for a view.
-unsafe fn parse(evidence: &[u8], out: *mut Evidence) -> c_int {
+pub(crate) unsafe fn parse(evidence: &[u8], out: *mut Evidence) -> c_int {
     let (mut schema, mut reset, mut restart, mut pcr) = (0i64, 0i64, 0i64, 0i64);
     let mut initial = [0u8; 65];
     let mut parser = EventParser {
@@ -374,7 +376,7 @@ unsafe fn parse(evidence: &[u8], out: *mut Evidence) -> c_int {
             && schema == 1
             && (0..=i64::from(u32::MAX)).contains(&reset)
             && (0..=i64::from(u32::MAX)).contains(&restart)
-            && (0..=15).contains(&pcr)
+            && (0..=i64::from(u32::MAX)).contains(&pcr)
             && pcr_valid(pcr as u32) == 0
             && cstr(&initial).len() == 64;
         let decoded = fields_ok && {
@@ -411,17 +413,17 @@ unsafe fn parse(evidence: &[u8], out: *mut Evidence) -> c_int {
 
 /// What a quote says: the PCRs it covers, the TPM boot it was made in,
 /// and the PCR values.
-struct Quote<'a> {
-    mask: u32,
-    reset: u32,
-    restart: u32,
-    pcrs: &'a [[u8; 32]; 24],
+pub(crate) struct Quote<'a> {
+    pub(crate) mask: u32,
+    pub(crate) reset: u32,
+    pub(crate) pcrs: &'a [[u8; 32]; 24],
+    pub(crate) nvpcr: Option<&'a [u8; 32]>,
 }
 
 /// Whether the evidence is the history of the quoted config PCR, in the
 /// quote's TPM boot, ending in the root an operator approved: 0 or
 /// -EKEYREJECTED, and the reason.
-fn verify(
+pub(crate) fn verify(
     view: &Evidence,
     quote: &Quote,
     expected_root: Option<&[u8; 32]>,
@@ -438,23 +440,45 @@ fn verify(
 
         return (ret, c"configuration evidence is missing");
     }
-    if pcr_valid(view.pcr) != 0
-        || quote.mask & (1u32 << view.pcr) == 0
-        || (expected_pcr >= 0 && view.pcr != expected_pcr as u32)
-    {
+    if pcr_valid(view.pcr) != 0 || (expected_pcr >= 0 && view.pcr != expected_pcr as u32) {
         return (-EKEYREJECTED, c"config PCR is unquoted or unexpected");
     }
-    if view.reset_count != quote.reset || view.restart_count != quote.restart {
+    let live = if nvpcr(view.pcr) {
+        let Some(certified) = quote.nvpcr else {
+            return (-EKEYREJECTED, c"config NvPCR is not certified");
+        };
+        let mut initial = [0u8; 32];
+        let ret = nvpcr_initial(&mut initial);
+        if ret != 0 {
+            return (ret, c"config root history matches the certified NvPCR");
+        }
+        if view.initial_pcr != initial {
+            return (
+                -EKEYREJECTED,
+                c"config history does not start at the NvPCR's initial value",
+            );
+        }
+        certified
+    } else {
+        if quote.mask & (1u32 << view.pcr) == 0 {
+            return (-EKEYREJECTED, c"config PCR is unquoted or unexpected");
+        }
+        &quote.pcrs[view.pcr as usize]
+    };
+    if view.reset_count != quote.reset {
         return (-EKEYREJECTED, c"config history belongs to another TPM boot");
     }
     if expected_root.is_some() && expected_pcr < 0 {
         return (-EKEYREJECTED, c"expected config root needs an expected PCR");
     }
     let ret = replay(view, &mut value);
-    if ret != 0 || value != quote.pcrs[view.pcr as usize] {
-        let ret = if ret != 0 { ret } else { -EKEYREJECTED };
-
-        return (ret, c"config history does not match the quoted PCR");
+    if ret != 0 || value != *live {
+        let reason = if nvpcr(view.pcr) {
+            c"config history does not match the certified NvPCR"
+        } else {
+            c"config history does not match the quoted PCR"
+        };
+        return (if ret != 0 { ret } else { -EKEYREJECTED }, reason);
     }
     if let Some(root) = expected_root
         && events(view)[view.n_events - 1].root_hash != *root
@@ -464,7 +488,14 @@ fn verify(
             c"config root was not approved by the operator",
         );
     }
-    (0, c"config root history matches the quoted PCR")
+    (
+        0,
+        if nvpcr(view.pcr) {
+            c"config root history matches the certified NvPCR"
+        } else {
+            c"config root history matches the quoted PCR"
+        },
+    )
 }
 
 pub(crate) use capi::{
@@ -537,8 +568,8 @@ mod capi {
         view: *const Evidence,
         quote_mask: u32,
         reset: u32,
-        restart: u32,
         pcrs: *const [u8; 32],
+        nvpcr_value: *const u8,
         expected_root: *const u8,
         expected_pcr: c_int,
         reason: *mut *const c_char,
@@ -549,8 +580,8 @@ mod capi {
             let quote = super::Quote {
                 mask: quote_mask,
                 reset,
-                restart,
                 pcrs: &*pcrs.cast::<[[u8; 32]; 24]>(),
+                nvpcr: nvpcr_value.cast::<[u8; 32]>().as_ref(),
             };
             let (ret, why) = super::verify(
                 &*view,

@@ -1011,14 +1011,10 @@ testing/helper/test-upatch-prog-metadata: testing/helper/test-upatch-prog-metada
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ \
 		$(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
-testing/helper/test-upatch-serializer-pages: testing/helper/test-upatch-serializer-pages.c \
-                                          \
-                                        \
-                                       util/string.o \
-                                       util/malloc.o  util/paths.o \
-                                       util/log.o  \
-                                       $(RUST_LIB)
-	@printf '  CC      $@\n'
+testing/helper/test-upatch-serializer-pages: $(HELPER_MAIN_DIR)/test-upatch-serializer-pages.o \
+                                        $(RUST_HELPER_LIB)
+	@printf '  LD      $@\n'
+
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
 testing/helper/test-upatch-rodata: testing/helper/test-upatch-rodata.c \
@@ -1060,9 +1056,10 @@ testing/helper/test-tpm-command: testing/helper/test-tpm-command.c include/shiru
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $<
 
-testing/helper/test-config-attest: testing/helper/test-config-attest.c \
-		  $(REGISTER_OBJS)
-	@printf '  CC      $@\n'
+testing/helper/test-config-attest: $(HELPER_MAIN_DIR)/test-config-attest.o \
+		$(VERSION_OBJ) $(LIBBPF_A) $(RUST_HELPER_LIB)
+	@printf '  LD      $@\n'
+
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(REGISTER_LIBS)
 
 testing/helper/test-image-keys: $(HELPER_MAIN_DIR)/test-image-keys.o \
