@@ -491,6 +491,9 @@ pub(crate) use capi::{
     measured_unmeasured_archives, measured_unmeasured_pins, measured_upatch_of,
 };
 
+#[cfg(test)]
+mod tests;
+
 mod capi {
     use core::ffi::{c_char, c_int, c_void};
 
@@ -559,7 +562,6 @@ mod capi {
     ///
     /// `set` has room for `max` members of which `*n` are held, and
     /// `name` and `payload_hex` are C strings.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn measured_set_add(
         set: *mut MeasuredUpatch,
         n: *mut usize,

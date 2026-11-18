@@ -45,6 +45,9 @@ pub(crate) fn decode(hex: &[u8], out: &mut [u8]) -> Result<(), c_int> {
     Ok(())
 }
 
+#[cfg(test)]
+mod tests;
+
 mod capi {
     use core::ffi::{CStr, c_char, c_int};
 
@@ -101,7 +104,6 @@ mod capi {
     ///
     /// `hex` is a C string or holds `2 * cap + 1` bytes, `out` is room for
     /// `cap` bytes and `len` for their count.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn hex_decode_max(
         hex: *const c_char,
         out: *mut u8,
@@ -152,29 +154,6 @@ mod capi {
             Some(hex) => super::decode(hex, out).map_or_else(|e| e, |()| 0),
             None => -EINVAL,
         }
-    }
-
-    /// Whether the `n` bytes at `s` are all lowercase hex digits; it
-    /// reads no further than the first that is not, a terminator
-    /// included.
-    ///
-    /// # Safety
-    ///
-    /// `s` holds `n` bytes, or a byte that is no hex digit before them.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn hex_is_lower(s: *const c_char, n: usize) -> bool {
-        // SAFETY: the caller's bytes, read up to the first that is no
-        // lowercase hex digit.
-        (0..n).all(|i| matches!(unsafe { *s.add(i) } as u8, b'0'..=b'9' | b'a'..=b'f'))
-    }
-
-    /// # Safety
-    ///
-    /// `inp` holds 32 bytes and `out` has room for an OCI digest.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn sha256_digest_encode(inp: *const [u8; 32], out: *mut [u8; 72]) {
-        // SAFETY: the caller's digest and room.
-        unsafe { *out = super::sha256_digest_encode(&*inp) };
     }
 }
 

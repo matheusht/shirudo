@@ -279,8 +279,12 @@ endef
 # tools/backend, which need docker or podman and read no C.
 VM ?= 1
 BACKEND ?= 1
+# A suite is a file of testing/unit/, or a module of the Rust with a
+# tests.rs, by its name.
 UNIT_SUITES := $(sort $(basename $(notdir $(filter-out %/unit.c, \
-	$(wildcard $(ROOT)/testing/unit/*.c)))))
+	$(wildcard $(ROOT)/testing/unit/*.c)))) \
+	$(notdir $(patsubst %/tests.rs,%, \
+	$(shell find $(ROOT)/rust/src -name tests.rs))))
 family-list = $(shell cd $(ROOT)/testing/functional && \
 	ls */t[0-9]$(1)[0-9][0-9]-*.sh | \
 	awk -F/ '{ print substr($$2, 2, 1), $$1 }' | sort -u | cut -d' ' -f2)

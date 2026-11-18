@@ -66,27 +66,5 @@ pub(crate) unsafe fn fputs_sanitized(s: &[u8], f: *mut File) {
     unsafe { fputs(shown.as_ptr().cast(), f) };
 }
 
-mod capi {
-    use core::ffi::{c_char, c_int};
-
-    use crate::ffi;
-    use crate::sys::libc::File;
-
-    /// # Safety
-    ///
-    /// `out` has room for `out_cap` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn human_size(bytes: u64, out: *mut c_char, out_cap: usize) -> c_int {
-        // SAFETY: the caller passes the room.
-        super::human_size(bytes, unsafe { ffi::bytes_mut(out.cast(), out_cap) })
-    }
-
-    /// # Safety
-    ///
-    /// `s` is a C string and `f` an open stream.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn fputs_sanitized(s: *const c_char, f: *mut File) {
-        // SAFETY: the caller passes a C string and its stream.
-        unsafe { super::fputs_sanitized(ffi::c_str(s), f) }
-    }
-}
+#[cfg(test)]
+mod tests;

@@ -80,7 +80,7 @@ below. The VM always boots the dm-verity runtime and the signed config
 from a dracut initrd. The runner caches the initrd by kernel, bundle and
 initrd inputs, while each family keeps its own VM and guest state. CI
 runs the same suite through `.github/scripts/tests.sh`. A change to
-`util/<m>.c` adds or updates its cases in `testing/unit/<m>.c`, and a
+a module of `rust/src/` adds or updates its cases in its `tests.rs`, and a
 parser of input from outside the host gets a target in `testing/fuzz/`.
 
 ## Reading results

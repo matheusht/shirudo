@@ -1149,6 +1149,9 @@ pub(crate) use capi::{
     upatch_open_memory, upatch_select, upatch_signature,
 };
 
+#[cfg(test)]
+mod tests;
+
 mod capi {
     use core::ffi::{c_char, c_int, c_void};
     use core::ptr;

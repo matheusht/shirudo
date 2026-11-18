@@ -115,35 +115,3 @@ pub unsafe extern "C" fn path_exists(path: *const c_char) -> bool {
     let path = unsafe { CStr::from_ptr(path) };
     std::fs::metadata(std::ffi::OsStr::from_bytes(path.to_bytes())).is_ok()
 }
-
-/// `dir`, a slash and `name` into `out`: 0, or -ENAMETOOLONG with `out`
-/// empty.
-///
-/// # Safety
-///
-/// `out` has room for `cap` bytes, and `dir` and `name` are C strings.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn path_join(
-    out: *mut c_char,
-    cap: usize,
-    dir: *const c_char,
-    name: *const c_char,
-) -> c_int {
-    // SAFETY: the caller's room and C strings.
-    let (room, dir, name) = unsafe {
-        (
-            crate::ffi::bytes_mut(out.cast(), cap),
-            CStr::from_ptr(dir).to_bytes(),
-            CStr::from_ptr(name).to_bytes(),
-        )
-    };
-    match strsprintf(room, &[dir, b"/", name]) {
-        Ok(_) => 0,
-        Err(_) => {
-            if let Some(first) = room.first_mut() {
-                *first = 0;
-            }
-            -ENAMETOOLONG
-        }
-    }
-}

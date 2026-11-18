@@ -412,7 +412,7 @@ already, or should. The basics:
 
 Code that a second place needs moves into `util/<m>.c`, declared in
 `util/<m>.h`, or in `include/shirudo/` for the project's basics, with
-cases in `testing/unit/<m>.c`, and the copies it replaces go in the same
+cases in its `tests.rs`, and the copies it replaces go in the same
 commit, whose message names each copy and how they differed. Two static
 copies of one helper in two builtins are a bug in waiting: one gets
 fixed and the other does not. A util function takes a length rather

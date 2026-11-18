@@ -400,8 +400,8 @@ one usually still compiles and passes tests.
 - A compiler warning fails every build; fix it rather than silence it.
   Validate C changes, test code included, with GCC and with clang 23,
   `make -B` when switching `CC`.
-- `make tests` runs every test as CI does. `util/<m>.c` is unit tested
-  by `testing/unit/<m>.c`, a parser of input from outside the host has a
+- `make tests` runs every test as CI does. A module of `rust/src/` is
+  unit tested by the `tests.rs` beside it, a parser of input from outside the host has a
   fuzz target, and a shell test `t<F><K><NN>` lives in its family's
   directory (`Documentation/contribute/testing/testing.rst`). The
   `testing` and `fuzz-target` skills say how to run and add them. Its

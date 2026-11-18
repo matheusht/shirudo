@@ -406,8 +406,8 @@ repeat it, and two that fell alone may hold together.
 Use the smallest local proof that shows the result. The `testing`,
 `fuzz-target` and `proofs` skills say how to run each one.
 
-- a unit case in `testing/unit/`, or a harness linked against
-  `build/unit/libshirudo.a`, for a parser or a helper;
+- a unit case in the `tests.rs` of the module, for a parser or a
+  helper;
 - a crafted input run by the fuzz target, under ASan and UBSan;
 - a CBMC harness for a bound that must hold for every input;
 - a functional test in the test VM (`make -C testing functional/<family>`)

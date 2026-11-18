@@ -95,6 +95,9 @@ pub(crate) unsafe fn read_build_id(out: *mut c_char) -> c_int {
     }
 }
 
+#[cfg(test)]
+mod tests;
+
 mod capi {
     use core::ffi::{c_char, c_int, c_void};
 

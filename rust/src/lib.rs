@@ -12,6 +12,7 @@ mod errno;
 mod ffi;
 mod heap;
 mod log;
+#[cfg(not(test))]
 mod panic;
 mod quote_check;
 mod shirudo_build;

@@ -173,7 +173,8 @@ Test tiers
      - Runs
      - Command
    * - Unit
-     - :src:`testing/unit/`
+     - ``tests.rs`` beside a module of :src:`rust/src/`, and
+       :src:`testing/unit/`
      - On the build host
      - ``make -C testing unit``
    * - CI checks
@@ -317,8 +318,9 @@ one tier, one unit suite or one family:
    $ make -C testing unit/<suite>
    $ make -C testing functional/<family>
 
-``<suite>`` is a file name under :src:`testing/unit/` without ``.c``, such
-as ``json``. ``<family>`` is a directory under :src:`testing/functional/`,
+``<suite>`` is the name of a Rust module with a ``tests.rs``, such as
+``hex``, or of a file under :src:`testing/unit/` without ``.c``, such as
+``json``. ``<family>`` is a directory under :src:`testing/functional/`,
 such as ``upatch``. A family runs its operator tests in number order,
 then boots its VM and runs its target tests there. ``make -j`` boots the
 VMs of several families side by side.
@@ -337,7 +339,13 @@ Run the cases of a unit suite whose names contain ``<substring>``:
 
 .. code-block:: console
 
+   $ build/unit/shirudo-unit <substring>
    $ build/unit/<suite> <substring>
+
+The first runs the Rust tests whose path, such as
+``util::hex::tests::decode_refuses_non_hex``, contains the substring,
+the second a C suite's cases. ``cargo test`` in :src:`rust/` runs the
+Rust tests as well.
 
 Run one operator test directly. It changes to :src:`testing/` itself and
 uses the binaries in the checkout root, so build them first:
@@ -1663,8 +1671,8 @@ Put a test in the lowest tier that can show the change works:
 
    * - The change touches
      - The test goes in
-   * - A function in ``util/<m>.c``
-     - ``testing/unit/<m>.c``
+   * - A function of a module ``rust/src/<path>/<m>.rs``
+     - Its ``tests.rs``, ``rust/src/<path>/<m>/tests.rs``
    * - A command, a mechanism or an attack on one
      - The family that owns it, as an operator test if it needs no root,
        kernel or TPM, otherwise as a target test
@@ -1678,36 +1686,35 @@ Put a test in the lowest tier that can show the change works:
 Write a unit test
 ~~~~~~~~~~~~~~~~~
 
-``testing/unit/<m>.c`` calls the functions of ``util/<m>.c`` and checks
-them with the macros of ``unit.h``: ``EXPECT_*`` records a failure and
-continues, ``ASSERT_*`` ends the case. List every case in the table,
-which ends with an empty entry:
+A module's tests go in a ``tests.rs`` beside it, which the module
+declares, and reach its private items through ``use super::*``. Each
+``#[test]`` function is a case, which ``assert!`` and ``assert_eq!``
+end at the first failure:
 
-.. code-block:: c
+.. code-block:: rust
 
-   static void decode_refuses_non_hex(void)
-   {
-           __u8 out[1];
+   // rust/src/util/hex.rs
+   #[cfg(test)]
+   mod tests;
 
-           EXPECT_EQ(hex_decode("zz", out, 1), -EINVAL);
+   // rust/src/util/hex/tests.rs
+   use super::*;
+   use crate::errno::EINVAL;
+
+   #[test]
+   fn decode_refuses_non_hex() {
+       assert_eq!(decode(b"zz", &mut [0u8; 1]), Err(-EINVAL));
    }
 
-   static const struct unit_case cases[] = {
-           UNIT_CASE(decode_refuses_non_hex),
-           {}
-   };
+A case tests what the code it covers does, through the functions the
+crate calls, and documents each ``unsafe`` block as the crate does.
+cargo builds every case into ``build/unit/shirudo-unit``, unoptimized
+and with the debug assertions on, and runs them on threads of one
+process.
 
-   UNIT_SUITE(hex, cases);
-
-A case left out of the table is an unused static function, which fails
-the build. Each case runs in a child process with a 60-second limit, so
-a crash, a sanitizer report or a hang fails that case alone.
-``unit_skip()`` skips a case with a reason. The suite links the util
-objects from an archive and the Rust library, which holds code outside
-:src:`util/` as well, the rows of :src:`rust/src/quote_check.rs` that
-``quote_check`` tests among it, and needs no build rule of its own. A
-suite that needs an object of its own names it in ``UNIT_OBJS`` in
-:src:`Makefile.shirudo`.
+The suites still in C, ``testing/unit/<m>.c``, check with the macros of
+``unit.h`` and run each case in a child process; they go to Rust one by
+one.
 
 Write a shell test
 ~~~~~~~~~~~~~~~~~~

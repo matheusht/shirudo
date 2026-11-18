@@ -1099,6 +1099,9 @@ pub(crate) use capi::{
 
 pub(crate) use capi::chain_init_event;
 
+#[cfg(test)]
+mod tests;
+
 mod capi {
     use core::ffi::{c_char, c_int, c_void};
 
@@ -1139,7 +1142,6 @@ mod capi {
     /// # Safety
     ///
     /// `tag` is a C string, `cert_sha` a digest and `event` room for one.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn chain_key_event(
         tag: *const c_char,
         cert_sha: *const u8,

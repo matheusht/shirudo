@@ -13,24 +13,5 @@ pub(crate) fn prefix_matches(release: &[u8], prefix: &[u8]) -> bool {
         || (release.starts_with(prefix) && matches!(at(release, prefix.len()), 0 | b'.' | b'-'))
 }
 
-mod capi {
-    use core::ffi::c_char;
-
-    use super::prefix_matches;
-    use crate::ffi;
-
-    /// # Safety
-    ///
-    /// `release` and `prefix` are NULL or C strings.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn kernel_release_prefix_matches(
-        release: *const c_char,
-        prefix: *const c_char,
-    ) -> bool {
-        if release.is_null() || prefix.is_null() {
-            return false;
-        }
-        // SAFETY: the caller passes two C strings.
-        unsafe { prefix_matches(ffi::c_str(release), ffi::c_str(prefix)) }
-    }
-}
+#[cfg(test)]
+mod tests;

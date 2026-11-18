@@ -76,6 +76,9 @@ pub const CURLUPART_URL: CurlUPart = 0;
 pub const CURLUPART_SCHEME: CurlUPart = 1;
 pub const CURLUPART_HOST: CurlUPart = 5;
 
+// The binaries link libcurl themselves; the crate's tests, which rustc
+// links, name it.
+#[cfg_attr(test, link(name = "curl"))]
 unsafe extern "C" {
     pub fn curl_global_init(flags: c_long) -> CurlCode;
     pub fn curl_global_cleanup();

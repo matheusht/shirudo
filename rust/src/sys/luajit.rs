@@ -39,6 +39,9 @@ pub const LUA_MASKCOUNT: c_int = 8;
 pub const LUAJIT_MODE_ENGINE: c_int = 0;
 pub const LUAJIT_MODE_OFF: c_int = 0;
 
+// The binaries link LuaJIT themselves; the crate's tests, which rustc
+// links, name it.
+#[cfg_attr(test, link(name = "luajit-5.1"))]
 unsafe extern "C-unwind" {
     pub fn luaL_newstate() -> *mut LuaState;
     pub fn lua_newstate(f: LuaAlloc, ud: *mut c_void) -> *mut LuaState;
