@@ -9,8 +9,9 @@
 //!   test-config-attest parse <evidence>
 //!   test-config-attest replay <evidence> <root hex|-> <pcr|-> <reset> <restart> <pcr value hex>
 
-use core::ffi::{CStr, c_char, c_int, c_void};
+use core::ffi::{CStr, c_char, c_int};
 use std::ffi::OsStr;
+use std::os::fd::BorrowedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 
@@ -21,9 +22,7 @@ use crate::util::attest::{NONCE_MAX, evidence_config};
 use crate::util::chain::PCR_MASK;
 use crate::util::config_attest::{Evidence, Quote, clear, parse, verify};
 use crate::util::config_measure::nvpcr;
-use crate::util::config_update::{
-    ConfigUpdate, ConfigUpdateOps, ConfigUpdateTarget, config_update_close, config_update_open,
-};
+use crate::util::config_update::{BootIdentity, ConfigUpdate, ConfigUpdateOps, ConfigUpdateTarget};
 use crate::util::json::MAX_BYTES;
 use crate::util::tpm::{Tpm, tpm_boot_identity, tpm_close, tpm_open, tpm_pcr_read};
 
@@ -43,39 +42,44 @@ fn with_tpm(read: impl FnOnce(*mut Tpm) -> c_int) -> c_int {
     }
 }
 
-unsafe extern "C" fn boot_identity(_: *mut c_void, reset: *mut u32, restart: *mut u32) -> c_int {
-    // SAFETY: a connection and the journal's rooms.
-    with_tpm(|tpm| unsafe { tpm_boot_identity(tpm, reset, restart) })
-}
-
-unsafe extern "C" fn pcr_read(_: *mut c_void, pcr: u32, out: *mut u8) -> c_int {
-    // SAFETY: a connection and the journal's 32 bytes of room.
-    with_tpm(|tpm| unsafe { tpm_pcr_read(tpm, pcr, out) })
-}
-
-unsafe extern "C" fn no_extend(_: *mut c_void, _: u32, _: *const u8) -> c_int {
-    -EPERM
-}
-
-unsafe extern "C" fn no_activate(_: *mut c_void, _: *const ConfigUpdateTarget) -> c_int {
-    -EPERM
-}
-
-unsafe extern "C" fn no_seal(_: *mut c_void, _: c_int) -> c_int {
-    0
-}
-
 /// A journal read, as attest reads it, that changes nothing.
-static OPS: ConfigUpdateOps = ConfigUpdateOps {
-    boot_identity: Some(boot_identity),
-    pcr_read: Some(pcr_read),
-    pcr_extend: Some(no_extend),
-    prepare: Some(no_activate),
-    activate: Some(no_activate),
-    seal: Some(no_seal),
-    checkpoint: None,
-    lock_wait_ms: 0,
-};
+struct ReadOnly;
+
+impl ConfigUpdateOps for ReadOnly {
+    fn boot_identity(&self) -> Result<BootIdentity, c_int> {
+        let (mut reset, mut restart) = (0u32, 0u32);
+        // SAFETY: a connection and rooms for its counts.
+        match with_tpm(|tpm| unsafe { tpm_boot_identity(tpm, &mut reset, &mut restart) }) {
+            0 => Ok(BootIdentity { reset, restart }),
+            err => Err(err),
+        }
+    }
+
+    fn pcr_read(&self, pcr: u32) -> Result<[u8; 32], c_int> {
+        let mut value = [0u8; 32];
+        // SAFETY: a connection and room for a digest.
+        match with_tpm(|tpm| unsafe { tpm_pcr_read(tpm, pcr, value.as_mut_ptr()) }) {
+            0 => Ok(value),
+            err => Err(err),
+        }
+    }
+
+    fn pcr_extend(&self, _: u32, _: &[u8; 32]) -> Result<(), c_int> {
+        Err(-EPERM)
+    }
+
+    fn prepare(&self, _: &ConfigUpdateTarget) -> Result<(), c_int> {
+        Err(-EPERM)
+    }
+
+    fn activate(&self, _: &ConfigUpdate<'_>, _: &ConfigUpdateTarget) -> Result<(), c_int> {
+        Err(-EPERM)
+    }
+
+    fn seal(&self, _: BorrowedFd<'_>) -> Result<(), c_int> {
+        Ok(())
+    }
+}
 
 fn render(directory: &CStr, nonce_hex: &CStr) -> c_int {
     let hex = nonce_hex.to_bytes();
@@ -87,32 +91,32 @@ fn render(directory: &CStr, nonce_hex: &CStr) -> c_int {
     {
         return -EINVAL;
     }
-    let mut update = ConfigUpdate::closed();
+    let mut journal = match ConfigUpdate::open(directory, &ReadOnly, 0) {
+        Ok(journal) => journal,
+        Err(err) => return err,
+    };
     let (mut doc, mut len, mut cap): (*mut c_char, usize, usize) = (core::ptr::null_mut(), 0, 0);
-    // SAFETY: a C string, the ops, the journal to fill, the nonce, and
-    // rooms for the document, which is freed and the journal closed after.
-    unsafe {
-        let mut ret =
-            config_update_open(directory.as_ptr(), &OPS, core::ptr::null_mut(), &mut update);
-        if ret == 0 {
-            ret = evidence_config(
-                nonce.as_ptr(),
-                n,
-                PCR_MASK,
-                core::ptr::null(),
-                &mut update,
-                &mut doc,
-                &mut len,
-                &mut cap,
-            );
-        }
-        if ret == 0 {
-            ret = crate::util::io::write_complete(libc::STDOUT_FILENO, doc.cast(), len);
-        }
-        xfree(doc.cast(), cap);
-        config_update_close(&mut update);
-        ret
+    // SAFETY: the nonce, the open journal, and rooms for the document.
+    let mut ret = unsafe {
+        evidence_config(
+            nonce.as_ptr(),
+            n,
+            PCR_MASK,
+            core::ptr::null(),
+            &mut journal,
+            &mut doc,
+            &mut len,
+            &mut cap,
+        )
+    };
+    if ret == 0 {
+        // SAFETY: the len bytes of the document.
+        ret = unsafe { crate::util::io::write_complete(libc::STDOUT_FILENO, doc.cast(), len) };
     }
+    // SAFETY: the document evidence_config() allocated, cap bytes of it,
+    // or NULL.
+    unsafe { xfree(doc.cast(), cap) };
+    ret
 }
 
 /// The evidence document at `path`: a regular file of 1 to MAX_BYTES

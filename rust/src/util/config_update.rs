@@ -7,7 +7,7 @@
 //! the next, under the journal's lock, through the operations the
 //! caller supplies.
 
-use core::ffi::{CStr, c_char, c_int, c_void};
+use core::ffi::{CStr, c_int};
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Read, Write};
@@ -42,7 +42,7 @@ const EWOULDBLOCK: c_int = crate::errno::EAGAIN;
 /// Where a caller may stop the protocol, numbered as the checkpoints
 /// test-config-update's SHIRUDO_TEST_CONFIG_CRASH and _FAIL name.
 #[derive(Clone, Copy)]
-enum Checkpoint {
+pub(crate) enum Checkpoint {
     PendingSync = 1,
     Extend = 2,
     EventSync = 3,
@@ -53,20 +53,17 @@ enum Checkpoint {
     EventWrite = 8,
 }
 
-/// `struct config_update_target`: a config image's mapping prefix and
-/// its dm-verity root.
-#[repr(C)]
+/// A config image's mapping prefix and its dm-verity root.
 #[derive(Clone, Copy)]
-pub struct ConfigUpdateTarget {
+pub(crate) struct ConfigUpdateTarget {
     pub(crate) prefix: [u8; PREFIX_MAX],
     pub(crate) root_hash: [u8; 32],
 }
 
-/// `struct config_update_record`: the state file's selection, or an
-/// event, which carries no prefix and is never pending.
-#[repr(C)]
+/// The state file's selection, or an event, which carries no prefix and
+/// is never pending.
 #[derive(Clone, Copy)]
-pub struct ConfigUpdateRecord {
+pub(crate) struct ConfigUpdateRecord {
     pub(crate) target: ConfigUpdateTarget,
     pub(crate) initial_pcr: [u8; 32],
     pub(crate) sequence: u64,
@@ -75,15 +72,7 @@ pub struct ConfigUpdateRecord {
     pub(crate) pcr: u32,
     pub(crate) kind: c_int,
     pub(crate) pending: bool,
-    /// The C's trailing padding as a field, so that a record copied out
-    /// has a value in every byte, as the C's memset() and `= {}` gave it.
-    _pad: [u8; 7],
 }
-
-const _: () = assert!(size_of::<ConfigUpdateRecord>() == 4192);
-const _: () = assert!(core::mem::offset_of!(ConfigUpdateRecord, sequence) == 4160);
-const _: () = assert!(core::mem::offset_of!(ConfigUpdateRecord, kind) == 4180);
-const _: () = assert!(core::mem::offset_of!(ConfigUpdateRecord, pending) == 4184);
 
 impl ConfigUpdateTarget {
     pub(crate) const fn zeroed() -> Self {
@@ -105,7 +94,6 @@ impl ConfigUpdateRecord {
             pcr: 0,
             kind: 0,
             pending: false,
-            _pad: [0; 7],
         }
     }
 }
@@ -113,136 +101,50 @@ impl ConfigUpdateRecord {
 /// The TPM boot a reading was made in: the TPM's reset and restart
 /// counts.
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct BootIdentity {
-    reset: u32,
-    restart: u32,
+pub(crate) struct BootIdentity {
+    pub(crate) reset: u32,
+    pub(crate) restart: u32,
 }
 
-/// `struct config_update_ops`: what the caller does for the protocol.
-#[repr(C)]
-pub struct ConfigUpdateOps {
-    pub(crate) boot_identity:
-        Option<unsafe extern "C" fn(*mut c_void, *mut u32, *mut u32) -> c_int>,
-    pub(crate) pcr_read: Option<unsafe extern "C" fn(*mut c_void, u32, *mut u8) -> c_int>,
-    pub(crate) pcr_extend: Option<unsafe extern "C" fn(*mut c_void, u32, *const u8) -> c_int>,
-    pub(crate) prepare:
-        Option<unsafe extern "C" fn(*mut c_void, *const ConfigUpdateTarget) -> c_int>,
-    pub(crate) activate:
-        Option<unsafe extern "C" fn(*mut c_void, *const ConfigUpdateTarget) -> c_int>,
-    pub(crate) seal: Option<unsafe extern "C" fn(*mut c_void, c_int) -> c_int>,
-    pub(crate) checkpoint: Option<unsafe extern "C" fn(*mut c_void, c_int) -> c_int>,
-    pub(crate) lock_wait_ms: u32,
+/// What the caller does for the protocol: the TPM's boot and a PCR read,
+/// a PCR extended, a config prepared and activated, the journal's files
+/// sealed, and the protocol stopped at a checkpoint where a test asks.
+pub(crate) trait ConfigUpdateOps {
+    fn boot_identity(&self) -> Result<BootIdentity, c_int>;
+
+    fn pcr_read(&self, pcr: u32) -> Result<[u8; 32], c_int>;
+
+    fn pcr_extend(&self, pcr: u32, event: &[u8; 32]) -> Result<(), c_int>;
+
+    /// `target` made ready to activate, or refused before anything is
+    /// measured.
+    fn prepare(&self, target: &ConfigUpdateTarget) -> Result<(), c_int>;
+
+    /// `target`, prepared, made the config in force, with `journal`
+    /// holding its selection pending.
+    fn activate(
+        &self,
+        journal: &ConfigUpdate<'_>,
+        target: &ConfigUpdateTarget,
+    ) -> Result<(), c_int>;
+
+    /// The seal's label on the journal's directory or a file it makes.
+    fn seal(&self, fd: BorrowedFd<'_>) -> Result<(), c_int>;
+
+    /// Whether the protocol goes on past `point`.
+    fn checkpoint(&self, _point: Checkpoint) -> Result<(), c_int> {
+        Ok(())
+    }
 }
 
-/// `struct config_update`: an open journal, its lock held until close.
-#[repr(C)]
-pub struct ConfigUpdate {
-    ops: *const ConfigUpdateOps,
-    ctx: *mut c_void,
-    dir_fd: c_int,
-    lock_fd: c_int,
+/// An open journal: its directory, and its lock, held until the journal
+/// is dropped; the operations it calls are borrowed for as long.
+pub(crate) struct ConfigUpdate<'o> {
+    ops: &'o dyn ConfigUpdateOps,
+    /// Held for its flock(), which its close releases.
+    _lock: OwnedFd,
+    dir: OwnedFd,
     boot_pending: bool,
-}
-
-/// `shirudo_config_cb`: what a walk of the events calls with each.
-pub type ConfigCb = unsafe extern "C" fn(r: *const ConfigUpdateRecord, ctx: *mut c_void) -> c_int;
-
-/// What the caller's operation returned, as a Result.
-fn op_result(ret: c_int) -> Result<(), c_int> {
-    if ret == 0 { Ok(()) } else { Err(ret) }
-}
-
-impl ConfigUpdate {
-    /// A journal not open.
-    pub(crate) const fn closed() -> Self {
-        ConfigUpdate {
-            ops: core::ptr::null(),
-            ctx: core::ptr::null_mut(),
-            dir_fd: -1,
-            lock_fd: -1,
-            boot_pending: false,
-        }
-    }
-
-    pub(crate) fn is_open(&self) -> bool {
-        self.lock_fd >= 0
-    }
-
-    /// The operations the open journal calls from here.
-    pub(crate) fn set_ops(&mut self, ops: &'static ConfigUpdateOps) {
-        self.ops = ops;
-    }
-
-    fn ops(&self) -> &ConfigUpdateOps {
-        // SAFETY: an open journal holds the operations it was opened
-        // with, which outlive it.
-        unsafe { &*self.ops }
-    }
-
-    /// The directory of the open journal.
-    fn dir(&self) -> BorrowedFd<'_> {
-        // SAFETY: the open journal's directory, which only
-        // close_journal() closes.
-        unsafe { BorrowedFd::borrow_raw(self.dir_fd) }
-    }
-
-    fn boot_identity(&self) -> Result<BootIdentity, c_int> {
-        let f = self.ops().boot_identity.expect("checked at open");
-        let mut boot = BootIdentity {
-            reset: 0,
-            restart: 0,
-        };
-
-        // SAFETY: the caller's operation, its context, and room for both.
-        op_result(unsafe { f(self.ctx, &mut boot.reset, &mut boot.restart) })?;
-        Ok(boot)
-    }
-
-    fn pcr_read(&self, pcr: u32) -> Result<[u8; 32], c_int> {
-        let f = self.ops().pcr_read.expect("checked at open");
-        let mut value = [0u8; 32];
-
-        // SAFETY: the caller's operation, its context, and room.
-        op_result(unsafe { f(self.ctx, pcr, value.as_mut_ptr()) })?;
-        Ok(value)
-    }
-
-    fn pcr_extend(&self, pcr: u32, event: &[u8; 32]) -> Result<(), c_int> {
-        let f = self.ops().pcr_extend.expect("checked at open");
-
-        // SAFETY: the caller's operation, its context, and the event.
-        op_result(unsafe { f(self.ctx, pcr, event.as_ptr()) })
-    }
-
-    fn prepare(&self, target: &ConfigUpdateTarget) -> Result<(), c_int> {
-        let f = self.ops().prepare.expect("checked at open");
-
-        // SAFETY: the caller's operation, its context, and its target.
-        op_result(unsafe { f(self.ctx, target) })
-    }
-
-    fn activate(&self, target: &ConfigUpdateTarget) -> Result<(), c_int> {
-        let f = self.ops().activate.expect("checked at open");
-
-        // SAFETY: the caller's operation, its context, and its target.
-        op_result(unsafe { f(self.ctx, target) })
-    }
-
-    fn seal(&self, fd: BorrowedFd<'_>) -> Result<(), c_int> {
-        let f = self.ops().seal.expect("checked at open");
-
-        // SAFETY: the caller's operation, its context, and an fd.
-        op_result(unsafe { f(self.ctx, fd.as_raw_fd()) })
-    }
-
-    /// The caller's checkpoint, which may stop the protocol there.
-    fn checkpoint(&self, point: Checkpoint) -> Result<(), c_int> {
-        match self.ops().checkpoint {
-            // SAFETY: the caller's operation and its context.
-            Some(f) => op_result(unsafe { f(self.ctx, point as c_int) }),
-            None => Ok(()),
-        }
-    }
 }
 
 fn io_errno(e: std::io::Error) -> c_int {
@@ -492,113 +394,65 @@ fn lock_wait(fd: BorrowedFd<'_>, wait_ms: u32) -> Result<(), c_int> {
     }
 }
 
-/// The journal's directory at `directory` and its lock file, the lock
-/// taken, each sealed and synced; the operations of `u` seal them.
-fn open_files(
-    u: &ConfigUpdate,
-    directory: &CStr,
-    lock_wait_ms: u32,
-) -> Result<(OwnedFd, OwnedFd), c_int> {
-    let dir: OwnedFd = OpenOptions::new()
-        .read(true)
-        .custom_flags(O_DIRECTORY | O_NOFOLLOW)
-        .open(OsStr::from_bytes(directory.to_bytes()))
-        .map_err(io_errno)?
-        .into();
-    let st = status(dir.as_fd())?;
-    if st.stx_uid != euid() || st.stx_mode & 0o22 != 0 {
-        return Err(-EPERM);
-    }
-    u.seal(dir.as_fd())?;
-    let lock = open_at(
-        dir.as_fd(),
-        c"lock",
-        O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK,
-        0o600,
-    )?;
-    regular_file(lock.as_fd())?;
-    lock_wait(lock.as_fd(), lock_wait_ms).inspect_err(|&err| {
-        if err == -EWOULDBLOCK {
-            crate::log::err(
-                &[
-                    &b"image: another shirudo command still holds the config operation lock "[..],
-                    directory.to_bytes(),
-                    b"/lock after ",
-                    format!("{}", lock_wait_ms / 1000).as_bytes(),
-                    b" seconds",
-                ]
-                .concat(),
-            );
+impl<'o> ConfigUpdate<'o> {
+    /// The journal in `directory`, its lock taken, waiting up to
+    /// `lock_wait_ms` for another command's, and the directory and the
+    /// lock file sealed through `ops` and synced: -EPERM where the
+    /// directory is another user's or others may write it, or the lock
+    /// file is not a regular file of the user's alone, and -EAGAIN when
+    /// another command still holds the lock.
+    pub(crate) fn open(
+        directory: &CStr,
+        ops: &'o dyn ConfigUpdateOps,
+        lock_wait_ms: u32,
+    ) -> Result<Self, c_int> {
+        let dir: OwnedFd = OpenOptions::new()
+            .read(true)
+            .custom_flags(O_DIRECTORY | O_NOFOLLOW)
+            .open(OsStr::from_bytes(directory.to_bytes()))
+            .map_err(io_errno)?
+            .into();
+        let st = status(dir.as_fd())?;
+        if st.stx_uid != euid() || st.stx_mode & 0o22 != 0 {
+            return Err(-EPERM);
         }
-    })?;
-    u.seal(lock.as_fd())?;
-    sync(lock.as_fd())?;
-    sync(dir.as_fd())?;
-    Ok((dir, lock))
-}
+        ops.seal(dir.as_fd())?;
+        let lock = open_at(
+            dir.as_fd(),
+            c"lock",
+            O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK,
+            0o600,
+        )?;
+        regular_file(lock.as_fd())?;
+        lock_wait(lock.as_fd(), lock_wait_ms).inspect_err(|&err| {
+            if err == -EWOULDBLOCK {
+                crate::log::err(
+                    &[
+                        &b"image: another shirudo command still holds the config operation lock "[..],
+                        directory.to_bytes(),
+                        b"/lock after ",
+                        format!("{}", lock_wait_ms / 1000).as_bytes(),
+                        b" seconds",
+                    ]
+                    .concat(),
+                );
+            }
+        })?;
+        ops.seal(lock.as_fd())?;
+        sync(lock.as_fd())?;
+        sync(dir.as_fd())?;
+        Ok(ConfigUpdate {
+            ops,
+            _lock: lock,
+            dir,
+            boot_pending: false,
+        })
+    }
 
-/// config_update_open().
-///
-/// # Safety
-///
-/// `directory` is NULL or a C string, `ops` NULL or operations that
-/// outlive the journal and take `ctx`, and `out` NULL or room for one.
-unsafe fn open_journal(
-    directory: *const c_char,
-    ops: *const ConfigUpdateOps,
-    ctx: *mut c_void,
-    out: *mut ConfigUpdate,
-) -> c_int {
-    if out.is_null() {
-        return -EINVAL;
+    /// The operations the journal calls from here.
+    pub(crate) fn set_ops(&mut self, ops: &'o dyn ConfigUpdateOps) {
+        self.ops = ops;
     }
-    // SAFETY: the caller's room, all of whose bits zeroed are a journal.
-    let u = unsafe {
-        out.write_bytes(0, 1);
-        &mut *out
-    };
-    u.dir_fd = -1;
-    u.lock_fd = -1;
-    // SAFETY: the caller's operations or NULL.
-    let Some(o) = (unsafe { ops.as_ref() }) else {
-        return -EINVAL;
-    };
-    if directory.is_null()
-        || o.boot_identity.is_none()
-        || o.pcr_read.is_none()
-        || o.pcr_extend.is_none()
-        || o.prepare.is_none()
-        || o.activate.is_none()
-        || o.seal.is_none()
-    {
-        return -EINVAL;
-    }
-    u.ops = ops;
-    u.ctx = ctx;
-    // SAFETY: the caller's C string.
-    let directory = unsafe { CStr::from_ptr(directory) };
-    match open_files(u, directory, o.lock_wait_ms) {
-        Ok((dir, lock)) => {
-            u.dir_fd = dir.into_raw_fd();
-            u.lock_fd = lock.into_raw_fd();
-            0
-        }
-        Err(err) => err,
-    }
-}
-
-/// config_update_close(): the journal's fds closed, the lock with them.
-fn close_journal(u: &mut ConfigUpdate) {
-    if u.lock_fd >= 0 {
-        // SAFETY: the journal's own fd.
-        unsafe { close(u.lock_fd) };
-    }
-    if u.dir_fd >= 0 {
-        // SAFETY: the journal's own fd.
-        unsafe { close(u.dir_fd) };
-    }
-    u.dir_fd = -1;
-    u.lock_fd = -1;
 }
 
 /// The selection record in the file `name` of the journal directory
@@ -745,15 +599,29 @@ fn events_scan(
     }
 }
 
-impl ConfigUpdate {
-    /// config_update_read(): the state file's record.
-    fn read_state(&self) -> Result<ConfigUpdateRecord, c_int> {
+impl ConfigUpdate<'_> {
+    fn dir(&self) -> BorrowedFd<'_> {
+        self.dir.as_fd()
+    }
+
+    /// The selection in force, from the state file.
+    pub(crate) fn read_state(&self) -> Result<ConfigUpdateRecord, c_int> {
         selection_read(self.dir(), c"state")
     }
 
-    /// config_update_stage_read(): the record staged for the next boot.
-    fn stage_read(&self) -> Result<ConfigUpdateRecord, c_int> {
+    /// The selection staged for the next boot.
+    pub(crate) fn read_staged(&self) -> Result<ConfigUpdateRecord, c_int> {
         selection_read(self.dir(), c"next-boot")
+    }
+
+    /// Each event handed to `consume` in turn, once it is checked to
+    /// follow the one before and folded into the PCR value: the error of
+    /// an event that does not, or the one `consume` returns.
+    pub(crate) fn events(
+        &self,
+        consume: impl FnMut(&ConfigUpdateRecord) -> Result<(), c_int>,
+    ) -> Result<(), c_int> {
+        events_scan(self.dir(), false, consume).map(|_| ())
     }
 
     /// The selection file `name` replaced by `record`, through the sealed
@@ -782,17 +650,17 @@ impl ConfigUpdate {
             0o600,
         )?);
         let saved = closed_after(file, |file| {
-            self.seal(file.as_fd())?;
+            self.ops.seal(file.as_fd())?;
             write_all(file, line)?;
             if inject {
-                self.checkpoint(Checkpoint::StateWrite)?;
+                self.ops.checkpoint(Checkpoint::StateWrite)?;
             }
             sync(file.as_fd())
         })
         .and_then(|()| {
             rename_at(dir, temporary, name)?;
             if inject {
-                self.checkpoint(Checkpoint::StateRename)?;
+                self.ops.checkpoint(Checkpoint::StateRename)?;
             }
             sync(dir)
         });
@@ -824,10 +692,10 @@ impl ConfigUpdate {
         )?);
         closed_after(file, |file| {
             regular_file(file.as_fd())?;
-            self.seal(file.as_fd())?;
+            self.ops.seal(file.as_fd())?;
             truncate(file.as_fd(), replay.end)?;
             write_all(file, line)?;
-            self.checkpoint(Checkpoint::EventWrite)?;
+            self.ops.checkpoint(Checkpoint::EventWrite)?;
             sync(file.as_fd())
         })?;
         sync(dir)
@@ -836,10 +704,10 @@ impl ConfigUpdate {
     /// The PCR's value between two readings of the TPM's boot, which
     /// must agree, or -ESTALE.
     fn live_read(&self, pcr: u32) -> Result<(BootIdentity, [u8; 32]), c_int> {
-        let boot = self.boot_identity()?;
-        let value = self.pcr_read(pcr)?;
+        let boot = self.ops.boot_identity()?;
+        let value = self.ops.pcr_read(pcr)?;
 
-        if self.boot_identity()? != boot {
+        if self.ops.boot_identity()? != boot {
             return Err(-ESTALE);
         }
         Ok((boot, value))
@@ -862,8 +730,11 @@ impl ConfigUpdate {
         Ok(())
     }
 
-    /// config_update_check(): the active record, complete and checked.
-    fn check(&self) -> Result<ConfigUpdateRecord, c_int> {
+    /// The selection in force, once it is complete, the last event, of
+    /// this TPM boot, and the PCR holds what the events replay to:
+    /// -EINPROGRESS while it is pending, -ESTALE in another TPM boot,
+    /// -EUCLEAN where the events or the PCR disagree.
+    pub(crate) fn check(&self) -> Result<ConfigUpdateRecord, c_int> {
         let record = self.read_state()?;
         if record.pending {
             return Err(-EINPROGRESS);
@@ -879,7 +750,7 @@ impl ConfigUpdate {
         record.pending = false;
         let completed = self
             .state_save(&record, true)
-            .and_then(|()| self.checkpoint(Checkpoint::CompleteSync));
+            .and_then(|()| self.ops.checkpoint(Checkpoint::CompleteSync));
         if completed.is_err() {
             record.pending = true;
             if let Err(restore) = self.state_save(&record, false) {
@@ -905,7 +776,7 @@ impl ConfigUpdate {
         if previous.sequence == i64::MAX as u64 {
             return Err(-EOVERFLOW);
         }
-        self.prepare(target)?;
+        self.ops.prepare(target)?;
         let (boot, before) = self.live_read(pcr)?;
         let mut record = ConfigUpdateRecord::zeroed();
         record.target = *target;
@@ -928,22 +799,21 @@ impl ConfigUpdate {
             return Err(ret);
         }
         self.state_save(&record, true)?;
-        self.checkpoint(Checkpoint::PendingSync)?;
-        self.pcr_extend(pcr, &event)?;
-        self.checkpoint(Checkpoint::Extend)?;
+        self.ops.checkpoint(Checkpoint::PendingSync)?;
+        self.ops.pcr_extend(pcr, &event)?;
+        self.ops.checkpoint(Checkpoint::Extend)?;
         let (after, value) = self.live_read(pcr)?;
         if after != boot || value != expected {
             return Err(-EUCLEAN);
         }
         self.event_append(&record)?;
-        self.checkpoint(Checkpoint::EventSync)?;
-        self.activate(target)?;
-        self.checkpoint(Checkpoint::Activate)
+        self.ops.checkpoint(Checkpoint::EventSync)?;
+        self.ops.activate(self, target)?;
+        self.ops.checkpoint(Checkpoint::Activate)
     }
 
-    /// config_update_clear_staged(): no selection staged for the next
-    /// boot.
-    fn clear_staged(&self) -> Result<(), c_int> {
+    /// No selection staged for the next boot.
+    pub(crate) fn clear_staged(&self) -> Result<(), c_int> {
         match unlink_at(self.dir(), c"next-boot") {
             Ok(()) => sync(self.dir()),
             Err(err) if err == -ENOENT => Ok(()),
@@ -951,10 +821,10 @@ impl ConfigUpdate {
         }
     }
 
-    /// config_update_stage(): `target` staged for the next boot, in the
-    /// selection record format: its target the candidate, its sequence
-    /// and TPM counts those of the selection it was staged from.
-    fn stage(&self, target: &ConfigUpdateTarget) -> Result<(), c_int> {
+    /// `target` staged for the next boot, in the selection record format:
+    /// its target the candidate, its sequence and TPM counts those of the
+    /// selection it was staged from.
+    pub(crate) fn stage(&self, target: &ConfigUpdateTarget) -> Result<(), c_int> {
         if !target_valid(target) {
             return Err(-EINVAL);
         }
@@ -963,14 +833,14 @@ impl ConfigUpdate {
         self.selection_save(&record, c"next-boot", c".next-boot.tmp", false)
     }
 
-    /// config_update_staged(): the staged target when the boot `reset`
-    /// after `previous` takes it, None to keep the selection in force.
-    fn staged(
+    /// The staged target when the boot with `reset` after `previous` takes
+    /// it, or None to keep the selection in force.
+    pub(crate) fn staged(
         &self,
         previous: &ConfigUpdateRecord,
         reset: u32,
     ) -> Result<Option<ConfigUpdateTarget>, c_int> {
-        let staged = match self.stage_read() {
+        let staged = match self.read_staged() {
             Ok(staged) => staged,
             Err(err) if err == -ENOENT => return Ok(None),
             Err(err) => return Err(err),
@@ -990,7 +860,7 @@ impl ConfigUpdate {
 
     /// A staged selection the boot in force came from goes with it.
     fn complete_staged(&self) -> Result<(), c_int> {
-        let staged = match self.stage_read() {
+        let staged = match self.read_staged() {
             Ok(staged) => staged,
             Err(err) if err == -ENOENT => return Ok(()),
             Err(err) => return Err(err),
@@ -1001,9 +871,9 @@ impl ConfigUpdate {
         self.clear_staged()
     }
 
-    /// config_update_begin(): `target` activated live on the config PCR
-    /// `pcr`, over a selection complete and checked.
-    fn begin(&self, target: &ConfigUpdateTarget, pcr: u32) -> Result<(), c_int> {
+    /// `target` activated live on the config PCR `pcr`, over a selection
+    /// complete and checked.
+    pub(crate) fn begin(&self, target: &ConfigUpdateTarget, pcr: u32) -> Result<(), c_int> {
         if !target_valid(target) || config_measure::pcr_valid(pcr) != 0 {
             return Err(-EINVAL);
         }
@@ -1024,9 +894,10 @@ impl ConfigUpdate {
         Ok(())
     }
 
-    /// config_update_boot(): `target` selected by this TPM boot on the
-    /// config PCR `pcr`, left pending for complete_boot().
-    fn boot(&mut self, target: &ConfigUpdateTarget, pcr: u32) -> Result<(), c_int> {
+    /// `target` selected by this TPM boot on the config PCR `pcr`, left
+    /// pending for complete_boot(): -EINPROGRESS while a selection of
+    /// this TPM boot is pending.
+    pub(crate) fn boot(&mut self, target: &ConfigUpdateTarget, pcr: u32) -> Result<(), c_int> {
         if !target_valid(target) || config_measure::pcr_valid(pcr) != 0 {
             return Err(-EINVAL);
         }
@@ -1036,7 +907,7 @@ impl ConfigUpdate {
             Err(err) if err == -ENOENT => ConfigUpdateRecord::zeroed(),
             Err(err) => return Err(err),
         };
-        let boot = self.boot_identity()?;
+        let boot = self.ops.boot_identity()?;
         if previous.sequence != 0 && previous.reset_count == boot.reset {
             if previous.pending {
                 return Err(-EINPROGRESS);
@@ -1067,10 +938,9 @@ impl ConfigUpdate {
         Ok(())
     }
 
-    /// config_update_complete_boot(): the boot's selection completed, or
-    /// the selection in force checked, and a staged selection it came
-    /// from removed.
-    fn complete_boot(&mut self) -> Result<(), c_int> {
+    /// The boot's selection completed, or the selection in force
+    /// checked, and a staged selection it came from removed.
+    pub(crate) fn complete_boot(&mut self) -> Result<(), c_int> {
         if self.boot_pending {
             self.boot_pending = false;
             self.complete()?;
@@ -1081,233 +951,5 @@ impl ConfigUpdate {
     }
 }
 
-/// The journal of an open update, or None for NULL or one not open.
-///
-/// # Safety
-///
-/// `update` is NULL or a journal.
-unsafe fn journal<'a>(update: *mut ConfigUpdate) -> Option<&'a mut ConfigUpdate> {
-    // SAFETY: the caller's journal or NULL.
-    unsafe { update.as_mut() }.filter(|u| u.dir_fd >= 0)
-}
-
-pub(crate) use capi::{
-    config_update_begin, config_update_boot, config_update_check, config_update_clear_staged,
-    config_update_close, config_update_complete_boot, config_update_events, config_update_open,
-    config_update_read, config_update_stage, config_update_stage_read, config_update_staged,
-};
-
 #[cfg(shirudo_fuzz)]
 mod fuzz;
-mod capi {
-    use core::ffi::{c_char, c_int, c_void};
-
-    use super::{ConfigCb, ConfigUpdate, ConfigUpdateOps, ConfigUpdateRecord, ConfigUpdateTarget};
-
-    /// `result`'s value into `out`: 0, or its error.
-    fn give<T>(result: Result<T, c_int>, out: &mut T) -> c_int {
-        match result {
-            Ok(value) => {
-                *out = value;
-                0
-            }
-            Err(err) => err,
-        }
-    }
-
-    fn status(result: Result<(), c_int>) -> c_int {
-        result.err().unwrap_or(0)
-    }
-
-    /// # Safety
-    ///
-    /// `directory` is NULL or a C string, `ops` NULL or operations that
-    /// outlive the journal and take `ctx`, and `out` NULL or room.
-    pub unsafe extern "C" fn config_update_open(
-        directory: *const c_char,
-        ops: *const ConfigUpdateOps,
-        ctx: *mut c_void,
-        out: *mut ConfigUpdate,
-    ) -> c_int {
-        // SAFETY: the caller passes what the function takes.
-        unsafe { super::open_journal(directory, ops, ctx, out) }
-    }
-
-    /// # Safety
-    ///
-    /// `update` is NULL or a journal.
-    pub unsafe extern "C" fn config_update_close(update: *mut ConfigUpdate) {
-        // SAFETY: the caller's journal or NULL.
-        if let Some(u) = unsafe { update.as_mut() } {
-            super::close_journal(u);
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `update` is NULL or a journal, and `out` NULL or room for a
-    /// record.
-    pub unsafe extern "C" fn config_update_read(
-        update: *mut ConfigUpdate,
-        out: *mut ConfigUpdateRecord,
-    ) -> c_int {
-        // SAFETY: the caller's journal and room, or NULL.
-        match unsafe { (super::journal(update), out.as_mut()) } {
-            (Some(u), Some(out)) => give(u.read_state(), out),
-            _ => -super::EINVAL,
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `update` is NULL or a journal, and `t` NULL or a target.
-    pub unsafe extern "C" fn config_update_begin(
-        update: *mut ConfigUpdate,
-        t: *const ConfigUpdateTarget,
-        pcr: u32,
-    ) -> c_int {
-        // SAFETY: the caller's journal and target, or NULL.
-        match unsafe { (super::journal(update), t.as_ref()) } {
-            (Some(u), Some(t)) => status(u.begin(t, pcr)),
-            _ => -super::EINVAL,
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `update` is NULL or a journal, and `t` NULL or a target.
-    pub unsafe extern "C" fn config_update_boot(
-        update: *mut ConfigUpdate,
-        t: *const ConfigUpdateTarget,
-        pcr: u32,
-    ) -> c_int {
-        // SAFETY: the caller's journal and target, or NULL.
-        match unsafe { (super::journal(update), t.as_ref()) } {
-            (Some(u), Some(t)) => status(u.boot(t, pcr)),
-            _ => -super::EINVAL,
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `update` is NULL or a journal, and `target` NULL or a target.
-    pub unsafe extern "C" fn config_update_stage(
-        update: *mut ConfigUpdate,
-        target: *const ConfigUpdateTarget,
-    ) -> c_int {
-        // SAFETY: the caller's journal and target, or NULL.
-        match unsafe { (super::journal(update), target.as_ref()) } {
-            (Some(u), Some(t)) => status(u.stage(t)),
-            _ => -super::EINVAL,
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `update` is NULL or a journal, and `out` NULL or room for a
-    /// record.
-    pub unsafe extern "C" fn config_update_stage_read(
-        update: *mut ConfigUpdate,
-        out: *mut ConfigUpdateRecord,
-    ) -> c_int {
-        // SAFETY: the caller's journal and room, or NULL.
-        match (unsafe { super::journal(update) }, unsafe { out.as_mut() }) {
-            (Some(u), Some(out)) => give(u.stage_read(), out),
-            _ => -super::EINVAL,
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `update` is NULL or a journal, `previous` NULL or a record and
-    /// `target` NULL or room for a target.
-    pub unsafe extern "C" fn config_update_staged(
-        update: *mut ConfigUpdate,
-        previous: *const ConfigUpdateRecord,
-        reset: u32,
-        target: *mut ConfigUpdateTarget,
-    ) -> c_int {
-        // SAFETY: the caller's journal, record and room, or NULL.
-        let (Some(u), Some(previous), Some(target)) = (
-            unsafe { super::journal(update) },
-            unsafe { previous.as_ref() },
-            unsafe { target.as_mut() },
-        ) else {
-            return -super::EINVAL;
-        };
-        match u.staged(previous, reset) {
-            Ok(Some(staged)) => {
-                *target = staged;
-                1
-            }
-            Ok(None) => 0,
-            Err(err) => err,
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `update` is NULL or a journal.
-    pub unsafe extern "C" fn config_update_clear_staged(update: *mut ConfigUpdate) -> c_int {
-        // SAFETY: the caller's journal or NULL.
-        match unsafe { super::journal(update) } {
-            Some(u) => status(u.clear_staged()),
-            None => -super::EINVAL,
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `update` is NULL or a journal.
-    pub unsafe extern "C" fn config_update_complete_boot(update: *mut ConfigUpdate) -> c_int {
-        // SAFETY: the caller's journal or NULL.
-        match unsafe { super::journal(update) } {
-            Some(u) => status(u.complete_boot()),
-            None => -super::EINVAL,
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `update` is NULL or a journal, and `out` NULL or room for a
-    /// record.
-    pub unsafe extern "C" fn config_update_check(
-        update: *mut ConfigUpdate,
-        out: *mut ConfigUpdateRecord,
-    ) -> c_int {
-        // SAFETY: the caller's journal or NULL.
-        let Some(u) = (unsafe { super::journal(update) }) else {
-            return -super::EINVAL;
-        };
-        // SAFETY: the caller's room or NULL.
-        match (u.check(), unsafe { out.as_mut() }) {
-            (Ok(record), Some(out)) => {
-                *out = record;
-                0
-            }
-            (result, _) => status(result.map(|_| ())),
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `update` is NULL or a journal, and `consume` takes `ctx`.
-    pub unsafe extern "C" fn config_update_events(
-        update: *mut ConfigUpdate,
-        consume: Option<ConfigCb>,
-        ctx: *mut c_void,
-    ) -> c_int {
-        // SAFETY: the caller's journal or NULL.
-        let (Some(u), Some(consume)) = (unsafe { super::journal(update) }, consume) else {
-            return -super::EINVAL;
-        };
-        let replay = super::events_scan(u.dir(), false, |record| {
-            // SAFETY: the caller's function and context, with the event.
-            match unsafe { consume(record, ctx) } {
-                0 => Ok(()),
-                err => Err(err),
-            }
-        });
-        status(replay.map(|_| ()))
-    }
-}

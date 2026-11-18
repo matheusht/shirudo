@@ -10,18 +10,16 @@
 //!
 //! SHIRUDO_TEST_IMAGE_INTERRUPT fails the live update's first activation.
 
-use core::ffi::{CStr, c_int, c_void};
-use std::os::fd::AsRawFd;
+use core::cell::RefCell;
+use core::ffi::{CStr, c_int};
+use std::os::fd::{AsRawFd, BorrowedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 
 use super::{helper_main, out};
 use crate::errno::EIO;
 use crate::util::chain::fold;
-use crate::util::config_update::{
-    ConfigUpdate, ConfigUpdateOps, ConfigUpdateTarget, config_update_begin, config_update_boot,
-    config_update_close, config_update_complete_boot, config_update_open,
-};
+use crate::util::config_update::{BootIdentity, ConfigUpdate, ConfigUpdateOps, ConfigUpdateTarget};
 use crate::util::image_keys::{check_set_with, validate_set};
 use crate::util::keys::{TrustedSet, read_der};
 
@@ -38,14 +36,6 @@ struct Context<'a> {
     interrupt: bool,
 }
 
-/// # Safety
-///
-/// `opaque` is the update's Context.
-unsafe fn ctx<'a>(opaque: *mut c_void) -> &'a mut Context<'a> {
-    // SAFETY: the caller's.
-    unsafe { &mut *opaque.cast::<Context<'a>>() }
-}
-
 /// Whether the keyring holds `der`: 1, 0, or -errno for a held
 /// certificate that does not read.
 fn holds(held: &[&CStr], der: &[u8]) -> c_int {
@@ -59,62 +49,54 @@ fn holds(held: &[&CStr], der: &[u8]) -> c_int {
     0
 }
 
-unsafe extern "C" fn boot_identity(_: *mut c_void, reset: *mut u32, restart: *mut u32) -> c_int {
-    // SAFETY: the journal's rooms.
-    unsafe { (*reset, *restart) = (1, 1) };
-    0
-}
+/// A stand-in TPM of one boot, whose PCR `Context` keeps, and the BPF
+/// keyring that holds the certificates the command line names.
+impl ConfigUpdateOps for RefCell<Context<'_>> {
+    fn boot_identity(&self) -> Result<BootIdentity, c_int> {
+        Ok(BootIdentity {
+            reset: 1,
+            restart: 1,
+        })
+    }
 
-unsafe extern "C" fn pcr_read(opaque: *mut c_void, _: u32, out: *mut u8) -> c_int {
-    // SAFETY: the context and the journal's 32 bytes of room.
-    unsafe { core::ptr::copy_nonoverlapping(ctx(opaque).pcr.as_ptr(), out, 32) };
-    0
-}
+    fn pcr_read(&self, _: u32) -> Result<[u8; 32], c_int> {
+        Ok(self.borrow().pcr)
+    }
 
-unsafe extern "C" fn pcr_extend(opaque: *mut c_void, _: u32, event: *const u8) -> c_int {
-    // SAFETY: the context, and the journal's event of 32 bytes.
-    unsafe {
-        let c = ctx(opaque);
+    fn pcr_extend(&self, _: u32, event: &[u8; 32]) -> Result<(), c_int> {
+        let mut c = self.borrow_mut();
         c.extends += 1;
-        fold(&mut c.pcr, &*event.cast::<[u8; 32]>())
+        match fold(&mut c.pcr, event) {
+            0 => Ok(()),
+            err => Err(err),
+        }
+    }
+
+    fn prepare(&self, _: &ConfigUpdateTarget) -> Result<(), c_int> {
+        let c = self.borrow();
+        if !c.live {
+            return Ok(());
+        }
+        match check_set_with(c.set, |der| holds(c.held, der)) {
+            0 => Ok(()),
+            err => Err(err),
+        }
+    }
+
+    fn activate(&self, _: &ConfigUpdate<'_>, _: &ConfigUpdateTarget) -> Result<(), c_int> {
+        let mut c = self.borrow_mut();
+        c.activations += 1;
+        if c.live && c.interrupt {
+            c.interrupt = false;
+            return Err(-EIO);
+        }
+        Ok(())
+    }
+
+    fn seal(&self, _: BorrowedFd<'_>) -> Result<(), c_int> {
+        Ok(())
     }
 }
-
-unsafe extern "C" fn prepare(opaque: *mut c_void, _: *const ConfigUpdateTarget) -> c_int {
-    // SAFETY: the context.
-    let c = unsafe { ctx(opaque) };
-    if c.live {
-        check_set_with(c.set, |der| holds(c.held, der))
-    } else {
-        0
-    }
-}
-
-unsafe extern "C" fn activate(opaque: *mut c_void, _: *const ConfigUpdateTarget) -> c_int {
-    // SAFETY: the context.
-    let c = unsafe { ctx(opaque) };
-    c.activations += 1;
-    if c.live && c.interrupt {
-        c.interrupt = false;
-        return -EIO;
-    }
-    0
-}
-
-unsafe extern "C" fn seal(_: *mut c_void, _: c_int) -> c_int {
-    0
-}
-
-static OPS: ConfigUpdateOps = ConfigUpdateOps {
-    boot_identity: Some(boot_identity),
-    pcr_read: Some(pcr_read),
-    pcr_extend: Some(pcr_extend),
-    prepare: Some(prepare),
-    activate: Some(activate),
-    seal: Some(seal),
-    checkpoint: None,
-    lock_wait_ms: 0,
-};
 
 fn target(prefix: &[u8], fill: u8) -> Box<ConfigUpdateTarget> {
     let mut t = Box::new(ConfigUpdateTarget::zeroed());
@@ -126,7 +108,7 @@ fn target(prefix: &[u8], fill: u8) -> Box<ConfigUpdateTarget> {
 /// A boot to /verified/boot, then a live update to /verified/live,
 /// in the journal at `directory`.
 fn live_update(directory: &CStr, set: &TrustedSet, held: &[&CStr]) -> c_int {
-    let mut c = Context {
+    let c = RefCell::new(Context {
         set,
         held,
         pcr: [0; 32],
@@ -134,38 +116,31 @@ fn live_update(directory: &CStr, set: &TrustedSet, held: &[&CStr]) -> c_int {
         activations: 0,
         live: false,
         interrupt: false,
+    });
+    let mut journal = match ConfigUpdate::open(directory, &c, 0) {
+        Ok(journal) => journal,
+        Err(err) => return err,
     };
-    // The context, which the callbacks reach through the journal: from
-    // here only through this pointer.
-    let cp = &raw mut c;
-    // SAFETY: an update the open fills.
-    let mut update: ConfigUpdate = unsafe { core::mem::zeroed() };
-    // SAFETY: a C string, the ops, the context, which outlives the
-    // update, and the update to fill; the update closed after.
-    unsafe {
-        let mut ret = config_update_open(directory.as_ptr(), &OPS, cp.cast(), &mut update);
-        if ret != 0 {
-            return ret;
-        }
-        ret = config_update_boot(&mut update, &*target(b"/verified/boot", 1), 15);
-        if ret == 0 {
-            ret = config_update_complete_boot(&mut update);
-        }
-        (*cp).live = true;
-        (*cp).interrupt = std::env::var_os("SHIRUDO_TEST_IMAGE_INTERRUPT").is_some();
-        (*cp).extends = 0;
-        (*cp).activations = 0;
-        if ret == 0 {
-            ret = config_update_begin(&mut update, &*target(b"/verified/live", 2), 15);
-        }
-        out(&format!(
-            "extends={} activations={}\n",
-            (*cp).extends,
-            (*cp).activations
-        ));
-        config_update_close(&mut update);
-        ret
+    let mut ret = journal.boot(&target(b"/verified/boot", 1), 15);
+    if ret.is_ok() {
+        ret = journal.complete_boot();
     }
+    {
+        let mut c = c.borrow_mut();
+        c.live = true;
+        c.interrupt = std::env::var_os("SHIRUDO_TEST_IMAGE_INTERRUPT").is_some();
+        c.extends = 0;
+        c.activations = 0;
+    }
+    if ret.is_ok() {
+        ret = journal.begin(&target(b"/verified/live", 2), 15);
+    }
+    let c = c.borrow();
+    out(&format!(
+        "extends={} activations={}\n",
+        c.extends, c.activations
+    ));
+    ret.err().unwrap_or(0)
 }
 
 fn run(args: &[&CStr]) -> c_int {

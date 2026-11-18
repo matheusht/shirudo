@@ -13,12 +13,12 @@
 //! borrow taken twice panics rather than aliases.
 
 use core::cell::RefCell;
-use core::ffi::{CStr, c_int, c_void};
+use core::ffi::{CStr, c_int};
 use core::ptr;
 use std::ffi::{CString, OsStr};
 use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::ErrorKind;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::path::Path;
@@ -37,10 +37,7 @@ use crate::util::bpf_sys::{bpf_map_get_next_key, bpf_map_lookup_elem, bpf_obj_ge
 use crate::util::config::{self, CONF_PATH, Config};
 use crate::util::config_image::{self, ConfigImageOpen};
 use crate::util::config_update::{
-    ConfigUpdate, ConfigUpdateOps, ConfigUpdateRecord, ConfigUpdateTarget, config_update_begin,
-    config_update_boot, config_update_check, config_update_clear_staged, config_update_close,
-    config_update_complete_boot, config_update_open, config_update_read, config_update_stage,
-    config_update_stage_read, config_update_staged,
+    BootIdentity, ConfigUpdate, ConfigUpdateOps, ConfigUpdateRecord, ConfigUpdateTarget,
 };
 use crate::util::crypto_openssl::{
     key_algorithm, pubkey_digest, verify_detached_x509, x509_from_der,
@@ -121,8 +118,7 @@ struct State {
 impl State {
     fn new() -> Self {
         State {
-            // SAFETY: plain C data, for which all-zero bytes are a value.
-            boot_target: unsafe { core::mem::zeroed() },
+            boot_target: ConfigUpdateTarget::zeroed(),
             boot_runtime: DmVerity::empty(),
             candidate: ConfigImageOpen::closed(),
             candidate_device: DmVerity::empty(),
@@ -147,19 +143,22 @@ impl State {
 
 thread_local! {
     static STATE: RefCell<State> = RefCell::new(State::new());
-    static JOURNAL: RefCell<ConfigUpdate> = const { RefCell::new(ConfigUpdate::closed()) };
+    static JOURNAL: RefCell<Option<ConfigUpdate<'static>>> = const { RefCell::new(None) };
 }
 
 fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
     STATE.with_borrow_mut(f)
 }
 
-fn with_journal<R>(f: impl FnOnce(&mut ConfigUpdate) -> R) -> R {
-    JOURNAL.with_borrow_mut(f)
+/// `f` on the open journal, or -EINVAL without one.
+fn with_journal<R>(
+    f: impl FnOnce(&mut ConfigUpdate<'static>) -> Result<R, c_int>,
+) -> Result<R, c_int> {
+    JOURNAL.with_borrow_mut(|journal| journal.as_mut().map_or(Err(-EINVAL), f))
 }
 
 fn journal_open() -> bool {
-    JOURNAL.with_borrow(ConfigUpdate::is_open)
+    JOURNAL.with_borrow(Option::is_some)
 }
 
 fn say(level: fn(&[u8]), text: String) {
@@ -188,15 +187,6 @@ fn print(text: &[u8]) {
     // SAFETY: the bytes, to the C library's stdout, which the other
     // commands write too.
     unsafe { fwrite(text.as_ptr().cast(), 1, text.len(), stdout) };
-}
-
-fn zero_record() -> ConfigUpdateRecord {
-    ConfigUpdateRecord::zeroed()
-}
-
-fn zero_target() -> ConfigUpdateTarget {
-    // SAFETY: plain C data, for which all-zero bytes are a value.
-    unsafe { core::mem::zeroed() }
 }
 
 /// strscpy(): `src` into `dst`, truncated, NUL-terminated.
@@ -560,42 +550,6 @@ fn mount_runtime(s: &mut State, trusted_boot: bool) -> c_int {
     ret
 }
 
-unsafe extern "C" fn seal_fd(_: *mut c_void, fd: c_int) -> c_int {
-    let label = SEAL_LABEL.to_bytes();
-    // SAFETY: the journal's fd, a C string and the label's bytes.
-    if unsafe {
-        fsetxattr(
-            fd,
-            XATTR_SEAL.as_ptr(),
-            label.as_ptr().cast(),
-            label.len(),
-            0,
-        )
-    } != 0
-    {
-        return last_errno();
-    }
-    0
-}
-
-unsafe extern "C" fn boot_identity(_: *mut c_void, reset: *mut u32, restart: *mut u32) -> c_int {
-    let tpm = with_state(|s| s.tpm);
-    // SAFETY: the TPM open_update() opened and the journal's rooms.
-    unsafe { tpm_boot_identity(tpm, reset, restart) }
-}
-
-unsafe extern "C" fn pcr_read(_: *mut c_void, pcr: u32, out: *mut u8) -> c_int {
-    let tpm = with_state(|s| s.tpm);
-    // SAFETY: the TPM open_update() opened and the journal's room.
-    unsafe { tpm_pcr_read(tpm, pcr, out) }
-}
-
-unsafe extern "C" fn pcr_extend(_: *mut c_void, pcr: u32, event: *const u8) -> c_int {
-    let tpm = with_state(|s| s.tpm);
-    // SAFETY: the TPM open_update() opened and the journal's event.
-    unsafe { tpm_pcr_extend(tpm, pcr, event) }
-}
-
 /// Removes a config mapping the guards watched shirudo make that is not
 /// the active config's: a candidate an update or a stage is done with,
 /// or one an interrupted update left. One the guards did not watch being
@@ -850,42 +804,81 @@ fn activate_config(s: &mut State, boot: bool) -> c_int {
     image_config::set(&s.bootstrap_config, dir.as_raw_fd())
 }
 
-unsafe extern "C" fn prepare_update(_: *mut c_void, target: *const ConfigUpdateTarget) -> c_int {
-    // SAFETY: the journal's target.
-    let target = unsafe { &*target };
-    with_state(|s| prepare_config(s, target, Prepare::Update))
+/// The journal's operations: the TPM the state holds, the candidate
+/// config it prepares and activates, and the seal's label.
+struct RuntimeOps {
+    /// Whether an activation records key revocations as a boot does,
+    /// rather than as a live update.
+    boot: bool,
 }
 
-unsafe extern "C" fn activate_update(_: *mut c_void, _: *const ConfigUpdateTarget) -> c_int {
-    with_state(|s| activate_config(s, false))
+/// How long a command waits for another's config operation lock.
+const UPDATE_LOCK_WAIT_MS: u32 = 30 * 1000;
+static UPDATE_OPS: RuntimeOps = RuntimeOps { boot: false };
+static BOOT_OPS: RuntimeOps = RuntimeOps { boot: true };
+
+impl ConfigUpdateOps for RuntimeOps {
+    fn boot_identity(&self) -> Result<BootIdentity, c_int> {
+        let tpm = with_state(|s| s.tpm);
+        let (mut reset, mut restart) = (0u32, 0u32);
+        // SAFETY: the TPM open_update() opened and rooms for its counts.
+        match unsafe { tpm_boot_identity(tpm, &mut reset, &mut restart) } {
+            0 => Ok(BootIdentity { reset, restart }),
+            err => Err(err),
+        }
+    }
+
+    fn pcr_read(&self, pcr: u32) -> Result<[u8; 32], c_int> {
+        let tpm = with_state(|s| s.tpm);
+        let mut value = [0u8; 32];
+        // SAFETY: the TPM open_update() opened and room for a digest.
+        match unsafe { tpm_pcr_read(tpm, pcr, value.as_mut_ptr()) } {
+            0 => Ok(value),
+            err => Err(err),
+        }
+    }
+
+    fn pcr_extend(&self, pcr: u32, event: &[u8; 32]) -> Result<(), c_int> {
+        let tpm = with_state(|s| s.tpm);
+        // SAFETY: the TPM open_update() opened and the event's digest.
+        match unsafe { tpm_pcr_extend(tpm, pcr, event.as_ptr()) } {
+            0 => Ok(()),
+            err => Err(err),
+        }
+    }
+
+    fn prepare(&self, target: &ConfigUpdateTarget) -> Result<(), c_int> {
+        match with_state(|s| prepare_config(s, target, Prepare::Update)) {
+            0 => Ok(()),
+            err => Err(err),
+        }
+    }
+
+    fn activate(&self, _: &ConfigUpdate<'_>, _: &ConfigUpdateTarget) -> Result<(), c_int> {
+        match with_state(|s| activate_config(s, self.boot)) {
+            0 => Ok(()),
+            err => Err(err),
+        }
+    }
+
+    fn seal(&self, fd: BorrowedFd<'_>) -> Result<(), c_int> {
+        let label = SEAL_LABEL.to_bytes();
+        // SAFETY: the journal's fd, a C string and the label's bytes.
+        if unsafe {
+            fsetxattr(
+                fd.as_raw_fd(),
+                XATTR_SEAL.as_ptr(),
+                label.as_ptr().cast(),
+                label.len(),
+                0,
+            )
+        } != 0
+        {
+            return Err(last_errno());
+        }
+        Ok(())
+    }
 }
-
-unsafe extern "C" fn activate_boot(_: *mut c_void, _: *const ConfigUpdateTarget) -> c_int {
-    with_state(|s| activate_config(s, true))
-}
-
-static UPDATE_OPS: ConfigUpdateOps = ConfigUpdateOps {
-    boot_identity: Some(boot_identity),
-    pcr_read: Some(pcr_read),
-    pcr_extend: Some(pcr_extend),
-    prepare: Some(prepare_update),
-    activate: Some(activate_update),
-    seal: Some(seal_fd),
-    checkpoint: None,
-    lock_wait_ms: 30 * 1000,
-};
-
-/// Boot and live updates record key revocations differently.
-static BOOT_OPS: ConfigUpdateOps = ConfigUpdateOps {
-    boot_identity: Some(boot_identity),
-    pcr_read: Some(pcr_read),
-    pcr_extend: Some(pcr_extend),
-    prepare: Some(prepare_update),
-    activate: Some(activate_boot),
-    seal: Some(seal_fd),
-    checkpoint: None,
-    lock_wait_ms: 0,
-};
 
 fn open_update() -> c_int {
     if journal_open() {
@@ -897,10 +890,13 @@ fn open_update() -> c_int {
         ret = with_state(|s| unsafe { tpm_open(&mut s.tpm) });
     }
     if ret == 0 {
-        // SAFETY: a C string, the operations, no context, and the journal.
-        ret = with_journal(|j| unsafe {
-            config_update_open(CONFIG_UPDATE_DIR.as_ptr(), &UPDATE_OPS, ptr::null_mut(), j)
-        });
+        ret = match ConfigUpdate::open(CONFIG_UPDATE_DIR, &UPDATE_OPS, UPDATE_LOCK_WAIT_MS) {
+            Ok(journal) => {
+                JOURNAL.set(Some(journal));
+                0
+            }
+            Err(err) => err,
+        };
     }
     ret
 }
@@ -908,54 +904,38 @@ fn open_update() -> c_int {
 /// The config the boot activates: the one staged for it, the journal's
 /// selection, or the bootstrap's config without one, as the image there
 /// is now.
-fn boot_target(target: &mut ConfigUpdateTarget) -> c_int {
-    let mut previous = zero_record();
-    // SAFETY: the open journal and room for its record.
-    let ret = with_journal(|j| unsafe { config_update_read(j, &mut previous) });
-    let selected = ret == 0;
-    if ret != 0 && ret != -ENOENT {
-        return ret;
-    }
-    if selected {
-        let (mut reset, mut restart) = (0u32, 0u32);
-        let mut staged = zero_target();
-        let tpm = with_state(|s| s.tpm);
-        // SAFETY: the TPM open_update() opened and rooms for its counts.
-        let mut ret = unsafe { tpm_boot_identity(tpm, &mut reset, &mut restart) };
-        if ret == 0 {
-            // SAFETY: the open journal, the record read and room for the
-            // staged target.
-            ret =
-                with_journal(|j| unsafe { config_update_staged(j, &previous, reset, &mut staged) });
-        }
-        if ret < 0 {
-            return ret;
-        }
-        if ret > 0 {
-            *target = staged;
-            return 0;
+fn boot_target() -> Result<ConfigUpdateTarget, c_int> {
+    let previous = match with_journal(|j| j.read_state()) {
+        Ok(previous) => Some(previous),
+        Err(err) if err == -ENOENT => None,
+        Err(err) => return Err(err),
+    };
+    if let Some(previous) = &previous {
+        let boot = UPDATE_OPS.boot_identity()?;
+        if let Some(staged) = with_journal(|j| j.staged(previous, boot.reset))? {
+            return Ok(staged);
         }
     }
-    let prefix = if selected {
-        cstr(&previous.target.prefix).to_vec()
-    } else {
-        with_state(|s| cstr(&s.bootstrap.config).to_vec())
+    let prefix = match &previous {
+        Some(previous) => cstr(&previous.target.prefix).to_vec(),
+        None => with_state(|s| cstr(&s.bootstrap.config).to_vec()),
     };
     let prefix_c = CString::new(prefix.clone()).unwrap_or_default();
     let mut opened = ConfigImageOpen::closed();
     let ret = config_image::place(ConfigImageOpen::open(&prefix_c, None), &mut opened);
     if ret != 0 {
-        return ret;
+        return Err(ret);
     }
-    let ret = if selected && previous.target.root_hash != opened.image.root_hash {
-        -EKEYREJECTED
+    let target = if previous.is_some_and(|p| p.target.root_hash != opened.image.root_hash) {
+        Err(-EKEYREJECTED)
     } else {
+        let mut target = ConfigUpdateTarget::zeroed();
         copy_str(&mut target.prefix, &prefix);
         target.root_hash = opened.image.root_hash;
-        0
+        Ok(target)
     };
     opened.close();
-    ret
+    target
 }
 
 fn boot_keys_error(step: &str, ret: c_int) -> c_int {
@@ -1018,12 +998,8 @@ pub(crate) fn runtime_root() -> Option<[u8; 32]> {
 
 /// The config activation journal of this command, which attestation
 /// reports on; null without one.
-pub(crate) fn update_context() -> *mut ConfigUpdate {
-    if journal_open() {
-        JOURNAL.with(RefCell::as_ptr)
-    } else {
-        ptr::null_mut()
-    }
+pub(crate) fn update_context() -> *mut ConfigUpdate<'static> {
+    JOURNAL.with_borrow_mut(|journal| journal.as_mut().map_or(ptr::null_mut(), ptr::from_mut))
 }
 
 fn reject_overrides() -> c_int {
@@ -1121,11 +1097,10 @@ pub(crate) fn boot_keys(set: &mut TrustedSet) -> c_int {
     if ret != 0 {
         return boot_keys_error("open config update state", ret);
     }
-    let mut target = zero_target();
-    let ret = boot_target(&mut target);
-    if ret != 0 {
-        return boot_keys_error("select boot config", ret);
-    }
+    let target = match boot_target() {
+        Ok(target) => target,
+        Err(err) => return boot_keys_error("select boot config", err),
+    };
     let ret = with_state(|s| {
         s.boot_target = target;
         prepare_config(s, &target, Prepare::Boot)
@@ -1206,20 +1181,19 @@ pub(crate) fn boot() -> c_int {
     let target = if valid {
         saved
     } else {
-        let mut target = zero_target();
-        let ret = boot_target(&mut target);
-        if ret != 0 {
-            return ret;
+        match boot_target() {
+            Ok(target) => target,
+            Err(err) => return err,
         }
-        target
     };
     let ret = with_journal(|j| {
         j.set_ops(&BOOT_OPS);
-        // SAFETY: the open journal and the boot target.
-        let ret = unsafe { config_update_boot(j, &target, pcr) };
+        let booted = j.boot(&target, pcr);
         j.set_ops(&UPDATE_OPS);
-        ret
-    });
+        booted
+    })
+    .err()
+    .unwrap_or(0);
     if ret == -EINPROGRESS {
         error("image: activation is pending; further changes are blocked".into());
     }
@@ -1279,31 +1253,25 @@ fn config_mount_check(s: &State, record: &ConfigUpdateRecord) -> c_int {
 /// Completes the boot's activation once the config it selected is the
 /// one mounted.
 pub(crate) fn boot_complete() -> c_int {
-    let mut record = zero_record();
-    // SAFETY: the open journal and room for its record.
-    let mut ret = with_journal(|j| unsafe { config_update_read(j, &mut record) });
-    if ret == 0 {
-        ret = with_state(|s| config_mount_check(s, &record));
+    let ret = match with_journal(|j| j.read_state()) {
+        Ok(record) => with_state(|s| config_mount_check(s, &record)),
+        Err(err) => err,
+    };
+    if ret != 0 {
+        return ret;
     }
-    if ret == 0 {
-        // SAFETY: the open journal.
-        ret = with_journal(|j| unsafe { config_update_complete_boot(j) });
-    }
-    ret
+    with_journal(|j| j.complete_boot()).err().unwrap_or(0)
 }
 
 /// Whether the journal's selection is complete and the config mounted.
 fn current_config() -> c_int {
-    let mut record = zero_record();
-    let mut ret = open_update();
-    if ret == 0 {
-        // SAFETY: the open journal and room for its record.
-        ret = with_journal(|j| unsafe { config_update_check(j, &mut record) });
-    }
+    let ret = open_update();
     if ret != 0 {
-        ret
-    } else {
-        with_state(|s| config_mount_check(s, &record))
+        return ret;
+    }
+    match with_journal(|j| j.check()) {
+        Ok(record) => with_state(|s| config_mount_check(s, &record)),
+        Err(err) => err,
     }
 }
 
@@ -1314,12 +1282,10 @@ fn current_config() -> c_int {
 /// destination.
 fn status_config(state: c_int) -> c_int {
     with_state(|s| s.config_state = state);
-    if state == -EINPROGRESS {
-        let mut record = zero_record();
-        // SAFETY: the open journal and room for its record.
-        if with_journal(|j| unsafe { config_update_read(j, &mut record) }) == 0 {
-            with_state(|s| config_mount_check(s, &record));
-        }
+    if state == -EINPROGRESS
+        && let Ok(record) = with_journal(|j| j.read_state())
+    {
+        with_state(|s| config_mount_check(s, &record));
     }
     0
 }
@@ -1395,13 +1361,7 @@ pub(crate) fn config_state(root: &mut [u8; 32]) -> c_int {
     if !journal_open() {
         return -ENODEV;
     }
-    let mut record = zero_record();
-    // SAFETY: the open journal and room for its record.
-    *root = if with_journal(|j| unsafe { config_update_read(j, &mut record) }) == 0 {
-        record.target.root_hash
-    } else {
-        [0; 32]
-    };
+    *root = with_journal(|j| j.read_state()).map_or([0; 32], |record| record.target.root_hash);
     with_state(|s| s.config_state)
 }
 
@@ -1412,20 +1372,17 @@ pub(crate) fn status(json: bool) -> c_int {
     if !journal_open() {
         return -ENODEV;
     }
-    let mut record = zero_record();
-    let mut staged = zero_record();
-    // SAFETY: the open journal and room for its record.
-    let ret = with_journal(|j| unsafe { config_update_read(j, &mut record) });
-    if ret != 0 {
-        return ret;
-    }
-    // SAFETY: as above, for the record staged for the next boot.
-    let ret = with_journal(|j| unsafe { config_update_stage_read(j, &mut staged) });
-    if ret != 0 && ret != -ENOENT {
-        return ret;
-    }
+    let record = match with_journal(|j| j.read_state()) {
+        Ok(record) => record,
+        Err(err) => return err,
+    };
+    let staged = match with_journal(|j| j.read_staged()) {
+        Ok(staged) => Some(staged),
+        Err(err) if err == -ENOENT => None,
+        Err(err) => return err,
+    };
     let hex = |root: &[u8; 32]| -> String { root.iter().map(|b| format!("{b:02x}")).collect() };
-    let next_root = (ret == 0).then(|| hex(&staged.target.root_hash));
+    let next_root = staged.map(|staged| hex(&staged.target.root_hash));
     let root = hex(&record.target.root_hash);
     let ret = if record.pending {
         -EINPROGRESS
@@ -1489,8 +1446,7 @@ pub(crate) fn leave() {
     with_state(|s| close_candidate(s, open));
     collect_mappings(open);
     if open {
-        // SAFETY: the open journal, closed once.
-        with_journal(|j| unsafe { config_update_close(j) });
+        JOURNAL.set(None);
     }
     with_state(|s| {
         // SAFETY: the TPM open_update() opened, or null.
@@ -1509,7 +1465,7 @@ pub(crate) fn update(prefix: &CStr) -> c_int {
     if !journal_open() {
         return -ENODEV;
     }
-    let mut target = zero_target();
+    let mut target = ConfigUpdateTarget::zeroed();
     let mut ret = current_config();
     if ret == 0 {
         ret = mkdir_owned(IMAGE_CACHE_DIR);
@@ -1521,8 +1477,7 @@ pub(crate) fn update(prefix: &CStr) -> c_int {
     }
     if ret == 0 {
         let pcr = with_state(|s| s.bootstrap.pcr);
-        // SAFETY: the open journal and the fetched target.
-        ret = with_journal(|j| unsafe { config_update_begin(j, &target, pcr) });
+        ret = with_journal(|j| j.begin(&target, pcr)).err().unwrap_or(0);
     }
     ret
 }
@@ -1534,7 +1489,7 @@ pub(crate) fn stage(prefix: &CStr) -> c_int {
     if !journal_open() {
         return -ENODEV;
     }
-    let mut target = zero_target();
+    let mut target = ConfigUpdateTarget::zeroed();
     let mut ret = current_config();
     if ret == 0 {
         ret = mkdir_owned(IMAGE_CACHE_DIR);
@@ -1548,8 +1503,7 @@ pub(crate) fn stage(prefix: &CStr) -> c_int {
         ret = with_state(|s| prepare_config(s, &target, Prepare::Stage));
     }
     if ret == 0 {
-        // SAFETY: the open journal and the prepared target.
-        ret = with_journal(|j| unsafe { config_update_stage(j, &target) });
+        ret = with_journal(|j| j.stage(&target)).err().unwrap_or(0);
     }
     ret
 }
@@ -1564,6 +1518,5 @@ pub(crate) fn stage_cancel() -> c_int {
     if ret != 0 {
         return ret;
     }
-    // SAFETY: the open journal.
-    with_journal(|j| unsafe { config_update_clear_staged(j) })
+    with_journal(|j| j.clear_staged()).err().unwrap_or(0)
 }

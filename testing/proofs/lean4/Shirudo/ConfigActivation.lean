@@ -4,15 +4,14 @@
 import Shirudo.Chain
 
 /-!
-The config image activation protocol of rust/src/util/config_update.rs, as `image
-update` (`update()` of rust/src/util/image_runtime.rs), `image stage`
-(`stage()`), `status` and `init` (`boot()` and
-`boot_complete()` around the upatch restore and the register
-binding in rust/src/builtin/init/) drive it. An activation saves the selection
-as pending in `state`, extends the config PCR with
-`config_measure_event()`, reads the PCR back, appends the event to
+The config image activation protocol of rust/src/util/config_update.rs,
+as `image update` (`update()` of rust/src/util/image_runtime.rs), `image stage`
+(`stage()`), `status` and `init` (`boot()` and `boot_complete()` around the
+upatch restore and the register binding in rust/src/builtin/init/) drive it.
+An activation saves the selection as pending in `state`, extends the config
+PCR with `config_measure_event()`, reads the PCR back, appends the event to
 `events`, mounts the config and saves the selection complete.
-`config_update_check()` lets a command run only when the record is the
+`ConfigUpdate::check()` lets a command run only when the record is the
 last event, of this TPM boot, not pending, and the PCR replays from the
 events. `init` records a boot event for the selection, pending or not,
 and completes it only at its end. `image stage` saves a consistent
@@ -50,7 +49,7 @@ breaks `extends_once` on root's TPM.
 For every such sequence:
 
 - (a) `consistent_or_refusing`: at every point the PCR replays from the
-  record and the selected config is mounted, or `config_update_check()`
+  record and the selected config is mounted, or `ConfigUpdate::check()`
   refuses: a selection of this TPM boot pending, the PCR extended by
   another process, or no record of this TPM boot. `refusal_persists`: the
   first two last, with no command starting and shirudo extending nothing,
@@ -246,7 +245,7 @@ have one an earlier one had. -/
 def rootTpm : Variant :=
   { restartInFlight := true, repeatBoot := true, restartClears := true }
 
-/-- The result codes of `config_update_check()`. -/
+/-- The result codes of `ConfigUpdate::check()`. -/
 inductive Res
   | ok
   | enoent
@@ -277,14 +276,14 @@ def checkRecord (w : World B R D) (r : Event B R D) : Res :=
     else if w.pcr r.pcr ≠ exp then .euclean
     else .ok
 
-/-- `config_update_check()`. -/
+/-- `ConfigUpdate::check()`. -/
 def check (w : World B R D) : Res :=
   match w.state with
   | none => .enoent
   | some ⟨r, p⟩ => if p then .einprogress else checkRecord digest w r
 
 /-- `current_config()`: what every target command but `status` and
-`image status` needs before it runs, `config_update_check()` and
+`image status` needs before it runs, `ConfigUpdate::check()` and
 `config_mount_check()`. -/
 def Admits (w : World B R D) : Prop :=
   check digest w = .ok ∧ ∃ r, w.state = some ⟨r, false⟩ ∧
@@ -342,14 +341,14 @@ inductive StepIn (v : Variant) : Sys B R D → Sys B R D → Prop
   /-- Any other process extends any PCR (R4). -/
   | outsider (w : World B R D) (π : Proc B R D) (i : Nat) (d : D) :
       StepIn v ⟨w, π⟩ ⟨{ w with pcr := extendAt w.pcr i d }, π⟩
-  /-- `update()`: `current_config()`, then `config_update_begin()`
-  for another root on the same PCR. -/
+  /-- `image_runtime::update()`: `current_config()`, then
+  `ConfigUpdate::begin()` for another root on the same PCR. -/
   | startUpdate (w : World B R D) (t : R) (r : Event B R D) :
       w.state = some ⟨r, false⟩ → check digest w = .ok →
       w.mounted = some r.root → r.pcr = w.cfgPcr → t ≠ r.root →
       StepIn v ⟨w, .idle⟩ ⟨w, .starting .update t (some r)⟩
-  /-- `boot()` when the record is of this TPM boot:
-  `config_update_boot()` refuses a pending one, otherwise checks it. -/
+  /-- `image_runtime::boot()` when the record is of this TPM boot:
+  `ConfigUpdate::boot()` refuses a pending one, otherwise checks it. -/
   | initSame (w : World B R D) (r : Event B R D) :
       w.state = some ⟨r, false⟩ → r.boot = w.boot → r.pcr = w.cfgPcr →
       check digest w = .ok →
@@ -443,7 +442,7 @@ inductive StepIn (v : Variant) : Sys B R D → Sys B R D → Prop
   | initComplete (w : World B R D) (sel : R) (r : Event B R D) (q : Bool) :
       w.state = some ⟨r, q⟩ → w.mounted = some r.root →
       StepIn v ⟨w, .restOfInit true sel⟩ ⟨w, .checking (some sel)⟩
-  /-- The same without `boot_pending`: `config_update_check()`, then
+  /-- The same without `boot_pending`: `ConfigUpdate::check()`, then
   `complete_staged()`. -/
   | initDone (w : World B R D) (sel : R) (r : Event B R D) (q : Bool) :
       w.state = some ⟨r, q⟩ → w.mounted = some r.root →
@@ -627,7 +626,7 @@ def selected (w : World B R D) : R :=
   | some ⟨r, _⟩ => bootTarget w r
 
 /-- `init` has not recorded this TPM boot: no record, or one of another
-TPM boot. `config_update_check()` refuses with `ENOENT` or `ESTALE`. -/
+TPM boot. `ConfigUpdate::check()` refuses with `ENOENT` or `ESTALE`. -/
 def Stale (w : World B R D) : Prop :=
   ∀ r q, w.state = some ⟨r, q⟩ → r.boot ≠ w.boot
 
@@ -1574,7 +1573,7 @@ theorem stale_refuses {w : World B R D} (h : Stale w) :
 
 /-- (a) At every point of every sequence of commands, interruptions and
 boots, the config PCR replays from the record and the selected config is
-mounted, so commands run; or `config_update_check()` refuses, because a
+mounted, so commands run; or `ConfigUpdate::check()` refuses, because a
 selection of this TPM boot is pending, because something else extended
 the PCR, or because `init` has not recorded this TPM boot. A journal that
 cannot be read is never among them. -/

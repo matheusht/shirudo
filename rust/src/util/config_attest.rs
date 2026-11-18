@@ -6,7 +6,7 @@
 //! with a quote, parsed back by a verifier, and checked there against
 //! the quoted PCR, the TPM boot and the root an operator approved.
 
-use core::ffi::{CStr, c_int, c_void};
+use core::ffi::{CStr, c_int};
 
 use crate::errno::{E2BIG, EINVAL, EKEYREJECTED, ENOMEM, EOVERFLOW, EUCLEAN};
 use crate::heap::{xfree, xreallocarray};
@@ -15,9 +15,7 @@ use crate::util::chain::fold;
 use crate::util::config_measure::{
     EVENT_BOOT, EVENT_UPDATE, event as measure_event, nvpcr, nvpcr_initial, pcr_valid,
 };
-use crate::util::config_update::{
-    ConfigUpdate, ConfigUpdateRecord, config_update_check, config_update_events,
-};
+use crate::util::config_update::{ConfigUpdate, ConfigUpdateRecord};
 use crate::util::hex::{hex_decode, hex_encode};
 use crate::util::json::{JsonEmit, JsonField, parse_schema};
 
@@ -143,44 +141,37 @@ fn replay(view: &Evidence, out: &mut [u8; 32]) -> c_int {
     0
 }
 
-unsafe extern "C" fn collect_event(
-    record: *const ConfigUpdateRecord,
-    opaque: *mut c_void,
-) -> c_int {
-    // SAFETY: config_update_events() passes a record, and the view
-    // collect() made the context, touched through this pointer alone
-    // while the walk runs.
-    let (r, view) = unsafe { (&*record, &mut *opaque.cast::<Evidence>()) };
-
+/// The event `r` added to the view when it is of the view's TPM boot:
+/// -EUCLEAN for one of another PCR or initial value.
+fn collect_event(r: &ConfigUpdateRecord, view: &mut Evidence) -> Result<(), c_int> {
     if r.reset_count != view.reset_count {
-        return 0;
+        return Ok(());
     }
     if r.pcr != view.pcr || r.sequence > i64::MAX as u64 || r.initial_pcr != view.initial_pcr {
-        return -EUCLEAN;
+        return Err(-EUCLEAN);
     }
-    append_event(view, &r.target.root_hash, r.sequence, r.kind)
+    match append_event(view, &r.target.root_hash, r.sequence, r.kind) {
+        0 => Ok(()),
+        err => Err(err),
+    }
 }
 
-/// The evidence of the active config from the update records, or none
-/// without an update: 0, or -errno with the view cleared.
+/// The evidence of the active config from the journal, or none without
+/// one: 0, or -errno with the view cleared.
 ///
 /// # Safety
 ///
-/// `update` is NULL or an open update, and `out` points to room for a
-/// view.
-unsafe fn collect(update: *mut ConfigUpdate, out: *mut Evidence) -> c_int {
-    let mut active = ConfigUpdateRecord::zeroed();
-
+/// `out` points to room for a view.
+unsafe fn collect(update: Option<&ConfigUpdate<'_>>, out: *mut Evidence) -> c_int {
     // SAFETY: the caller passes the room.
     unsafe { zero(out) };
-    if update.is_null() {
+    let Some(update) = update else {
         return 0;
-    }
-    // SAFETY: the caller's update, and a record to fill.
-    let mut ret = unsafe { config_update_check(update, &mut active) };
-    if ret != 0 {
-        return ret;
-    }
+    };
+    let active = match update.check() {
+        Ok(active) => active,
+        Err(err) => return err,
+    };
     // SAFETY: the view, zeroed above.
     let view = unsafe { &mut *out };
 
@@ -188,11 +179,7 @@ unsafe fn collect(update: *mut ConfigUpdate, out: *mut Evidence) -> c_int {
     view.reset_count = active.reset_count;
     view.restart_count = active.restart_count;
     view.initial_pcr = active.initial_pcr;
-    // SAFETY: the caller's update, the callback, and the view it takes,
-    // not touched here while the walk runs.
-    ret = unsafe { config_update_events(update, Some(collect_event), out.cast()) };
-    // SAFETY: as above, the walk is over.
-    let view = unsafe { &mut *out };
+    let mut ret = update.events(|r| collect_event(r, view)).err().unwrap_or(0);
     if ret == 0 {
         let mut value = [0u8; 32];
 
@@ -504,13 +491,15 @@ mod capi {
 
     /// # Safety
     ///
-    /// `update` is NULL or an open update, and `out` points to room for a
-    /// view.
+    /// `update` is NULL or an open journal, and `out` points to room for
+    /// a view.
     pub unsafe extern "C" fn config_evidence_collect(
         update: *mut ConfigUpdate,
         out: *mut Evidence,
     ) -> c_int {
-        // SAFETY: the caller passes the update and the room.
+        // SAFETY: the caller's journal or NULL.
+        let update = unsafe { update.as_ref() };
+        // SAFETY: the caller passes the room.
         unsafe { super::collect(update, out) }
     }
 
