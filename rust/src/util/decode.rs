@@ -1435,6 +1435,8 @@ pub(crate) fn signal(v: &MapView) -> Result<u32, c_int> {
         .ok_or(-ENODATA)
 }
 
+#[cfg(shirudo_fuzz)]
+mod fuzz;
 #[cfg(test)]
 mod tests;
 

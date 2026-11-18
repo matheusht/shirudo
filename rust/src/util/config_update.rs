@@ -1360,6 +1360,8 @@ pub(crate) use capi::{
     config_update_read, config_update_stage, config_update_stage_read, config_update_staged,
 };
 
+#[cfg(shirudo_fuzz)]
+mod fuzz;
 mod capi {
     use core::ffi::{c_char, c_int, c_void};
     use core::ptr;

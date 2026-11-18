@@ -1170,21 +1170,16 @@ sparse:
 
 # ----- fuzzing ----------------------------------------------------
 
-# libFuzzer targets for the parsers of input from outside the host, built
-# with clang from the util sources under the sanitizers SANITIZE names, ASan
-# and UBSan without it; make -C testing fuzz builds and runs them. FUZZ_OUT
-# keeps the builds of another engine apart, as make -C testing afl does.
+# libFuzzer targets for the parsers of input from outside the host, linked
+# by clang under the sanitizers SANITIZE names, ASan and UBSan without it;
+# make -C testing fuzz builds and runs them. FUZZ_OUT keeps the builds of
+# another engine apart, as make -C testing afl does.
 FUZZ_CC ?= clang
 FUZZ_OUT ?= testing/fuzz
 FUZZ_SANITIZE := $(if $(SANITIZE),$(SANITIZE_CFLAGS), \
                  -fsanitize=address$(comma)undefined)
-FUZZ_WARNINGS := $(call cc-option,$(FUZZ_CC),$(PROBED_WARNINGS))
-FUZZ_CFLAGS := -O1 -g -std=gnu11 -fno-omit-frame-pointer $(LANG_CFLAGS) \
-               $(call cc-option,$(FUZZ_CC),$(PROBED_LANG)) \
-               -fsanitize=fuzzer $(FUZZ_SANITIZE) \
-               -fno-sanitize-recover=all $(WARNINGS) $(FUZZ_WARNINGS) \
-               -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE $(INCLUDES) \
-               $(LIBCRYPTO_CFLAGS) $(LIBCURL_CFLAGS) $(ZLIB_CFLAGS)
+FUZZ_CFLAGS := -O1 -g -fno-omit-frame-pointer \
+               -fsanitize=fuzzer $(FUZZ_SANITIZE) -fno-sanitize-recover=all
 
 # The targets link a copy of the Rust library that carries libFuzzer's
 # coverage instrumentation, so that the fuzzer sees the Rust code too.
@@ -1227,41 +1222,19 @@ FUZZ_TARGETS := $(patsubst testing/fuzz/%.c,$(FUZZ_OUT)/%, \
 $(FUZZ_OUT)/fuzz-tpm-command: testing/fuzz/fuzz-tpm-command.c $(FUZZ_BASE) \
                                include/shirudo/tpm_command.h
 
-$(FUZZ_OUT)/fuzz-rodata: testing/fuzz/fuzz-rodata.c $(FUZZ_BASE) \
-                            \
-                           $(FUZZ_SEAL) $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-rodata: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-rodata: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS) $(ZLIB_LIBS)
-$(FUZZ_OUT)/fuzz-attest: testing/fuzz/fuzz-attest.c $(FUZZ_BASE) \
-                            \
-                           $(FUZZ_SEAL) \
-                           \
-                          $(VERSION_OBJ)  \
-                          $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-attest: FUZZ_CFLAGS += $(TSS2_CFLAGS) $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-attest: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) $(LIBELF_LIBS) $(ZLIB_LIBS)
-$(FUZZ_OUT)/fuzz-serializer: testing/fuzz/fuzz-serializer.c $(FUZZ_BASE) \
-                                \
-                               $(FUZZ_SEAL)  util/paths.c \
-                              $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-serializer: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-serializer: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS) \
 	-Wl,--wrap=syscall
-$(FUZZ_OUT)/fuzz-decoder: testing/fuzz/fuzz-decoder.c $(FUZZ_BASE) \
-                              \
-                           $(FUZZ_SEAL)
 $(FUZZ_OUT)/fuzz-decoder: FUZZ_CFLAGS += $(LUAJIT_CFLAGS) -DHAVE_LUAJIT \
 	-DFUZZ_SOURCE_TREE='"$(CURDIR)"'
 $(FUZZ_OUT)/fuzz-decoder: FUZZ_LIBS += $(LUAJIT_LIBS)
-$(FUZZ_OUT)/fuzz-config-update: testing/fuzz/fuzz-config-update.c \
-                                 $(FUZZ_BASE) \
-                                  $(FUZZ_SEAL)
 FUZZ_TREE_STATE :=  \
                      $(FUZZ_OCI) \
                    util/kconfig.c
-$(FUZZ_OUT)/fuzz-kconfig: testing/fuzz/fuzz-kconfig.c $(FUZZ_BASE) \
-                           $(FUZZ_TREE_STATE)
-$(FUZZ_OUT)/fuzz-quote-check: testing/fuzz/fuzz-quote-check.c $(FUZZ_BASE)
 
 $(FUZZ_OUT)/fuzz-upatch-info: testing/fuzz/fuzz-upatch-info.c $(FUZZ_BASE) \
                               testing/fuzz/output.c  \
@@ -1342,9 +1315,15 @@ $(FUZZ_TARGETS): $(FUZZ_HEADERS) $(FUZZ_STAMP) $(RUST_FUZZ_LIB)
 # each run by an entry object made from testing/fuzz/target.rs.in.
 FUZZ_RUST := kernel beefile elf tree-state image prog-metadata upatch \
 	     bpm-tar bpm-index bpm-package oci-manifest oci-http \
-	     oci-ref registry-auth config tpm-wire json tree cms eventlog otel
+	     oci-ref registry-auth config tpm-wire json tree cms eventlog otel \
+	     attest config-update decoder kconfig quote-check rodata serializer
 FUZZ_MAIN_DIR := build/fuzz-main
-FUZZ_RUST_TARGETS := $(addprefix $(FUZZ_OUT)/fuzz-,$(FUZZ_RUST))
+$(FUZZ_OUT)/fuzz-attest: FUZZ_LIBS += $(TSS2_LIBS)
+$(FUZZ_OUT)/fuzz-decoder: FUZZ_LIBS += $(LUAJIT_LIBS)
+# Its map's lookups come from the input through a wrap of syscall().
+$(FUZZ_OUT)/fuzz-serializer: FUZZ_LIBS += -Wl,--wrap=syscall
+$(FUZZ_OUT)/fuzz-attest $(FUZZ_OUT)/fuzz-otel $(FUZZ_OUT)/fuzz-beefile: \
+	$(VERSION_OBJ)
 
 $(FUZZ_MAIN_DIR)/%.o: testing/fuzz/target.rs.in
 	@printf '  RUSTC   $@\n'

@@ -338,6 +338,8 @@ fn quote_check(args: &[*const c_char]) -> c_int {
     }
 }
 
+#[cfg(shirudo_fuzz)]
+mod fuzz;
 #[cfg(test)]
 mod tests;
 

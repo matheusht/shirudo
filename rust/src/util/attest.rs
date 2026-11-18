@@ -2529,6 +2529,8 @@ pub(crate) use capi::{
     attest_parse_pcr_value, attest_parse_pcrs, attest_verify,
 };
 
+#[cfg(shirudo_fuzz)]
+mod fuzz;
 #[cfg(test)]
 mod tests;
 

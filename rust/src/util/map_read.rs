@@ -818,6 +818,8 @@ pub(crate) fn list(upatch: Option<&[u8]>) -> Vec<MapSummary> {
     list
 }
 
+#[cfg(shirudo_fuzz)]
+mod fuzz;
 mod capi {
     use core::ffi::{CStr, c_char, c_int};
 

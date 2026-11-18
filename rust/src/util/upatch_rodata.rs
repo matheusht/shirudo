@@ -1251,6 +1251,8 @@ unsafe fn print(u: &Upatch, path: *const c_char, json: bool) -> c_int {
 
 pub(crate) use capi::{upatch_rodata_data_offset, upatch_rodata_print, upatch_rodata_symbol_range};
 
+#[cfg(shirudo_fuzz)]
+mod fuzz;
 mod capi {
     use core::ffi::{c_char, c_int};
 
