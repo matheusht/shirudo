@@ -71,9 +71,7 @@ static ALLOCATOR: Scrubbing = Scrubbing;
 /// The xmalloc family's allocator, for memory that C code frees or
 /// hands over and that Rust code hands to C: zeroed when it is given out
 /// and scrubbed when it comes back, as every Rust allocation is.
-pub(crate) use capi::{
-    libc_free, xcalloc, xfree, xmalloc, xreallocarray, xstrdup, xstrfree, xstrndup,
-};
+pub(crate) use capi::{libc_free, xcalloc, xfree, xmalloc, xreallocarray, xstrfree, xstrndup};
 
 mod capi {
     use core::ffi::{c_char, c_void};
@@ -145,20 +143,6 @@ mod capi {
         new
     }
 
-    /// A copy of the C string `s` for xstrfree(); NULL for NULL or when
-    /// the allocation fails.
-    ///
-    /// # Safety
-    ///
-    /// `s` is NULL or a C string.
-    pub unsafe extern "C" fn xstrdup(s: *const c_char) -> *mut c_char {
-        if s.is_null() {
-            return ptr::null_mut();
-        }
-        // SAFETY: the caller's C string.
-        unsafe { xstrndup(s, strlen(s)) }
-    }
-
     /// A copy of at most `n` bytes of the C string `s`, NUL-terminated,
     /// for xstrfree(); NULL for NULL or when the allocation fails.
     ///
@@ -198,7 +182,7 @@ mod capi {
         }
     }
 
-    /// Scrubs and frees a string xstrdup() or xstrndup() gave; nothing
+    /// Scrubs and frees a string xstrndup() gave; nothing
     /// for NULL.
     ///
     /// # Safety

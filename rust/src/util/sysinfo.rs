@@ -7,10 +7,9 @@
 //! scanned with the C library's own calls, so that every file reads as
 //! it did.
 
-use core::ffi::{CStr, c_char, c_int, c_long, c_void};
+use core::ffi::{CStr, c_char, c_int, c_long};
 
 use crate::errno::ENOENT;
-use crate::heap::{xfree, xreallocarray, xstrdup, xstrfree};
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     SC_NPROCESSORS_ONLN, Statvfs, Utsname, fclose, fgets, fopen, gethostname, sscanf, statvfs,
@@ -19,6 +18,7 @@ use crate::sys::libc::{
 use crate::text::{cstr, digits, parse_u64, strscpy, strsprintf};
 use crate::util::json::JsonEmit;
 use crate::util::kernel_build_id::read_build_id;
+use std::os::unix::ffi::OsStrExt;
 
 /// `struct sysinfo`.
 #[repr(C)]
@@ -42,16 +42,11 @@ pub struct Sysinfo {
 const _: () = assert!(size_of::<Sysinfo>() == 1272);
 const _: () = assert!(core::mem::offset_of!(Sysinfo, nproc) == 1224);
 
-/// `shirudo_kernel_config_cb`.
-type KernelConfigCb =
-    unsafe extern "C" fn(ctx: *mut c_void, key: *const c_char, value: *const c_char);
-
 /// The start of the file at `path` in all of `buf` but its last byte,
 /// read until that is full or the file ends: how many bytes, or None
 /// where it cannot be opened or read.
 fn read_start(path: &CStr, buf: &mut [u8]) -> Option<usize> {
     use std::io::{ErrorKind, Read};
-    use std::os::unix::ffi::OsStrExt;
 
     let mut f = std::fs::File::open(std::ffi::OsStr::from_bytes(path.to_bytes())).ok()?;
     let room = buf.len() - 1;
@@ -318,37 +313,6 @@ fn trim(line: &mut [u8], start: usize) -> usize {
     s
 }
 
-/// An entry of the kernel configuration, its two strings from xstrdup().
-#[repr(C)]
-struct ConfigEntry {
-    key: *mut c_char,
-    value: *mut c_char,
-}
-
-/// # Safety
-///
-/// The first `n` of `entries` hold strings from xstrdup() or NULL, and
-/// `entries` is NULL or an allocation of `cap` entries.
-unsafe fn entries_free(entries: *mut ConfigEntry, n: usize, cap: usize) {
-    for i in 0..n {
-        // SAFETY: the caller passes n entries, freed once, here.
-        unsafe {
-            let e = &*entries.add(i);
-
-            xstrfree(e.key);
-            xstrfree(e.value);
-        }
-    }
-    // SAFETY: the caller passes an allocation of cap entries.
-    unsafe { xfree(entries.cast(), cap * size_of::<ConfigEntry>()) };
-}
-
-/// An entry's key.
-fn entry_key(e: &ConfigEntry) -> &CStr {
-    // SAFETY: every entry filled holds its key, a C string.
-    unsafe { CStr::from_ptr(e.key) }
-}
-
 /// One `CONFIG_` option of a configuration line in `line`, its key and
 /// value: from `KEY=value`, quotes taken off a value, or `n` from
 /// `# KEY is not set`.
@@ -402,113 +366,41 @@ fn config_option(line: &mut [u8]) -> Option<(usize, Option<usize>)> {
     Some((key, value))
 }
 
-/// The options of /boot/config-`release`, by key, each to `cb`: how many,
-/// or -1.
-///
-/// # Safety
-///
-/// `release` is NULL or a C string, and `cb` takes `ctx`.
-unsafe fn kernel_config_foreach(
-    release: *const c_char,
-    cb: Option<KernelConfigCb>,
-    ctx: *mut c_void,
-) -> c_int {
-    let mut path = [0u8; 4096];
-    let mut line = [0u8; 8192];
-    let mut entries: *mut ConfigEntry = core::ptr::null_mut();
-    let (mut n, mut cap) = (0usize, 0usize);
+/// fgets()'s room for a line of the configuration, its NUL included.
+const CONFIG_LINE: usize = 8192;
 
-    // SAFETY: the caller passes NULL or a C string.
-    let release = (!release.is_null()).then(|| unsafe { CStr::from_ptr(release) }.to_bytes());
-    let (Some(release), Some(cb)) = (release.filter(|r| !r.is_empty()), cb) else {
-        return -1;
-    };
-    if strsprintf(&mut path, &[b"/boot/config-", release]).is_err() {
-        return -1;
+/// The options of /boot/config-`release`, sorted by key: none without a
+/// release or a file to read. The file is taken in the pieces fgets()
+/// gave the C, each line or the first CONFIG_LINE - 1 bytes of one.
+fn kernel_config(release: &[u8]) -> Option<Vec<(Vec<u8>, Vec<u8>)>> {
+    let mut path = [0u8; 4096];
+
+    if release.is_empty() || strsprintf(&mut path, &[b"/boot/config-", release]).is_err() {
+        return None;
     }
-    // SAFETY: the path just written, and a mode.
-    let f = unsafe { fopen(path.as_ptr().cast(), c"re".as_ptr()) };
-    if f.is_null() {
-        return -1;
-    }
-    // SAFETY: the room of line, and the stream fopen() gave.
-    while !unsafe { fgets(line.as_mut_ptr().cast(), line.len() as c_int, f) }.is_null() {
+    let text = std::fs::read(std::ffi::OsStr::from_bytes(cstr(&path))).ok()?;
+    let mut options = Vec::new();
+    let mut rest = &text[..];
+    while !rest.is_empty() {
+        let take = rest
+            .iter()
+            .position(|&c| c == b'\n')
+            .map_or(rest.len(), |i| i + 1)
+            .min(CONFIG_LINE - 1);
+        let (piece, tail) = rest.split_at(take);
+        let mut line = [0u8; CONFIG_LINE];
+
+        rest = tail;
+        line[..piece.len()].copy_from_slice(piece);
         let Some((key, value)) = config_option(&mut line) else {
             continue;
         };
-        let value: *const c_char = match value {
-            Some(v) => line[v..].as_ptr().cast(),
-            None => c"n".as_ptr(),
-        };
-
-        if n == cap {
-            let grown = if cap != 0 { 2 * cap } else { 256 };
-            // SAFETY: the entries so far, from xreallocarray() or NULL.
-            let next: *mut ConfigEntry =
-                unsafe { xreallocarray(entries.cast(), cap, grown, size_of::<ConfigEntry>()) }
-                    .cast();
-
-            if next.is_null() {
-                // SAFETY: the stream, and the entries so far.
-                unsafe {
-                    fclose(f);
-                    entries_free(entries, n, cap);
-                }
-                return -1;
-            }
-            entries = next;
-            cap = grown;
-        }
-        // SAFETY: room for entry n, and the C strings of the line.
-        unsafe {
-            let e = &mut *entries.add(n);
-
-            e.key = xstrdup(line[key..].as_ptr().cast());
-            e.value = xstrdup(value);
-            if e.key.is_null() || e.value.is_null() {
-                xstrfree(e.key);
-                xstrfree(e.value);
-                e.key = core::ptr::null_mut();
-                e.value = core::ptr::null_mut();
-                fclose(f);
-                entries_free(entries, n + 1, cap);
-                return -1;
-            }
-        }
-        n += 1;
+        let value = value.map_or(&b"n"[..], |v| cstr(&line[v..]));
+        options.push((cstr(&line[key..]).to_vec(), value.to_vec()));
     }
-    // SAFETY: the stream fopen() gave, closed once.
-    unsafe { fclose(f) };
-    if n != 0 {
-        // SAFETY: the n entries filled above.
-        let filled = unsafe { core::slice::from_raw_parts_mut(entries, n) };
-        // As qsort() with strcmp() of the keys ordered them, which no two
-        // entries share.
-        filled.sort_unstable_by(|a, b| entry_key(a).cmp(entry_key(b)));
-    }
-    for i in 0..n {
-        // SAFETY: entry i, and the caller's callback and context.
-        unsafe {
-            let e = &*entries.add(i);
-
-            cb(ctx, e.key, e.value);
-        }
-    }
-    // SAFETY: the n entries in an allocation of cap.
-    unsafe { entries_free(entries, n, cap) };
-    n as c_int
-}
-
-unsafe extern "C" fn emit_config_entry(ctx: *mut c_void, key: *const c_char, value: *const c_char) {
-    // SAFETY: the emitter emit_kernel_config() passes, and two C strings.
-    unsafe {
-        let e = &mut *ctx.cast::<JsonEmit>();
-
-        e.kv_string(
-            CStr::from_ptr(key).to_bytes(),
-            CStr::from_ptr(value).to_bytes(),
-        );
-    }
+    // As qsort() with strcmp() of the keys ordered them.
+    options.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    Some(options)
 }
 
 fn gather(si: &mut Sysinfo) {
@@ -563,15 +455,9 @@ fn emit_json(e: &mut JsonEmit, si: &Sysinfo) {
     e.kv_string(b"kernel_version", cstr(&si.kernel_version));
     e.kv_string(b"kernel_build_id", cstr(&si.kernel_build_id));
     e.obj_open_key(b"kernel_config");
-    // SAFETY: the release, which its array ends, and the emitter the
-    // callback takes.
-    unsafe {
-        kernel_config_foreach(
-            si.kernel_release.as_ptr().cast(),
-            Some(emit_config_entry),
-            (&raw mut *e).cast(),
-        )
-    };
+    for (key, value) in kernel_config(cstr(&si.kernel_release)).unwrap_or_default() {
+        e.kv_string(&key, &value);
+    }
     e.obj_close();
     e.kv_string(b"architecture", cstr(&si.machine));
     e.kv_string(b"machine_id", cstr(&si.machine_id));
