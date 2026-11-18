@@ -177,7 +177,7 @@ struct Init {
     /// Runs from the initrd.
     initrd: bool,
     /// The trusted certificates the bpf keyring was given.
-    enrolled: Box<TrustedSet>,
+    enrolled: TrustedSet,
 }
 
 fn print_preflight(r: &PreflightResult) {
@@ -243,8 +243,7 @@ fn init_keyring(init: &mut Init) -> c_int {
             && image_runtime::runtime_root() == Some(id.runtime_root);
         return if same { 0 } else { -EKEYREJECTED };
     }
-    // SAFETY: an all-zero set is an empty one.
-    let mut set: Box<TrustedSet> = Box::new(unsafe { mem::zeroed() });
+    let mut set = TrustedSet::default();
     let ret = image_runtime::boot_keys(&mut set);
     if ret != 0 {
         return ret;
@@ -548,18 +547,10 @@ fn run(init: &mut Init) -> c_int {
     if ret != 0 {
         return phase(ret, "loading authenticated boot settings");
     }
-    // SAFETY: C strings and the set to fill.
-    let ret = unsafe {
-        keys::load(
-            RUNTIME_KEYS_DIR.as_ptr(),
-            KEYS_REVOKED_DIR.as_ptr(),
-            true,
-            &mut *init.enrolled,
-        )
+    init.enrolled = match keys::load(RUNTIME_KEYS_DIR, Some(KEYS_REVOKED_DIR), true) {
+        Ok(set) => set,
+        Err(ret) => return phase(ret, "loading trusted keys"),
     };
-    if ret != 0 {
-        return phase(ret, "loading trusted keys");
-    }
 
     // The record is the eventlog's, which root can hide behind a mount;
     // the register is the TPM's, written once this boot by whoever bound
@@ -647,8 +638,7 @@ pub(super) fn cmd_init(args: &[&CStr]) -> c_int {
     }
     let mut init = Init {
         initrd: initrd::in_initrd(),
-        // SAFETY: an all-zero set is an empty one.
-        enrolled: Box::new(unsafe { mem::zeroed() }),
+        enrolled: TrustedSet::default(),
     };
     let ret = image_runtime::bootstrap_load();
     if ret < 0 {

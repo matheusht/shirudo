@@ -49,8 +49,7 @@ use crate::util::io::check_trusted;
 use crate::util::json::JsonEmit;
 use crate::util::keyring;
 use crate::util::keys::{
-    KEYS_MAX, TrustedSet, digest_der, install, is_revoked, keys_load, members, read_der,
-    verify_vouch,
+    KEYS_MAX, TrustedSet, digest_der, install, is_revoked, load, members, read_der, verify_vouch,
 };
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::paths::{key_files, keys_dir, path_exists};
@@ -680,12 +679,6 @@ static REVOKE_HELP: Help = Help::new(
     None,
 );
 
-/// A trusted set, which takes some 66 KiB.
-fn new_set() -> Box<TrustedSet> {
-    // SAFETY: an all-zero set is an empty one.
-    Box::new(unsafe { core::mem::zeroed() })
-}
-
 /// The public key must be one the kernel verifies loaders with.
 fn check_cert_algorithm(der: &[u8], what: &[u8]) -> c_int {
     let mut cert = Cert::new();
@@ -801,19 +794,19 @@ fn keys_add(args: &[&CStr]) -> c_int {
         return 1;
     }
     let fp_hex = hex(&fp);
-    let mut set = new_set();
-    // SAFETY: a C string and room for the set.
-    let ret = unsafe { keys_load(keys_dir.as_ptr(), ptr::null(), true, &mut *set) };
-    if ret != 0 {
-        error(&[
-            b"keys add: no trusted set under ",
-            keys_dir.to_bytes(),
-            b": ",
-            strerr(-ret),
-            b" (install the primary certificate first)",
-        ]);
-        return 1;
-    }
+    let set = match load(keys_dir, None, true) {
+        Ok(set) => set,
+        Err(ret) => {
+            error(&[
+                b"keys add: no trusted set under ",
+                keys_dir.to_bytes(),
+                b": ",
+                strerr(-ret),
+                b" (install the primary certificate first)",
+            ]);
+            return 1;
+        }
+    };
     if is_revoked(&revoked, &fp) {
         error(&[b"keys add: ", &fp_hex, b" was revoked on this target"]);
         return 1;
@@ -1178,9 +1171,9 @@ fn keys_show(args: &[&CStr]) -> c_int {
         e.kv_null(b"cert");
         e.kv_null(b"signing_key");
     }
-    let mut set = new_set();
-    // SAFETY: a C string and room for the set.
-    let have_set = unsafe { keys_load(keys_dir.as_ptr(), ptr::null(), true, &mut *set) } == 0;
+    let loaded = load(keys_dir, None, true);
+    let have_set = loaded.is_ok();
+    let set = loaded.unwrap_or_default();
     if let Some(e) = &mut out {
         e.arr_open(b"trusted_set");
     }
@@ -1206,17 +1199,17 @@ fn keys_show(args: &[&CStr]) -> c_int {
             );
         }
         for c in members(&set) {
-            let (fp, sha, voucher) = (hex(c.fingerprint()), hex(c.sha256()), hex(c.voucher()));
+            let (fp, sha) = (hex(c.fingerprint()), hex(c.sha256()));
+            let voucher = c.voucher().map(hex);
 
             if let Some(e) = &mut out {
                 e.obj_open();
                 e.kv_string(b"fingerprint", &fp);
                 e.kv_string(b"sha256", &sha);
                 e.kv_bool(b"primary", c.primary());
-                if c.primary() {
-                    e.kv_null(b"voucher");
-                } else {
-                    e.kv_string(b"voucher", &voucher);
+                match &voucher {
+                    Some(voucher) => e.kv_string(b"voucher", voucher),
+                    None => e.kv_null(b"voucher"),
                 }
                 e.obj_close();
                 continue;
@@ -1236,7 +1229,7 @@ fn keys_show(args: &[&CStr]) -> c_int {
                 ]
                 .concat(),
             );
-            if !c.primary() {
+            if let Some(voucher) = &voucher {
                 print(&[b"    vouched by ", &voucher[..], b"\n"].concat());
             }
         }

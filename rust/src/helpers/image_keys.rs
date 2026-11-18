@@ -179,8 +179,7 @@ fn run(args: &[&CStr]) -> c_int {
     else {
         return 2;
     };
-    // SAFETY: a set of no member, for which zeros are the value.
-    let mut set: Box<TrustedSet> = Box::new(unsafe { core::mem::zeroed() });
+    let mut set = TrustedSet::default();
     let mut ret = validate_set(args[1], root.as_raw_fd(), &mut set);
     if ret == 0 && args.len() >= 5 {
         ret = live_update(args[3], &set, &args[4..]);

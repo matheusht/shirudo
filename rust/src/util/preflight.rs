@@ -6,7 +6,6 @@
 //! why it failed.
 
 use core::ffi::{CStr, c_char, c_int, c_long};
-use core::mem::MaybeUninit;
 
 use crate::bpf::lskel::Lskel;
 use crate::errno::{ENOENT, ENOPKG};
@@ -276,16 +275,8 @@ fn check_cert(r: &mut PreflightResult) {
 /// The certificates init would enrol: cert.der and the trusted set
 /// beside it. A set that cannot be read is cert_on_disk's to report; the
 /// checks after it skip rather than fail twice.
-fn preflight_keys(set: &mut MaybeUninit<TrustedSet>) -> c_int {
-    // SAFETY: two C strings, and room for a set.
-    unsafe {
-        keys::load(
-            initrd::keys_dir().as_ptr(),
-            KEYS_REVOKED_DIR.as_ptr(),
-            true,
-            set.as_mut_ptr(),
-        )
-    }
+fn preflight_keys() -> Result<TrustedSet, c_int> {
+    keys::load(initrd::keys_dir(), Some(KEYS_REVOKED_DIR), true)
 }
 
 /// The room for the name of a key's algorithm, its NUL included.
@@ -296,16 +287,12 @@ const ALGORITHM_NAME_ROOM: usize = 64;
 /// drift back to RSA by provisioning the wrong cert.der.
 fn check_cert_algorithm(r: &mut PreflightResult) {
     let i = r.next_slot(PRE_CERT_ALGORITHM, c"cert_algorithm");
-    let mut set = MaybeUninit::uninit();
-
-    if preflight_keys(&mut set) != 0 {
+    let Ok(set) = preflight_keys() else {
         r.pass_with(i, b"skipped (cert unreadable)");
         return;
-    }
-    // SAFETY: the set the load filled.
-    let set = unsafe { set.assume_init_ref() };
+    };
 
-    for c in keys::members(set) {
+    for c in keys::members(&set) {
         let path = keys::cert_path(c);
         let Ok(x509) = keys::cert_x509(c) else {
             r.fail(i, &[path, b": cannot parse"]);
@@ -340,16 +327,12 @@ fn check_cert_algorithm(r: &mut PreflightResult) {
 /// to this thread and gone with it, and is cleared right away.
 fn check_cert_kernel_algo(r: &mut PreflightResult) {
     let i = r.next_slot(PRE_CERT_KERNEL_ALGO, c"cert_kernel_support");
-    let mut set = MaybeUninit::uninit();
-
-    if preflight_keys(&mut set) != 0 {
+    let Ok(set) = preflight_keys() else {
         r.pass_with(i, b"skipped (cert unreadable)");
         return;
-    }
-    // SAFETY: the set the load filled.
-    let set = unsafe { set.assume_init_ref() };
+    };
 
-    for c in keys::members(set) {
+    for c in keys::members(&set) {
         let path = keys::cert_path(c);
         let der = match keys::cert_der(c) {
             Ok(der) => der,

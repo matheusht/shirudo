@@ -1152,7 +1152,7 @@ struct Report {
     keyring_serial: i32,
     keyring_pinned: i32,
     keyring_mode: &'static CStr,
-    certs: Box<TrustedSet>,
+    certs: TrustedSet,
     certs_rc: c_int,
     bpf: KeyringView,
     dmv: KeyringView,
@@ -1212,11 +1212,10 @@ impl Report {
         // The certificates the keyring would have been given, and how
         // many keys it holds now: the two part when a certificate was
         // added or revoked since the boot.
-        // SAFETY: an all-zero set is an empty one.
-        let mut certs: Box<TrustedSet> = Box::new(unsafe { mem::zeroed() });
-        // SAFETY: a C string and the set to fill.
-        let certs_rc =
-            unsafe { keys::load(KEYS_DIR.as_ptr(), ptr::null(), serial >= 0, &mut *certs) };
+        let (certs, certs_rc) = match keys::load(KEYS_DIR, None, serial >= 0) {
+            Ok(set) => (set, 0),
+            Err(err) => (TrustedSet::default(), err),
+        };
         let bpf = KeyringView::bpf(serial, pinned, &ident, &certs, certs_rc);
         let dmv_pinned = if pinned < 0 {
             pinned

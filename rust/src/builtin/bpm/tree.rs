@@ -38,7 +38,7 @@ use crate::util::eventlog::{
 };
 use crate::util::hex::sha256_digest_encode;
 use crate::util::json::JsonEmit;
-use crate::util::keys::{TrustedSet, keys_load_image_root};
+use crate::util::keys::{TrustedSet, load_image_root};
 use crate::util::seal::{
     SealOutput, seal_mkdir_p, seal_output_commit, seal_output_create, seal_write_file,
 };
@@ -345,7 +345,7 @@ fn recover_pending(
 struct Source {
     c: Client,
     repository: Vec<u8>,
-    trusted: Option<Box<TrustedSet>>,
+    trusted: Option<TrustedSet>,
 }
 
 impl Source {
@@ -361,25 +361,17 @@ impl Source {
         if !image_config::active() {
             return Ok(src);
         }
-        // SAFETY: an all-zero set is an empty one.
-        let mut set: Box<TrustedSet> = Box::new(unsafe { core::mem::zeroed() });
-        // SAFETY: a C string and room for a set.
-        let mut ret = unsafe {
-            keys_load_image_root(
-                initrd::cert_path().as_ptr(),
-                image_config::root_fd(),
-                true,
-                &mut *set,
-            )
+        let set = match load_image_root(initrd::cert_path(), image_config::root_fd(), true) {
+            Ok(set) => set,
+            Err(ret) => {
+                let why = String::from_utf8_lossy(super::strerr(-ret));
+                return Err(refuse(
+                    format!("the config image's keys cannot be read: {why}"),
+                    b"trusted_set",
+                    ret,
+                ));
+            }
         };
-        if ret != 0 {
-            let why = String::from_utf8_lossy(super::strerr(-ret));
-            return Err(refuse(
-                format!("the config image's keys cannot be read: {why}"),
-                b"trusted_set",
-                ret,
-            ));
-        }
         if set.len() == 0 || set.n_unvouched() != 0 {
             return Err(refuse(
                 format!(
@@ -391,7 +383,7 @@ impl Source {
                 -EKEYREJECTED,
             ));
         }
-        ret = image_keys::check_set(&set);
+        let ret = image_keys::check_set(&set);
         if ret != 0 {
             let why = String::from_utf8_lossy(super::strerr(-ret));
             return Err(refuse(
@@ -415,7 +407,7 @@ impl Source {
             &self.repository,
             reference,
             initrd::cert_path(),
-            self.trusted.as_deref(),
+            self.trusted.as_ref(),
             p,
             &mut digest,
         ))?;

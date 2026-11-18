@@ -18,9 +18,7 @@ use crate::sys::libc::{
 use crate::util::image_config;
 use crate::util::io::stat_fd;
 use crate::util::keyring;
-use crate::util::keys::{
-    TrustedSet, cert_der, digest_der, keys_load_image_root, members, read_der_fd,
-};
+use crate::util::keys::{TrustedSet, cert_der, digest_der, load_image_root, members, read_der_fd};
 
 /// KEYS_DER_MAX: the largest certificate a key file holds.
 const DER_MAX: u64 = 1024 * 1024;
@@ -206,12 +204,13 @@ pub(crate) fn validate_set(primary: &CStr, root_fd: c_int, set: &mut TrustedSet)
         ));
         return ret;
     }
-    // SAFETY: a C string, the image and the set to fill.
-    let ret = unsafe { keys_load_image_root(primary.as_ptr(), root_fd, true, set) };
-    if ret != 0 {
-        error(format!("image trust set: load certificates: {}", text(ret)));
-        return ret;
-    }
+    *set = match load_image_root(primary, root_fd, true) {
+        Ok(loaded) => loaded,
+        Err(ret) => {
+            error(format!("image trust set: load certificates: {}", text(ret)));
+            return ret;
+        }
+    };
     if set.len() == 0 || set.n_unvouched() != 0 {
         error(format!(
             "image trust set: reject set with {} certificates and {} unvouched",
@@ -253,8 +252,7 @@ pub(crate) fn check_set(set: &TrustedSet) -> c_int {
 /// Validates the trust set of the image at `root_fd`, from the runtime's
 /// signer, and checks the kernel holds all of it.
 pub(crate) fn validate(root_fd: c_int) -> c_int {
-    // SAFETY: an all-zero set is an empty one.
-    let mut set: Box<TrustedSet> = Box::new(unsafe { core::mem::zeroed() });
+    let mut set = TrustedSet::default();
     let ret = validate_set(RUNTIME_CERT_PATH, root_fd, &mut set);
     if ret != 0 { ret } else { check_set(&set) }
 }

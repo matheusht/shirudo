@@ -13,7 +13,7 @@ use std::ffi::CString;
 use super::{err, helper_main, strerror};
 use crate::errno::{EEXIST, EINVAL, EIO, EKEYREJECTED, ENOKEY};
 use crate::util::keyring::{holds_exactly, seal_set, unlink_key};
-use crate::util::keys::{TrustedSet, read_der};
+use crate::util::keys::{TrustedSet, load, read_der};
 
 helper_main!(shirudo_helper_test_keyring_seal, run);
 
@@ -203,14 +203,10 @@ fn case(mode: &[u8], keys: &CStr, revoked: &CStr, own: &CStr, other: &CStr) -> c
     if mode == b"exact" {
         return exact(&own, &other);
     }
-    // SAFETY: a set of no member, for which zeros are the value.
-    let mut set: Box<TrustedSet> = Box::new(unsafe { core::mem::zeroed() });
-    // SAFETY: two C strings and room for the set.
-    let ret = unsafe { crate::util::keys::load(keys.as_ptr(), revoked.as_ptr(), false, &mut *set) };
-    if ret != 0 {
-        return ret;
+    match load(keys, Some(revoked), false) {
+        Ok(set) => seal(mode, &set, &own, &other),
+        Err(ret) => ret,
     }
-    seal(mode, &set, &own, &other)
 }
 
 fn run(args: &[&CStr]) -> c_int {

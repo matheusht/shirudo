@@ -9,7 +9,7 @@
 use core::ffi::{CStr, c_int};
 use std::io::Write;
 
-use crate::errno::{EINVAL, EIO, EKEYREJECTED, ENOENT};
+use crate::errno::{EINVAL, EIO, EKEYREJECTED};
 use crate::sys::curl::{CURL_GLOBAL_DEFAULT, curl_global_cleanup, curl_global_init};
 use crate::text::cstr;
 use crate::util::bpm_oci::Client;
@@ -21,7 +21,7 @@ use crate::util::bpm_tree::{
 use crate::util::help::Help;
 use crate::util::hex::sha256_digest_encode;
 use crate::util::json::{JsonEmit, MAX_BYTES};
-use crate::util::keys::{TrustedSet, keys_load_image_at};
+use crate::util::keys::{TrustedSet, load_image_at};
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 
 const SHOW_CERT: c_int = 0;
@@ -269,17 +269,16 @@ fn show(args: &[&CStr]) -> c_int {
     // A node verifies against its config image's set; a set of this
     // certificate alone takes the same path, so a refusal names the errno
     // sync would.
-    // SAFETY: an all-zero set is an empty one.
-    let mut set: Box<TrustedSet> = Box::new(unsafe { core::mem::zeroed() });
-    // SAFETY: a C string and room for a set.
-    let ret = unsafe { keys_load_image_at(cert.as_ptr(), -ENOENT, false, &mut *set) };
-    if ret != 0 {
-        error(format!(
-            "bpm tree show: cannot read the certificate {}",
-            String::from_utf8_lossy(cert.to_bytes())
-        ));
-        return ret;
-    }
+    let set = match load_image_at(cert, None, false) {
+        Ok(set) => set,
+        Err(ret) => {
+            error(format!(
+                "bpm tree show: cannot read the certificate {}",
+                String::from_utf8_lossy(cert.to_bytes())
+            ));
+            return ret;
+        }
+    };
     let mut publ = Publication::new();
     let run = (|| {
         let (digest, doc) = fetch_checked(

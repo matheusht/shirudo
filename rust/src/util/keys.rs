@@ -6,8 +6,7 @@
 //! less those revoked, read from a directory or through a config image's
 //! descriptor.
 
-use core::ffi::{CStr, c_char, c_int};
-use core::ptr;
+use core::ffi::{CStr, c_int};
 use std::ffi::CString;
 use std::fs::File;
 use std::io::Read;
@@ -25,7 +24,7 @@ use crate::sys::libc::{
     F_OK, O_CLOEXEC, O_DIRECTORY, O_RDONLY, PATH_MAX, S_IFMT, S_IFREG, Statx, access, errno,
     faccessat, open,
 };
-use crate::text::{cstr, name_has_suffix, strscpy};
+use crate::text::name_has_suffix;
 use crate::util::crypto_openssl::{self, pubkey_digest, verify_detached_x509, x509_from_der};
 use crate::util::hex::encode;
 use crate::util::image_config;
@@ -49,27 +48,26 @@ const RUNTIME_CERT_PATH: &CStr = c"/run/shirudo/runtime/keys/cert.der";
 /// members' paths give it.
 const IMAGE_KEYS_DIR: &CStr = c"keys";
 
-/// `struct trusted_cert`.
-#[repr(C)]
-pub struct TrustedCert {
-    path: [u8; PATH_MAX],
-    sha256: [u8; 32],
-    fingerprint: [u8; 32],
-    voucher: [u8; 32],
-    primary: bool,
+/// A certificate of a set: the primary, or a member another vouched
+/// for.
+pub(crate) struct TrustedCert {
+    /// The path it was read from, or a config image's member's under
+    /// keys/.
+    path: Vec<u8>,
+    digests: CertDigests,
+    /// The fingerprint of the member that vouched for it, None for the
+    /// primary.
+    voucher: Option<[u8; 32]>,
 }
 
-/// `struct trusted_set`.
-#[repr(C)]
-pub struct TrustedSet {
-    certs: [TrustedCert; KEYS_MAX],
-    n: usize,
+/// The certificates a target trusts, at most KEYS_MAX of them, and how
+/// many a load counted revoked and unvouched.
+#[derive(Default)]
+pub(crate) struct TrustedSet {
+    certs: Vec<TrustedCert>,
     n_revoked: usize,
     n_unvouched: usize,
 }
-
-const _: () = assert!(size_of::<TrustedCert>() == 4193);
-const _: () = assert!(size_of::<TrustedSet>() == 67112);
 
 /// A certificate under trusted/ waiting for a vouch.
 struct Candidate {
@@ -218,7 +216,7 @@ fn der_keep(sha256: &[u8; 32], der: &[u8]) -> Result<(), c_int> {
 pub(crate) fn cert_der(c: &TrustedCert) -> Result<&'static [u8], c_int> {
     kept()
         .iter()
-        .find(|k| k.sha256 == c.sha256)
+        .find(|k| k.sha256 == c.digests.sha256)
         .map(|k| k.der)
         .ok_or(-ENOKEY)
 }
@@ -309,7 +307,7 @@ pub(crate) fn verify_signature(
         let x509 = cert_x509(c)?;
 
         if verify_detached_x509(payload, sig, &x509) == 0 {
-            return Ok(c.fingerprint);
+            return Ok(c.digests.fingerprint);
         }
     }
     Err(-EKEYREJECTED)
@@ -317,50 +315,47 @@ pub(crate) fn verify_signature(
 
 impl TrustedCert {
     pub(crate) fn sha256(&self) -> &[u8; 32] {
-        &self.sha256
+        &self.digests.sha256
     }
 
     pub(crate) fn fingerprint(&self) -> &[u8; 32] {
-        &self.fingerprint
+        &self.digests.fingerprint
     }
 
-    pub(crate) fn voucher(&self) -> &[u8; 32] {
-        &self.voucher
+    pub(crate) fn voucher(&self) -> Option<&[u8; 32]> {
+        self.voucher.as_ref()
     }
 
     pub(crate) fn primary(&self) -> bool {
-        self.primary
+        self.voucher.is_none()
     }
-}
 
-impl TrustedCert {
     /// The certificate at `path`, by its digests, as a set's primary.
     pub(crate) fn primary_at(path: &CStr) -> Result<Self, c_int> {
-        // SAFETY: plain C data, for which all-zero bytes are a value.
-        let mut c: TrustedCert = unsafe { core::mem::zeroed() };
-        let p = path.to_bytes();
-        if p.len() >= c.path.len() {
-            return Err(-crate::errno::ENAMETOOLONG);
+        if path.count_bytes() >= PATH_MAX {
+            return Err(-ENAMETOOLONG);
         }
-        c.path[..p.len()].copy_from_slice(p);
-        c.primary = true;
-        let digests = digest_der(&read_der(path)?)?;
-        c.sha256 = digests.sha256;
-        c.fingerprint = digests.fingerprint;
-        Ok(c)
+        Ok(TrustedCert {
+            path: path.to_bytes().to_vec(),
+            digests: digest_der(&read_der(path)?)?,
+            voucher: None,
+        })
     }
 }
 
 impl TrustedSet {
-    /// `c` added; the caller checked there is room.
-    pub(crate) fn push(&mut self, c: TrustedCert) {
-        self.certs[self.n] = c;
-        self.n += 1;
+    /// `c` added: -E2BIG when the set holds KEYS_MAX already.
+    pub(crate) fn push(&mut self, c: TrustedCert) -> Result<(), c_int> {
+        if self.certs.len() >= KEYS_MAX {
+            return Err(-E2BIG);
+        }
+        self.certs.push(c);
+        Ok(())
     }
 
     /// How many certificates the set holds.
     pub(crate) fn len(&self) -> usize {
-        self.n.min(KEYS_MAX)
+        self.certs.len()
     }
 
     pub(crate) fn n_revoked(&self) -> usize {
@@ -374,65 +369,60 @@ impl TrustedSet {
     /// The digest the init event covers: [`anchor_digest`] of the
     /// members' SHA-256.
     pub(crate) fn digest(&self) -> Result<[u8; 32], c_int> {
-        if self.n > KEYS_MAX {
-            return Err(-EINVAL);
-        }
-        let sha256: Vec<[u8; 32]> = members(self).iter().map(|c| c.sha256).collect();
+        let sha256: Vec<[u8; 32]> = self.certs.iter().map(|c| c.digests.sha256).collect();
 
         anchor_digest(&sha256)
     }
-}
 
-pub(crate) use capi::{keys_load, keys_load_image_at, keys_load_image_root};
+    /// Whether the set holds the certificate of `fingerprint`.
+    fn holds(&self, fingerprint: &[u8; 32]) -> bool {
+        self.certs
+            .iter()
+            .any(|c| c.digests.fingerprint == *fingerprint)
+    }
+
+    /// A certificate added, its bytes kept when given; a voucher makes it
+    /// a member, none the primary. -E2BIG, -ENAMETOOLONG, or what keeping
+    /// its bytes failed with.
+    fn add(
+        &mut self,
+        path: &[u8],
+        digests: &CertDigests,
+        voucher: Option<&[u8; 32]>,
+        der: Option<&[u8]>,
+    ) -> Result<(), c_int> {
+        if self.certs.len() >= KEYS_MAX {
+            return Err(-E2BIG);
+        }
+        if let Some(der) = der {
+            der_keep(&digests.sha256, der)?;
+        }
+        if path.len() >= PATH_MAX {
+            return Err(-ENAMETOOLONG);
+        }
+        self.certs.push(TrustedCert {
+            path: path.to_vec(),
+            digests: *digests,
+            voucher: voucher.copied(),
+        });
+        Ok(())
+    }
+
+    /// The members sorted by the SHA-256 of each one's DER, which no two
+    /// share.
+    fn sort(&mut self) {
+        self.certs.sort_unstable_by_key(|c| c.digests.sha256);
+    }
+}
 
 /// The members of a set.
 pub(crate) fn members(set: &TrustedSet) -> &[TrustedCert] {
-    &set.certs[..set.n.min(KEYS_MAX)]
+    &set.certs
 }
 
 /// The path a member was read from.
 pub(crate) fn cert_path(c: &TrustedCert) -> &[u8] {
-    cstr(&c.path)
-}
-
-/// Whether the set holds the certificate of `fingerprint`.
-fn set_holds(set: &TrustedSet, fingerprint: &[u8; 32]) -> bool {
-    set.certs[..set.n.min(KEYS_MAX)]
-        .iter()
-        .any(|c| c.fingerprint == *fingerprint)
-}
-
-/// A certificate added to the set, its bytes kept when given; a voucher
-/// makes it a member, none the primary. -E2BIG, -ENAMETOOLONG, or what
-/// keeping its bytes failed with.
-fn set_add(
-    set: &mut TrustedSet,
-    path: &[u8],
-    digests: &CertDigests,
-    voucher: Option<&[u8; 32]>,
-    der: Option<&[u8]>,
-) -> Result<(), c_int> {
-    if set.n >= KEYS_MAX {
-        return Err(-E2BIG);
-    }
-    if let Some(der) = der {
-        der_keep(&digests.sha256, der)?;
-    }
-    let c = &mut set.certs[set.n];
-
-    // SAFETY: the certificate's slot, all of whose bits zeroed are one.
-    unsafe { ptr::from_mut(c).write_bytes(0, 1) };
-    if strscpy(&mut c.path, path).is_err() {
-        return Err(-ENAMETOOLONG);
-    }
-    c.sha256 = digests.sha256;
-    c.fingerprint = digests.fingerprint;
-    match voucher {
-        Some(v) => c.voucher = *v,
-        None => c.primary = true,
-    }
-    set.n += 1;
-    Ok(())
+    &c.path
 }
 
 /// Whether a directory entry's name is a certificate's: a stem and .der.
@@ -487,7 +477,7 @@ fn admit_vouched(
     while progress {
         progress = false;
         for c in cands.iter_mut().filter(|c| !c.done) {
-            if set_holds(set, &c.digests.fingerprint) {
+            if set.holds(&c.digests.fingerprint) {
                 c.done = true;
                 continue;
             }
@@ -497,7 +487,7 @@ fn admit_vouched(
             let Ok(voucher) = verify_vouch(set, &c.der, &sig) else {
                 continue;
             };
-            set_add(set, &c.path, &c.digests, Some(&voucher), Some(&c.der))?;
+            set.add(&c.path, &c.digests, Some(&voucher), Some(&c.der))?;
             c.done = true;
             progress = true;
         }
@@ -577,40 +567,16 @@ fn scan_trusted_at(keys: BorrowedFd<'_>) -> Result<Option<(OwnedFd, Vec<Candidat
     Ok(Some((trusted, cands)))
 }
 
-/// The set sorted by the SHA-256 of each certificate's DER, which no two
-/// members share.
-fn sort_set(set: &mut TrustedSet) {
-    let n = set.n.min(KEYS_MAX);
-
-    if n > 1 {
-        set.certs[..n].sort_unstable_by_key(|c| c.sha256);
-    }
-}
-
-/// The caller's room for a set, emptied.
-///
-/// # Safety
-///
-/// `set` is room for a set.
-unsafe fn empty_set<'a>(set: *mut TrustedSet) -> &'a mut TrustedSet {
-    // SAFETY: the caller's room, all of whose bits zeroed are a set.
-    unsafe {
-        set.write_bytes(0, 1);
-        &mut *set
-    }
-}
-
 /// The set of a keys directory: the primary at `primary` unless revoked,
 /// with `with_trusted` the members trusted/ adds, and the count of what
-/// is revoked; `<keys_dir>/revoked` without `revoked_dir`. -errno, with
-/// what was taken so far in `set`.
+/// is revoked; `<keys_dir>/revoked` without `revoked_dir`.
 fn load_set(
-    set: &mut TrustedSet,
     primary: &CStr,
     keys_dir: &[u8],
     revoked_dir: Option<&CStr>,
     with_trusted: bool,
-) -> Result<(), c_int> {
+) -> Result<TrustedSet, c_int> {
+    let mut set = TrustedSet::default();
     let default_revoked;
     let revoked_dir = match revoked_dir {
         Some(dir) => dir,
@@ -622,61 +588,55 @@ fn load_set(
     let digests = take_file(primary)?;
 
     if !is_revoked(revoked_dir, &digests.fingerprint) {
-        set_add(set, primary.to_bytes(), &digests, None, None)?;
+        set.add(primary.to_bytes(), &digests, None, None)?;
     }
     set.n_revoked = count_der(revoked_dir);
     if with_trusted {
         let mut cands = scan_trusted(keys_dir, revoked_dir)?;
 
-        admit_vouched(set, &mut cands, None)?;
+        admit_vouched(&mut set, &mut cands, None)?;
     }
-    sort_set(set);
-    Ok(())
+    set.sort();
+    Ok(set)
 }
 
 /// A config image's set: the primary and every vouched certificate
 /// under keys/trusted, less what keys/revoked names, all read through
-/// the image's descriptor. Historical vouches count before revocation,
-/// so a revoked certificate's vouch for another still admits it.
-fn load_set_at(
-    set: &mut TrustedSet,
+/// the descriptor of the image's keys directory; the primary alone
+/// without one. Historical vouches count before revocation, so a
+/// revoked certificate's vouch for another still admits it.
+pub(crate) fn load_image_at(
     primary: &CStr,
     keys: Option<BorrowedFd<'_>>,
     with_trusted: bool,
-) -> Result<(), c_int> {
+) -> Result<TrustedSet, c_int> {
+    let mut set = TrustedSet::default();
     let digests = take_file(primary)?;
 
-    set_add(set, primary.to_bytes(), &digests, None, None)?;
+    set.add(primary.to_bytes(), &digests, None, None)?;
     let Some(keys) = keys else {
-        return Ok(());
+        return Ok(set);
     };
     let revoked = open_beneath(keys.as_raw_fd(), c"revoked", O_RDONLY | O_DIRECTORY).ok();
     let revoked = revoked.as_ref().map(AsFd::as_fd);
 
     set.n_revoked = count_der_at(revoked);
     if with_trusted && let Some((trusted, mut cands)) = scan_trusted_at(keys)? {
-        admit_vouched(set, &mut cands, Some(trusted.as_fd()))?;
+        admit_vouched(&mut set, &mut cands, Some(trusted.as_fd()))?;
     }
-    let mut kept_n = 0usize;
-
-    for i in 0..set.n.min(KEYS_MAX) {
-        if !is_revoked_at(revoked, &set.certs[i].fingerprint) {
-            set.certs.swap(kept_n, i);
-            kept_n += 1;
-        }
-    }
-    set.n = kept_n;
-    sort_set(set);
-    Ok(())
+    set.certs
+        .retain(|c| !is_revoked_at(revoked, &c.digests.fingerprint));
+    set.sort();
+    Ok(set)
 }
 
-/// The set of the config image whose root is open as `root_fd`.
-fn load_image_root(
-    set: &mut TrustedSet,
+/// [`load_image_at`] of the config image whose root is open as
+/// `root_fd`.
+pub(crate) fn load_image_root(
     primary: &CStr,
     root_fd: c_int,
     with_trusted: bool,
-) -> Result<(), c_int> {
+) -> Result<TrustedSet, c_int> {
     let keys = match open_beneath(root_fd, IMAGE_KEYS_DIR, O_RDONLY | O_DIRECTORY) {
         Ok(keys) => Some(keys),
         Err(err) if err == -ENOENT => None,
@@ -688,41 +648,29 @@ fn load_image_root(
         }
     };
 
-    load_set_at(set, primary, keys.as_ref().map(AsFd::as_fd), with_trusted)
+    load_image_at(primary, keys.as_ref().map(AsFd::as_fd), with_trusted)
 }
 
 /// The set of the keys directory, from the config image when the
-/// directory is the target's and an image is active.
-///
-/// # Safety
-///
-/// `keys_dir` is a C string, `revoked_dir` NULL or one, and `set` room
-/// for a set.
-pub(crate) unsafe fn load(
-    keys_dir: *const c_char,
-    revoked_dir: *const c_char,
+/// directory is the target's and an image is active; its revoked/
+/// without `revoked_dir`.
+pub(crate) fn load(
+    keys_dir: &CStr,
+    revoked_dir: Option<&CStr>,
     with_trusted: bool,
-    set: *mut TrustedSet,
-) -> c_int {
-    // SAFETY: the caller's C strings, NULL for no revoked directory.
-    let (keys_dir, revoked_dir) = unsafe {
-        (
-            CStr::from_ptr(keys_dir),
-            (!revoked_dir.is_null()).then(|| CStr::from_ptr(revoked_dir)),
-        )
-    };
+) -> Result<TrustedSet, c_int> {
     let dir = keys_dir.to_bytes();
     let root_fd = image_config::root_fd();
-    // SAFETY: the caller's room.
-    let set = unsafe { empty_set(set) };
 
-    let loaded = if root_fd >= 0 && (dir == KEYS_DIR || dir == RUNTIME_KEYS_DIR) {
-        load_image_root(set, RUNTIME_CERT_PATH, root_fd, with_trusted)
-    } else {
-        path_of(&[dir, b"/", b"cert.der"])
-            .and_then(|primary| load_set(set, &primary, dir, revoked_dir, with_trusted))
-    };
-    loaded.err().unwrap_or(0)
+    if root_fd >= 0 && (dir == KEYS_DIR || dir == RUNTIME_KEYS_DIR) {
+        return load_image_root(RUNTIME_CERT_PATH, root_fd, with_trusted);
+    }
+    load_set(
+        &path_of(&[dir, b"/", b"cert.der"])?,
+        dir,
+        revoked_dir,
+        with_trusted,
+    )
 }
 
 /// The digest of a set of anchors: the one, or the SHA-256 of all of
@@ -766,64 +714,6 @@ pub(crate) fn install(keys_dir: &CStr, der: &[u8], sig: &[u8]) -> Result<CString
         return Err(ret);
     }
     Ok(cert)
-}
-
-mod capi {
-    use core::ffi::{c_char, c_int};
-    use std::os::fd::BorrowedFd;
-
-    use super::{TrustedSet, empty_set};
-
-    /// # Safety
-    ///
-    /// `keys_dir` is a C string, `revoked_dir` NULL or one, and `set`
-    /// room for a set.
-    pub unsafe extern "C" fn keys_load(
-        keys_dir: *const c_char,
-        revoked_dir: *const c_char,
-        with_trusted: bool,
-        set: *mut TrustedSet,
-    ) -> c_int {
-        // SAFETY: the caller passes C strings and room for a set.
-        unsafe { super::load(keys_dir, revoked_dir, with_trusted, set) }
-    }
-
-    /// # Safety
-    ///
-    /// `primary` is a C string, `keys_fd` open or negative for none, and
-    /// `set` room for a set.
-    pub unsafe extern "C" fn keys_load_image_at(
-        primary: *const c_char,
-        keys_fd: c_int,
-        with_trusted: bool,
-        set: *mut TrustedSet,
-    ) -> c_int {
-        // SAFETY: the caller's fd, open while the load runs.
-        let keys = (keys_fd >= 0).then(|| unsafe { BorrowedFd::borrow_raw(keys_fd) });
-        // SAFETY: the caller passes a C string and room for a set.
-        let (primary, set) = unsafe { (core::ffi::CStr::from_ptr(primary), empty_set(set)) };
-
-        super::load_set_at(set, primary, keys, with_trusted)
-            .err()
-            .unwrap_or(0)
-    }
-
-    /// # Safety
-    ///
-    /// `primary` is a C string, and `set` room for a set.
-    pub unsafe extern "C" fn keys_load_image_root(
-        primary: *const c_char,
-        root_fd: c_int,
-        with_trusted: bool,
-        set: *mut TrustedSet,
-    ) -> c_int {
-        // SAFETY: the caller passes a C string and room for a set.
-        let (primary, set) = unsafe { (core::ffi::CStr::from_ptr(primary), empty_set(set)) };
-
-        super::load_image_root(set, primary, root_fd, with_trusted)
-            .err()
-            .unwrap_or(0)
-    }
 }
 
 #[cfg(test)]

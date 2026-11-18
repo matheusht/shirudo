@@ -24,8 +24,8 @@ use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt}
 use std::path::Path;
 
 use crate::errno::{
-    E2BIG, EACCES, EBUSY, EEXIST, EINPROGRESS, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENODEV,
-    ENOENT, ENOKEY, ENXIO, EPERM, EPROTO, ESTALE, EUCLEAN, last_errno, text,
+    EACCES, EBUSY, EEXIST, EINPROGRESS, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENODEV, ENOENT,
+    ENOKEY, ENXIO, EPERM, EPROTO, ESTALE, EUCLEAN, last_errno, text,
 };
 use crate::sys::identity::{DEVICE_CONFIG, DEVICE_RUNTIME, DeviceAuthority, Identity};
 use crate::sys::libc::{
@@ -55,7 +55,7 @@ use crate::util::image_keys::{self, RUNTIME_CERT_PATH};
 use crate::util::io::{kernel_dev, read_whole};
 use crate::util::json::JsonEmit;
 use crate::util::keyring;
-use crate::util::keys::{KEYS_MAX, TrustedCert, TrustedSet, members, read_der_fd};
+use crate::util::keys::{TrustedCert, TrustedSet, members, read_der_fd};
 use crate::util::seal::seal_label;
 use crate::util::tpm::{Tpm, tpm_boot_identity, tpm_close, tpm_open, tpm_pcr_extend, tpm_pcr_read};
 
@@ -683,8 +683,7 @@ fn remove_candidate(device: &mut DmVerity) -> c_int {
 /// The candidate's BPF trust set, valid; for a live update, also all
 /// held by the kernel, which enrols a set only at boot.
 fn candidate_keys(fd: c_int, enrolled: bool) -> c_int {
-    // SAFETY: an all-zero set is an empty one.
-    let mut set: Box<TrustedSet> = Box::new(unsafe { core::mem::zeroed() });
+    let mut set = TrustedSet::default();
     let mut ret = image_keys::validate_set(RUNTIME_CERT_PATH, fd, &mut set);
     if ret == 0 && enrolled {
         ret = image_keys::check_set(&set);
@@ -1142,11 +1141,10 @@ pub(crate) fn boot_keys(set: &mut TrustedSet) -> c_int {
         Ok(c) => c,
         Err(err) => return boot_keys_error("digest primary certificate", err),
     };
-    if !members(set).iter().any(|c| c.sha256() == primary.sha256()) {
-        if set.len() == KEYS_MAX {
-            return boot_keys_error("add runtime certificate to trusted set", -E2BIG);
-        }
-        set.push(primary);
+    if !members(set).iter().any(|c| c.sha256() == primary.sha256())
+        && let Err(err) = set.push(primary)
+    {
+        return boot_keys_error("add runtime certificate to trusted set", err);
     }
     with_state(|s| s.boot_target_valid = true);
     0
