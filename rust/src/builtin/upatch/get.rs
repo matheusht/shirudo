@@ -15,7 +15,7 @@ use crate::sys::libc::close;
 use crate::sys::upatch::MapSummary;
 use crate::sys::upatch_maps::{MAP_ENTRIES_DEFAULT, MAP_READ_PEEK, MapView};
 use crate::text::cstr;
-use crate::util::bpf_info::{Info, LINK_INFO_SIZE, PROG_INFO_SIZE};
+use crate::util::bpf_info::{Info, PROG_INFO_SIZE};
 use crate::util::bpf_sys::bpf_prog_get_fd_by_id;
 use crate::util::help::{Help, HelpSection};
 use crate::util::json::JsonEmit;
@@ -25,14 +25,10 @@ use crate::util::map_render;
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::timefmt::format_duration;
 use crate::util::upatch::name_valid;
-use crate::util::upatch_resolve::{loaded_at, open_first_link, payload_sha256, resolve_location};
+use crate::util::upatch_resolve::{first_prog_id, loaded_at, payload_sha256, resolve_location};
 use crate::util::upatch_table::age_sec;
 
-const EINVAL: c_int = 22;
-
-/// Where `struct bpf_link_info` and `struct bpf_prog_info` keep what is
-/// read of them.
-const LINK_PROG_ID: usize = 8;
+/// Where `struct bpf_prog_info` keeps what is read of it.
 const PROG_BTF_ID: usize = 128;
 const PROG_NR_LINE_INFO: usize = 148;
 const PROG_LINE_INFO: usize = 152;
@@ -113,22 +109,11 @@ fn filled<const N: usize>(f: impl FnOnce(&mut [u8])) -> Vec<u8> {
     cstr(&buf).to_vec()
 }
 
-/// Upatch `name` as loaded, or -errno. Missing line_info is no failure:
-/// the rest still describes it.
+/// Upatch `name` as loaded, from its first link or, an XDP upatch with no
+/// device yet, its program pin; or -errno. Missing line_info is no
+/// failure: the rest still describes it.
 fn collect(name: &CStr) -> Result<Loaded, c_int> {
-    let link = open_first_link(name.to_bytes());
-    if link < 0 {
-        return Err(link);
-    }
-    let mut linfo = Info::<LINK_INFO_SIZE>::new();
-    let read = linfo.read(link);
-    // SAFETY: the descriptor opened above.
-    unsafe { close(link) };
-    read?;
-    let prog_id = linfo.u32_at(LINK_PROG_ID);
-    if prog_id == 0 {
-        return Err(-EINVAL);
-    }
+    let prog_id = first_prog_id(name.to_bytes())?;
     let n = name.to_bytes();
     let loaded_at = filled::<32>(|o| loaded_at(n, o));
     let payload = filled::<65>(|o| payload_sha256(n, o));

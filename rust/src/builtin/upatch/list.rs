@@ -12,12 +12,11 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt;
 
 use super::{JSON_MAX, hex, out, pad, print_json};
-use crate::sys::libc::close;
 use crate::util::help::{Help, HelpSection};
 use crate::util::json::JsonEmit;
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::upatch::{self, NAME_MAX, Opened, name_from_pin, pin_name};
-use crate::util::upatch_resolve::open_first_link;
+use crate::util::upatch_pins::loaded_pins;
 
 pub(super) const UPATCHES_DIR: &str = "/var/lib/shirudo/upatches";
 pub(super) use crate::util::upatch_resolve::BPFFS_UPATCHES_DIR;
@@ -37,12 +36,11 @@ fn names(dir: &str, keep: impl Fn(&[u8]) -> bool) -> Vec<Vec<u8>> {
     v
 }
 
-/// Whether upatch `name` is loaded: a link pinned, or its test program.
+/// Whether upatch `name` is loaded, by its pins alone, so that listing
+/// adds no denied BPF_OBJ_GET to the tamper counters: a link, an XDP
+/// program pin, or its test program.
 fn loaded(name: &[u8]) -> bool {
-    let fd = open_first_link(name);
-    if fd >= 0 {
-        // SAFETY: the descriptor opened above.
-        unsafe { close(fd) };
+    if loaded_pins(name) {
         return true;
     }
     let pin = [

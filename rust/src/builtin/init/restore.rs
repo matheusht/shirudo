@@ -12,7 +12,7 @@ use std::ffi::CString;
 use super::{Init, cat, error, hex, info, strerr, warn};
 use crate::builtin::upatch::loader;
 use crate::errno::{EACCES, EEXIST, EINVAL, ENAMETOOLONG, ENODEV, ENOENT, ENOSPC, EPERM};
-use crate::sys::libc::{close, explicit_bzero};
+use crate::sys::libc::explicit_bzero;
 use crate::text::{cstr, name_has_suffix};
 use crate::util::bpm_tree::TreeState;
 use crate::util::bpm_tree_state::tree_state_read;
@@ -30,7 +30,9 @@ use crate::util::measured::{
 };
 use crate::util::seal::seal_owns;
 use crate::util::upatch::{Upatch, upatch_close, upatch_open};
+use crate::util::upatch_pins::loaded_pins;
 use crate::util::upatch_resolve;
+use crate::util::upatch_verify::links_complete;
 
 const UPATCHES_DIR: &str = "/var/lib/shirudo/upatches";
 const BPM_TREE_STATE_PATH: &str = "/var/lib/shirudo/bpm/upatch-tree/state.json";
@@ -135,12 +137,11 @@ fn restore_one(
         ));
         return Ok(None);
     }
-    let fd = upatch_resolve::open_first_link(cstr(&e.name));
-    if fd >= 0 {
+    // By the pins' names alone: an XDP upatch with no device yet has its
+    // program pin and no link.
+    if loaded_pins(upatch) {
         let mut pinned = [0u8; 65];
-        // SAFETY: the descriptor opened above.
-        unsafe { close(fd) };
-        upatch_resolve::payload_sha256(cstr(&e.name), &mut pinned);
+        upatch_resolve::payload_sha256(upatch, &mut pinned);
         if cstr(&pinned) != cstr(&e.payload_hex) {
             error(&cat!(
                 "boot-restore: ",
@@ -148,6 +149,14 @@ fn restore_one(
                 " is loaded with a payload other than the archived one (tampered)"
             ));
             return Err(-EINVAL);
+        }
+        if links_complete(upatch, &file) != 1 {
+            error(&cat!(
+                "boot-restore: ",
+                upatch,
+                " is loaded without every link its signed metadata implies (tampered); unload it or reboot"
+            ));
+            return Err(-EPERM);
         }
         info(&cat!("boot-restore: ", upatch, " already loaded"));
         return Ok(Some(e));
