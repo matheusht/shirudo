@@ -8,7 +8,7 @@
 use core::ffi::{CStr, c_char, c_int, c_void};
 use core::ptr;
 
-use super::{sha256_calc, walk_boot, walk_log};
+use super::{sha256_into, walk_boot, walk_log};
 use crate::errno::{EINVAL, ENOENT};
 use crate::sys::libc::abort;
 use crate::text::cstr;
@@ -95,7 +95,7 @@ fn replay_line(line: &CStr, is_init: bool, chain: &mut [u8; 32]) -> c_int {
     }
     cat[..32].copy_from_slice(chain);
     cat[32..].copy_from_slice(&digest);
-    sha256_calc(&cat, chain)
+    sha256_into(&cat, chain)
 }
 
 /// This boot's last init record into `out`, which the caller zeroed.

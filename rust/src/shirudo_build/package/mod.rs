@@ -24,7 +24,7 @@ use super::{KeyFiles, error, info, strerr};
 use crate::bpf::object::{self, GenOpts, Object};
 use crate::errno::{E2BIG, EBADMSG, EINVAL, EIO, ENAMETOOLONG, ENOENT, EOVERFLOW};
 use crate::util::bpm_package::verify_cms;
-use crate::util::crypto_openssl::sha256_calc;
+use crate::util::crypto_openssl::sha256_into;
 use crate::util::upatch::{
     self, DIRECTIVE_UNLOAD, FILE_MAX, HEADER_SIZE, MAGIC, MAPS_MAX, NAME_MAX, PAYLOAD_HASH_LEN,
     POLICY_LABEL_ENTRY, POLICY_LABEL_HEADER, POLICY_LABELS_MAGIC, POLICY_LABELS_VERSION,
@@ -244,7 +244,7 @@ fn verify_payload(u: &Opened, cert: &CStr) -> c_int {
     if ret != 0 {
         return ret;
     }
-    if sha256_calc(&payload, &mut digest) != 0 || digest != u.0.hdr.payload_sha256 {
+    if sha256_into(&payload, &mut digest) != 0 || digest != u.0.hdr.payload_sha256 {
         return -EBADMSG;
     }
     0

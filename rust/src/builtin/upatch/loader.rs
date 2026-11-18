@@ -36,7 +36,7 @@ use crate::util::bpf_sys::{
     BPF_RAW_TRACEPOINT_OPEN, bpf_obj_get, link_create, prog_test_run,
 };
 use crate::util::chain::{memneq_explicit, sha256_2};
-use crate::util::crypto_openssl::sha256_calc;
+use crate::util::crypto_openssl::sha256_into;
 use crate::util::elf_target;
 use crate::util::identity;
 use crate::util::kernel_btf;
@@ -1261,7 +1261,7 @@ pub(crate) fn apply_signed(
     // instructions alone, which the verifier enforces, and frozen: the
     // kernel refuses a signed load whose bound map is not.
     let mut loader_digest = [0u8; 32];
-    if sha256_calc(insns, &mut loader_digest) != 0 {
+    if sha256_into(insns, &mut loader_digest) != 0 {
         log_err(b"__loader.map: cannot hash the loader");
         rep.fail(
             c"signed_loader_load",

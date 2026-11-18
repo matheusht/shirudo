@@ -243,9 +243,9 @@ pub(crate) unsafe fn sha256_free(ctx: *mut Sha256Ctx) {
     }
 }
 
-/// SHA-256 of `data` into `out`, zeros when it fails: the sha256_calc()
-/// of util/chain.h.
-pub(crate) fn sha256_calc(data: &[u8], out: &mut [u8; 32]) -> c_int {
+/// SHA-256 of `data` into `out`, zeros when it fails, as
+/// sha256_buffer().
+pub(crate) fn sha256_into(data: &[u8], out: &mut [u8; 32]) -> c_int {
     match sha256(data) {
         Ok(d) => {
             *out = d;
@@ -258,22 +258,29 @@ pub(crate) fn sha256_calc(data: &[u8], out: &mut [u8; 32]) -> c_int {
     }
 }
 
+/// SHA-256 of the `len` bytes at `data` into `out`; where it fails, a
+/// zeroed digest, so that no caller reads a stale one.
+///
 /// # Safety
 ///
 /// `data` holds `len` bytes, and `out` is NULL or has room for 32.
 pub(crate) unsafe fn sha256_buffer(data: *const c_void, len: usize, out: *mut u8) -> c_int {
-    if (len != 0 && data.is_null()) || out.is_null() {
+    if out.is_null() {
         return -EINVAL;
     }
-    // SAFETY: the caller's data.
-    match sha256(unsafe { slice(data.cast::<u8>(), len) }) {
-        Ok(d) => {
-            // SAFETY: the caller's room for the digest.
-            unsafe { ptr::copy_nonoverlapping(d.as_ptr(), out, SHA256_LEN) };
-            0
-        }
-        Err(err) => err,
-    }
+    let digest = if len != 0 && data.is_null() {
+        Err(-EINVAL)
+    } else {
+        // SAFETY: the caller's data.
+        sha256(unsafe { slice(data.cast::<u8>(), len) })
+    };
+    let (d, ret) = match digest {
+        Ok(d) => (d, 0),
+        Err(err) => ([0; SHA256_LEN], err),
+    };
+    // SAFETY: the caller's room for the digest.
+    unsafe { ptr::copy_nonoverlapping(d.as_ptr(), out, SHA256_LEN) };
+    ret
 }
 
 /// # Safety

@@ -27,7 +27,7 @@ use crate::sys::libc::{
     open, read, statx, strerror, time, unlink,
 };
 use crate::text::{cstr, strsprintf};
-use crate::util::crypto_openssl::sha256_calc;
+use crate::util::crypto_openssl::sha256_into;
 use crate::util::hex::hex_encode;
 use crate::util::image_config;
 use crate::util::io::read_file;

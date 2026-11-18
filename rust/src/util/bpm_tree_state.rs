@@ -21,7 +21,7 @@ use crate::util::bpm_tree::{
     MAX_KCONFIG, MAX_LABELS, MAX_VALUES, STRING_MAX, TreeKv, TreeOperation, TreePending,
     TreeSelector, TreeSelectorKv, TreeState, count, pairs,
 };
-use crate::util::crypto_openssl::sha256_calc;
+use crate::util::crypto_openssl::sha256_into;
 use crate::util::hex::{hex_decode, hex_encode, sha256_digest_decode};
 use crate::util::image_config;
 use crate::util::io::{read_file, read_text_line};
@@ -980,7 +980,7 @@ unsafe fn event_replay(path: *const c_char, out: *mut u8) -> c_int {
 
         next[..32].copy_from_slice(&chain);
         next[32..].copy_from_slice(&d);
-        ret = sha256_calc(&next, &mut chain);
+        ret = sha256_into(&next, &mut chain);
         if ret != 0 {
             break;
         }

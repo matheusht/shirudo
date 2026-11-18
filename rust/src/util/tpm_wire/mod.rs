@@ -13,8 +13,7 @@ mod policy;
 
 pub(crate) use capi::{
     shirudo_tpm_ek_policy, tpm_attest_parse, tpm_credential_protect, tpm_ecc_public_parse,
-    tpm_ecdsa_signature_parse, tpm_kdfe, tpm_nv_name, tpm_object_name, tpm_public_parse,
-    tpm_qualified_name, tpm_register_policy,
+    tpm_kdfe, tpm_nv_name, tpm_object_name, tpm_public_parse, tpm_register_policy,
 };
 pub(crate) use parse::public_marshal;
 pub(crate) use policy::{
@@ -24,7 +23,9 @@ pub(crate) use policy::{
 
 use core::ffi::c_int;
 
-use crate::errno::EINVAL;
+use crate::errno::{EBADMSG, EINVAL, EKEYREJECTED};
+use crate::util::chain::memneq_explicit;
+use crate::util::crypto_openssl::{ecdsa_p256_verify, sha256};
 
 pub(crate) const DIGEST_LEN: usize = 32;
 /// nameAlg and a SHA-256.
@@ -51,6 +52,8 @@ const PCR_SELECTION_LEN: usize = 7 + PCR_SELECT_LEN;
 const NV_POLICY_REF: &[u8] = b"shirudo-nv-writer-v1";
 const WRITER_ATTRS: u32 = 0x0004_0072;
 const CC_NV_EXTEND: u32 = 0x0000_0136;
+/// `TPM_RH_ENDORSEMENT`: the endorsement hierarchy.
+pub(crate) const RH_ENDORSEMENT: u32 = 0x4000_000B;
 
 /// `struct tpm_public`: a TPMT_PUBLIC of the shapes shirudo makes or
 /// checks.
@@ -218,4 +221,37 @@ fn put_sized(out: &mut [u8], data: &[u8]) -> usize {
     out[..2].copy_from_slice(&(data.len() as u16).to_be_bytes());
     out[2..2 + data.len()].copy_from_slice(data);
     2 + data.len()
+}
+
+// The two checks of an attestation that attest verify and the keepalive
+// quote checker make, here once so that neither gains one the other
+// lacks. What each asks of the key stays with it.
+
+/// Whether the TPM named the key of `ak_name`, an endorsement primary,
+/// as the signer of `a`; the error of the qualified name where it has
+/// none.
+pub(crate) fn attest_signer(a: &TpmAttest, ak_name: &[u8; NAME_LEN]) -> Result<bool, c_int> {
+    let mut qualified = [0u8; NAME_LEN];
+
+    match policy::qualified_name(RH_ENDORSEMENT, ak_name, &mut qualified) {
+        0 => Ok(a.signer_len == NAME_LEN && !memneq_explicit(&a.signer, &qualified)),
+        err => Err(err),
+    }
+}
+
+/// The ECDSA signature `sig`, a TPMT_SIGNATURE, over the SHA-256 of
+/// `attest` by the P-256 point `x`, `y`: 0 where it verifies,
+/// -EKEYREJECTED where it does not, a point off the curve among them,
+/// and -EBADMSG where `sig` does not parse.
+pub(crate) fn attest_verify(attest: &[u8], sig: &[u8], x: &[u8; 32], y: &[u8; 32]) -> c_int {
+    let (mut r, mut s) = ([0u8; 32], [0u8; 32]);
+
+    if parse::ecdsa_signature_parse(sig, &mut r, &mut s) != 0 {
+        return -EBADMSG;
+    }
+    let ret = match sha256(attest) {
+        Ok(digest) => ecdsa_p256_verify(x, y, &digest, &r, &s),
+        Err(err) => err,
+    };
+    if ret == -EINVAL { -EKEYREJECTED } else { ret }
 }

@@ -13,7 +13,7 @@ use crate::errno::{E2BIG, EINVAL, EIO, EKEYREJECTED, ENOMEM, EOPNOTSUPP, ERANGE}
 use crate::ffi;
 use crate::heap::{xcalloc, xfree, xmalloc, xreallocarray};
 use crate::text::{cstr, strscpy};
-use crate::util::crypto_openssl::sha256_calc;
+use crate::util::crypto_openssl::sha256_into;
 use crate::util::json::{JsonArray, JsonEmit, JsonField, JsonMap, MAX_BYTES, parse_schema};
 use crate::util::upatch;
 
@@ -828,7 +828,7 @@ pub(crate) unsafe fn operation_digest(op: &TreeOperation) -> Result<[u8; 72], c_
     if ret != 0 {
         return Err(ret);
     }
-    if sha256_calc(&body[..e.written()], &mut digest) != 0 {
+    if sha256_into(&body[..e.written()], &mut digest) != 0 {
         return Err(-EIO);
     }
     out[..7].copy_from_slice(b"sha256:");

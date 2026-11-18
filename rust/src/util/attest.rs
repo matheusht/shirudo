@@ -10,7 +10,8 @@ use core::mem::MaybeUninit;
 use core::ptr;
 
 use crate::errno::{
-    E2BIG, EAGAIN, EFBIG, EINTR, EINVAL, EIO, EKEYREJECTED, ENODEV, ENOMEM, ENXIO, EUCLEAN,
+    E2BIG, EAGAIN, EBADMSG, EFBIG, EINTR, EINVAL, EIO, EKEYREJECTED, ENODEV, ENOMEM, ENOSPC, ENXIO,
+    EUCLEAN,
 };
 use crate::ffi;
 use crate::heap::{xcalloc, xfree, xmalloc};
@@ -33,9 +34,8 @@ use crate::util::config_attest::{
 };
 use crate::util::config_update::ConfigUpdate;
 use crate::util::crypto_openssl::{
-    Cert, CertPubkey, Sha256Ctx, base64_decode, base64_encode, cert_free, cert_pubkey,
-    cert_read_der, cert_verify_chain, ecdh_p256_ephemeral, ecdsa_p256_verify, rsa_oaep_encrypt,
-    sha256_calc, sha256_final, sha256_free, sha256_init, sha256_update,
+    Cert, CertPubkey, base64_decode, base64_encode, cert_free, cert_pubkey, cert_read_der,
+    cert_verify_chain, ecdh_p256_ephemeral, rsa_oaep_encrypt, sha256, sha256_into,
 };
 use crate::util::eventlog::{
     NV_INDEX, eventlog_boot_id, eventlog_boot_lines, eventlog_path, eventlog_timestamp,
@@ -53,9 +53,10 @@ use crate::util::tpm::{
 };
 use crate::util::tpm_wire::{
     ALG_ECC, ALG_RSA, CREDENTIAL_LEN, ID_OBJECT_LEN, NAME_LEN, NV_RSA_BYTES, ST_ATTEST_NV,
-    ST_ATTEST_QUOTE, TpmAttest, TpmEccPublic, TpmPublic, shirudo_tpm_ek_policy, tpm_attest_parse,
-    tpm_credential_protect, tpm_ecc_public_parse, tpm_ecdsa_signature_parse, tpm_kdfe, tpm_nv_name,
-    tpm_object_name, tpm_public_parse, tpm_qualified_name, tpm_register_policy,
+    ST_ATTEST_QUOTE, TpmAttest, TpmEccPublic, TpmPublic, attest_signer,
+    attest_verify as signature_verify, shirudo_tpm_ek_policy, tpm_attest_parse,
+    tpm_credential_protect, tpm_ecc_public_parse, tpm_kdfe, tpm_nv_name, tpm_object_name,
+    tpm_public_parse, tpm_register_policy,
 };
 use crate::util::upatch::{NAME_MAX as UPATCH_NAME_MAX, upatch_name_valid};
 
@@ -72,8 +73,6 @@ const AK_ATTRS_REQUIRED: u32 = 0x0005_0032;
 const NONCE_MAX: usize = 64;
 /// `ATTEST_CHALLENGE_MAX` of util/attest.h.
 const CHALLENGE_MAX: usize = 16 * 1024;
-/// `TPM_RH_ENDORSEMENT`: the endorsement hierarchy.
-const RH_ENDORSEMENT: u32 = 0x4000_000B;
 /// The label of a credential's seed, which the TPM takes with its NUL.
 const IDENTITY: &CStr = c"IDENTITY";
 
@@ -332,12 +331,22 @@ fn emit_hex(e: &mut JsonEmit, key: &[u8], data: &[u8]) {
     e.kv_string(key, &hex[..2 * data.len()]);
 }
 
+/// The digest a quote over `mask` carries: SHA-256 of the PCR values
+/// it selects, in index order. None where the hash fails, which the
+/// target and the operator alike take as a digest that does not match.
+fn pcr_values_digest(mask: u32, values: &[[u8; 32]; 24]) -> Option<[u8; 32]> {
+    let selected: Vec<u8> = (0..values.len())
+        .filter(|&i| mask & (1 << i) != 0)
+        .flat_map(|i| values[i])
+        .collect();
+
+    sha256(&selected).ok()
+}
+
 /// Whether the quote covers the PCR values read beside it, which alone
 /// makes it acceptable.
 fn quote_covers(quote: &TpmAttestation, mask: u32, values: &[[u8; 32]; 24]) -> bool {
     let mut a: TpmAttest = zeroed();
-    let mut ctx = Sha256Ctx::new();
-    let mut digest = [0u8; 32];
 
     // SAFETY: the quote's bytes, and room for what they hold.
     if unsafe { tpm_attest_parse(quote.attest.as_ptr(), quote.attest_len, &mut a) } != 0
@@ -346,26 +355,7 @@ fn quote_covers(quote: &TpmAttestation, mask: u32, values: &[[u8; 32]; 24]) -> b
     {
         return false;
     }
-    // SAFETY: the context.
-    if unsafe { sha256_init(&mut ctx) } != 0 {
-        return false;
-    }
-    for (i, value) in values.iter().enumerate() {
-        if mask & (1 << i) == 0 {
-            continue;
-        }
-        // SAFETY: the context and the value's bytes.
-        if unsafe { sha256_update(&mut ctx, value.as_ptr().cast(), 32) } != 0 {
-            // SAFETY: the context, released once.
-            unsafe { sha256_free(&mut ctx) };
-            return false;
-        }
-    }
-    // SAFETY: the context, and room for the digest.
-    if unsafe { sha256_final(&mut ctx, digest.as_mut_ptr()) } != 0 {
-        return false;
-    }
-    !memneq_explicit(&digest, &a.pcr_digest)
+    pcr_values_digest(mask, values).is_some_and(|d| !memneq_explicit(&d, &a.pcr_digest))
 }
 
 /// What attest_evidence_config() holds across its steps, freed and wiped
@@ -1129,10 +1119,6 @@ fn check_signed(
     parsed: &mut TpmAttest,
 ) -> c_int {
     let mut sig = [0u8; SIGNATURE_MAX];
-    let mut r = [0u8; 32];
-    let mut s = [0u8; 32];
-    let mut digest = [0u8; 32];
-    let mut qn = [0u8; NAME_LEN];
     let mut sig_len = 0usize;
     let what = what.as_ptr();
 
@@ -1158,16 +1144,10 @@ fn check_signed(
         say!(rep, false, c"%s: attestation structure unparseable", what);
         return -EKEYREJECTED;
     }
-    // SAFETY: the signature's bytes, and rooms for its halves.
-    if unsafe { tpm_ecdsa_signature_parse(sig.as_ptr(), sig_len, r.as_mut_ptr(), s.as_mut_ptr()) }
-        != 0
-    {
+    let ret = signature_verify(&attest[..*attest_len], &sig[..sig_len], &ak.x, &ak.y);
+    if ret == -EBADMSG {
         say!(rep, false, c"%s: signature structure unparseable", what);
         return -EKEYREJECTED;
-    }
-    let mut ret = sha256_calc(&attest[..*attest_len], &mut digest);
-    if ret == 0 {
-        ret = ecdsa_p256_verify(&ak.x, &ak.y, &digest, &r, &s);
     }
     say!(
         rep,
@@ -1175,12 +1155,9 @@ fn check_signed(
         c"%s: ECDSA signature by the attestation key",
         what
     );
-    // SAFETY: the key's name, and room for the qualified one.
-    let qualified =
-        unsafe { tpm_qualified_name(RH_ENDORSEMENT, ak_name.as_ptr(), qn.as_mut_ptr()) } == 0;
     say!(
         rep,
-        qualified && parsed.signer_len == NAME_LEN && !memneq_explicit(&parsed.signer, &qn),
+        attest_signer(parsed, ak_name) == Ok(true),
         c"%s: signed by the key as an endorsement primary",
         what
     );
@@ -1406,6 +1383,10 @@ unsafe fn verify_parsed(
             c"config: the events are one boot event followed by updates in sequence"
         );
     }
+    // What json_parse() refuses past a bound is a malformed document.
+    if ret == -E2BIG || ret == -ENOSPC {
+        return -EINVAL;
+    }
     if ret != 0 {
         return ret;
     }
@@ -1575,35 +1556,14 @@ unsafe fn verify_parsed(
         return qrc;
     }
     if qrc == 0 {
-        let mut ctx = Sha256Ctx::new();
-        let mut digest = [0u8; 32];
         let complete = quote.ty == ST_ATTEST_QUOTE
             && p.pcr_mask == i64::from(quote.pcr_mask)
             && p.pcr_have == quote.pcr_mask;
-        let mut hashed = false;
 
         say!(rep, complete, c"quote: covers the PCRs the document lists");
-        // SAFETY: the context.
-        if complete && unsafe { sha256_init(&mut ctx) } == 0 {
-            let mut err = 0;
-            let mut bit = 0;
-
-            while bit < 24 && err == 0 {
-                if quote.pcr_mask & (1 << bit) != 0 {
-                    // SAFETY: the context and the value's bytes.
-                    err = unsafe { sha256_update(&mut ctx, p.pcrs[bit].as_ptr().cast(), 32) };
-                }
-                bit += 1;
-            }
-            if err != 0 {
-                // SAFETY: the context, released once.
-                unsafe { sha256_free(&mut ctx) };
-            } else {
-                // SAFETY: the context, and room for the digest.
-                hashed = unsafe { sha256_final(&mut ctx, digest.as_mut_ptr()) } == 0;
-            }
-        }
-        let vouched = hashed && !memneq_explicit(&digest, &quote.pcr_digest);
+        let vouched = complete
+            && pcr_values_digest(quote.pcr_mask, &p.pcrs)
+                .is_some_and(|d| !memneq_explicit(&d, &quote.pcr_digest));
         say!(rep, vouched, c"quote: PCR digest matches the listed values");
         if !vouched {
             p.pcr_have = 0;
@@ -1883,7 +1843,7 @@ unsafe fn verify_parsed(
                 anchor.len(),
             )
         } == 0
-            && sha256_calc(cstr(&anchor), &mut anchor_digest) == 0;
+            && sha256_into(cstr(&anchor), &mut anchor_digest) == 0;
 
         say!(
             rep,

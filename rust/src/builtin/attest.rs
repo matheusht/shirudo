@@ -25,7 +25,7 @@ use crate::util::chain::{
     chain_upatch_event,
 };
 use crate::util::config_measure::config_measure_pcr_valid;
-use crate::util::crypto_openssl::sha256_calc;
+use crate::util::crypto_openssl::sha256_into;
 use crate::util::help::{
     Help, HelpItem, HelpSection, is_help, is_list_cmds, print_help, print_subcmd_list,
     resolve_subcommand,
@@ -35,6 +35,9 @@ use crate::util::io::read_file;
 use crate::util::json::{JsonEmit, MAX_BYTES};
 use crate::util::keys::{KEYS_MAX, keys_anchor_digest};
 use crate::util::measured::{measured_set_add, measured_upatch_of};
+use crate::util::options::{
+    EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OPT_REPEAT, OptParser, OptSpec,
+};
 use crate::util::seal::{SealOutput, seal_output_commit, seal_output_create};
 use crate::util::tpm_wire::{tpm_nv_name, tpm_register_policy};
 use crate::util::upatch::{self, Upatch, upatch_close, upatch_open};
@@ -55,6 +58,344 @@ const CHAIN_PCR: u64 = 9;
 const CHAIN_PHASE_PCR: u64 = 11;
 const CHAIN_PCR_MASK: u32 = (1 << 9) | (1 << 11);
 const ANCHOR_MAX: usize = 128;
+
+static SUBCMDS: [HelpItem; 3] = [
+    HelpItem::new(
+        c"verify",
+        c"check an evidence document against the expected state",
+    ),
+    HelpItem::new(
+        c"predict",
+        c"compute the register value a set of upatches yields",
+    ),
+    HelpItem::new(
+        c"challenge",
+        c"make a credential challenge for a target's attestation key",
+    ),
+];
+
+const EVIDENCE_NONCE: c_int = 0;
+const EVIDENCE_PCRS: c_int = 1;
+const EVIDENCE_CHALLENGE: c_int = 2;
+const EVIDENCE_OUTPUT: c_int = 3;
+
+static EVIDENCE_OPTS: [OptSpec; 4] = [
+    OptSpec::new(
+        c"--nonce",
+        0,
+        0,
+        Some(c"<hex>"),
+        c"freshness value from the verifier (up to 64 bytes)",
+    ),
+    OptSpec::new(
+        c"--pcrs",
+        0,
+        0,
+        Some(c"<list>"),
+        c"PCRs to quote, comma separated (default 0-7,9,11-15)",
+    ),
+    OptSpec::new(
+        c"--challenge",
+        0,
+        0,
+        Some(c"<path>"),
+        c"a challenge from the verifier to activate while attesting",
+    ),
+    OptSpec::new(
+        c"--output",
+        b'o',
+        0,
+        Some(c"<path>"),
+        c"write the evidence there (0600) instead of stdout",
+    ),
+];
+
+const VERIFY_EVIDENCE: c_int = 0;
+const VERIFY_NONCE: c_int = 1;
+const VERIFY_AK_NAME: c_int = 2;
+const VERIFY_CERT: c_int = 3;
+const VERIFY_UPATCH: c_int = 4;
+const VERIFY_EXPECT: c_int = 5;
+const VERIFY_TREE_ROOT: c_int = 6;
+const VERIFY_EXPECT_CHAIN: c_int = 7;
+const VERIFY_EXPECT_CONFIG_ROOT: c_int = 8;
+const VERIFY_EXPECT_CONFIG_PCR: c_int = 9;
+const VERIFY_EXPECT_PCR: c_int = 10;
+const VERIFY_ALLOW_RUNTIME_EVENTS: c_int = 11;
+const VERIFY_JSON: c_int = 12;
+const VERIFY_STRICT_ANCHOR: c_int = 13;
+const VERIFY_EXPECT_CREDENTIAL: c_int = 14;
+const VERIFY_EK_NAME: c_int = 15;
+const VERIFY_EXPECT_BIND_PCR: c_int = 16;
+const VERIFY_REQUIRE_INITRD: c_int = 17;
+
+static VERIFY_OPTS: [OptSpec; 18] = [
+    OptSpec::new(
+        c"--evidence",
+        0,
+        0,
+        Some(c"<path>"),
+        c"the document a target produced",
+    ),
+    OptSpec::new(
+        c"--nonce",
+        0,
+        0,
+        Some(c"<hex>"),
+        c"the nonce that document was requested with",
+    ),
+    OptSpec::new(
+        c"--ak-name",
+        0,
+        0,
+        Some(c"<hex>"),
+        c"the attestation key name pinned at enrollment",
+    ),
+    OptSpec::new(
+        c"--cert",
+        0,
+        OPT_REPEAT,
+        Some(c"<cert.der>"),
+        c"a certificate the target enrols (repeatable)",
+    ),
+    OptSpec::new(
+        c"--upatch",
+        0,
+        OPT_REPEAT,
+        Some(c"<file>"),
+        c"an installed artifact (repeatable)",
+    ),
+    OptSpec::new(
+        c"--expect",
+        0,
+        OPT_REPEAT,
+        Some(c"<name>=<hex>"),
+        c"an installed upatch by name and payload digest",
+    ),
+    OptSpec::new(
+        c"--tree-root",
+        0,
+        0,
+        Some(c"<hex>"),
+        c"the upatch tree projection root at boot",
+    ),
+    OptSpec::new(
+        c"--expect-chain",
+        0,
+        0,
+        Some(c"<hex>"),
+        c"the register value after the expected events",
+    ),
+    OptSpec::new(
+        c"--expect-config-root",
+        0,
+        0,
+        Some(c"<hex>"),
+        c"approved config image hash",
+    ),
+    OptSpec::new(
+        c"--expect-config-pcr",
+        0,
+        0,
+        Some(c"<n>"),
+        c"reserved config PCR number",
+    ),
+    OptSpec::new(
+        c"--expect-pcr",
+        0,
+        OPT_REPEAT,
+        Some(c"<n>=<hex>"),
+        c"a PCR value the quote must carry (repeatable)",
+    ),
+    OptSpec::new(
+        c"--allow-runtime-events",
+        0,
+        0,
+        None,
+        c"accept loads, unloads and revocations after boot",
+    ),
+    OptSpec::new(
+        c"--json",
+        0,
+        0,
+        None,
+        c"print the checks and the verdict as JSON",
+    ),
+    OptSpec::new(
+        c"--strict-anchor",
+        0,
+        0,
+        None,
+        c"require the anchoring PCR to hold only the anchor",
+    ),
+    OptSpec::new(
+        c"--expect-credential",
+        0,
+        0,
+        Some(c"<hex>"),
+        c"the credential the challenge given to the target carried",
+    ),
+    OptSpec::new(
+        c"--ek-name",
+        0,
+        0,
+        Some(c"<hex>"),
+        c"the endorsement key name pinned at enrollment",
+    ),
+    OptSpec::new(
+        c"--expect-bind-pcr",
+        0,
+        OPT_REPEAT,
+        Some(c"<n>=<hex>"),
+        c"a PCR value the register was bound under (repeatable)",
+    ),
+    OptSpec::new(
+        c"--require-initrd",
+        0,
+        0,
+        None,
+        c"fail unless init bound the register from the initrd",
+    ),
+];
+
+const CHALLENGE_EVIDENCE: c_int = 0;
+const CHALLENGE_AK_NAME: c_int = 1;
+const CHALLENGE_EK_CA: c_int = 2;
+const CHALLENGE_EK_NAME: c_int = 3;
+const CHALLENGE_TRUST_PRESENTED_EK: c_int = 4;
+const CHALLENGE_OUTPUT: c_int = 5;
+
+static CHALLENGE_OPTS: [OptSpec; 6] = [
+    OptSpec::new(
+        c"--evidence",
+        0,
+        0,
+        Some(c"<path>"),
+        c"a document the target produced, carrying its keys",
+    ),
+    OptSpec::new(
+        c"--ak-name",
+        0,
+        0,
+        Some(c"<hex>"),
+        c"the attestation key name the challenge is for",
+    ),
+    OptSpec::new(
+        c"--ek-ca",
+        0,
+        0,
+        Some(c"<bundle>"),
+        c"PEM issuers the endorsement certificate must chain to",
+    ),
+    OptSpec::new(
+        c"--ek-name",
+        0,
+        0,
+        Some(c"<hex>"),
+        c"an endorsement key name known out of band",
+    ),
+    OptSpec::new(
+        c"--trust-presented-ek",
+        0,
+        0,
+        None,
+        c"accept an endorsement key nothing vouches for",
+    ),
+    OptSpec::new(
+        c"--output",
+        b'o',
+        0,
+        Some(c"<path>"),
+        c"write the challenge there (0600)",
+    ),
+];
+
+const PREDICT_CERT: c_int = 0;
+const PREDICT_UPATCH: c_int = 1;
+const PREDICT_EXPECT: c_int = 2;
+const PREDICT_TREE_ROOT: c_int = 3;
+const PREDICT_EVENT: c_int = 4;
+const PREDICT_BIND_PCR: c_int = 5;
+const PREDICT_JSON: c_int = 6;
+const PREDICT_WRITER_PUBLIC: c_int = 7;
+
+static PREDICT_OPTS: [OptSpec; 8] = [
+    OptSpec::new(
+        c"--cert",
+        0,
+        OPT_REPEAT,
+        Some(c"<cert.der>"),
+        c"a certificate the target enrols (repeatable)",
+    ),
+    OptSpec::new(
+        c"--upatch",
+        0,
+        OPT_REPEAT,
+        Some(c"<file>"),
+        c"an installed artifact (repeatable)",
+    ),
+    OptSpec::new(
+        c"--expect",
+        0,
+        OPT_REPEAT,
+        Some(c"<name>=<hex>"),
+        c"an installed upatch by name and payload digest",
+    ),
+    OptSpec::new(
+        c"--tree-root",
+        0,
+        0,
+        Some(c"<hex>"),
+        c"the upatch tree projection root at boot",
+    ),
+    OptSpec::new(
+        c"--event",
+        0,
+        OPT_REPEAT,
+        Some(c"<kind>:<name>=<hex>"),
+        c"a load, unload, tree:<seq> or revoke:<fingerprint> event after boot",
+    ),
+    OptSpec::new(
+        c"--bind-pcr",
+        0,
+        OPT_REPEAT,
+        Some(c"<n>=<hex>"),
+        c"PCR 9 and 11 values at binding, for the register name",
+    ),
+    OptSpec::new(c"--json", 0, 0, None, c"print the values as JSON"),
+    OptSpec::new(
+        c"--writer-public",
+        0,
+        0,
+        Some(c"<hex>"),
+        c"init record's 384-byte RSA modulus (with --bind-pcr)",
+    ),
+];
+
+static SECTIONS: [HelpSection; 5] = [
+    HelpSection::items(c"subcommands:", &SUBCMDS),
+    HelpSection::options(c"evidence options (target):", &EVIDENCE_OPTS),
+    HelpSection::options(c"verify options (operator):", &VERIFY_OPTS),
+    HelpSection::options(c"predict options (operator):", &PREDICT_OPTS),
+    HelpSection::options(c"challenge options (operator):", &CHALLENGE_OPTS),
+];
+
+static HELP: Help = Help::new(
+    c"shirudo attest [--nonce=<hex>] [--pcrs=<list>] [--challenge=<path>] [--output=<path>]\n       \
+      shirudo attest verify --evidence=<path> --nonce=<hex> --ak-name=<hex> [options]\n       \
+      shirudo attest predict --cert=<cert.der> [options]\n       \
+      shirudo attest challenge --evidence=<path> --output=<path> \
+      --ek-ca=<bundle>|--ek-name=<hex>|--trust-presented-ek [options]",
+    Some(
+        c"Without a subcommand: emit a TPM-signed evidence document for this\n\
+          target (quote over the PCRs, certification of the measurement register,\n\
+          this boot's eventlog, the firmware and systemd measurement logs), activating\n\
+          the verifier's challenge when given one.\n\
+          verify, predict and challenge run on the operator and touch no TPM.",
+    ),
+    &SECTIONS,
+    None,
+);
 
 fn print(text: &[u8]) {
     // SAFETY: the bytes, to the C library's stdout.
@@ -123,221 +464,46 @@ fn unhex_max(text: &[u8], out: &mut [u8]) -> Option<usize> {
     unhex(text, &mut out[..n]).then_some(n)
 }
 
-/// A valued option: `<name>=<value>` or `<name> <value>`, or one that
-/// came last with nothing after it, as opt_arg() reads them.
-enum Opt<'a> {
-    No,
-    Value(&'a [u8]),
-    Missing,
+/// The value of the option or argument `p` last returned, empty for a
+/// flag.
+fn value<'a>(p: &OptParser<'a>) -> &'a [u8] {
+    p.value().map_or(&[], CStr::to_bytes)
 }
 
-fn opt<'a>(name: &[u8], arg: &[u8], args: &[&'a [u8]], i: &mut usize) -> Opt<'a> {
-    let Some(rest) = arg.strip_prefix(name) else {
-        return Opt::No;
-    };
-    match rest.first() {
-        Some(b'=') => Opt::Value(&args[*i][args[*i].len() - rest.len() + 1..]),
-        Some(_) => Opt::No,
-        None if *i + 1 >= args.len() => Opt::Missing,
-        None => {
-            *i += 1;
-            Opt::Value(args[*i])
-        }
+/// Reports a usage error of `p`'s command, its message formatted.
+fn usage(p: &OptParser<'_>, message: impl AsRef<[u8]>) -> c_int {
+    p.usage(message.as_ref());
+    EXIT_USAGE
+}
+
+/// The nonce of `v`: hex of 1 to NONCE_MAX bytes.
+fn nonce_of(p: &OptParser<'_>, v: &[u8], nonce: &mut [u8; NONCE_MAX]) -> Result<usize, c_int> {
+    match unhex_max(v, nonce) {
+        Some(n) if n > 0 => Ok(n),
+        _ => Err(usage(
+            p,
+            format!("--nonce must be hex of up to {NONCE_MAX} bytes"),
+        )),
     }
 }
 
-const fn item(name: &'static CStr, summary: &'static CStr) -> HelpItem {
-    HelpItem {
-        name: name.as_ptr(),
-        summary: summary.as_ptr(),
+/// A key name of `v`, of the option `what`: 2 * NAME_LEN hex digits.
+fn name_of(p: &OptParser<'_>, what: &str, v: &[u8], out: &mut [u8; NAME_LEN]) -> Result<(), c_int> {
+    if unhex(v, out) {
+        return Ok(());
     }
+    Err(usage(
+        p,
+        format!("{what} must be {} hex characters", 2 * NAME_LEN),
+    ))
 }
 
-const SUBCMDS: [HelpItem; 3] = [
-    item(
-        c"verify",
-        c"check an evidence document against the expected state",
-    ),
-    item(
-        c"predict",
-        c"compute the register value a set of upatches yields",
-    ),
-    item(
-        c"challenge",
-        c"make a credential challenge for a target's attestation key",
-    ),
-];
-const ATTEST_OPTIONS: [HelpItem; 4] = [
-    item(
-        c"--nonce=<hex>",
-        c"freshness value from the verifier (up to 64 bytes)",
-    ),
-    item(
-        c"--pcrs=<list>",
-        c"PCRs to quote, comma separated (default 0-7,9,11-15)",
-    ),
-    item(
-        c"--challenge=<path>",
-        c"a challenge from the verifier to activate while attesting",
-    ),
-    item(
-        c"-o, --output <path>",
-        c"write the evidence there (0600) instead of stdout",
-    ),
-];
-const VERIFY_OPTIONS: [HelpItem; 18] = [
-    item(c"--evidence=<path>", c"the document a target produced"),
-    item(
-        c"--nonce=<hex>",
-        c"the nonce that document was requested with",
-    ),
-    item(
-        c"--ak-name=<hex>",
-        c"the attestation key name pinned at enrollment",
-    ),
-    item(
-        c"--cert=<cert.der>",
-        c"a certificate the target enrols (repeatable)",
-    ),
-    item(c"--upatch=<file>", c"an installed artifact (repeatable)"),
-    item(
-        c"--expect=<name>=<hex>",
-        c"an installed upatch by name and payload digest",
-    ),
-    item(
-        c"--tree-root=<hex>",
-        c"the upatch tree projection root at boot",
-    ),
-    item(
-        c"--expect-chain=<hex>",
-        c"the register value after the expected events",
-    ),
-    item(c"--expect-config-root=<hex>", c"approved config image hash"),
-    item(c"--expect-config-pcr=<n>", c"reserved config PCR number"),
-    item(
-        c"--expect-pcr=<n>=<hex>",
-        c"a PCR value the quote must carry (repeatable)",
-    ),
-    item(
-        c"--allow-runtime-events",
-        c"accept loads, unloads and revocations after boot",
-    ),
-    item(c"--json", c"print the checks and the verdict as JSON"),
-    item(
-        c"--strict-anchor",
-        c"require the anchoring PCR to hold only the anchor",
-    ),
-    item(
-        c"--expect-credential=<hex>",
-        c"the credential the challenge given to the target carried",
-    ),
-    item(
-        c"--ek-name=<hex>",
-        c"the endorsement key name pinned at enrollment",
-    ),
-    item(
-        c"--expect-bind-pcr=<n>=<hex>",
-        c"a PCR value the register was bound under (repeatable)",
-    ),
-    item(
-        c"--require-initrd",
-        c"fail unless init bound the register from the initrd",
-    ),
-];
-const CHALLENGE_OPTIONS: [HelpItem; 6] = [
-    item(
-        c"--evidence=<path>",
-        c"a document the target produced, carrying its keys",
-    ),
-    item(
-        c"--ak-name=<hex>",
-        c"the attestation key name the challenge is for",
-    ),
-    item(
-        c"--ek-ca=<bundle>",
-        c"PEM issuers the endorsement certificate must chain to",
-    ),
-    item(
-        c"--ek-name=<hex>",
-        c"an endorsement key name known out of band",
-    ),
-    item(
-        c"--trust-presented-ek",
-        c"accept an endorsement key nothing vouches for",
-    ),
-    item(c"-o, --output <path>", c"write the challenge there (0600)"),
-];
-const PREDICT_OPTIONS: [HelpItem; 8] = [
-    item(
-        c"--cert=<cert.der>",
-        c"a certificate the target enrols (repeatable)",
-    ),
-    item(c"--upatch=<file>", c"an installed artifact (repeatable)"),
-    item(
-        c"--expect=<name>=<hex>",
-        c"an installed upatch by name and payload digest",
-    ),
-    item(
-        c"--tree-root=<hex>",
-        c"the upatch tree projection root at boot",
-    ),
-    item(
-        c"--event=<kind>:<name>=<hex>",
-        c"a load, unload, tree:<seq> or revoke:<fingerprint> event after boot",
-    ),
-    item(
-        c"--bind-pcr=<n>=<hex>",
-        c"PCR 9 and 11 values at binding, for the register name",
-    ),
-    item(c"--json", c"print the values as JSON"),
-    item(
-        c"--writer-public=<hex>",
-        c"init record's 384-byte RSA modulus (with --bind-pcr)",
-    ),
-];
-
-fn attest_help() {
-    let sections = [
-        (c"subcommands:", &SUBCMDS[..]),
-        (c"evidence options (target):", &ATTEST_OPTIONS[..]),
-        (c"verify options (operator):", &VERIFY_OPTIONS[..]),
-        (c"predict options (operator):", &PREDICT_OPTIONS[..]),
-        (c"challenge options (operator):", &CHALLENGE_OPTIONS[..]),
-    ]
-    .map(|(header, items)| HelpSection {
-        header: header.as_ptr(),
-        items: items.as_ptr(),
-        n_items: items.len(),
-        options: core::ptr::null(),
-        n_options: 0,
-    });
-    let help = Help {
-        usage: c"shirudo attest [--nonce=<hex>] [--pcrs=<list>] [--challenge=<path>] [--output=<path>]\n       \
-shirudo attest verify --evidence=<path> --nonce=<hex> --ak-name=<hex> [options]\n       \
-shirudo attest predict --cert=<cert.der> [options]\n       \
-shirudo attest challenge --evidence=<path> --output=<path> --ek-ca=<bundle>|--ek-name=<hex>|--trust-presented-ek [options]"
-            .as_ptr(),
-        summary: c"Without a subcommand: emit a TPM-signed evidence document for this\n\
-target (quote over the PCRs, certification of the measurement register,\n\
-this boot's eventlog, the firmware and systemd measurement logs), activating\n\
-the verifier's challenge when given one.\n\
-verify, predict and challenge run on the operator and touch no TPM."
-            .as_ptr(),
-        sections: sections.as_ptr(),
-        n_sections: sections.len(),
-        footer: ptr::null(),
-    };
-
-    // SAFETY: the help, its strings constants and its sections live.
-    unsafe { print_help(&help) };
-}
-
-fn parse_hex32(what: &[u8], text: &[u8], out: &mut [u8; 32]) -> Result<(), ()> {
+fn parse_hex32(what: &[u8], text: &[u8], out: &mut [u8; 32]) -> Result<(), c_int> {
     if unhex(text, out) {
         return Ok(());
     }
     error(&[b"attest: ", what, b" must be 64 hex characters"]);
-    Err(())
+    Err(EXIT_USAGE)
 }
 
 /// The upatches the init event counts, at most MEMBERS_MAX.
@@ -368,7 +534,7 @@ impl Members {
         }
     }
 
-    fn add_file(&mut self, path: &[u8]) -> Result<(), ()> {
+    fn add_file(&mut self, path: &[u8]) -> Result<(), c_int> {
         // SAFETY: an all-zero container is a closed one.
         let mut u: Upatch = unsafe { core::mem::zeroed() };
         // SAFETY: an all-zero member is an empty one.
@@ -379,7 +545,7 @@ impl Members {
         let ret = unsafe { upatch_open(p.as_ptr(), &mut u) };
         if ret != 0 {
             error(&[b"attest: open ", path, b": ", strerr(-ret)]);
-            return Err(());
+            return Err(EXIT_USAGE);
         }
         // SAFETY: the member's room and the open container, then closed.
         unsafe {
@@ -397,12 +563,12 @@ impl Members {
                 strerr(-ret)
             };
             error(&[b"attest: --upatch ", path, b": ", why]);
-            return Err(());
+            return Err(EXIT_USAGE);
         }
         Ok(())
     }
 
-    fn add_spec(&mut self, spec: &[u8]) -> Result<(), ()> {
+    fn add_spec(&mut self, spec: &[u8]) -> Result<(), c_int> {
         let mut name = [0u8; upatch::NAME_MAX + 1];
         let mut payload = [0u8; 32];
         let s = message(&[spec]);
@@ -423,7 +589,7 @@ impl Members {
                 strerr(-ret)
             };
             error(&[b"attest: --expect '", spec, b"': ", why]);
-            return Err(());
+            return Err(EXIT_USAGE);
         }
         Ok(())
     }
@@ -463,19 +629,28 @@ fn read(path: &[u8], max: usize) -> Result<File, c_int> {
 }
 
 /// What the init event counts of a certificate: the SHA-256 of its DER.
-fn cert_digest(path: &[u8]) -> Result<[u8; 32], ()> {
+fn cert_digest(path: &[u8]) -> Result<[u8; 32], c_int> {
     let mut out = [0; 32];
     let ret = match read(path, KEYS_DER_MAX) {
         Ok(der) if der.bytes().is_empty() => -ENODATA,
-        Ok(der) => sha256_calc(der.bytes(), &mut out),
+        Ok(der) => sha256_into(der.bytes(), &mut out),
         Err(err) => err,
     };
 
     if ret != 0 {
         error(&[b"attest: --cert ", path, b": ", strerr(-ret)]);
-        return Err(());
+        return Err(EXIT_USAGE);
     }
     Ok(out)
+}
+
+/// The certificates of `--cert`: the digest of each, at most KEYS_MAX.
+fn cert_add(p: &OptParser<'_>, v: &[u8], certs: &mut Vec<[u8; 32]>) -> Result<(), c_int> {
+    if certs.len() >= KEYS_MAX {
+        return Err(usage(p, format!("at most {KEYS_MAX} --cert")));
+    }
+    certs.push(cert_digest(v)?);
+    Ok(())
 }
 
 /// Folds a `<kind>:<name>=<hex>` event into `chain`.
@@ -549,10 +724,6 @@ impl Predicted {
     }
 }
 
-fn missing(cmd: &[u8], a: &[u8]) {
-    error(&[cmd, b": ", a, b" takes a value"]);
-}
-
 /// The SHA-256 of the certificates a target enrols, as the init event
 /// counts them.
 fn anchor_digest(certs: &[[u8; 32]]) -> Option<[u8; 32]> {
@@ -562,106 +733,107 @@ fn anchor_digest(certs: &[[u8; 32]]) -> Option<[u8; 32]> {
     (unsafe { keys_anchor_digest(certs.as_ptr(), certs.len(), &mut out) } == 0).then_some(out)
 }
 
-fn predict(args: &[&[u8]]) -> c_int {
-    const CMD: &[u8] = b"attest predict";
+/// `<n>=<hex>` of a PCR, n its number below 24, as
+/// attest_parse_pcr_value() reads it.
+fn pcr_value(v: &[u8]) -> Option<(usize, &[u8])> {
+    let vc = message(&[v]);
+    let mut n = 0u64;
+    let mut value: *const c_char = ptr::null();
+
+    // SAFETY: a C string and the rooms for the number and value.
+    if unsafe { attest_parse_pcr_value(vc.as_ptr(), &mut n, &mut value) } != 0 {
+        return None;
+    }
+    // SAFETY: the value points into vc, a C string.
+    let at = unsafe { value.offset_from(vc.as_ptr()) } as usize;
+    Some((n as usize, &v[at..]))
+}
+
+/// A `<n>=<hex>` PCR value of the option `what` into `values`, once for
+/// each PCR, which `mask` marks.
+fn pcr_expect(
+    p: &OptParser<'_>,
+    what: &str,
+    v: &[u8],
+    values: &mut [[u8; 32]; 24],
+    mask: &mut u32,
+) -> Result<(), c_int> {
+    let (n, value) = pcr_value(v).ok_or(EXIT_USAGE)?;
+
+    parse_hex32(format!("{what} value").as_bytes(), value, &mut values[n])?;
+    if *mask & (1 << n) != 0 {
+        return Err(usage(p, format!("{what} {n} given twice")));
+    }
+    *mask |= 1 << n;
+    Ok(())
+}
+
+fn predict(args: &[*const c_char]) -> c_int {
+    let mut p = OptParser::new(c"attest predict", &PREDICT_OPTS, Some(&HELP), args, 2);
     let mut writer_public = [0u8; NV_RSA_BYTES];
     let mut tree_root = [0u8; 32];
-    let mut certs: Vec<[u8; 32]> = Vec::new();
+    let mut certs = Vec::new();
     let mut bind = [[0u8; 32]; 2];
     let mut have_bind = [false; 2];
     let mut have_writer = false;
-    let mut chain = [0u8; 32];
-    let mut events: Vec<&[u8]> = Vec::new();
+    let mut events = Vec::new();
     let mut m = Members::new();
     let mut json = false;
-    let mut i = 2;
 
-    while i < args.len() {
-        let a = args[i];
-        macro_rules! value {
-            ($name:expr) => {
-                match opt($name, a, args, &mut i) {
-                    Opt::No => None,
-                    Opt::Missing => {
-                        missing(CMD, a);
-                        return 2;
-                    }
-                    Opt::Value(v) => Some(v),
+    let parsed = (|| loop {
+        let opt = p.next();
+        let v = value(&p);
+        match opt {
+            OPT_END => return Ok(()),
+            PREDICT_CERT => cert_add(&p, v, &mut certs)?,
+            PREDICT_UPATCH => m.add_file(v)?,
+            PREDICT_EXPECT => m.add_spec(v)?,
+            PREDICT_TREE_ROOT => parse_hex32(b"--tree-root", v, &mut tree_root)?,
+            PREDICT_EVENT => {
+                if events.len() >= EVENTS_MAX {
+                    return Err(usage(&p, format!("at most {EVENTS_MAX} --event")));
                 }
-            };
+                events.push(v);
+            }
+            PREDICT_WRITER_PUBLIC => {
+                if !unhex(v, &mut writer_public) {
+                    return Err(usage(&p, "invalid RSA-3072 --writer-public"));
+                }
+                have_writer = true;
+            }
+            PREDICT_JSON => json = true,
+            PREDICT_BIND_PCR => {
+                let slot = pcr_value(v).and_then(|(n, value)| {
+                    let s = [CHAIN_PCR, CHAIN_PHASE_PCR]
+                        .iter()
+                        .position(|&pcr| pcr == n as u64)?;
+                    parse_hex32(b"--bind-pcr value", value, &mut bind[s]).ok()?;
+                    Some((n, s))
+                });
+                let Some((n, s)) = slot else {
+                    return Err(usage(
+                        &p,
+                        format!("--bind-pcr takes {CHAIN_PCR}=<hex> or {CHAIN_PHASE_PCR}=<hex>"),
+                    ));
+                };
+                if have_bind[s] {
+                    return Err(usage(&p, format!("--bind-pcr {n} given twice")));
+                }
+                have_bind[s] = true;
+            }
+            OPT_ARG => {
+                p.usage_arg(b"unexpected argument ");
+                return Err(EXIT_USAGE);
+            }
+            OPT_DONE => return Err(0),
+            _ => return Err(EXIT_USAGE),
         }
-
-        if let Some(v) = value!(b"--cert") {
-            if certs.len() >= KEYS_MAX {
-                error(&[
-                    CMD,
-                    b": at most ",
-                    KEYS_MAX.to_string().as_bytes(),
-                    b" --cert",
-                ]);
-                return 2;
-            }
-            let Ok(digest) = cert_digest(v) else {
-                return 2;
-            };
-            certs.push(digest);
-        } else if let Some(v) = value!(b"--upatch") {
-            if m.add_file(v).is_err() {
-                return 2;
-            }
-        } else if let Some(v) = value!(b"--expect") {
-            if m.add_spec(v).is_err() {
-                return 2;
-            }
-        } else if let Some(v) = value!(b"--tree-root") {
-            if parse_hex32(b"--tree-root", v, &mut tree_root).is_err() {
-                return 2;
-            }
-        } else if let Some(v) = value!(b"--event") {
-            if events.len() >= EVENTS_MAX {
-                return 2;
-            }
-            events.push(v);
-        } else if let Some(v) = value!(b"--writer-public") {
-            if !unhex(v, &mut writer_public) {
-                error(&[CMD, b": invalid RSA-3072 --writer-public"]);
-                return 2;
-            }
-            have_writer = true;
-        } else if a == b"--json" {
-            json = true;
-        } else if let Some(v) = value!(b"--bind-pcr") {
-            let mut n = 0u64;
-            let mut value: *const c_char = ptr::null();
-            let vc = message(&[v]);
-            // SAFETY: a C string and the rooms for the number and value.
-            let slot = match unsafe { attest_parse_pcr_value(vc.as_ptr(), &mut n, &mut value) } {
-                0 if n == CHAIN_PCR => Some(0),
-                0 if n == CHAIN_PHASE_PCR => Some(1),
-                _ => None,
-            };
-            let parsed = slot.is_some_and(|s| {
-                // SAFETY: the value, a C string within the argument.
-                let text = unsafe { ffi::c_str(value) };
-                parse_hex32(b"--bind-pcr value", text, &mut bind[s]).is_ok()
-            });
-            if !parsed {
-                error(&[CMD, b": --bind-pcr takes 9=<hex> or 11=<hex>"]);
-                return 2;
-            }
-            have_bind[slot.unwrap_or(0)] = true;
-        } else if is_help(Some(a)) {
-            attest_help();
-            return 0;
-        } else {
-            error(&[CMD, b": unknown option '", a, b"'"]);
-            return 2;
-        }
-        i += 1;
+    })();
+    if let Err(code) = parsed {
+        return code;
     }
     if certs.is_empty() {
-        error(&[CMD, b": --cert is required"]);
-        return 2;
+        return usage(&p, "--cert is required");
     }
     let mut out = Predicted {
         json: json.then(|| {
@@ -674,7 +846,7 @@ fn predict(args: &[&[u8]]) -> c_int {
         e.obj_open();
         e.kv_int(b"schema", 1);
     }
-    let (mut set_digest, mut init) = ([0u8; 32], [0u8; 32]);
+    let (mut set_digest, mut init, mut chain) = ([0u8; 32], [0u8; 32], [0u8; 32]);
     let ok = anchor_digest(&certs).is_some_and(|cert_sha| {
         // SAFETY: the digest, the set, the root and the rooms.
         let ret = unsafe {
@@ -690,21 +862,21 @@ fn predict(args: &[&[u8]]) -> c_int {
         ret == 0
     });
     if !ok {
-        error(&[CMD, b": cannot hash the init event"]);
-        return 2;
+        error(&[b"attest predict: cannot hash the init event"]);
+        return EXIT_USAGE;
     }
     out.kv(b"set_digest", &hex(&set_digest));
     out.kv(b"init_event", &hex(&init));
     // SAFETY: the chain and the event.
     if unsafe { chain_fold(chain.as_mut_ptr(), init.as_ptr()) } != 0 {
-        error(&[CMD, b": cannot hash the register at boot"]);
-        return 2;
+        error(&[b"attest predict: cannot hash the register at boot"]);
+        return EXIT_USAGE;
     }
     out.kv(b"register_at_boot", &hex(&chain));
     for ev in &events {
         if apply_event(ev, &mut chain).is_err() {
-            error(&[CMD, b": bad --event '", ev, b"'"]);
-            return 2;
+            error(&[b"attest predict: bad --event '", ev, b"'"]);
+            return EXIT_USAGE;
         }
     }
     if !events.is_empty() {
@@ -717,8 +889,8 @@ fn predict(args: &[&[u8]]) -> c_int {
         let mut anchor_digest = [0u8; 32];
 
         if !have_writer {
-            error(&[CMD, b": --bind-pcr requires --writer-public"]);
-            return 2;
+            error(&[b"attest predict: --bind-pcr requires --writer-public"]);
+            return EXIT_USAGE;
         }
         // SAFETY: the two PCR values, the modulus and three rooms.
         let ret = unsafe {
@@ -733,7 +905,7 @@ fn predict(args: &[&[u8]]) -> c_int {
             )
         };
         if ret != 0 {
-            error(&[CMD, b": cannot compute the signed write policy"]);
+            error(&[b"attest predict: cannot compute the signed write policy"]);
             return 1;
         }
         // SAFETY: the policy and room for the name.
@@ -747,34 +919,42 @@ fn predict(args: &[&[u8]]) -> c_int {
             )
         } != 0
         {
-            error(&[CMD, b": cannot compute the register name"]);
+            error(&[b"attest predict: cannot compute the register name"]);
             return 1;
         }
         out.kv(b"register_name", &hex(&name));
         // SAFETY: the name and room for the anchor.
         if unsafe { chain_anchor(name.as_ptr(), anchor.as_mut_ptr().cast(), anchor.len()) } != 0 {
-            error(&[CMD, b": the anchor does not fit"]);
-            return 2;
+            error(&[b"attest predict: the anchor does not fit"]);
+            return EXIT_USAGE;
         }
         out.kv(b"anchor", cstr(&anchor));
-        if sha256_calc(cstr(&anchor), &mut anchor_digest) != 0 {
-            error(&[CMD, b": cannot hash the anchor"]);
-            return 2;
+        if sha256_into(cstr(&anchor), &mut anchor_digest) != 0 {
+            error(&[b"attest predict: cannot hash the anchor"]);
+            return EXIT_USAGE;
         }
         // SAFETY: the PCR value and the digest.
         if unsafe { chain_fold(bind[0].as_mut_ptr(), anchor_digest.as_ptr()) } != 0 {
-            error(&[CMD, b": cannot hash PCR 9 after the anchor"]);
-            return 2;
+            error(&[
+                format!("attest predict: cannot hash PCR {CHAIN_PCR} after the anchor").as_bytes(),
+            ]);
+            return EXIT_USAGE;
         }
-        out.kv(b"pcr9_after_anchor", &hex(&bind[0]));
+        out.kv(
+            format!("pcr{CHAIN_PCR}_after_anchor").as_bytes(),
+            &hex(&bind[0]),
+        );
     } else if have_bind[0] || have_bind[1] || have_writer {
-        error(&[CMD, b": --bind-pcr needs both 9 and 11"]);
-        return 2;
+        error(&[format!(
+            "attest predict: --bind-pcr needs both {CHAIN_PCR} and {CHAIN_PHASE_PCR}"
+        )
+        .as_bytes()]);
+        return EXIT_USAGE;
     }
     if let Some((buf, e)) = &mut out.json {
         e.obj_close();
         if e.err() != 0 {
-            error(&[CMD, b": json encode failed"]);
+            error(&[b"attest predict: json encode failed"]);
             return 1;
         }
         print(&[&buf[..e.written()], b"\n"].concat());
@@ -816,329 +996,242 @@ fn report_json(report: &[u8], verdict: &[u8]) -> c_int {
     0
 }
 
-fn read_evidence(path: &[u8]) -> Result<File, ()> {
+fn read_evidence(path: &[u8]) -> Result<File, c_int> {
     let ret = match read(path, MAX_BYTES) {
         Ok(f) if f.bytes().is_empty() => Err(-ENODATA),
         r => r,
     };
 
-    ret.map_err(|err| error(&[b"attest: evidence ", path, b": ", strerr(-err)]))
+    ret.map_err(|err| {
+        error(&[b"attest: evidence ", path, b": ", strerr(-err)]);
+        EXIT_USAGE
+    })
 }
 
-fn verify(args: &[&[u8]]) -> c_int {
-    const CMD: &[u8] = b"attest verify";
+fn verify(args: &[*const c_char]) -> c_int {
     // SAFETY: an all-zero expectation expects nothing.
     let mut x: Box<AttestExpect> = Box::new(unsafe { core::mem::zeroed() });
-    let mut nonce = [0u8; NONCE_MAX];
-    let mut nonce_len = 0;
-    let mut certs: Vec<[u8; 32]> = Vec::new();
-    let mut tree_root = [0u8; 32];
-    let mut evidence_path: Option<&[u8]> = None;
-    let mut m = Members::new();
-    let (mut json, mut have_tree_root) = (false, false);
-    let mut i = 2;
-    let ret = (|| -> c_int {
-        while i < args.len() {
-            let a = args[i];
-            macro_rules! value {
-                ($name:expr) => {
-                    match opt($name, a, args, &mut i) {
-                        Opt::No => None,
-                        Opt::Missing => {
-                            missing(CMD, a);
-                            return 2;
-                        }
-                        Opt::Value(v) => Some(v),
-                    }
-                };
-            }
+    let ret = verify_against(args, &mut x).unwrap_or_else(|code| code);
 
-            if let Some(v) = value!(b"--evidence") {
-                evidence_path = Some(v);
-            } else if let Some(v) = value!(b"--nonce") {
-                match unhex_max(v, &mut nonce) {
-                    Some(n) if n > 0 => nonce_len = n,
-                    _ => {
-                        error(&[CMD, b": --nonce must be hex of up to 64 bytes"]);
-                        return 2;
-                    }
-                }
-            } else if let Some(v) = value!(b"--ak-name") {
-                if !unhex(v, &mut x.ak_name) {
-                    error(&[CMD, b": --ak-name must be 68 hex characters"]);
-                    return 2;
-                }
-                x.have_ak_name = true;
-            } else if let Some(v) = value!(b"--cert") {
-                if certs.len() >= KEYS_MAX {
-                    error(&[
-                        CMD,
-                        b": at most ",
-                        KEYS_MAX.to_string().as_bytes(),
-                        b" --cert",
-                    ]);
-                    return 2;
-                }
-                let Ok(digest) = cert_digest(v) else {
-                    return 2;
-                };
-                certs.push(digest);
-            } else if let Some(v) = value!(b"--upatch") {
-                if m.add_file(v).is_err() {
-                    return 2;
-                }
-            } else if let Some(v) = value!(b"--expect") {
-                if m.add_spec(v).is_err() {
-                    return 2;
-                }
-            } else if let Some(v) = value!(b"--tree-root") {
-                if parse_hex32(b"--tree-root", v, &mut tree_root).is_err() {
-                    return 2;
-                }
-                have_tree_root = true;
-            } else if let Some(v) = value!(b"--expect-config-root") {
-                if x.have_config_root
-                    || parse_hex32(b"--expect-config-root", v, &mut x.config_root).is_err()
-                {
-                    return 2;
-                }
-                x.have_config_root = true;
-            } else if let Some(v) = value!(b"--expect-config-pcr") {
-                let Ok(pcr) = parse_u64(v, 15) else {
-                    return 2;
-                };
-                if x.have_config_pcr || config_measure_pcr_valid(pcr as u32) != 0 {
-                    return 2;
-                }
-                x.config_pcr = pcr as u32;
-                x.have_config_pcr = true;
-            } else if let Some(v) = value!(b"--expect-chain") {
-                if parse_hex32(b"--expect-chain", v, &mut x.chain).is_err() {
-                    return 2;
-                }
-                x.have_chain = true;
-            } else if let Some(v) = value!(b"--expect-pcr") {
-                let Some((n, value)) = pcr_value(v) else {
-                    return 2;
-                };
-                if parse_hex32(b"--expect-pcr value", value, &mut x.pcrs[n]).is_err() {
-                    return 2;
-                }
-                x.pcr_expect_mask |= 1 << n;
-            } else if a == b"--json" {
-                json = true;
-            } else if a == b"--allow-runtime-events" {
-                x.allow_runtime_events = true;
-            } else if a == b"--strict-anchor" {
-                x.strict_anchor = true;
-            } else if let Some(v) = value!(b"--expect-credential") {
-                if parse_hex32(b"--expect-credential", v, &mut x.credential).is_err() {
-                    return 2;
-                }
-                x.have_credential = true;
-            } else if let Some(v) = value!(b"--ek-name") {
-                if !unhex(v, &mut x.ek_name) {
-                    error(&[CMD, b": --ek-name must be 68 hex characters"]);
-                    return 2;
-                }
-                x.have_ek_name = true;
-            } else if let Some(v) = value!(b"--expect-bind-pcr") {
-                let Some((n, value)) = pcr_value(v) else {
-                    return 2;
-                };
-                if parse_hex32(b"--expect-bind-pcr value", value, &mut x.bind_values[n]).is_err() {
-                    return 2;
-                }
-                x.bind_expect_mask |= 1 << n;
-            } else if a == b"--require-initrd" {
-                x.require_initrd = true;
-            } else if is_help(Some(a)) {
-                attest_help();
-                return 0;
-            } else {
-                error(&[CMD, b": unknown option '", a, b"'"]);
-                return 2;
-            }
-            i += 1;
-        }
-        if x.have_config_root && !x.have_config_pcr {
-            error(&[CMD, b": --expect-config-root requires --expect-config-pcr"]);
-            return 2;
-        }
-        let Some(evidence_path) = evidence_path.filter(|_| nonce_len > 0) else {
-            error(&[CMD, b": --evidence and --nonce are required"]);
-            return 2;
-        };
-        if certs.is_empty() && (m.n != 0 || have_tree_root) {
-            error(&[
-                CMD,
-                b": --upatch, --expect and --tree-root describe the init event and need --cert",
-            ]);
-            return 2;
-        }
-        // The credential proves that the pinned attestation key sits
-        // beside the endorsement key; recovered on the target, its value
-        // says nothing about which key signed the evidence.
-        if x.have_credential && !x.have_ak_name {
-            error(&[
-                CMD,
-                b": --expect-credential needs the key the challenge was made for; give --ak-name",
-            ]);
-            return 2;
-        }
-        if !x.have_ak_name {
-            warn(&[CMD, b": no --ak-name; the signer is not pinned"]);
-        }
-        x.nonce = nonce.as_ptr();
-        x.nonce_len = nonce_len;
-        if !certs.is_empty() {
-            let mut set_digest = [0u8; 32];
-            let ok = anchor_digest(&certs).is_some_and(|cert_sha| {
-                // SAFETY: the digest, the set, the root and the rooms.
-                let ret = unsafe {
-                    chain_init_event(
-                        cert_sha.as_ptr(),
-                        m.set.as_mut_ptr(),
-                        m.n,
-                        tree_root.as_ptr(),
-                        set_digest.as_mut_ptr(),
-                        x.init_event.as_mut_ptr(),
-                    )
-                };
-                ret == 0
-            });
-            if !ok {
-                error(&[CMD, b": cannot hash the init event"]);
-                return 2;
-            }
-            x.have_init = true;
-        }
-        let Ok(evidence) = read_evidence(evidence_path) else {
-            return 2;
-        };
-        let mut report = vec![0u8; REPORT_MAX];
-        let doc = evidence.bytes();
-        // SAFETY: the evidence, the expectation and room for the report.
-        let err = unsafe {
-            attest_verify(
-                doc.as_ptr().cast(),
-                doc.len(),
-                &*x,
-                report.as_mut_ptr().cast(),
-                report.len(),
-            )
-        };
-        let report = cstr(&report);
-        if err == -EINVAL {
-            if !json {
-                print(report);
-            }
-            error(&[
-                CMD,
-                b": ",
-                evidence_path,
-                b" is not a shirudo evidence document",
-            ]);
-            return 2;
-        }
-        if json {
-            let ret = report_json(report, if err != 0 { b"fail" } else { b"ok" });
-            return if ret == 0 && err != 0 { 1 } else { ret };
-        }
-        print(report);
-        print(if err != 0 {
-            b"verdict: fail\n"
-        } else {
-            b"verdict: ok\n"
-        });
-        if err != 0 { 1 } else { 0 }
-    })();
     // SAFETY: the expectation, scrubbed before it goes.
     unsafe { ptr::write_bytes(&raw mut *x, 0, 1) };
     ret
 }
 
-/// `<n>=<hex>` of a PCR, n its number below 24, as
-/// attest_parse_pcr_value() reads it.
-fn pcr_value(v: &[u8]) -> Option<(usize, &[u8])> {
-    let vc = message(&[v]);
-    let mut n = 0u64;
-    let mut value: *const c_char = ptr::null();
+/// attest verify with the expectation `x` its options fill.
+fn verify_against(args: &[*const c_char], x: &mut AttestExpect) -> Result<c_int, c_int> {
+    let mut p = OptParser::new(c"attest verify", &VERIFY_OPTS, Some(&HELP), args, 2);
+    let mut nonce = [0u8; NONCE_MAX];
+    let mut nonce_len = 0;
+    let mut certs = Vec::new();
+    let mut tree_root = [0u8; 32];
+    let mut evidence_path = None;
+    let mut m = Members::new();
+    let (mut json, mut have_tree_root) = (false, false);
 
-    // SAFETY: a C string and the rooms for the number and value.
-    if unsafe { attest_parse_pcr_value(vc.as_ptr(), &mut n, &mut value) } != 0 {
-        return None;
+    loop {
+        let opt = p.next();
+        let v = value(&p);
+        match opt {
+            OPT_END => break,
+            VERIFY_EVIDENCE => evidence_path = Some(v),
+            VERIFY_NONCE => nonce_len = nonce_of(&p, v, &mut nonce)?,
+            VERIFY_AK_NAME => {
+                name_of(&p, "--ak-name", v, &mut x.ak_name)?;
+                x.have_ak_name = true;
+            }
+            VERIFY_CERT => cert_add(&p, v, &mut certs)?,
+            VERIFY_UPATCH => m.add_file(v)?,
+            VERIFY_EXPECT => m.add_spec(v)?,
+            VERIFY_TREE_ROOT => {
+                parse_hex32(b"--tree-root", v, &mut tree_root)?;
+                have_tree_root = true;
+            }
+            VERIFY_EXPECT_CONFIG_ROOT => {
+                parse_hex32(b"--expect-config-root", v, &mut x.config_root)?;
+                x.have_config_root = true;
+            }
+            VERIFY_EXPECT_CONFIG_PCR => {
+                let pcr = p.number(0, 15).map_err(|_| EXIT_USAGE)? as u32;
+                if config_measure_pcr_valid(pcr) != 0 {
+                    return Err(usage(&p, "--expect-config-pcr cannot be 9 or 11"));
+                }
+                x.config_pcr = pcr;
+                x.have_config_pcr = true;
+            }
+            VERIFY_EXPECT_CHAIN => {
+                parse_hex32(b"--expect-chain", v, &mut x.chain)?;
+                x.have_chain = true;
+            }
+            VERIFY_EXPECT_PCR => {
+                pcr_expect(&p, "--expect-pcr", v, &mut x.pcrs, &mut x.pcr_expect_mask)?;
+            }
+            VERIFY_JSON => json = true,
+            VERIFY_ALLOW_RUNTIME_EVENTS => x.allow_runtime_events = true,
+            VERIFY_STRICT_ANCHOR => x.strict_anchor = true,
+            VERIFY_EXPECT_CREDENTIAL => {
+                parse_hex32(b"--expect-credential", v, &mut x.credential)?;
+                x.have_credential = true;
+            }
+            VERIFY_EK_NAME => {
+                name_of(&p, "--ek-name", v, &mut x.ek_name)?;
+                x.have_ek_name = true;
+            }
+            VERIFY_EXPECT_BIND_PCR => {
+                pcr_expect(
+                    &p,
+                    "--expect-bind-pcr",
+                    v,
+                    &mut x.bind_values,
+                    &mut x.bind_expect_mask,
+                )?;
+            }
+            VERIFY_REQUIRE_INITRD => x.require_initrd = true,
+            OPT_ARG => {
+                p.usage_arg(b"unexpected argument ");
+                return Err(EXIT_USAGE);
+            }
+            OPT_DONE => return Ok(0),
+            _ => return Err(EXIT_USAGE),
+        }
     }
-    // SAFETY: the value points into vc, a C string.
-    let at = unsafe { value.offset_from(vc.as_ptr()) } as usize;
-    Some((n as usize, &v[at..]))
+    if x.have_config_root && !x.have_config_pcr {
+        return Err(usage(
+            &p,
+            "--expect-config-root requires --expect-config-pcr",
+        ));
+    }
+    let Some(evidence_path) = evidence_path.filter(|_| nonce_len > 0) else {
+        return Err(usage(&p, "--evidence and --nonce are required"));
+    };
+    if certs.is_empty() && (m.n != 0 || have_tree_root) {
+        return Err(usage(
+            &p,
+            "--upatch, --expect and --tree-root describe the init event and need --cert",
+        ));
+    }
+    // The credential proves that the pinned attestation key sits beside
+    // the endorsement key; recovered on the target, its value says
+    // nothing about which key signed the evidence.
+    if x.have_credential && !x.have_ak_name {
+        error(&[
+            b"attest verify: --expect-credential needs the key the challenge was made for; give --ak-name",
+        ]);
+        return Err(EXIT_USAGE);
+    }
+    if !x.have_ak_name {
+        warn(&[b"attest verify: no --ak-name; the signer is not pinned"]);
+    }
+    x.nonce = nonce.as_ptr();
+    x.nonce_len = nonce_len;
+    if !certs.is_empty() {
+        let mut set_digest = [0u8; 32];
+        let ok = anchor_digest(&certs).is_some_and(|cert_sha| {
+            // SAFETY: the digest, the set, the root and the rooms.
+            let ret = unsafe {
+                chain_init_event(
+                    cert_sha.as_ptr(),
+                    m.set.as_mut_ptr(),
+                    m.n,
+                    tree_root.as_ptr(),
+                    set_digest.as_mut_ptr(),
+                    x.init_event.as_mut_ptr(),
+                )
+            };
+            ret == 0
+        });
+        if !ok {
+            error(&[b"attest verify: cannot hash the init event"]);
+            return Err(EXIT_USAGE);
+        }
+        x.have_init = true;
+    }
+    let evidence = read_evidence(evidence_path)?;
+    let mut report = vec![0u8; REPORT_MAX];
+    let doc = evidence.bytes();
+    // SAFETY: the evidence, the expectation and room for the report.
+    let err = unsafe {
+        attest_verify(
+            doc.as_ptr().cast(),
+            doc.len(),
+            x,
+            report.as_mut_ptr().cast(),
+            report.len(),
+        )
+    };
+    let report = cstr(&report);
+    if err == -EINVAL {
+        if !json {
+            print(report);
+        }
+        error(&[
+            b"attest verify: ",
+            evidence_path,
+            b" is not a shirudo evidence document",
+        ]);
+        return Err(EXIT_USAGE);
+    }
+    let verdict: &[u8] = if err != 0 { b"fail" } else { b"ok" };
+    if json {
+        let ret = report_json(report, verdict);
+        return Ok(if ret == 0 && err != 0 { 1 } else { ret });
+    }
+    print(report);
+    print(&[b"verdict: ", verdict, b"\n"].concat());
+    Ok(c_int::from(err != 0))
 }
 
-fn challenge(args: &[&[u8]]) -> c_int {
-    const CMD: &[u8] = b"attest challenge";
+fn challenge(args: &[*const c_char]) -> c_int {
+    let mut credential = [0u8; CREDENTIAL_LEN];
+    let ret = challenge_into(args, &mut credential).unwrap_or_else(|code| code);
+
+    // SAFETY: the credential's bytes, scrubbed before they go.
+    unsafe { ptr::write_volatile(&mut credential, [0; CREDENTIAL_LEN]) };
+    ret
+}
+
+/// attest challenge, the credential it makes into `credential`.
+fn challenge_into(
+    args: &[*const c_char],
+    credential: &mut [u8; CREDENTIAL_LEN],
+) -> Result<c_int, c_int> {
+    let mut p = OptParser::new(c"attest challenge", &CHALLENGE_OPTS, Some(&HELP), args, 2);
     let (mut ak_name, mut ek_name) = ([0u8; NAME_LEN], [0u8; NAME_LEN]);
     let (mut have_ak, mut have_ek, mut trust_presented) = (false, false, false);
-    let mut ek_ca: Option<CString> = None;
-    let (mut evidence_path, mut out_path): (Option<&[u8]>, Option<&[u8]>) = (None, None);
-    let mut i = 2;
+    let mut ek_ca: Option<&CStr> = None;
+    let (mut evidence_path, mut out_path) = (None, None);
 
-    while i < args.len() {
-        let a = if args[i] == b"-o" {
-            &b"--output"[..]
-        } else {
-            args[i]
-        };
-        macro_rules! value {
-            ($name:expr) => {
-                match opt($name, a, args, &mut i) {
-                    Opt::No => None,
-                    Opt::Missing => {
-                        missing(CMD, a);
-                        return 2;
-                    }
-                    Opt::Value(v) => Some(v),
-                }
-            };
-        }
-
-        if let Some(v) = value!(b"--evidence") {
-            evidence_path = Some(v);
-        } else if let Some(v) = value!(b"--ek-ca") {
-            ek_ca = Some(message(&[v]));
-        } else if let Some(v) = value!(b"--ak-name") {
-            if !unhex(v, &mut ak_name) {
-                error(&[CMD, b": --ak-name must be 68 hex characters"]);
-                return 2;
+    loop {
+        let opt = p.next();
+        let v = value(&p);
+        match opt {
+            OPT_END => break,
+            CHALLENGE_EVIDENCE => evidence_path = Some(v),
+            CHALLENGE_EK_CA => ek_ca = p.value(),
+            CHALLENGE_AK_NAME => {
+                name_of(&p, "--ak-name", v, &mut ak_name)?;
+                have_ak = true;
             }
-            have_ak = true;
-        } else if let Some(v) = value!(b"--ek-name") {
-            if !unhex(v, &mut ek_name) {
-                error(&[CMD, b": --ek-name must be 68 hex characters"]);
-                return 2;
+            CHALLENGE_EK_NAME => {
+                name_of(&p, "--ek-name", v, &mut ek_name)?;
+                have_ek = true;
             }
-            have_ek = true;
-        } else if a == b"--trust-presented-ek" {
-            trust_presented = true;
-        } else if let Some(v) = value!(b"--output") {
-            out_path = Some(v);
-        } else if is_help(Some(a)) {
-            attest_help();
-            return 0;
-        } else {
-            error(&[CMD, b": unknown option '", a, b"'"]);
-            return 2;
+            CHALLENGE_TRUST_PRESENTED_EK => trust_presented = true,
+            CHALLENGE_OUTPUT => out_path = Some(v),
+            OPT_ARG => {
+                p.usage_arg(b"unexpected argument ");
+                return Err(EXIT_USAGE);
+            }
+            OPT_DONE => return Ok(0),
+            _ => return Err(EXIT_USAGE),
         }
-        i += 1;
     }
     let (Some(evidence_path), Some(out_path)) = (evidence_path, out_path) else {
-        error(&[CMD, b": --evidence and --output are required"]);
-        return 2;
+        return Err(usage(&p, "--evidence and --output are required"));
     };
-    let Ok(evidence) = read_evidence(evidence_path) else {
-        return 2;
-    };
+    let evidence = read_evidence(evidence_path)?;
     let pol = AttestChallengePolicy {
-        ek_ca: ek_ca.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
+        ek_ca: ek_ca.map_or(ptr::null(), CStr::as_ptr),
         ak_name: if have_ak {
             ak_name.as_ptr()
         } else {
@@ -1151,7 +1244,6 @@ fn challenge(args: &[&[u8]]) -> c_int {
         },
         trust_presented,
     };
-    let mut credential = [0u8; CREDENTIAL_LEN];
     let mut report = vec![0u8; REPORT_MAX];
     let (mut doc, mut len, mut cap): (*mut c_char, usize, usize) = (ptr::null_mut(), 0, 0);
     let ev = evidence.bytes();
@@ -1173,8 +1265,12 @@ fn challenge(args: &[&[u8]]) -> c_int {
     print(cstr(&report));
     let ret = (|| {
         if err == -EINVAL {
-            error(&[CMD, b": ", evidence_path, b" carries no endorsement key"]);
-            return 2;
+            error(&[
+                b"attest challenge: ",
+                evidence_path,
+                b" carries no endorsement key",
+            ]);
+            return EXIT_USAGE;
         }
         if err != 0 {
             print(b"verdict: fail\n");
@@ -1185,13 +1281,13 @@ fn challenge(args: &[&[u8]]) -> c_int {
         // SAFETY: the output to create and a C string.
         let e = unsafe { seal_output_create(&mut out, path.as_ptr(), 0o600) };
         if e != 0 {
-            error(&[CMD, b": open ", out_path, b": ", strerr(-e)]);
+            error(&[b"attest challenge: open ", out_path, b": ", strerr(-e)]);
             return 1;
         }
         // SAFETY: the output created above and the document's bytes.
         let e = unsafe { seal_output_commit(&mut out, doc.cast(), len) };
         if e != 0 {
-            error(&[CMD, b": write ", out_path, b": ", strerr(-e)]);
+            error(&[b"attest challenge: write ", out_path, b": ", strerr(-e)]);
             return 1;
         }
         print(
@@ -1199,83 +1295,61 @@ fn challenge(args: &[&[u8]]) -> c_int {
                 b"challenge: ",
                 out_path,
                 b"\ncredential: ",
-                &hex(&credential),
+                &hex(&credential[..]),
                 b"\n",
             ]
             .concat(),
         );
         0
     })();
-    credential.fill(0);
     // SAFETY: the document's buffer of cap bytes, or NULL.
     unsafe { xfree(doc.cast(), cap) };
-    ret
+    Ok(ret)
 }
 
-fn evidence(args: &[&[u8]]) -> c_int {
+fn evidence(args: &[*const c_char]) -> c_int {
+    let mut p = OptParser::new(c"attest", &EVIDENCE_OPTS, Some(&HELP), args, 1);
     let mut nonce = [0u8; NONCE_MAX];
     let mut nonce_len = 0;
     let mut mask = PCR_DEFAULT;
-    let (mut out_path, mut challenge_path): (Option<&[u8]>, Option<&[u8]>) = (None, None);
-    let mut i = 1;
+    let (mut out_path, mut challenge_path) = (None, None);
 
-    while i < args.len() {
-        let a = if args[i] == b"-o" {
-            &b"--output"[..]
-        } else {
-            args[i]
-        };
-        macro_rules! value {
-            ($name:expr) => {
-                match opt($name, a, args, &mut i) {
-                    Opt::No => None,
-                    Opt::Missing => {
-                        missing(b"attest", a);
-                        return 2;
-                    }
-                    Opt::Value(v) => Some(v),
-                }
-            };
-        }
-
-        if let Some(v) = value!(b"--challenge") {
-            challenge_path = Some(v);
-        } else if let Some(v) = value!(b"--nonce") {
-            match unhex_max(v, &mut nonce) {
-                Some(n) if n > 0 => nonce_len = n,
-                _ => {
-                    error(&[b"attest: --nonce must be hex of up to 64 bytes"]);
-                    return 2;
+    loop {
+        let opt = p.next();
+        let v = value(&p);
+        match opt {
+            OPT_END => break,
+            EVIDENCE_CHALLENGE => challenge_path = Some(v),
+            EVIDENCE_NONCE => match nonce_of(&p, v, &mut nonce) {
+                Ok(n) => nonce_len = n,
+                Err(code) => return code,
+            },
+            EVIDENCE_PCRS => {
+                let list = p.value().map_or(ptr::null(), CStr::as_ptr);
+                // SAFETY: a C string and room for the mask.
+                if unsafe { attest_parse_pcrs(list, &mut mask) } != 0 {
+                    return usage(&p, "--pcrs takes a comma separated list of 0..23");
                 }
             }
-        } else if let Some(v) = value!(b"--pcrs") {
-            let vc = message(&[v]);
-            // SAFETY: a C string and room for the mask.
-            if unsafe { attest_parse_pcrs(vc.as_ptr(), &mut mask) } != 0 {
-                error(&[b"attest: --pcrs takes a comma separated list of 0..23"]);
-                return 2;
+            EVIDENCE_OUTPUT => out_path = Some(v),
+            OPT_ARG => {
+                p.usage_arg(b"unexpected argument ");
+                return EXIT_USAGE;
             }
-        } else if let Some(v) = value!(b"--output") {
-            out_path = Some(v);
-        } else if is_help(Some(a)) {
-            attest_help();
-            return 0;
-        } else {
-            error(&[b"attest: unknown option '", a, b"'"]);
-            return 2;
+            OPT_DONE => return 0,
+            _ => return EXIT_USAGE,
         }
-        i += 1;
     }
     if nonce_len == 0 {
         warn(&[b"attest: no --nonce; the evidence proves no freshness"]);
     }
     // SAFETY: an all-zero challenge is an empty one.
     let mut challenge: Box<AttestChallenge> = Box::new(unsafe { core::mem::zeroed() });
-    if let Some(p) = challenge_path {
-        let pc = message(&[p]);
+    if let Some(path) = challenge_path {
+        let pc = message(&[path]);
         // SAFETY: a C string and room for the challenge.
         if unsafe { attest_challenge_read(pc.as_ptr(), &mut *challenge) } != 0 {
-            error(&[b"attest: ", p, b" is not a shirudo credential challenge"]);
+            error(&[b"attest: ", path, b" is not a shirudo credential challenge"]);
             return 2;
         }
     }
@@ -1306,7 +1380,11 @@ fn evidence(args: &[&[u8]]) -> c_int {
             return 1;
         }
         r if r == -ENODEV => {
-            error(&[b"attest: register 0x01818E00 is not bound this boot (tpm_error); run shirudo init first"]);
+            error(&[format!(
+                "attest: register 0x{NV_INDEX:08X} is not bound this boot (tpm_error); \
+                 run shirudo init first"
+            )
+            .as_bytes()]);
             return 1;
         }
         r if r == -EKEYREJECTED => {
@@ -1321,19 +1399,19 @@ fn evidence(args: &[&[u8]]) -> c_int {
     // SAFETY: the document's len bytes.
     let body = unsafe { ffi::slice(doc.cast::<u8>(), len) };
     let ret = match out_path {
-        Some(p) => {
-            let path = message(&[p]);
+        Some(path) => {
+            let c = message(&[path]);
             let mut out = SealOutput::closed();
             // SAFETY: the output to create and a C string.
-            let e = unsafe { seal_output_create(&mut out, path.as_ptr(), 0o600) };
+            let e = unsafe { seal_output_create(&mut out, c.as_ptr(), 0o600) };
             if e != 0 {
-                error(&[b"attest: open ", p, b": ", strerr(-e)]);
+                error(&[b"attest: open ", path, b": ", strerr(-e)]);
                 e
             } else {
                 // SAFETY: the output created above and the bytes.
                 let e = unsafe { seal_output_commit(&mut out, body.as_ptr().cast(), body.len()) };
                 if e != 0 {
-                    error(&[b"attest: write ", p, b": ", strerr(-e)]);
+                    error(&[b"attest: write ", path, b": ", strerr(-e)]);
                 }
                 e
             }
@@ -1349,43 +1427,44 @@ fn evidence(args: &[&[u8]]) -> c_int {
     };
     // SAFETY: the document's buffer of cap bytes.
     unsafe { xfree(doc.cast(), cap) };
-    if ret != 0 { 1 } else { 0 }
+    c_int::from(ret != 0)
 }
 
-/// `shirudo attest`.
+/// `shirudo attest` on `args`, its name first, C strings.
 ///
 /// # Safety
 ///
-/// `argv` holds `argc` C strings.
-unsafe fn attest(argc: c_int, argv: *const *const c_char) -> c_int {
-    // SAFETY: the caller's arguments.
-    let raw = unsafe { words(argc, argv) };
-    // SAFETY: each a C string.
-    let args: Vec<&[u8]> = raw.iter().map(|&a| unsafe { ffi::c_str(a) }).collect();
+/// Each of `args` is a C string.
+unsafe fn attest(args: &[*const c_char]) -> c_int {
+    if let Some(&raw) = args.get(1) {
+        // SAFETY: the caller's C string.
+        let arg = unsafe { ffi::c_str(raw) };
 
-    if args.len() >= 2 && is_help(Some(args[1])) {
-        attest_help();
-        return 0;
-    }
-    if args.len() >= 2 && is_list_cmds(Some(args[1])) {
-        // SAFETY: items whose names are C strings.
-        unsafe { print_subcmd_list(&SUBCMDS) };
-        return 0;
-    }
-    if args.len() >= 2 && args[1].first() != Some(&b'-') {
-        // SAFETY: a label, the caller's word and items with names.
-        let sub = unsafe { resolve_subcommand(c"attest".as_ptr(), raw[1], &SUBCMDS) };
-        if sub.is_null() {
-            return 2;
+        if is_help(Some(arg)) {
+            // SAFETY: the command's help, of C strings.
+            unsafe { print_help(&HELP) };
+            return 0;
         }
-        // SAFETY: the name of one of the items.
-        return match unsafe { CStr::from_ptr(sub) }.to_bytes() {
-            b"verify" => verify(&args),
-            b"challenge" => challenge(&args),
-            _ => predict(&args),
-        };
+        if is_list_cmds(Some(arg)) {
+            // SAFETY: items whose names are C strings.
+            unsafe { print_subcmd_list(&SUBCMDS) };
+            return 0;
+        }
+        if arg.first() != Some(&b'-') {
+            // SAFETY: a label, the caller's word and items with names.
+            let sub = unsafe { resolve_subcommand(c"attest".as_ptr(), raw, &SUBCMDS) };
+            if sub.is_null() {
+                return EXIT_USAGE;
+            }
+            // SAFETY: the name of one of the items.
+            return match unsafe { CStr::from_ptr(sub) }.to_bytes() {
+                b"verify" => verify(args),
+                b"challenge" => challenge(args),
+                _ => predict(args),
+            };
+        }
     }
-    evidence(&args)
+    evidence(args)
 }
 
 pub(super) use capi::cmd_attest;
@@ -1398,7 +1477,7 @@ mod capi {
     /// `argv` holds `argc` C strings.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn cmd_attest(argc: c_int, argv: *const *const c_char) -> c_int {
-        // SAFETY: the caller's arguments.
-        unsafe { super::attest(argc, argv) }
+        // SAFETY: the caller's arguments, each a C string.
+        unsafe { super::attest(super::words(argc, argv)) }
     }
 }

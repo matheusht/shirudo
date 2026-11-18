@@ -111,23 +111,6 @@ pub(crate) fn memneq_explicit(a: &[u8], b: &[u8]) -> bool {
     neq != 0
 }
 
-/// SHA-256 of the `len` bytes at `data` into `out`, or zeros and the
-/// error: sha256_calc().
-///
-/// # Safety
-///
-/// `data` holds `len` bytes and `out` has room for a digest.
-unsafe fn sha256_calc(data: *const c_void, len: usize, out: *mut u8) -> c_int {
-    // SAFETY: the caller's bytes and room.
-    let ret = unsafe { sha256_buffer(data, len, out) };
-
-    if ret != 0 {
-        // SAFETY: the caller's room for a digest.
-        unsafe { out.write_bytes(0, DIGEST_LEN) };
-    }
-    ret
-}
-
 /// SHA-256 of the `a_len` bytes at `a` and then, if any, the `b_len` at
 /// `b`, into `out`, or zeros and the error: sha256_2().
 ///
@@ -267,7 +250,7 @@ unsafe fn init_event(
     }
     // SAFETY: the listing, freed once by its size, and the caller's room.
     let ret = unsafe {
-        let ret = sha256_calc(listing.cast(), listing_len, set_digest);
+        let ret = sha256_buffer(listing.cast(), listing_len, set_digest);
 
         xfree(listing.cast(), listing_len + 1);
         ret
@@ -283,7 +266,7 @@ unsafe fn init_event(
         ptr::copy_nonoverlapping(cert_sha, fields, DIGEST_LEN);
         ptr::copy_nonoverlapping(set_digest, fields.add(DIGEST_LEN), DIGEST_LEN);
         ptr::copy_nonoverlapping(tree_root, fields.add(2 * DIGEST_LEN), DIGEST_LEN);
-        sha256_calc(tag.as_ptr().cast(), tag.len(), event)
+        sha256_buffer(tag.as_ptr().cast(), tag.len(), event)
     }
 }
 
@@ -315,7 +298,7 @@ unsafe fn upatch_event(
         off += DIGEST_LEN;
         buf[off..off + namelen].copy_from_slice(core::slice::from_raw_parts(name, namelen));
         off += namelen;
-        sha256_calc(buf.as_ptr().cast(), off, event)
+        sha256_buffer(buf.as_ptr().cast(), off, event)
     }
 }
 
@@ -335,7 +318,7 @@ unsafe fn tree_event(seq: i64, operation: *const u8, event: *mut u8) -> c_int {
     // SAFETY: the caller's digest and room.
     unsafe {
         ptr::copy_nonoverlapping(operation, buf[TAG.len() + 8..].as_mut_ptr(), DIGEST_LEN);
-        sha256_calc(buf.as_ptr().cast(), buf.len(), event)
+        sha256_buffer(buf.as_ptr().cast(), buf.len(), event)
     }
 }
 
@@ -353,7 +336,7 @@ unsafe fn fold(chain: *mut u8, event: *const u8) -> c_int {
     unsafe {
         ptr::copy_nonoverlapping(chain, cat.as_mut_ptr(), DIGEST_LEN);
         ptr::copy_nonoverlapping(event, cat[DIGEST_LEN..].as_mut_ptr(), DIGEST_LEN);
-        sha256_calc(cat.as_ptr().cast(), cat.len(), chain)
+        sha256_buffer(cat.as_ptr().cast(), cat.len(), chain)
     }
 }
 
@@ -677,7 +660,7 @@ fn bind(tpm: *mut Tpm, event: &[u8; DIGEST_LEN], info: &mut ChainInitInfo) -> c_
     let len = cstr(&info.anchor).len();
     // SAFETY: the anchor's bytes and room for its digest.
     let ret = unsafe {
-        sha256_calc(
+        sha256_buffer(
             info.anchor.as_ptr().cast(),
             len,
             info.anchor_digest.as_mut_ptr(),
@@ -1111,15 +1094,6 @@ mod capi {
     use core::ffi::{c_char, c_int, c_void};
 
     use super::{ChainInitInfo, ChainLive, ChainStatus, DIGEST_LEN, MeasuredUpatch};
-
-    /// # Safety
-    ///
-    /// `data` holds `len` bytes and `out` has room for a digest.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn sha256_calc(data: *const c_void, len: usize, out: *mut u8) -> c_int {
-        // SAFETY: the caller passes the bytes and the room.
-        unsafe { super::sha256_calc(data, len, out) }
-    }
 
     /// # Safety
     ///

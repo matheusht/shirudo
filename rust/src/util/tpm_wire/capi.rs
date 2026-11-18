@@ -17,19 +17,6 @@ use super::{
 };
 use crate::ffi;
 
-use crate::errno::{EBADMSG, EINVAL, EKEYREJECTED};
-use crate::util::crypto_openssl::sha256_buffer;
-
-unsafe extern "C" {
-    fn ecdsa_p256_verify(
-        x: *const u8,
-        y: *const u8,
-        digest: *const u8,
-        r: *const u8,
-        s: *const u8,
-    ) -> c_int;
-}
-
 /// The TCG default endorsement key policy,
 /// PolicySecret(TPM_RH_ENDORSEMENT).
 #[allow(non_upper_case_globals)]
@@ -462,44 +449,29 @@ pub unsafe extern "C" fn tpm_attest_parse(
 
 /// # Safety
 ///
-/// `a` points to a parsed attestation, `ak_name` to a TPM name,
-/// and `is` to a writable boolean.
+/// `a` is an attestation, `ak_name` holds a name and `is` is room for
+/// whether it signed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tpm_attest_signer(
     a: *const TpmAttest,
     ak_name: *const u8,
     is: *mut bool,
 ) -> c_int {
-    // SAFETY: the C caller supplies the attestation, name and result.
+    // SAFETY: the caller passes the attestation, the name and the room.
     unsafe {
-        let name = copy::<NAME_LEN>(ak_name);
-        let mut qualified = [0u8; NAME_LEN];
-        let ret = policy::qualified_name(0x4000_000B, &name, &mut qualified);
-
-        if ret != 0 {
-            return ret;
-        }
-        let attest = &*a;
-        let mut same = attest.signer_len == NAME_LEN;
-
-        if same {
-            let mut diff = 0u8;
-
-            for (a, b) in attest.signer.iter().zip(qualified.iter()) {
-                diff |= a ^ b;
-                core::hint::black_box(diff);
+        match super::attest_signer(&*a, &copy::<NAME_LEN>(ak_name)) {
+            Ok(signed) => {
+                is.write(signed);
+                0
             }
-            same = diff == 0;
+            Err(err) => err,
         }
-        *is = same;
-        0
     }
 }
 
 /// # Safety
 ///
-/// `attest` and `sig` point to their stated lengths, and `x` and
-/// `y` each point to 32 bytes of the attestation key.
+/// `attest` holds `len` bytes, `sig` `sig_len`, and `x` and `y` 32 each.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tpm_attest_verify(
     attest: *const u8,
@@ -509,20 +481,13 @@ pub unsafe extern "C" fn tpm_attest_verify(
     x: *const u8,
     y: *const u8,
 ) -> c_int {
-    // SAFETY: the C caller supplies the attestation, signature and key.
+    // SAFETY: the caller passes the bytes and the point.
     unsafe {
-        let mut r = [0u8; 32];
-        let mut s = [0u8; 32];
-
-        if parse::ecdsa_signature_parse(ffi::slice(sig, sig_len), &mut r, &mut s) != 0 {
-            return -EBADMSG;
-        }
-        let mut digest = [0u8; DIGEST_LEN];
-        let mut ret = sha256_buffer(attest.cast(), len, digest.as_mut_ptr());
-
-        if ret == 0 {
-            ret = ecdsa_p256_verify(x, y, digest.as_ptr(), r.as_ptr(), s.as_ptr());
-        }
-        if ret == -EINVAL { -EKEYREJECTED } else { ret }
+        super::attest_verify(
+            ffi::slice(attest, len),
+            ffi::slice(sig, sig_len),
+            &copy::<32>(x),
+            &copy::<32>(y),
+        )
     }
 }
