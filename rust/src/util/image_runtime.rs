@@ -30,8 +30,8 @@ use crate::errno::{
 use crate::heap::xfree;
 use crate::sys::identity::{DEVICE_CONFIG, DEVICE_RUNTIME, DeviceAuthority, Identity};
 use crate::sys::libc::{
-    O_DIRECTORY, O_NOFOLLOW, O_PATH, Statvfs, Timespec, explicit_bzero, fsetxattr, fstatvfs,
-    fwrite, ioctl, nanosleep, stdout, umount2,
+    O_DIRECTORY, O_NOFOLLOW, O_PATH, Statvfs, explicit_bzero, fsetxattr, fstatvfs, fwrite, ioctl,
+    stdout, umount2,
 };
 use crate::text::cstr;
 use crate::util::bpf_sys::{bpf_map_get_next_key, bpf_map_lookup_elem, bpf_obj_get};
@@ -734,13 +734,7 @@ fn retry_busy(mut remove: impl FnMut() -> c_int) -> c_int {
             return ret;
         }
         if attempt < 99 {
-            let pause = Timespec {
-                tv_sec: 0,
-                tv_nsec: 10_000_000,
-            };
-            // SAFETY: the pause, and no room for what is left of it: an
-            // interrupted pause only retries sooner.
-            unsafe { nanosleep(&pause, ptr::null_mut()) };
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
     ret

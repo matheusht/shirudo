@@ -12,10 +12,10 @@ use crate::ffi;
 use crate::heap::{xfree, xmalloc};
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
-    AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, File, LOCK_EX, O_CLOEXEC, O_DIRECTORY,
-    O_NOFOLLOW, O_PATH, O_RDONLY, PATH_MAX, S_IFDIR, S_IFMT, S_IFREG, S_ISVTX,
-    STATX_ATTR_MOUNT_ROOT, STATX_BASIC_STATS, Statfs, Statx, close, errno, flock, fstatfs, fsync,
-    ftruncate, geteuid, getline, open, pread, realpath, set_errno, statx, strerror, syscall, write,
+    AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW, File, LOCK_EX, O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW, O_PATH,
+    O_RDONLY, PATH_MAX, S_IFDIR, S_IFMT, S_IFREG, S_ISVTX, STATX_ATTR_MOUNT_ROOT,
+    STATX_BASIC_STATS, Statfs, Statx, close, errno, flock, fstatfs, fsync, ftruncate, geteuid,
+    getline, open, pread, set_errno, statx, strerror, syscall, write,
 };
 use crate::util::seal::seal_open_read;
 
@@ -107,6 +107,24 @@ fn last_line_end(fd: c_int, size: i64, end: &mut i64) -> c_int {
 }
 
 /// The status of the open `fd`, as fstat() gave it: 0 or -errno.
+/// The names of the directory at `dir` that `keep` keeps, in the order
+/// alphasort() gives them in the C locale shirudo runs in: bytewise.
+/// "." and ".." are no entry. -errno when the directory cannot be read.
+pub(crate) fn dir_names(dir: &[u8], keep: impl Fn(&[u8]) -> bool) -> Result<Vec<Vec<u8>>, c_int> {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    let errno = |e: std::io::Error| -e.raw_os_error().unwrap_or(crate::errno::EIO);
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(std::ffi::OsStr::from_bytes(dir)).map_err(errno)? {
+        let name = entry.map_err(errno)?.file_name().into_vec();
+        if keep(&name) {
+            names.push(name);
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
 pub(crate) fn stat_fd(fd: c_int, st: &mut Statx) -> c_int {
     // SAFETY: the caller's fd, an empty path, and room for its status.
     if unsafe { statx(fd, c"".as_ptr(), AT_EMPTY_PATH, STATX_BASIC_STATS, st) } != 0 {
@@ -400,7 +418,6 @@ fn trusted_owner(uid: u32) -> bool {
 ///
 /// `path` is a C string.
 pub(crate) unsafe fn check_trusted(fd: c_int, path: *const c_char, secret: bool) -> c_int {
-    let mut real = [0u8; PATH_MAX];
     let mut st = Statx::zeroed();
 
     // SAFETY: the caller's C string.
@@ -430,51 +447,47 @@ pub(crate) unsafe fn check_trusted(fd: c_int, path: *const c_char, secret: bool)
         };
         return -EPERM;
     }
-    // SAFETY: the caller's C string, and room for PATH_MAX bytes.
-    if unsafe { realpath(path, real.as_mut_ptr().cast()) }.is_null() {
-        return -errno();
-    }
-    loop {
-        let end = real.iter().position(|&c| c == 0).unwrap_or(real.len());
-        let slash = real[..end].iter().rposition(|&c| c == b'/').unwrap_or(0);
+    use std::ffi::{CString, OsStr};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
 
-        if slash == 0 {
-            real[1] = 0;
-        } else {
-            real[slash] = 0;
-        }
-        // SAFETY: the directory's C string, and room for its status.
-        if unsafe {
-            statx(
-                AT_FDCWD,
-                real.as_ptr().cast(),
-                0,
-                STATX_BASIC_STATS,
-                &mut st,
-            )
-        } != 0
+    // The file's directories up to /, as realpath() resolves its path
+    // and as statx() of each, following links, finds them.
+    // SAFETY: the caller's C string.
+    let given = unsafe { CStr::from_ptr(path) };
+    let errno = |e: std::io::Error| -e.raw_os_error().unwrap_or(crate::errno::EIO);
+    let real = match std::fs::canonicalize(OsStr::from_bytes(given.to_bytes())) {
+        Ok(real) => real,
+        Err(e) => return errno(e),
+    };
+    // realpath()'s bound, which canonicalize() does not keep.
+    if real.as_os_str().len() >= PATH_MAX {
+        return -crate::errno::ENAMETOOLONG;
+    }
+    for dir in real.ancestors().skip(1) {
+        let st = match std::fs::metadata(dir) {
+            Ok(st) => st,
+            Err(e) => return errno(e),
+        };
+        let mode = st.mode();
+        let sticky_root = mode & u32::from(S_ISVTX) != 0 && st.uid() == 0;
+        if mode & u32::from(S_IFMT) != u32::from(S_IFDIR)
+            || !trusted_owner(st.uid())
+            || (mode & 0o22 != 0 && !sticky_root)
         {
-            return -errno();
-        }
-        if st.stx_mode & S_IFMT != S_IFDIR
-            || !trusted_owner(st.stx_uid)
-            || (st.stx_mode & 0o22 != 0 && !(st.stx_mode & S_ISVTX != 0 && st.stx_uid == 0))
-        {
+            let dir = CString::new(dir.as_os_str().as_bytes()).unwrap_or_default();
             // SAFETY: the C's format and its arguments.
             unsafe {
                 crate::log::log_c!(crate::log::err,
                     c"%s: directory %s, owner %u, mode %04o: refusing a file another user could replace"
                         .as_ptr(),
                     path,
-                    real.as_ptr(),
-                    st.stx_uid,
-                    u32::from(st.stx_mode & 0o7777),
+                    dir.as_ptr(),
+                    st.uid(),
+                    mode & 0o7777,
                 )
             };
             return -EPERM;
-        }
-        if slash == 0 {
-            break;
         }
     }
     0

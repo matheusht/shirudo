@@ -11,7 +11,7 @@ use core::ptr;
 
 use crate::errno::{E2BIG, EACCES, EEXIST, EIO, EKEYREJECTED, ENODEV, ENOENT, ENOMEM, EPROTO};
 use crate::heap::{xfree, xmalloc};
-use crate::sys::libc::{qsort, strcmp, strerror, strlen, strnlen};
+use crate::sys::libc::{strerror, strlen, strnlen};
 use crate::sys::tss2::NV_WRITTEN;
 use crate::text::{cstr, strsprintf};
 use crate::util::config::{self, Scrubbed};
@@ -157,21 +157,6 @@ pub(crate) unsafe fn sha256_2(
     ret
 }
 
-/// The order qsort() gives the set: strcmp() of the names.
-///
-/// # Safety
-///
-/// `a` and `b` are members of a set, whose names end in a NUL.
-unsafe extern "C" fn member_cmp(a: *const c_void, b: *const c_void) -> c_int {
-    // SAFETY: qsort() hands two members of the caller's set.
-    unsafe {
-        strcmp(
-            (&raw const (*a.cast::<MeasuredUpatch>()).name).cast(),
-            (&raw const (*b.cast::<MeasuredUpatch>()).name).cast(),
-        )
-    }
-}
-
 /// A member's payload digest in hex and its name, each up to the NUL
 /// strlen() finds, as the C's "%s" took them.
 ///
@@ -214,8 +199,10 @@ unsafe fn init_event(
     let mut off = 0;
 
     if n > 1 {
-        // SAFETY: the caller's n members, sorted in place.
-        unsafe { qsort(set.cast(), n, size_of::<MeasuredUpatch>(), Some(member_cmp)) };
+        // SAFETY: the caller's n members.
+        let members = unsafe { core::slice::from_raw_parts_mut(set, n) };
+        // In the order strcmp() gives their names, which no two share.
+        members.sort_unstable_by(|a, b| cstr(&a.name).cmp(cstr(&b.name)));
     }
     for i in 0..n {
         // SAFETY: a member of the caller's set.

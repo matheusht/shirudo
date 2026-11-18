@@ -10,8 +10,8 @@ use core::mem::MaybeUninit;
 use core::ptr;
 
 use crate::errno::{E2BIG, EEXIST, EINVAL, ENAMETOOLONG, ENOENT, ENOMEM, ENOSPC};
-use crate::heap::{libc_free, xcalloc, xfree, xmalloc};
-use crate::sys::libc::{Dirent, PATH_MAX, alphasort, errno, getxattr, scandir, strcmp, strnlen};
+use crate::heap::{xcalloc, xfree, xmalloc};
+use crate::sys::libc::{PATH_MAX, getxattr, strcmp, strnlen};
 use crate::text::{at, strscpy, strsprintf};
 use crate::util::chain::MeasuredUpatch;
 use crate::util::eventlog::{UPATCH_INIT, UPATCH_UNLOAD, eventlog_upatches};
@@ -19,7 +19,7 @@ use crate::util::hex::hex_encode;
 use crate::util::seal::seal_owns;
 use crate::util::upatch::{
     NAME_MAX, PAYLOAD_HASH_LEN, Upatch, upatch_close, upatch_header_name, upatch_member_valid,
-    upatch_open, upatch_select,
+    upatch_open,
 };
 
 /// `MEASURED_MAX`: the most upatches a set holds.
@@ -330,31 +330,6 @@ pub(crate) fn name_from_bpffs(out: &mut [u8], name: &[u8]) -> c_int {
     0
 }
 
-/// The `n` entries scandir() gave, and the list.
-///
-/// # Safety
-///
-/// `names` is the list of `n` entries scandir() allocated.
-unsafe fn free_names(names: *mut *mut Dirent, n: c_int) {
-    // SAFETY: the caller's list, each entry and the list freed once.
-    unsafe {
-        for i in 0..n.max(0) as usize {
-            libc_free((*names.add(i)).cast());
-        }
-        libc_free(names.cast());
-    }
-}
-
-/// The name of a directory entry, up to its NUL.
-///
-/// # Safety
-///
-/// `e` is an entry scandir() gave.
-unsafe fn entry_name<'a>(e: *const Dirent) -> &'a [u8] {
-    // SAFETY: the entry's name, a C string.
-    unsafe { CStr::from_ptr((&raw const (*e).d_name).cast()) }.to_bytes()
-}
-
 /// The upatches pinned in the private bpffs that the set does not hold
 /// with the payload their pin records, each to `cb`: how many, or the
 /// first non-zero `cb` returned, or -errno.
@@ -363,32 +338,20 @@ unsafe fn entry_name<'a>(e: *const Dirent) -> &'a [u8] {
 ///
 /// `s` is a set, and `cb` takes `ctx`.
 unsafe fn unmeasured_pins(s: *const MeasuredSet, cb: Option<PinFn>, ctx: *mut c_void) -> c_int {
-    let mut pins: *mut *mut Dirent = ptr::null_mut();
     let (mut ret, mut unmeasured) = (0, 0);
 
-    // SAFETY: a C string, where the list goes, and a comparison.
-    let n = unsafe {
-        scandir(
-            BPFFS_UPATCHES_DIR.as_ptr(),
-            &mut pins,
-            None,
-            Some(alphasort),
-        )
+    let pins = match crate::util::io::dir_names(BPFFS_UPATCHES_DIR.to_bytes(), |_| true) {
+        Ok(pins) => pins,
+        Err(err) if err == -ENOENT => return 0,
+        Err(err) => return err,
     };
-    if n < 0 {
-        return if errno() == ENOENT { 0 } else { -errno() };
-    }
-    for i in 0..n as usize {
+    for pin in &pins {
         let mut payload_hex = [0u8; 2 * PAYLOAD_HASH_LEN + 1];
         let mut payload = [0u8; PAYLOAD_HASH_LEN];
         let mut name = [0u8; NAME_MAX + 1];
         let mut dir = [0u8; PATH_MAX];
-        // SAFETY: an entry of the list.
-        let pin = unsafe { entry_name(*pins.add(i)) };
 
-        if pin == b"."
-            || pin == b".."
-            || name_from_bpffs(&mut name, pin) != 0
+        if name_from_bpffs(&mut name, pin) != 0
             || strsprintf(&mut dir, &[BPFFS_UPATCHES_DIR.to_bytes(), b"/", pin]).is_err()
         {
             continue;
@@ -425,8 +388,6 @@ unsafe fn unmeasured_pins(s: *const MeasuredSet, cb: Option<PinFn>, ctx: *mut c_
             }
         }
     }
-    // SAFETY: the list scandir() gave.
-    unsafe { free_names(pins, n) };
     if ret != 0 { ret } else { unmeasured }
 }
 
@@ -442,29 +403,21 @@ unsafe fn unmeasured_archives(
     cb: Option<ArchiveFn>,
     ctx: *mut c_void,
 ) -> c_int {
-    let mut names: *mut *mut Dirent = ptr::null_mut();
     let (mut ret, mut unmeasured) = (0, 0);
 
-    // SAFETY: a C string, where the list goes, a filter and a comparison.
-    let n = unsafe {
-        scandir(
-            UPATCHES_DIR.as_ptr(),
-            &mut names,
-            Some(upatch_select),
-            Some(alphasort),
-        )
+    let names = match crate::util::io::dir_names(UPATCHES_DIR.to_bytes(), |n| {
+        crate::text::name_has_suffix(n, b".upatch")
+    }) {
+        Ok(names) => names,
+        Err(err) if err == -ENOENT => return 0,
+        Err(err) => return err,
     };
-    if n < 0 {
-        return if errno() == ENOENT { 0 } else { -errno() };
-    }
-    for i in 0..n as usize {
+    for archive in &names {
         // SAFETY: all of whose bits zeroed are a member, which
         // upatch_of() fills.
         let mut m: MeasuredUpatch = unsafe { core::mem::zeroed() };
         let mut path = [0u8; PATH_MAX];
         let mut u = MaybeUninit::<Upatch>::uninit();
-        // SAFETY: an entry of the list.
-        let archive = unsafe { entry_name(*names.add(i)) };
 
         if strsprintf(&mut path, &[UPATCHES_DIR.to_bytes(), b"/", archive]).is_err() {
             continue;
@@ -497,8 +450,6 @@ unsafe fn unmeasured_archives(
             }
         }
     }
-    // SAFETY: the list scandir() gave.
-    unsafe { free_names(names, n) };
     if ret != 0 { ret } else { unmeasured }
 }
 

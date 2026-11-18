@@ -25,7 +25,7 @@ use crate::heap::{xfree, xmalloc};
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     AT_FDCWD, F_OK, O_CLOEXEC, O_RDONLY, PATH_MAX, STATX_SIZE, Statx, access, close, env, errno,
-    open, read, statx, strerror, time, unlink,
+    open, read, statx, strerror, unlink,
 };
 use crate::text::{cstr, strsprintf};
 use crate::util::crypto_openssl::sha256_into;
@@ -483,8 +483,7 @@ fn adopt_pending_locked() -> c_int {
 
 /// The time now as ISO-8601 UTC into `out`.
 fn timestamp(out: &mut [u8]) {
-    // SAFETY: time() with no pointer to fill.
-    iso8601(unsafe { time(core::ptr::null_mut()) }, out);
+    iso8601(crate::util::timefmt::now(), out);
 }
 
 /// This boot's ID from /proc, without its newline, or empty.

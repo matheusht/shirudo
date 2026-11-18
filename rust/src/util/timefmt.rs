@@ -87,3 +87,10 @@ mod capi {
         super::iso8601(t, unsafe { ffi::bytes_mut(out.cast(), cap) })
     }
 }
+
+/// The seconds since the epoch now, as time() gives them.
+pub(crate) fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}

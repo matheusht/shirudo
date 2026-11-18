@@ -16,7 +16,7 @@ use crate::heap::{libc_free, xcalloc, xfree, xmalloc};
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     AT_EMPTY_PATH, Dirent, F_OK, O_CLOEXEC, O_DIRECTORY, O_RDONLY, PATH_MAX, S_IFMT, S_IFREG,
-    STATX_SIZE, STATX_TYPE, Statx, access, alphasort, close, errno, faccessat, open, read, scandir,
+    STATX_SIZE, STATX_TYPE, Statx, access, alphasort, close, errno, faccessat, open, read,
     scandirat, statx, strerror, unlink,
 };
 use crate::text::capi::name_has_suffix;
@@ -744,16 +744,10 @@ unsafe fn names_free(names: *mut *mut Dirent, n: c_int) {
 ///
 /// `dir` is a C string.
 unsafe fn count_der(dir: *const c_char) -> usize {
-    let mut names: *mut *mut Dirent = ptr::null_mut();
-    // SAFETY: the caller's C string, room for the names, and a filter.
-    let n = unsafe { scandir(dir, &mut names, Some(select_der), None) };
-
-    if n < 0 {
-        return 0;
-    }
-    // SAFETY: the names scandir() gave.
-    unsafe { names_free(names, n) };
-    n as usize
+    // SAFETY: the caller's C string.
+    let dir = unsafe { ffi::c_str(dir) };
+    crate::util::io::dir_names(dir, |n| crate::text::name_has_suffix(n, b".der"))
+        .map_or(0, |n| n.len())
 }
 
 /// How many certificates the directory open as `dirfd` holds.
@@ -904,33 +898,22 @@ unsafe fn scan_trusted(
     n_cand: &mut usize,
 ) -> c_int {
     let mut dir = [0u8; PATH_MAX];
-    let mut names: *mut *mut Dirent = ptr::null_mut();
     let mut ret = 0;
 
     if strsprintf(&mut dir, &[keys_dir, b"/trusted"]).is_err() {
         return -ENAMETOOLONG;
     }
-    // SAFETY: the path, room for the names, a filter and a sort.
-    let n = unsafe {
-        scandir(
-            dir.as_ptr().cast(),
-            &mut names,
-            Some(select_der),
-            Some(alphasort),
-        )
+    let names = match crate::util::io::dir_names(cstr(&dir), |n| {
+        crate::text::name_has_suffix(n, b".der")
+    }) {
+        Ok(names) => names,
+        Err(err) if err == -ENOENT => return 0,
+        Err(err) => return err,
     };
-
-    if n < 0 {
-        let err = errno();
-
-        return if err == ENOENT { 0 } else { -err };
-    }
-    for i in 0..n as usize {
+    for name in &names {
         if ret != 0 {
             break;
         }
-        // SAFETY: an entry scandir() gave, its name a C string.
-        let name = unsafe { ffi::c_str((**names.add(i)).d_name.as_ptr().cast()) };
         let c = match next_slot(cand, *n_cand) {
             Ok(c) => c,
             Err(e) => {
@@ -972,8 +955,6 @@ unsafe fn scan_trusted(
         }
         *n_cand += 1;
     }
-    // SAFETY: the names scandir() gave.
-    unsafe { names_free(names, n) };
     ret
 }
 

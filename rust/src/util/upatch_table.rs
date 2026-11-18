@@ -7,7 +7,7 @@
 use core::ffi::{c_char, c_long};
 
 use crate::sys::libc::Zeroed;
-use crate::sys::libc::{Tm, printf, strptime, time, timegm};
+use crate::sys::libc::{Tm, printf, strptime, timegm};
 use crate::util::json::JsonEmit;
 use crate::util::timefmt::format_duration;
 
@@ -52,8 +52,9 @@ pub(crate) unsafe fn age_sec(ts: *const c_char) -> i64 {
     if unsafe { strptime(ts, c"%Y-%m-%dT%H:%M:%SZ".as_ptr(), &mut tm) }.is_null() {
         return -1;
     }
-    // SAFETY: a call that takes no pointer, and the struct tm filled.
-    let (now, then) = unsafe { (time(core::ptr::null_mut()), timegm(&mut tm)) };
+    // SAFETY: the struct tm filled.
+    let then = unsafe { timegm(&mut tm) };
+    let now = crate::util::timefmt::now();
 
     now.wrapping_sub(then)
 }

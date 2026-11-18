@@ -19,8 +19,8 @@ use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     AT_EMPTY_PATH, EOF, File, LOCK_EX, LOCK_NB, O_APPEND, O_CLOEXEC, O_CREAT, O_DIRECTORY, O_EXCL,
     O_NOFOLLOW, O_NONBLOCK, O_RDONLY, O_RDWR, O_WRONLY, S_IFMT, S_IFREG, STATX_BASIC_STATS, Statx,
-    Timespec, close, errno, fclose, fdopen, ferror, fgetc, flock, fsync, ftello, ftruncate,
-    geteuid, nanosleep, open, openat, read, renameat, statx, strerror, unlinkat,
+    close, errno, fclose, fdopen, ferror, fgetc, flock, fsync, ftello, ftruncate, geteuid, open,
+    openat, read, renameat, statx, strerror, unlinkat,
 };
 use crate::text::cstr;
 use crate::util::chain::chain_fold;
@@ -370,10 +370,7 @@ fn regular_file(fd: c_int) -> c_int {
 /// The journal's lock taken, waiting up to `wait_ms` for another
 /// command's, as the keepalive and map-export timers take turns.
 fn lock_wait(fd: c_int, wait_ms: u32) -> c_int {
-    let pause = Timespec {
-        tv_sec: 0,
-        tv_nsec: 100 * 1000 * 1000,
-    };
+    let pause = std::time::Duration::from_millis(100);
     let mut told = false;
     let mut waited: u32 = 0;
 
@@ -397,8 +394,7 @@ fn lock_wait(fd: c_int, wait_ms: u32) -> c_int {
             };
             told = true;
         }
-        // SAFETY: a pause, and no room for what is left of it.
-        unsafe { nanosleep(&pause, ptr::null_mut()) };
+        std::thread::sleep(pause);
         waited = waited.wrapping_add(100);
     }
 }

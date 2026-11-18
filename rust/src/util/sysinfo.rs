@@ -15,7 +15,7 @@ use crate::heap::{xfree, xreallocarray, xstrdup, xstrfree};
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     O_CLOEXEC, O_RDONLY, SC_NPROCESSORS_ONLN, Statvfs, Utsname, close, fclose, fgets, fopen,
-    gethostname, open, qsort, read, sscanf, statvfs, strcmp, sysconf, uname,
+    gethostname, open, read, sscanf, statvfs, sysconf, uname,
 };
 use crate::text::{cstr, digits, parse_u64, strscpy, strsprintf};
 use crate::util::io::read_file;
@@ -357,14 +357,10 @@ unsafe fn entries_free(entries: *mut ConfigEntry, n: usize, cap: usize) {
     unsafe { xfree(entries.cast(), cap * size_of::<ConfigEntry>()) };
 }
 
-unsafe extern "C" fn entry_cmp(a: *const c_void, b: *const c_void) -> c_int {
-    // SAFETY: qsort() passes two of the entries, each key a C string.
-    unsafe {
-        strcmp(
-            (*a.cast::<ConfigEntry>()).key,
-            (*b.cast::<ConfigEntry>()).key,
-        )
-    }
+/// An entry's key.
+fn entry_key(e: &ConfigEntry) -> &CStr {
+    // SAFETY: every entry filled holds its key, a C string.
+    unsafe { CStr::from_ptr(e.key) }
 }
 
 /// One `CONFIG_` option of a configuration line in `line`, its key and
@@ -498,8 +494,11 @@ unsafe fn kernel_config_foreach(
     // SAFETY: the stream fopen() gave, closed once.
     unsafe { fclose(f) };
     if n != 0 {
-        // SAFETY: n entries, their size, and an order over their keys.
-        unsafe { qsort(entries.cast(), n, size_of::<ConfigEntry>(), Some(entry_cmp)) };
+        // SAFETY: the n entries filled above.
+        let filled = unsafe { core::slice::from_raw_parts_mut(entries, n) };
+        // As qsort() with strcmp() of the keys ordered them, which no two
+        // entries share.
+        filled.sort_unstable_by(|a, b| entry_key(a).cmp(entry_key(b)));
     }
     for i in 0..n {
         // SAFETY: entry i, and the caller's callback and context.

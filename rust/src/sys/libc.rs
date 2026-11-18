@@ -13,12 +13,11 @@ pub use libc::{
     fopen, fprintf, fputc, fputs, free, fsetxattr, fstatfs, fstatvfs, fsync, ftello, ftruncate,
     fwrite, getenv, geteuid, gethostname, getline, getrandom, getsockopt, getxattr, gmtime_r,
     if_indextoname, ioctl, lgetxattr, link, lseek, lsetxattr, memfd_create, mkdirat, mkdtemp,
-    mknod, mkstemp, mkstemps, mlockall, mount, nanosleep, open, openat, opendir, openlog,
-    personality, posix_memalign, prctl, pread, printf, putchar, qsort, read, readdir, realpath,
-    recvmsg, rename, renameat, rmdir, sendto, setenv, setitimer, setrlimit, setsockopt, setvbuf,
-    setxattr, snprintf, socket, sscanf, statfs, statvfs, statx, strcasecmp, strcmp, strerror,
-    strftime, strlen, strncasecmp, strnlen, strptime, syscall, sysconf, syslog, time, timegm,
-    umount2, uname, unlink, unlinkat, unsetenv, write,
+    mknod, mkstemp, mkstemps, mlockall, mount, open, openat, opendir, openlog, personality,
+    posix_memalign, prctl, pread, printf, putchar, read, readdir, recvmsg, rename, renameat, rmdir,
+    sendto, setenv, setitimer, setrlimit, setsockopt, setvbuf, setxattr, snprintf, socket, sscanf,
+    statfs, statvfs, statx, strcasecmp, strcmp, strerror, strftime, strlen, strncasecmp, strnlen,
+    strptime, syscall, sysconf, syslog, timegm, umount2, uname, unlink, unlinkat, unsetenv, write,
 };
 pub use libc::{
     AF_INET, AF_NETLINK, AF_UNIX, AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, EOF,
@@ -42,7 +41,6 @@ pub type SockaddrNl = libc::sockaddr_nl;
 pub type Statfs = libc::statfs;
 pub type Statvfs = libc::statvfs;
 pub type Statx = libc::statx;
-pub type Timespec = libc::timespec;
 pub type Timeval = libc::timeval;
 pub type Tm = libc::tm;
 pub type Utsname = libc::utsname;
