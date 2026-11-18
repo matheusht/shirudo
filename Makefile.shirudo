@@ -932,11 +932,11 @@ testing/helper/test-nv-cphash: $(HELPER_MAIN_DIR)/test-nv-cphash.o \
 	@printf '  LD      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(REGISTER_LIBS) -Wl,--wrap=prctl
 
-testing/helper/test-tpm-session: testing/helper/test-tpm-session.c \
-		  $(TPM_CLIENT_SRCS) $(REGISTER_OBJS) $(RUST_LIB)
-	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) -o $@ $(filter-out %.h,$^) $(REGISTER_LIBS) \
-		-Wl,--wrap=enforcement_active,--wrap=syscall
+testing/helper/test-tpm-session: $(HELPER_MAIN_DIR)/test-tpm-session.o \
+		$(VERSION_OBJ) $(LIBBPF_A) $(RUST_HELPER_LIB)
+	@printf '  LD      $@\n'
+	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(REGISTER_LIBS) \
+		-Wl,--wrap=prctl,--wrap=syscall
 
 testing/helper/test-config: $(HELPER_MAIN_DIR)/test-config.o \
 		$(RUST_HELPER_LIB)

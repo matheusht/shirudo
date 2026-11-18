@@ -34,6 +34,7 @@ mod seal;
 mod seal_output;
 mod tpm_client;
 mod tpm_preopened;
+mod tpm_session;
 mod tpm_wire;
 mod upatch_decode;
 mod upatch_map_types;

@@ -13,7 +13,7 @@ use crate::util::bpf_info::{Info, MAP_INFO_SIZE, MAP_VALUE_SIZE};
 use crate::util::bpf_sys::{bpf_map_lookup_elem, bpf_obj_get};
 
 /// IDENTITY_PIN of util/paths.h.
-const IDENTITY_PIN: &CStr = c"/run/shirudo/bpffs/identity";
+pub(crate) const IDENTITY_PIN: &CStr = c"/run/shirudo/bpffs/identity";
 /// PR_GET_ENFORCEMENT and PR_ENFORCING_ERR of include/shirudo/enforcement.h.
 const PR_GET_ENFORCEMENT: c_int = 0x5352_0001;
 const PR_ENFORCING_ERR: c_int = 1002;
