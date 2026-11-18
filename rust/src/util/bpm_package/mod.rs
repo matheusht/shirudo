@@ -77,3 +77,6 @@ impl IndexEntry {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

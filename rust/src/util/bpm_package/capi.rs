@@ -6,8 +6,8 @@
 use core::ffi::{CStr, c_char, c_int, c_void};
 
 use super::archive::{self, Found};
-use super::publication::{self};
-use super::{IndexEntry, PackageInfo, UpatchMember, index, info, semver, tar};
+use super::publication;
+use super::{IndexEntry, PackageInfo, index, info, semver};
 use crate::ffi;
 
 type MemberFn = unsafe extern "C" fn(ctx: *mut c_void, member: *const c_char, ty: c_char) -> c_int;
@@ -50,47 +50,9 @@ pub unsafe extern "C" fn bpm_semver_compare(a: *const c_char, b: *const c_char) 
 /// # Safety
 ///
 /// `s` is NULL or a C string.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn bpm_semver_valid(s: *const c_char) -> bool {
     // SAFETY: the caller passes NULL or a C string.
     unsafe { opt_bytes(s) }.is_some_and(semver::valid)
-}
-
-/// # Safety
-///
-/// `name` is NULL or a C string.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn bpm_archive_rel_ok(name: *const c_char) -> bool {
-    // SAFETY: the caller passes NULL or a C string.
-    unsafe { opt_bytes(name) }.is_some_and(tar::archive_rel_ok)
-}
-
-/// # Safety
-///
-/// `name` holds `len` bytes.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn bpm_upatch_member(name: *const c_char, len: usize) -> UpatchMember {
-    // SAFETY: the caller passes len bytes at name.
-    tar::upatch_member(unsafe { ffi::slice(name.cast(), len) })
-}
-
-/// # Safety
-///
-/// `name` holds `len` bytes and `out` has room for `cap`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn bpm_upatch_pair(
-    name: *const c_char,
-    len: usize,
-    out: *mut c_char,
-    cap: usize,
-) -> c_int {
-    // SAFETY: the caller passes len bytes at name and the room at out.
-    unsafe {
-        tar::upatch_pair(
-            ffi::slice(name.cast(), len),
-            ffi::bytes_mut(out.cast(), cap),
-        )
-    }
 }
 
 /// # Safety
@@ -268,4 +230,3 @@ pub unsafe extern "C" fn bpm_pkg_read_member_fd(
         )
     }
 }
-

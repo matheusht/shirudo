@@ -86,21 +86,12 @@ pub unsafe extern "C" fn eventlog_boot_lines(cb: Option<LineFn>, ctx: *mut c_voi
 /// # Safety
 ///
 /// `operation_digest` is a C string.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn eventlog_tree_op_measured(
     seq: i64,
     operation_digest: *const c_char,
 ) -> c_int {
     // SAFETY: the caller passes a C string.
     records::tree_op_measured(seq, unsafe { ffi::c_str(operation_digest) })
-}
-
-/// # Safety
-///
-/// `cb` takes `ctx`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn eventlog_boot_upatches(cb: Option<UpatchFn>, ctx: *mut c_void) -> c_int {
-    records::upatches(false, cb, ctx)
 }
 
 /// # Safety
@@ -191,7 +182,6 @@ pub unsafe extern "C" fn eventlog_boot_id(out: *mut c_char, cap: usize) {
 /// # Safety
 ///
 /// `e` is an emitter, `ty` a C string and `digest` holds 32 bytes.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn eventlog_record_open(
     e: *mut JsonEmit,
     ty: *const c_char,

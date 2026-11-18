@@ -53,11 +53,27 @@ fn path_from(var: &CStr, default: &'static CStr) -> &'static CStr {
     env(var).filter(|v| !v.is_empty()).unwrap_or(default)
 }
 
+#[cfg(test)]
+std::thread_local! {
+    /// A test's own log and pending record, in place of the environment's,
+    /// which every thread of the test binary shares.
+    static TEST_PATHS: core::cell::Cell<Option<(&'static CStr, &'static CStr)>> =
+        const { core::cell::Cell::new(None) };
+}
+
 fn path() -> &'static CStr {
+    #[cfg(test)]
+    if let Some((log, _)) = TEST_PATHS.get() {
+        return log;
+    }
     path_from(c"SHIRUDO_EVENTLOG_PATH", DEFAULT_PATH)
 }
 
 fn pending_path() -> &'static CStr {
+    #[cfg(test)]
+    if let Some((_, pending)) = TEST_PATHS.get() {
+        return pending;
+    }
     path_from(c"SHIRUDO_EVENTLOG_PENDING_PATH", DEFAULT_PENDING_PATH)
 }
 
@@ -527,3 +543,6 @@ fn record_open(e: &mut JsonEmit, ty: &[u8], digest: &[u8; 32]) {
     e.kv_string(b"type", ty);
     e.kv_string(b"boot_id", cstr(&boot_id));
 }
+
+#[cfg(test)]
+mod tests;
