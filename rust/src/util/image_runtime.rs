@@ -173,8 +173,7 @@ fn journal_open() -> bool {
 fn say(level: fn(&[u8]), text: String) {
     let text = CString::new(text).unwrap_or_default();
 
-    // SAFETY: a "%s" format with a C string.
-    unsafe { crate::log::log_c!(level, c"%s".as_ptr(), text.as_ptr()) };
+    level(text.to_bytes());
 }
 
 fn error(text: String) {

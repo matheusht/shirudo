@@ -1087,14 +1087,7 @@ unsafe fn print_rodata_text(u: &Upatch, path: *const c_char, view: &View) -> c_i
             }
         }
         if ret == -E2BIG {
-            // SAFETY: the C's format and an integer.
-            unsafe {
-                crate::log::log_c!(
-                    crate::log::err,
-                    c"BTF text output exceeds %u values".as_ptr(),
-                    TEXT_MAX_VALUES,
-                )
-            };
+            crate::log::err(format!("BTF text output exceeds {TEXT_MAX_VALUES} values").as_bytes());
         }
         if ret != 0 {
             break;

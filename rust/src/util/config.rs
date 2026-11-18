@@ -13,7 +13,7 @@ use crate::errno::{EINVAL, EIO, ENOENT, EPERM};
 use crate::ffi;
 use crate::sys::libc::{
     BUFSIZ, F_DUPFD_CLOEXEC, File, IOFBF, SEEK_SET, close, env, errno, explicit_bzero, fclose,
-    fcntl, fdopen, ferror, fileno, fopen, free, lseek, scrub, setvbuf, strerror,
+    fcntl, fdopen, ferror, fileno, fopen, free, lseek, scrub, setvbuf,
 };
 use crate::text::{dns_name_valid, parse_u64, strscpy, trim_blanks};
 use crate::util::hex::hex_decode_max;
@@ -128,16 +128,18 @@ unsafe fn defaults(cfg: *mut Config) {
 /// A setting of the map export refused: the export goes idle.
 fn map_export_bad(cfg: &mut Config, key: &CStr, val: &CStr, reason: &CStr) {
     cfg.map_export_valid = false;
-    // SAFETY: the C's format and three C strings.
-    unsafe {
-        crate::log::log_c!(
-            crate::log::warn,
-            c"config: %s: bad value '%s' (%s)".as_ptr(),
-            key.as_ptr(),
-            val.as_ptr(),
-            reason.as_ptr(),
-        )
-    };
+    crate::log::warn(
+        &[
+            &b"config: "[..],
+            key.to_bytes(),
+            b": bad value '",
+            val.to_bytes(),
+            b"' (",
+            reason.to_bytes(),
+            b")",
+        ]
+        .concat(),
+    );
 }
 
 /// Owner auth is a literal passphrase, or `hex:<even hex>` for a binary
@@ -163,27 +165,19 @@ fn set_owner_auth(cfg: &mut Config, val: &CStr) {
             cfg.tpm_owner_auth[..n].copy_from_slice(&auth[..n]);
             cfg.tpm_owner_auth_len = n;
         } else {
-            // SAFETY: the C's format and its argument.
-            unsafe {
-                crate::log::log_c!(
-                    crate::log::warn,
-                    c"config: tpm.owner_auth: not an even count of up to %zu hex digits (ignored)"
-                        .as_ptr(),
-                    2 * auth.len(),
+            crate::log::warn(
+                format!(
+                    "config: tpm.owner_auth: not an even count of up to {} hex digits (ignored)",
+                    2 * auth.len()
                 )
-            };
+                .as_bytes(),
+            );
         }
         scrub(&mut auth);
         return;
     }
     if bytes.len() > cfg.tpm_owner_auth.len() {
-        // SAFETY: the C's format.
-        unsafe {
-            crate::log::log_c!(
-                crate::log::warn,
-                c"config: tpm.owner_auth too long (ignored)".as_ptr()
-            )
-        };
+        crate::log::warn(b"config: tpm.owner_auth too long (ignored)");
         return;
     }
     cfg.tpm_owner_auth[..bytes.len()].copy_from_slice(bytes);
@@ -208,25 +202,19 @@ fn apply(cfg: &mut Config, key: &CStr, val: &CStr) {
     match k {
         b"eventlog.max_bytes" => match parse_u64(v, u64::MAX) {
             Ok(n) => cfg.eventlog_max_bytes = n,
-            // SAFETY: the C's format and a C string.
-            Err(_) => unsafe {
-                crate::log::log_c!(
-                    crate::log::warn,
-                    c"config: eventlog.max_bytes: bad value '%s' (ignored)".as_ptr(),
-                    val.as_ptr(),
-                )
-            },
+            Err(_) => crate::log::warn(
+                &[
+                    &b"config: eventlog.max_bytes: bad value '"[..],
+                    val.to_bytes(),
+                    b"' (ignored)",
+                ]
+                .concat(),
+            ),
         },
         b"tpm.owner_auth" => set_owner_auth(cfg, val),
         b"tpm.tcti" => {
             if v.len() >= cfg.tpm_tcti.len() {
-                // SAFETY: the C's format.
-                unsafe {
-                    crate::log::log_c!(
-                        crate::log::warn,
-                        c"config: tpm.tcti too long (ignored)".as_ptr()
-                    )
-                };
+                crate::log::warn(b"config: tpm.tcti too long (ignored)");
             } else {
                 set_string(&mut cfg.tpm_tcti, val);
             }
@@ -234,13 +222,7 @@ fn apply(cfg: &mut Config, key: &CStr, val: &CStr) {
         b"tls.classical_hosts" => {
             if !set_string(&mut cfg.tls_classical_hosts, val) || !tls_classical_hosts_valid(v) {
                 cfg.tls_classical_hosts_valid = false;
-                // SAFETY: the C's format.
-                unsafe {
-                    crate::log::log_c!(
-                        crate::log::warn,
-                        c"config: tls.classical_hosts: invalid exact DNS host list".as_ptr()
-                    )
-                };
+                crate::log::warn(b"config: tls.classical_hosts: invalid exact DNS host list");
             }
         }
         b"map_export.json_path" => {
@@ -297,23 +279,18 @@ fn apply(cfg: &mut Config, key: &CStr, val: &CStr) {
         _ if k.starts_with(b"map_export.") => map_export_bad(cfg, key, val, c"unknown key"),
         _ if k.starts_with(b"tls.") => {
             cfg.tls_classical_hosts_valid = false;
-            // SAFETY: the C's format and a C string.
-            unsafe {
-                crate::log::log_c!(
-                    crate::log::warn,
-                    c"config: %s: unknown TLS setting".as_ptr(),
-                    key.as_ptr()
-                )
-            };
+            crate::log::warn(
+                &[&b"config: "[..], key.to_bytes(), b": unknown TLS setting"].concat(),
+            );
         }
-        // SAFETY: the C's format and a C string.
-        _ => unsafe {
-            crate::log::log_c!(
-                crate::log::warn,
-                c"config: unknown key '%s' (ignored)".as_ptr(),
-                key.as_ptr()
-            )
-        },
+        _ => crate::log::warn(
+            &[
+                &b"config: unknown key '"[..],
+                key.to_bytes(),
+                b"' (ignored)",
+            ]
+            .concat(),
+        ),
     }
 }
 
@@ -348,19 +325,20 @@ unsafe fn parse(cfg: &mut Config, f: *mut File, path: *const c_char) -> c_int {
                 break;
             }
             if got == -crate::errno::E2BIG {
-                crate::log::log_c!(
-                    crate::log::warn,
-                    c"config: line longer than %zu bytes (ignored)".as_ptr(),
-                    MAX,
+                crate::log::warn(
+                    format!("config: line longer than {MAX} bytes (ignored)").as_bytes(),
                 );
                 continue;
             }
             if got < 0 {
-                crate::log::log_c!(
-                    crate::log::err,
-                    c"config: %s: unreadable line: %s".as_ptr(),
-                    path,
-                    strerror(-got),
+                crate::log::err(
+                    &[
+                        &b"config: "[..],
+                        ffi::c_str(path),
+                        b": unreadable line: ",
+                        crate::errno::text(got).as_bytes(),
+                    ]
+                    .concat(),
                 );
                 ret = got;
                 break;
@@ -468,10 +446,7 @@ pub(crate) unsafe fn load(cfg: *mut Config) -> c_int {
             if tcti.to_bytes().len() < cfg.tpm_tcti.len() {
                 set_string(&mut cfg.tpm_tcti, tcti);
             } else {
-                crate::log::log_c!(
-                    crate::log::warn,
-                    c"SHIRUDO_TPM_TCTI too long (ignored)".as_ptr()
-                );
+                crate::log::warn(b"SHIRUDO_TPM_TCTI too long (ignored)");
             }
         }
         if ret == -ENOENT { 0 } else { ret }

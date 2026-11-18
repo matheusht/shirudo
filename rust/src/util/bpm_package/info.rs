@@ -151,15 +151,15 @@ fn signed_by(cert: Option<&X509Ref>, parsed: &Parsed, info: &mut PackageInfo) ->
     unsafe { hex_encode(digest.as_ptr(), digest.len(), hex.as_mut_ptr().cast()) };
     let hex = cstr(&hex);
     if parsed.signer[0] != 0 && !cstr(&parsed.signer).eq_ignore_ascii_case(hex) {
-        // SAFETY: the C's format, and two terminated buffers for it.
-        unsafe {
-            crate::log::log_c!(crate::log::err,
-                c"bpm: package signer fingerprint mismatch: certificate=%s build-environment.json=%s"
-                    .as_ptr(),
-                hex.as_ptr(),
-                parsed.signer.as_ptr(),
-            )
-        };
+        crate::log::err(
+            &[
+                &b"bpm: package signer fingerprint mismatch: certificate="[..],
+                hex,
+                b" build-environment.json=",
+                cstr(&parsed.signer),
+            ]
+            .concat(),
+        );
         return -EKEYREJECTED;
     }
     copy_string(&mut info.name, cstr(&parsed.name));

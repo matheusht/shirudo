@@ -13,11 +13,11 @@ use core::ptr;
 
 use crate::errno::{
     E2BIG, EACCES, EINVAL, EIO, EKEYREJECTED, ENODATA, ENODEV, ENOENT, ENOMEM, EPROTO,
-    EPROTONOSUPPORT,
+    EPROTONOSUPPORT, text,
 };
 use crate::heap::{xcalloc, xfree};
 use crate::sys::identity::Identity;
-use crate::sys::libc::{errno, explicit_bzero, getenv, setenv, strerror, unsetenv};
+use crate::sys::libc::{errno, explicit_bzero, getenv, setenv, unsetenv};
 use crate::sys::tss2::*;
 use crate::text::strscpy;
 use crate::util::config::{self, Scrubbed};
@@ -147,14 +147,6 @@ fn zeroed<T>() -> T {
     unsafe { core::mem::zeroed() }
 }
 
-/// A failure logged with the C's format.
-macro_rules! err {
-    ($fmt:expr $(, $arg:expr)*) => {
-        // SAFETY: a format of the C's, and the arguments it takes.
-        unsafe { $crate::log::log_c!($crate::log::err, $fmt.as_ptr() $(, $arg)*) }
-    };
-}
-
 /// Starts a salted session bound to the session key: an audit HMAC
 /// session for commands without an authorization handle, or a policy
 /// session.
@@ -186,7 +178,7 @@ pub(crate) fn session_start(t: &Tpm, key: EsysTr, ty: u8, session: &mut EsysTr) 
         ret = unsafe { Esys_TRSess_SetAttributes(t.esys, *session, attrs, 0xff) };
     }
     if ret != RC_SUCCESS {
-        err!(c"tpm: start salted session: rc=0x%08x", ret);
+        crate::log::err(format!("tpm: start salted session: rc=0x{ret:08x}").as_bytes());
         if *session != ESYS_TR_NONE {
             // SAFETY: the context and its session.
             unsafe { Esys_FlushContext(t.esys, *session) };
@@ -206,11 +198,11 @@ fn session_setup(t: &mut Tpm, active: bool) -> c_int {
         let ret = identity::read(&mut id);
 
         if ret != 0 {
-            err!(c"tpm: frozen identity unreadable: %s", strerror(-ret));
+            crate::log::err(format!("tpm: frozen identity unreadable: {}", text(ret)).as_bytes());
             return ret;
         }
         if id.ek_name[0] != 0 || u16::from(id.ek_name[1]) != ALG_SHA256 {
-            err!(c"tpm: no frozen session key; trusted reboot required");
+            crate::log::err(b"tpm: no frozen session key; trusted reboot required");
             return -EACCES;
         }
     }
@@ -222,7 +214,7 @@ fn session_setup(t: &mut Tpm, active: bool) -> c_int {
         return ret;
     }
     if t.session_key.name_len != NAME_LEN || (active && t.session_key.name != id.ek_name) {
-        err!(c"tpm: not the TPM init bound (session key name differs)");
+        crate::log::err(b"tpm: not the TPM init bound (session key name differs)");
         return -EACCES;
     }
     let mut session = t.session;
@@ -291,9 +283,8 @@ unsafe fn open_tpm(out: *mut *mut Tpm, quiet: bool) -> c_int {
     let active = identity::enforcement_active();
 
     if active < 0 {
-        err!(
-            c"tpm: cannot determine enforcement state: %s",
-            strerror(-active)
+        crate::log::err(
+            format!("tpm: cannot determine enforcement state: {}", text(active)).as_bytes(),
         );
         return active;
     }
@@ -305,7 +296,7 @@ unsafe fn open_tpm(out: *mut *mut Tpm, quiet: bool) -> c_int {
     if !set {
         let e = -errno();
 
-        err!(c"tpm: cannot disable library logging: %s", strerror(-e));
+        crate::log::err(format!("tpm: cannot disable library logging: {}", text(e)).as_bytes());
         return e;
     }
     // SAFETY: the room above.
@@ -313,11 +304,14 @@ unsafe fn open_tpm(out: *mut *mut Tpm, quiet: bool) -> c_int {
 
     if e != 0 {
         if !quiet && e == -EACCES {
-            err!(c"tpm: authenticated runtime requires a device TCTI");
+            crate::log::err(b"tpm: authenticated runtime requires a device TCTI");
         } else if !quiet {
-            err!(
-                c"tpm: the TCTI is longer than %d bytes",
-                (TCTI_MAX - 1) as c_int
+            crate::log::err(
+                format!(
+                    "tpm: the TCTI is longer than {} bytes",
+                    (TCTI_MAX - 1) as c_int
+                )
+                .as_bytes(),
             );
         }
         return e;
@@ -339,10 +333,14 @@ unsafe fn open_tpm(out: *mut *mut Tpm, quiet: bool) -> c_int {
 
     if ret != RC_SUCCESS {
         if !quiet {
-            err!(
-                c"tpm: TctiLdr_Initialize(%s): rc=0x%08x",
-                tcti_buf.as_ptr(),
-                ret
+            crate::log::err(
+                &[
+                    &b"tpm: TctiLdr_Initialize("[..],
+                    crate::text::cstr(&tcti_buf),
+                    b"): rc=0x",
+                    format!("{ret:08x}").as_bytes(),
+                ]
+                .concat(),
             );
         }
         // SAFETY: the allocation above, freed once.
@@ -354,7 +352,7 @@ unsafe fn open_tpm(out: *mut *mut Tpm, quiet: bool) -> c_int {
 
     if ret != RC_SUCCESS {
         if !quiet {
-            err!(c"tpm: Esys_Initialize: rc=0x%08x", ret);
+            crate::log::err(format!("tpm: Esys_Initialize: rc=0x{ret:08x}").as_bytes());
         }
         // SAFETY: the TCTI and the allocation, each released once.
         unsafe {
@@ -459,14 +457,14 @@ fn pcr_read(t: &Tpm, pcr: u32, out: &mut [u8; DIGEST_LEN]) -> c_int {
         )
     };
     if ret != RC_SUCCESS {
-        err!(c"tpm: PCR_Read(%u): rc=0x%08x", pcr, ret);
+        crate::log::err(format!("tpm: PCR_Read({pcr}): rc=0x{ret:08x}").as_bytes());
         return -EIO;
     }
     // SAFETY: the values ESYS gave on success.
     let v = unsafe { &*values };
 
     if v.count != 1 || v.digests[0].size != 32 {
-        err!(c"tpm: PCR %u has no SHA-256 bank", pcr);
+        crate::log::err(format!("tpm: PCR {pcr} has no SHA-256 bank").as_bytes());
         // SAFETY: the values, freed once.
         unsafe { Esys_Free(values.cast()) };
         return -ENOENT;
@@ -501,7 +499,7 @@ fn pcr_extend(t: &Tpm, pcr: u32, digest: &[u8; DIGEST_LEN]) -> c_int {
     };
 
     if ret != RC_SUCCESS {
-        err!(c"tpm: PCR_Extend(%u): rc=0x%08x", pcr, ret);
+        crate::log::err(format!("tpm: PCR_Extend({pcr}): rc=0x{ret:08x}").as_bytes());
         return -EIO;
     }
     0
@@ -514,7 +512,7 @@ fn read_clock(t: &Tpm) -> Result<(u32, u32), c_int> {
     let ret = unsafe { Esys_ReadClock(t.esys, t.session, ESYS_TR_NONE, ESYS_TR_NONE, &mut info) };
 
     if ret != RC_SUCCESS {
-        err!(c"tpm: ReadClock: rc=0x%08x", ret);
+        crate::log::err(format!("tpm: ReadClock: rc=0x{ret:08x}").as_bytes());
         return Err(-EIO);
     }
     // SAFETY: the time ESYS gave on success, freed once.
@@ -537,7 +535,7 @@ fn nv_handle(t: &Tpm, index: u32, out: &mut EsysTr) -> c_int {
         return -ENOENT; // quiet: undefined is normal
     }
     if ret != RC_SUCCESS {
-        err!(c"tpm: TR_FromTPMPublic(0x%08x): rc=0x%08x", index, ret);
+        crate::log::err(format!("tpm: TR_FromTPMPublic(0x{index:08x}): rc=0x{ret:08x}").as_bytes());
         return -EIO;
     }
     0
@@ -580,7 +578,7 @@ fn nv_info(t: &Tpm, index: u32, info: &mut TpmNvInfo) -> c_int {
 
     tr_close(t, &mut nv);
     if ret != RC_SUCCESS {
-        err!(c"tpm: NV_ReadPublic(0x%08x): rc=0x%08x", index, ret);
+        crate::log::err(format!("tpm: NV_ReadPublic(0x{index:08x}): rc=0x{ret:08x}").as_bytes());
         return -EIO;
     }
     // SAFETY: what ESYS gave on success, each freed once.
@@ -628,7 +626,7 @@ fn owner_auth_set(t: &Tpm, auth: &[u8]) -> c_int {
         ret
     };
     if ret != RC_SUCCESS {
-        err!(c"tpm: TR_SetAuth(owner): rc=0x%08x", ret);
+        crate::log::err(format!("tpm: TR_SetAuth(owner): rc=0x{ret:08x}").as_bytes());
         return -EIO;
     }
     0
@@ -643,16 +641,33 @@ fn owner_auth_clear(t: &Tpm) {
 
 fn owner_auth_error(op: &CStr, index: u32, ret: Rc) -> c_int {
     if rc_is_auth_failure(ret) {
-        err!(
-            c"tpm: %s(0x%08x): owner-hierarchy authorization failed (rc=0x%08x). This TPM has owner auth set; supply it via tpm.owner_auth in %s (or SHIRUDO_TPM_OWNER_AUTH), or clear the TPM owner auth.",
-            op.as_ptr(),
-            index,
-            ret,
-            CONF_PATH.as_ptr()
+        crate::log::err(
+            &[
+                &b"tpm: "[..],
+                op.to_bytes(),
+                b"(0x",
+                format!("{index:08x}").as_bytes(),
+                b"): owner-hierarchy authorization failed (rc=0x",
+                format!("{ret:08x}").as_bytes(),
+                b"). This TPM has owner auth set; supply it via tpm.owner_auth in ",
+                CONF_PATH.to_bytes(),
+                b" (or SHIRUDO_TPM_OWNER_AUTH), or clear the TPM owner auth.",
+            ]
+            .concat(),
         );
         return -EACCES;
     }
-    err!(c"tpm: %s(0x%08x): rc=0x%08x", op.as_ptr(), index, ret);
+    crate::log::err(
+        &[
+            &b"tpm: "[..],
+            op.to_bytes(),
+            b"(0x",
+            format!("{index:08x}").as_bytes(),
+            b"): rc=0x",
+            format!("{ret:08x}").as_bytes(),
+        ]
+        .concat(),
+    );
     -EIO
 }
 
@@ -758,17 +773,20 @@ pub(crate) fn nv_read(t: &Tpm, index: u32, out: &mut [u8; DIGEST_LEN]) -> c_int 
         return -ENODATA; // quiet: nothing written this boot
     }
     if ret != RC_SUCCESS {
-        err!(c"tpm: NV_Read(0x%08x): rc=0x%08x", index, ret);
+        crate::log::err(format!("tpm: NV_Read(0x{index:08x}): rc=0x{ret:08x}").as_bytes());
         return -EIO;
     }
     // SAFETY: the data ESYS gave on success.
     let d = unsafe { &*data };
 
     if usize::from(d.size) != DIGEST_LEN {
-        err!(
-            c"tpm: NV_Read returned %u bytes, expected %u",
-            c_uint::from(d.size),
-            DIGEST_LEN as c_uint
+        crate::log::err(
+            format!(
+                "tpm: NV_Read returned {} bytes, expected {}",
+                c_uint::from(d.size),
+                DIGEST_LEN as c_uint
+            )
+            .as_bytes(),
         );
         // SAFETY: the data, freed once.
         unsafe { Esys_Free(data.cast()) };
@@ -808,14 +826,14 @@ pub(crate) fn writer_prepare(
 
     authorization.cphash.buffer[..DIGEST_LEN].copy_from_slice(&cphash);
     if e != 0 {
-        err!(c"tpm: compute NV_Extend command hash: %s", strerror(-e));
+        crate::log::err(format!("tpm: compute NV_Extend command hash: {}", text(e)).as_bytes());
         return e;
     }
     // SAFETY: the context, the session and room for its nonce.
     let ret = unsafe { Esys_TRSess_GetNonceTPM(t.esys, session, &mut nonce) };
 
     if ret != RC_SUCCESS || nonce.is_null() {
-        err!(c"tpm: NV writer PolicySigned: rc=0x%08x", ret);
+        crate::log::err(format!("tpm: NV writer PolicySigned: rc=0x{ret:08x}").as_bytes());
         // SAFETY: what ESYS gave, or NULL, freed once.
         unsafe { Esys_Free(nonce.cast()) };
         return -EACCES;
@@ -831,7 +849,7 @@ pub(crate) fn writer_prepare(
         None => -EINVAL,
     };
     if e != 0 {
-        err!(c"tpm: compute NV writer authorization: %s", strerror(-e));
+        crate::log::err(format!("tpm: compute NV writer authorization: {}", text(e)).as_bytes());
     }
     e
 }
@@ -916,7 +934,7 @@ pub(crate) fn writer_primary(
     owner_auth_clear(t);
     let e = 'cleanup: {
         if ret != RC_SUCCESS {
-            err!(c"tpm: CreatePrimary(NV writer): rc=0x%08x", ret);
+            crate::log::err(format!("tpm: CreatePrimary(NV writer): rc=0x{ret:08x}").as_bytes());
             break 'cleanup if rc_is_auth_failure(ret) {
                 -EACCES
             } else {
@@ -969,7 +987,7 @@ pub(crate) fn writer_primary(
             if differs { -EPROTO } else { 0 }
         };
         if e != 0 {
-            err!(c"tpm: NV writer public key differs from the expected key");
+            crate::log::err(b"tpm: NV writer public key differs from the expected key");
         }
         e
     };
@@ -1017,7 +1035,7 @@ fn writer_sign(
         )
     };
     let e = if ret != RC_SUCCESS {
-        err!(c"tpm: Sign(NV writer): rc=0x%08x", ret);
+        crate::log::err(format!("tpm: Sign(NV writer): rc=0x{ret:08x}").as_bytes());
         -EACCES
     } else {
         // SAFETY: the signature ESYS gave, if any; its RSASSA variant read
@@ -1110,7 +1128,7 @@ fn policy_writer_signed(t: &Tpm, session: EsysTr, index: u32, event: &[u8; DIGES
         return e;
     }
     if !nv.defined || nv.name_len != NAME_LEN {
-        err!(c"tpm: NV writer requires a defined register");
+        crate::log::err(b"tpm: NV writer requires a defined register");
         return -ENODEV;
     }
     let e = writer_prepare(t, session, &nv.name, event, &mut authorization);
@@ -1131,7 +1149,7 @@ fn policy_writer_signed(t: &Tpm, session: EsysTr, index: u32, event: &[u8; DIGES
         let ret = writer_authorize(t, key, session, &authorization, &signature);
 
         if ret != RC_SUCCESS {
-            err!(c"tpm: NV writer PolicySigned: rc=0x%08x", ret);
+            crate::log::err(format!("tpm: NV writer PolicySigned: rc=0x{ret:08x}").as_bytes());
             e = -EACCES;
         }
     }
@@ -1162,7 +1180,7 @@ pub(crate) fn policy_session_finish(
     };
 
     if ret != RC_SUCCESS {
-        err!(c"tpm: register policy assertion: rc=0x%08x", ret);
+        crate::log::err(format!("tpm: register policy assertion: rc=0x{ret:08x}").as_bytes());
         return -EACCES;
     }
     // SAFETY: the context, handles and room for the digest.
@@ -1183,9 +1201,11 @@ pub(crate) fn policy_session_finish(
             usize::from(d.size) != DIGEST_LEN || d.buffer[..DIGEST_LEN] != *expected
         });
     let e = if differs {
-        err!(
-            c"tpm: register policy digest does not match the computed policy (rc=0x%08x)",
-            ret
+        crate::log::err(
+            format!(
+                "tpm: register policy digest does not match the computed policy (rc=0x{ret:08x})"
+            )
+            .as_bytes(),
         );
         -EPROTO
     } else {
@@ -1220,7 +1240,7 @@ fn policy_session_register(
 
     list.count = 2;
     if !t.writer_set {
-        err!(c"tpm: register policy requires the NV writer public key");
+        crate::log::err(b"tpm: register policy requires the NV writer public key");
         return -EACCES;
     }
     let e = session_start(t, t.session_key.handle, SE_POLICY, session);
@@ -1285,9 +1305,9 @@ fn policy_session_register(
     }
     if ret != RC_SUCCESS {
         if rc_is(ret, RC_VALUE) && init {
-            err!(c"tpm: the anchoring PCR moved; the register can only be initialised in the boot window");
+            crate::log::err(b"tpm: the anchoring PCR moved; the register can only be initialised in the boot window");
         } else {
-            err!(c"tpm: register policy assertion: rc=0x%08x", ret);
+            crate::log::err(format!("tpm: register policy assertion: rc=0x{ret:08x}").as_bytes());
         }
         session_flush(t, *session);
         *session = ESYS_TR_NONE;
@@ -1301,7 +1321,7 @@ fn policy_session_register(
     );
 
     if e != 0 {
-        err!(c"tpm: compute signed register policy: %s", strerror(-e));
+        crate::log::err(format!("tpm: compute signed register policy: {}", text(e)).as_bytes());
     } else {
         e = policy_session_finish(t, *session, &expected);
     }
@@ -1328,7 +1348,7 @@ fn nv_extend_session(t: &Tpm, index: u32, session: EsysTr, event: &[u8; DIGEST_L
 
     tr_close(t, &mut nv);
     if ret != RC_SUCCESS {
-        err!(c"tpm: NV_Extend(0x%08x): rc=0x%08x", index, ret);
+        crate::log::err(format!("tpm: NV_Extend(0x{index:08x}): rc=0x{ret:08x}").as_bytes());
         return if rc_is_auth_failure(ret) {
             -EACCES
         } else {
@@ -1507,13 +1527,26 @@ fn endorsement_primary(t: &Tpm, in_pub: &Tpm2bPublic, what: &CStr, key: &mut Tpm
     };
     if ret != RC_SUCCESS {
         if rc_is_auth_failure(ret) {
-            err!(
-                c"tpm: CreatePrimary(%s): the endorsement hierarchy has an auth value (rc=0x%08x)",
-                what.as_ptr(),
-                ret
+            crate::log::err(
+                &[
+                    &b"tpm: CreatePrimary("[..],
+                    what.to_bytes(),
+                    b"): the endorsement hierarchy has an auth value (rc=0x",
+                    format!("{ret:08x}").as_bytes(),
+                    b")",
+                ]
+                .concat(),
             );
         } else {
-            err!(c"tpm: CreatePrimary(%s): rc=0x%08x", what.as_ptr(), ret);
+            crate::log::err(
+                &[
+                    &b"tpm: CreatePrimary("[..],
+                    what.to_bytes(),
+                    b"): rc=0x",
+                    format!("{ret:08x}").as_bytes(),
+                ]
+                .concat(),
+            );
         }
         return -EIO;
     }
@@ -1547,9 +1580,13 @@ fn endorsement_primary(t: &Tpm, in_pub: &Tpm2bPublic, what: &CStr, key: &mut Tpm
                 key.name_len = NAME_LEN;
             }
             _ => {
-                err!(
-                    c"tpm: %s name does not match its marshalled public area",
-                    what.as_ptr()
+                crate::log::err(
+                    &[
+                        &b"tpm: "[..],
+                        what.to_bytes(),
+                        b" name does not match its marshalled public area",
+                    ]
+                    .concat(),
                 );
                 e = -EPROTO;
             }
@@ -1723,7 +1760,7 @@ unsafe fn quote(
         )
     };
     if ret != RC_SUCCESS {
-        err!(c"tpm: Quote: rc=0x%08x", ret);
+        crate::log::err(format!("tpm: Quote: rc=0x{ret:08x}").as_bytes());
         return -EIO;
     }
     // SAFETY: the outputs of the successful command.
@@ -1776,7 +1813,7 @@ unsafe fn nv_certify(
     };
     tr_close(t, &mut nv);
     if ret != RC_SUCCESS {
-        err!(c"tpm: NV_Certify(0x%08x): rc=0x%08x", index, ret);
+        crate::log::err(format!("tpm: NV_Certify(0x{index:08x}): rc=0x{ret:08x}").as_bytes());
         return if rc_is(ret, RC_NV_UNINITIALIZED) {
             -ENODATA
         } else {
@@ -1840,7 +1877,7 @@ fn activate_credential(
         )
     };
     if ret != RC_SUCCESS {
-        err!(c"tpm: PolicySecret(endorsement): rc=0x%08x", ret);
+        crate::log::err(format!("tpm: PolicySecret(endorsement): rc=0x{ret:08x}").as_bytes());
         session_flush(t, session);
         return -EACCES;
     }
@@ -1861,7 +1898,7 @@ fn activate_credential(
     };
     session_flush(t, session);
     if ret != RC_SUCCESS {
-        err!(c"tpm: ActivateCredential: rc=0x%08x", ret);
+        crate::log::err(format!("tpm: ActivateCredential: rc=0x{ret:08x}").as_bytes());
         return if ret & 0xFFFF_0000 == 0 {
             -EKEYREJECTED
         } else {
@@ -2075,7 +2112,7 @@ mod capi {
         let top = unsafe { public.as_ref() }.copied().unwrap_or(0);
 
         if t.is_null() || seed.is_null() || public.is_null() || top & 0x80 == 0 {
-            err!(c"tpm: NV writer identity is required");
+            crate::log::err(b"tpm: NV writer identity is required");
             return -EACCES;
         }
         // SAFETY: the caller's connection, seed and modulus.

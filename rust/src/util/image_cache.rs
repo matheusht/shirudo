@@ -10,7 +10,7 @@ use core::ffi::{CStr, c_char, c_int, c_long, c_void};
 use core::mem::MaybeUninit;
 use core::ptr;
 
-use crate::errno::{EEXIST, EFBIG, EINTR, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOMEM};
+use crate::errno::{EEXIST, EFBIG, EINTR, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOMEM, text};
 use crate::sys::curl::{
     CURLE_OK, CURLOPT_CONNECTTIMEOUT, CURLOPT_FAILONERROR, CURLOPT_FOLLOWLOCATION,
     CURLOPT_LOW_SPEED_LIMIT, CURLOPT_LOW_SPEED_TIME, CURLOPT_MAXREDIRS, CURLOPT_PROTOCOLS_STR,
@@ -21,7 +21,7 @@ use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     AT_EMPTY_PATH, O_CLOEXEC, O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_NONBLOCK, O_RDONLY,
     O_WRONLY, PATH_MAX, S_IFMT, S_IFREG, STATX_BASIC_STATS, Statx, close, errno, fsetxattr, fsync,
-    link, mkdtemp, open, read, rmdir, statx, strerror, unlink,
+    link, mkdtemp, open, read, rmdir, statx, unlink,
 };
 use crate::util::config_image::{
     ConfigImageOpen, MAX_BYTES, SIG_MAX, config_image_close, config_image_open,
@@ -290,14 +290,9 @@ unsafe fn verify_incoming(opened: &ConfigImageOpen, staging: *const c_char) -> c
     // SAFETY: as above.
     let cleanup = unsafe { dm_verity_remove(&mut device, true) };
     if cleanup != 0 {
-        // SAFETY: the C's format, and the string it converts.
-        unsafe {
-            crate::log::log_c!(
-                crate::log::warn,
-                c"image: cannot remove incoming mapping: %s".as_ptr(),
-                strerror(-cleanup),
-            )
-        };
+        crate::log::warn(
+            format!("image: cannot remove incoming mapping: {}", text(cleanup)).as_bytes(),
+        );
     }
     // SAFETY: the mapping, closed once.
     unsafe { dm_verity_close(&mut device) };

@@ -6,12 +6,12 @@
 
 use core::ffi::{CStr, c_int, c_ulong};
 
-use crate::errno::EBADF;
+use crate::errno::{EBADF, text};
 use crate::sys::libc::{
     __nss_configure_lookup, _exit, F_GETFD, ITIMER_PROF, ITIMER_REAL, ITIMER_VIRTUAL, Itimerval,
     MCL_CURRENT, MCL_FUTURE, O_RDWR, PER_LINUX, PR_SET_DUMPABLE, PR_SET_NO_NEW_PRIVS,
     PR_SET_PTRACER, RLIM_INFINITY, RLIMIT_CORE, RLIMIT_CPU, RLIMIT_FSIZE, Rlimit, Timeval, errno,
-    fcntl, mlockall, open, personality, prctl, setitimer, setrlimit, strerror,
+    fcntl, mlockall, open, personality, prctl, setitimer, setrlimit,
 };
 use crate::sys::openssl::{OPENSSL_INIT_NO_LOAD_CONFIG, OPENSSL_init_crypto};
 
@@ -37,15 +37,15 @@ pub(crate) fn harden_stdio() {
 fn failed(what: &CStr) -> c_int {
     let err = -errno();
 
-    // SAFETY: a format of two C strings, and strerror()'s.
-    unsafe {
-        crate::log::log_c!(
-            crate::log::err,
-            c"hardening: %s: %s".as_ptr(),
-            what.as_ptr(),
-            strerror(-err),
-        )
-    };
+    crate::log::err(
+        &[
+            &b"hardening: "[..],
+            what.to_bytes(),
+            b": ",
+            text(err).as_bytes(),
+        ]
+        .concat(),
+    );
     err
 }
 

@@ -136,8 +136,7 @@ fn line(label: &[u8], value: &[u8]) {
 }
 
 fn complain(what: &CStr) {
-    // SAFETY: a C string.
-    unsafe { openssl_complain(what.as_ptr()) };
+    openssl_complain(what);
 }
 
 /// The bytes of the file at `path`, checked first when `trusted`; none,

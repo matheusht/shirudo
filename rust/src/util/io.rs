@@ -15,7 +15,7 @@ use crate::sys::libc::{
     AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW, File, LOCK_EX, O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW, O_PATH,
     O_RDONLY, PATH_MAX, S_IFDIR, S_IFMT, S_IFREG, S_ISVTX, STATX_ATTR_MOUNT_ROOT,
     STATX_BASIC_STATS, Statfs, Statx, close, errno, flock, fstatfs, fsync, ftruncate, geteuid,
-    getline, open, pread, set_errno, statx, strerror, syscall, write,
+    getline, open, pread, set_errno, statx, syscall, write,
 };
 use crate::util::seal::seal_open_read;
 
@@ -131,20 +131,10 @@ pub(crate) fn stat_fd(fd: c_int, st: &mut Statx) -> c_int {
 /// `line` and its newline appended to the log open on `fd` at `path`,
 /// after a torn tail is dropped; the log taken back to its last record
 /// when the append fails.
-///
-/// # Safety
-///
-/// `path` is a C string and `line` holds `len` bytes.
-pub(crate) unsafe fn append_line(
-    fd: c_int,
-    path: *const c_char,
-    line: *const c_char,
-    len: usize,
-) -> c_int {
+pub(crate) fn append_line(fd: c_int, path: &CStr, line: &[u8]) -> c_int {
     let mut st = Statx::zeroed();
     let mut end: i64 = 0;
-    // SAFETY: the caller's bytes.
-    let mut text = unsafe { ffi::slice(line.cast::<u8>(), len) };
+    let mut text = line;
 
     if text.last() == Some(&b'\n') {
         text = &text[..text.len() - 1];
@@ -166,49 +156,33 @@ pub(crate) unsafe fn append_line(
         if unsafe { ftruncate(fd, end) } != 0 {
             return -errno();
         }
-        // SAFETY: the C's format and its arguments.
-        unsafe {
-            crate::log::log_c!(
-                crate::log::warn,
-                c"%s: dropped %lld bytes at its end, an append that did not finish".as_ptr(),
-                path,
-                size - end,
-            )
-        };
+        crate::log::warn(
+            &[
+                path.to_bytes(),
+                b": dropped ",
+                format!("{}", size - end).as_bytes(),
+                b" bytes at its end, an append that did not finish",
+            ]
+            .concat(),
+        );
     }
-    let n = text.len();
-    // SAFETY: an allocation of n + 1 bytes, freed below by its size.
-    let buf = unsafe { xmalloc(n + 1) }.cast::<u8>();
-    if buf.is_null() {
-        return -ENOMEM;
-    }
-    // SAFETY: the allocation's n + 1 bytes, the line and its newline
-    // written, then freed once.
-    let mut ret = unsafe {
-        let out = core::slice::from_raw_parts_mut(buf, n + 1);
-
-        out[..n].copy_from_slice(text);
-        out[n] = b'\n';
-        let ret = write_complete(fd, buf.cast(), n + 1);
-
-        xfree(buf.cast(), n + 1);
-        ret
-    };
+    let record = [text, b"\n"].concat();
+    // SAFETY: the caller's fd, and the record's bytes.
+    let mut ret = unsafe { write_complete(fd, record.as_ptr().cast(), record.len()) };
     // SAFETY: the caller's fd.
     if ret == 0 && unsafe { fsync(fd) } != 0 {
         ret = -errno();
     }
     // SAFETY: the caller's fd.
     if ret != 0 && unsafe { ftruncate(fd, end) } != 0 {
-        // SAFETY: the C's format and its arguments.
-        unsafe {
-            crate::log::log_c!(
-                crate::log::warn,
-                c"%s: could not roll back a partial append: %s".as_ptr(),
-                path,
-                strerror(errno()),
-            )
-        };
+        crate::log::warn(
+            &[
+                path.to_bytes(),
+                b": could not roll back a partial append: ",
+                crate::errno::text(-errno()).as_bytes(),
+            ]
+            .concat(),
+        );
     }
     ret
 }
@@ -413,6 +387,8 @@ fn trusted_owner(uid: u32) -> bool {
 ///
 /// `path` is a C string.
 pub(crate) unsafe fn check_trusted(fd: c_int, path: *const c_char, secret: bool) -> c_int {
+    // SAFETY: the caller's C string.
+    let path_text = unsafe { ffi::c_str(path) };
     let mut st = Statx::zeroed();
 
     // SAFETY: the caller's C string.
@@ -429,17 +405,18 @@ pub(crate) unsafe fn check_trusted(fd: c_int, path: *const c_char, secret: bool)
     {
         let could = if secret { c"read or change" } else { c"change" };
 
-        // SAFETY: the C's format and its arguments.
-        unsafe {
-            crate::log::log_c!(
-                crate::log::err,
-                c"%s: owner %u, mode %04o: refusing a file another user could %s".as_ptr(),
-                path,
-                st.stx_uid,
-                u32::from(st.stx_mode & 0o7777),
-                could.as_ptr(),
-            )
-        };
+        crate::log::err(
+            &[
+                path_text,
+                b": owner ",
+                format!("{}", st.stx_uid).as_bytes(),
+                b", mode ",
+                format!("{:04o}", u32::from(st.stx_mode & 0o7777)).as_bytes(),
+                b": refusing a file another user could ",
+                could.to_bytes(),
+            ]
+            .concat(),
+        );
         return -EPERM;
     }
     use std::ffi::{CString, OsStr};
@@ -471,17 +448,19 @@ pub(crate) unsafe fn check_trusted(fd: c_int, path: *const c_char, secret: bool)
             || (mode & 0o22 != 0 && !sticky_root)
         {
             let dir = CString::new(dir.as_os_str().as_bytes()).unwrap_or_default();
-            // SAFETY: the C's format and its arguments.
-            unsafe {
-                crate::log::log_c!(crate::log::err,
-                    c"%s: directory %s, owner %u, mode %04o: refusing a file another user could replace"
-                        .as_ptr(),
-                    path,
-                    dir.as_ptr(),
-                    st.uid(),
-                    mode & 0o7777,
-                )
-            };
+            crate::log::err(
+                &[
+                    path_text,
+                    b": directory ",
+                    dir.to_bytes(),
+                    b", owner ",
+                    format!("{}", st.uid()).as_bytes(),
+                    b", mode ",
+                    format!("{:04o}", mode & 0o7777).as_bytes(),
+                    b": refusing a file another user could replace",
+                ]
+                .concat(),
+            );
             return -EPERM;
         }
     }

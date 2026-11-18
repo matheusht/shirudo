@@ -11,9 +11,9 @@
 use core::ffi::{CStr, c_int};
 
 use crate::bpf::btf::{Btf, KIND_FUNC};
-use crate::errno::{EBUSY, ENAMETOOLONG, ENOENT, EPROTO};
+use crate::errno::{EBUSY, ENAMETOOLONG, ENOENT, EPROTO, text};
 use crate::skel::bpf2::{ExpectedRoot, def};
-use crate::sys::libc::{SYS_PIDFD_OPEN, close, errno, strerror, syscall};
+use crate::sys::libc::{SYS_PIDFD_OPEN, close, errno, syscall};
 use crate::text::cstr;
 use crate::util::bpf_info::{Info, LINK_INFO_SIZE, MAP_INFO_SIZE, PROG_INFO_SIZE};
 use crate::util::bpf_sys::{
@@ -534,15 +534,15 @@ fn guard_map_ids() -> Result<[u32; GUARD_MAP_COUNT], c_int> {
         // SAFETY: the pin opened above.
         unsafe { close(fd) };
         if ret != 0 {
-            // SAFETY: a format of two C strings.
-            unsafe {
-                crate::log::log_c!(
-                    crate::log::err,
-                    c"image: invalid guard map %s: %s".as_ptr(),
-                    expected.pin,
-                    strerror(-ret),
-                )
-            };
+            crate::log::err(
+                &[
+                    &b"image: invalid guard map "[..],
+                    expected.pin.to_bytes(),
+                    b": ",
+                    text(ret).as_bytes(),
+                ]
+                .concat(),
+            );
             return Err(ret);
         }
         *id = info.u32_at(MAP_ID);
@@ -708,15 +708,15 @@ pub(crate) fn image_guards_ready() -> c_int {
     for guard in groups.iter().flat_map(|g| g.iter()) {
         let ret = guard_link(guard, &maps, &mut kernel);
         if ret != 0 {
-            // SAFETY: a format of two C strings.
-            unsafe {
-                crate::log::log_c!(
-                    crate::log::err,
-                    c"image: missing or invalid guard %s: %s".as_ptr(),
-                    guard.pin,
-                    strerror(-ret),
-                )
-            };
+            crate::log::err(
+                &[
+                    &b"image: missing or invalid guard "[..],
+                    guard.pin.to_bytes(),
+                    b": ",
+                    text(ret).as_bytes(),
+                ]
+                .concat(),
+            );
             return ret;
         }
     }

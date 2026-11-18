@@ -28,15 +28,7 @@ fn log_of(dir: &TempDir) -> Vec<u8> {
 
 /// append_line() of `line` to the log `f`.
 fn append(f: &File, line: &[u8]) -> c_int {
-    // SAFETY: a C string and the line's bytes.
-    unsafe {
-        append_line(
-            f.as_raw_fd(),
-            c"log".as_ptr(),
-            line.as_ptr().cast(),
-            line.len(),
-        )
-    }
+    append_line(f.as_raw_fd(), c"log", line)
 }
 
 #[test]

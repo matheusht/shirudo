@@ -12,7 +12,7 @@ use core::ptr;
 
 use crate::errno::{
     EBADMSG, EBUSY, EINPROGRESS, EINTR, EINVAL, EIO, ENODATA, ENOENT, EOVERFLOW, EPERM, ESTALE,
-    EUCLEAN,
+    EUCLEAN, text,
 };
 use crate::ffi;
 use crate::sys::libc::Zeroed;
@@ -20,7 +20,7 @@ use crate::sys::libc::{
     AT_EMPTY_PATH, EOF, File, LOCK_EX, LOCK_NB, O_APPEND, O_CLOEXEC, O_CREAT, O_DIRECTORY, O_EXCL,
     O_NOFOLLOW, O_NONBLOCK, O_RDONLY, O_RDWR, O_WRONLY, S_IFMT, S_IFREG, STATX_BASIC_STATS, Statx,
     close, errno, fclose, fdopen, ferror, fgetc, flock, fsync, ftello, ftruncate, geteuid, open,
-    openat, read, renameat, statx, strerror, unlinkat,
+    openat, read, renameat, statx, unlinkat,
 };
 use crate::text::cstr;
 use crate::util::chain::chain_fold;
@@ -386,13 +386,9 @@ fn lock_wait(fd: c_int, wait_ms: u32) -> c_int {
             return -err;
         }
         if !told && waited >= 1000 {
-            // SAFETY: the C's format.
-            unsafe {
-                crate::log::log_c!(crate::log::info,
-                    c"image: waiting for another shirudo command to release the config operation lock"
-                        .as_ptr(),
-                )
-            };
+            crate::log::info(
+                b"image: waiting for another shirudo command to release the config operation lock",
+            );
             told = true;
         }
         std::thread::sleep(pause);
@@ -477,15 +473,9 @@ unsafe fn open_journal(
         let ret = lock_wait(u.lock_fd, o.lock_wait_ms);
         if ret != 0 {
             if ret == -EWOULDBLOCK {
-                // SAFETY: the C's format and its arguments.
-                unsafe {
-                    crate::log::log_c!(crate::log::err,
-                        c"image: another shirudo command still holds the config operation lock %s/lock after %u seconds"
-                            .as_ptr(),
-                        directory,
-                        o.lock_wait_ms / 1000,
-                    )
-                };
+                // SAFETY: the caller's directory, a C string.
+                let directory = unsafe { crate::ffi::c_str(directory) };
+                crate::log::err(&[&b"image: another shirudo command still holds the config operation lock "[..], directory, b"/lock after ", format!("{}", o.lock_wait_ms / 1000).as_bytes(), b" seconds"].concat());
             }
             break 'fail ret;
         }
@@ -1016,14 +1006,9 @@ fn complete(u: &ConfigUpdate) -> c_int {
         let restore = state_save(u, &record, false);
 
         if restore != 0 {
-            // SAFETY: the C's format and strerror()'s.
-            unsafe {
-                crate::log::log_c!(
-                    crate::log::err,
-                    c"image: cannot restore pending selection: %s".as_ptr(),
-                    strerror(-restore),
-                )
-            };
+            crate::log::err(
+                format!("image: cannot restore pending selection: {}", text(restore)).as_bytes(),
+            );
         }
     }
     ret
@@ -1205,13 +1190,7 @@ fn staged(
         return 0;
     }
     if staged.sequence != previous.sequence || !same_boot(&staged, previous) {
-        // SAFETY: a format without arguments.
-        unsafe {
-            crate::log::log_c!(
-                crate::log::warn,
-                c"image: ignoring staged config because the active selection changed".as_ptr()
-            )
-        };
+        crate::log::warn(b"image: ignoring staged config because the active selection changed");
         return 0;
     }
     *target = staged.target;
@@ -1266,14 +1245,9 @@ unsafe fn begin(update: *mut ConfigUpdate, t: *const ConfigUpdateTarget, pcr: u3
         let err = clear_staged(u);
 
         if err != 0 {
-            // SAFETY: a format of one C string, strerror()'s.
-            unsafe {
-                crate::log::log_c!(
-                    crate::log::warn,
-                    c"image: cannot remove obsolete staged config: %s".as_ptr(),
-                    strerror(-err)
-                )
-            };
+            crate::log::warn(
+                format!("image: cannot remove obsolete staged config: {}", text(err)).as_bytes(),
+            );
         }
     }
     ret

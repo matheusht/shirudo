@@ -53,8 +53,7 @@ const CURLE_OPERATION_TIMEDOUT: CurlCode = 28;
 fn say(text: String) {
     let text = CString::new(text).unwrap_or_default();
 
-    // SAFETY: a "%s" format with a C string.
-    unsafe { crate::log::log_c!(crate::log::err, c"%s".as_ptr(), text.as_ptr()) };
+    crate::log::err(text.to_bytes());
 }
 
 fn shown(b: &[u8]) -> std::borrow::Cow<'_, str> {

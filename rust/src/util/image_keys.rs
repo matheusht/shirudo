@@ -33,8 +33,7 @@ const O_RDONLY: c_int = 0;
 fn error(text: String) {
     let text = CString::new(text).unwrap_or_default();
 
-    // SAFETY: a "%s" format with a C string.
-    unsafe { crate::log::log_c!(crate::log::err, c"%s".as_ptr(), text.as_ptr()) };
+    crate::log::err(text.to_bytes());
 }
 
 fn hex_digit(c: u8) -> Option<u8> {

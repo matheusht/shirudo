@@ -169,8 +169,7 @@ fn gen_keypair() -> Option<PKey<Private>> {
         // SAFETY: the key EVP_PKEY_Q_keygen() made, owned from here.
         return Some(unsafe { PKey::from_ptr(k) });
     }
-    // SAFETY: a C string.
-    unsafe { openssl_complain(c"EVP_PKEY_Q_keygen".as_ptr()) };
+    openssl_complain(c"EVP_PKEY_Q_keygen");
     let version = openssl::version::number();
     let (major, minor) = (version >> 28, (version >> 20) & 0xff);
     if major < 3 || (major == 3 && minor < 5) {

@@ -185,24 +185,26 @@ unsafe extern "C" fn info_callback(ssl: *const SSL, kind: c_int, _ret: c_int) {
         (group, SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name))
     };
     let host = if host.is_null() {
-        c"unknown host".as_ptr()
+        c"unknown host"
     } else {
-        host
+        // SAFETY: OpenSSL's server name of the connection, a C string.
+        unsafe { CStr::from_ptr(host) }
     };
     let group = if group.is_null() {
-        c"unknown group".as_ptr()
+        c"unknown group"
     } else {
-        group
+        // SAFETY: OpenSSL's name of the group, a C string.
+        unsafe { CStr::from_ptr(group) }
     };
-    // SAFETY: the C's format, and two C strings.
-    unsafe {
-        crate::log::log_c!(
-            crate::log::warn,
-            c"TLS non-hybrid key exchange with %s: %s".as_ptr(),
-            host,
-            group,
-        )
-    };
+    crate::log::warn(
+        &[
+            &b"TLS non-hybrid key exchange with "[..],
+            host.to_bytes(),
+            b": ",
+            group.to_bytes(),
+        ]
+        .concat(),
+    );
 }
 
 /// The CA file at `path` added to the trust store of `ctx`: CURLE_OK, or

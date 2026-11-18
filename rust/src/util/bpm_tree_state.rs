@@ -12,13 +12,14 @@ use std::ffi::CString;
 use std::os::fd::{FromRawFd, IntoRawFd};
 use std::os::unix::fs::FileExt;
 
-use crate::errno::{E2BIG, EBADMSG, EINTR, EINVAL, EIO, ENAMETOOLONG, ENOENT, ENOMEM, ENOSPC};
+use crate::errno::{
+    E2BIG, EBADMSG, EINTR, EINVAL, EIO, ENAMETOOLONG, ENOENT, ENOMEM, ENOSPC, text,
+};
 use crate::ffi;
 use crate::heap::{libc_free, xfree, xmalloc};
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
-    File, O_RDONLY, PATH_MAX, R_OK, Utsname, access, close, errno, fclose, fdopen, fopen, strerror,
-    uname,
+    File, O_RDONLY, PATH_MAX, R_OK, Utsname, access, close, errno, fclose, fdopen, fopen, uname,
 };
 use crate::text::{cstr, find, strscpy, strsprintf};
 use crate::util::bpm_tree::{
@@ -861,16 +862,15 @@ fn state_write(s: &TreeState) -> c_int {
     let ret = unsafe { seal_mkdir_p(dir.as_ptr(), 0o700) };
 
     if ret != 0 {
-        // SAFETY: the C's format, a C string and the C library's
-        // message.
-        unsafe {
-            crate::log::log_c!(
-                crate::log::err,
-                c"tree state mkdir %s: %s".as_ptr(),
-                dir.as_ptr(),
-                strerror(-ret),
-            )
-        };
+        crate::log::err(
+            &[
+                &b"tree state mkdir "[..],
+                dir.to_bytes(),
+                b": ",
+                text(ret).as_bytes(),
+            ]
+            .concat(),
+        );
         return ret;
     }
     // SAFETY: a C string, the bytes emitted, and a mode.

@@ -349,10 +349,13 @@ fn curl_once_headers(
         curl::set_long(handle, curl::CURLOPT_SSL_VERIFYPEER, 1);
         curl::set_long(handle, curl::CURLOPT_SSL_VERIFYHOST, 2);
         if tls_curl_policy(handle, &mut c.tls_ca) != 0 {
-            crate::log::log_c!(
-                crate::log::err,
-                c"bpm OCI request %s: cannot apply TLS policy".as_ptr(),
-                req.url.as_ptr(),
+            crate::log::err(
+                &[
+                    &b"bpm OCI request "[..],
+                    req.url.to_bytes(),
+                    b": cannot apply TLS policy",
+                ]
+                .concat(),
             );
             curl::curl_easy_cleanup(handle);
             return -EHOSTUNREACH;
@@ -394,16 +397,19 @@ fn curl_once_headers(
             // SAFETY: any code has a static message.
             unsafe { curl::curl_easy_strerror(cc) }
         };
+        // SAFETY: the error buffer libcurl filled, or its static text,
+        // a C string either way.
+        let reason = unsafe { CStr::from_ptr(reason) };
 
-        // SAFETY: the C format with two C strings.
-        unsafe {
-            crate::log::log_c!(
-                crate::log::err,
-                c"bpm OCI request %s: %s".as_ptr(),
-                req.url.as_ptr(),
-                reason
-            )
-        };
+        crate::log::err(
+            &[
+                &b"bpm OCI request "[..],
+                req.url.to_bytes(),
+                b": ",
+                reason.to_bytes(),
+            ]
+            .concat(),
+        );
         status = -1;
     }
     if let Some(f) = file_ptr {
@@ -774,28 +780,26 @@ fn request(c: &mut OciClient, req: &Request, r: &mut HttpResponse) -> c_int {
             if !body.is_empty() {
                 let n = body.len().min(512);
 
-                // SAFETY: the C format, with a C string, a long, an int
-                // and n bytes of the body for %.*s.
-                unsafe {
-                    crate::log::log_c!(
-                        crate::log::err,
-                        c"bpm OCI request %s: HTTP %ld: %.*s".as_ptr(),
-                        req.url.as_ptr(),
-                        r.status,
-                        n as c_int,
-                        body.as_ptr(),
-                    )
-                };
+                // As %.*s printed it: up to n bytes, ending at a NUL.
+                crate::log::err(
+                    &[
+                        &b"bpm OCI request "[..],
+                        req.url.to_bytes(),
+                        format!(": HTTP {}: ", r.status).as_bytes(),
+                        cstr(&body[..n]),
+                    ]
+                    .concat(),
+                );
             } else {
-                // SAFETY: the C format, with a C string and a long.
-                unsafe {
-                    crate::log::log_c!(
-                        crate::log::err,
-                        c"bpm OCI request %s: HTTP %ld".as_ptr(),
-                        req.url.as_ptr(),
-                        r.status,
-                    )
-                };
+                crate::log::err(
+                    &[
+                        &b"bpm OCI request "[..],
+                        req.url.to_bytes(),
+                        b": HTTP ",
+                        format!("{}", r.status).as_bytes(),
+                    ]
+                    .concat(),
+                );
             }
         }
         return status_errno(r.status);

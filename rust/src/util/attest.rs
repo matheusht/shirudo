@@ -544,13 +544,7 @@ unsafe fn evidence(
         attempt += 1;
     }
     if attempt == QUOTE_ATTEMPTS {
-        // SAFETY: a format without conversions.
-        unsafe {
-            crate::log::log_c!(
-                crate::log::err,
-                c"attest: PCRs kept changing while quoting".as_ptr()
-            )
-        };
+        crate::log::err(b"attest: PCRs kept changing while quoting");
         return -EAGAIN;
     }
     if config.present {
@@ -613,13 +607,7 @@ unsafe fn evidence(
     }
     if let Some(c) = challenge {
         if s.ak.name_len != NAME_LEN || c.ak_name != s.ak.name {
-            // SAFETY: a format without conversions.
-            unsafe {
-                crate::log::log_c!(
-                    crate::log::err,
-                    c"attest: the challenge was made for another attestation key".as_ptr()
-                )
-            };
+            crate::log::err(b"attest: the challenge was made for another attestation key");
             return -EKEYREJECTED;
         }
         // SAFETY: the connection, the keys, the challenge's blob and
@@ -639,13 +627,7 @@ unsafe fn evidence(
             )
         };
         if ret != 0 {
-            // SAFETY: a format without conversions.
-            unsafe {
-                crate::log::log_c!(crate::log::err,
-                    c"attest: the TPM refused the challenge: not made for this attestation key under this endorsement key"
-                        .as_ptr(),
-                )
-            };
+            crate::log::err(b"attest: the TPM refused the challenge: not made for this attestation key under this endorsement key");
             return ret;
         }
     }

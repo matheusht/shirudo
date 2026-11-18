@@ -7,10 +7,10 @@
 
 use core::ffi::{CStr, c_char, c_int};
 
-use crate::errno::{E2BIG, ENOMEM};
+use crate::errno::{E2BIG, ENOMEM, text};
 use crate::heap::{xfree, xmalloc, xstrfree, xstrndup};
 use crate::sys::libc::Zeroed;
-use crate::sys::libc::{Utsname, printf, strerror, strerrorname_np, uname};
+use crate::sys::libc::{Utsname, printf, strerrorname_np, uname};
 use crate::text::{cstr, strsprintf};
 use crate::util::eventlog::NV_INDEX;
 use crate::util::json::JsonEmit;
@@ -185,17 +185,11 @@ pub(crate) unsafe fn report_emit(path: *const c_char, r: &OpReport) -> c_int {
     unsafe { encode(&mut e, r, vlog, &nv_index[..n]) };
     let mut ret = e.err();
     // SAFETY: the caller passes a C string.
-    let to_stdout = unsafe { CStr::from_ptr(path) } == c"-";
+    let path_c = unsafe { CStr::from_ptr(path) };
+    let to_stdout = path_c == c"-";
 
     if ret != 0 {
-        // SAFETY: a format of one C string, and strerror()'s.
-        unsafe {
-            crate::log::log_c!(
-                crate::log::err,
-                c"report: encode failed: %s".as_ptr(),
-                strerror(-ret)
-            )
-        };
+        crate::log::err(format!("report: encode failed: {}", text(ret)).as_bytes());
     } else if to_stdout {
         // SAFETY: a format of one C string, and the report, which the
         // emitter ends with a NUL.
@@ -206,16 +200,15 @@ pub(crate) unsafe fn report_emit(path: *const c_char, r: &OpReport) -> c_int {
         // SAFETY: an output to fill, the caller's path, and a mode.
         ret = unsafe { seal_output_create(&mut out, path, 0o644) };
         if ret != 0 {
-            // SAFETY: a format of two C strings, the path and
-            // strerror()'s.
-            unsafe {
-                crate::log::log_c!(
-                    crate::log::err,
-                    c"report: open %s: %s".as_ptr(),
-                    path,
-                    strerror(-ret)
-                )
-            };
+            crate::log::err(
+                &[
+                    &b"report: open "[..],
+                    path_c.to_bytes(),
+                    b": ",
+                    text(ret).as_bytes(),
+                ]
+                .concat(),
+            );
         } else {
             // SAFETY: the output just created, and the report, which
             // the emitter ends with a NUL.
@@ -223,16 +216,15 @@ pub(crate) unsafe fn report_emit(path: *const c_char, r: &OpReport) -> c_int {
                 seal_output_commit(&mut out, buf.cast(), CStr::from_ptr(buf).to_bytes().len())
             };
             if ret != 0 {
-                // SAFETY: a format of two C strings, the path and
-                // strerror()'s.
-                unsafe {
-                    crate::log::log_c!(
-                        crate::log::err,
-                        c"report: write %s: %s".as_ptr(),
-                        path,
-                        strerror(-ret)
-                    )
-                };
+                crate::log::err(
+                    &[
+                        &b"report: write "[..],
+                        path_c.to_bytes(),
+                        b": ",
+                        text(ret).as_bytes(),
+                    ]
+                    .concat(),
+                );
             }
         }
     }

@@ -42,8 +42,7 @@ const O_RDWR: c_int = 2;
 fn say(level: fn(&[u8]), text: String) {
     let text = CString::new(text).unwrap_or_default();
 
-    // SAFETY: a "%s" format with a C string.
-    unsafe { crate::log::log_c!(level, c"%s".as_ptr(), text.as_ptr()) };
+    level(text.to_bytes());
 }
 
 fn error(text: String) {
@@ -653,8 +652,7 @@ fn append(path: &CStr, line: &[u8]) -> c_int {
     };
     let mut ret = lock_exclusive(fd.0);
     if ret == 0 {
-        // SAFETY: the open log, a C string and the line's bytes.
-        ret = unsafe { append_line(fd.0, path.as_ptr(), line.as_ptr().cast(), line.len()) };
+        ret = append_line(fd.0, path, line);
     }
     let closed = fd.close();
     if ret == 0 { closed } else { ret }
