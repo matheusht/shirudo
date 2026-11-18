@@ -515,6 +515,52 @@ mod capi {
         http::send_log_json(self::opts(opts), &record)
     }
 
+    /// Sends the `body_len` bytes at `body` as the string body of one
+    /// OTLP log with the one string attribute `attr_key`: the receiver
+    /// decodes the very bytes passed in. A body with a NUL or malformed
+    /// UTF-8 is -EILSEQ, and nothing is sent. 0 or -errno.
+    ///
+    /// # Safety
+    ///
+    /// `opts` is options or NULL; the strings are C strings, and `body`
+    /// holds `body_len` bytes.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn otel_send_log_string(
+        opts: *const OtelOpts,
+        scope_name: *const c_char,
+        event_name: *const c_char,
+        severity_number: c_int,
+        severity_text: *const c_char,
+        body: *const c_char,
+        body_len: usize,
+        attr_key: *const c_char,
+        attr_value: *const c_char,
+    ) -> c_int {
+        let (Some(scope), Some(event), Some(text), Some(key), Some(value)) = (
+            path(scope_name),
+            path(event_name),
+            path(severity_text),
+            path(attr_key),
+            path(attr_value),
+        ) else {
+            return -crate::errno::EINVAL;
+        };
+        if body.is_null() {
+            return -crate::errno::EINVAL;
+        }
+        let record = otlp::StringRecord {
+            scope_name: scope.to_bytes(),
+            event_name: event.to_bytes(),
+            severity_number,
+            severity_text: text.to_bytes(),
+            // SAFETY: the caller's body_len bytes.
+            body: unsafe { crate::ffi::slice(body.cast(), body_len) },
+            attr_key: key.to_bytes(),
+            attr_value: value.to_bytes(),
+        };
+        http::send_log_string(self::opts(opts), &record)
+    }
+
     /// The seconds a Retry-After of `value` asks to wait from `now`, at
     /// most 30: 0 or -EINVAL.
     ///

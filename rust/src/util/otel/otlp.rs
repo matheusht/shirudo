@@ -567,6 +567,45 @@ pub(super) fn generic_log_payload(r: &Record<'_>) -> Result<Buffer, c_int> {
     Ok(buf)
 }
 
+/// What a log of [`super::send_log_string`] says: a body the receiver
+/// decodes to the very bytes given, and one string attribute.
+pub(super) struct StringRecord<'a> {
+    pub(super) scope_name: &'a [u8],
+    pub(super) event_name: &'a [u8],
+    pub(super) severity_number: c_int,
+    pub(super) severity_text: &'a [u8],
+    pub(super) body: &'a [u8],
+    pub(super) attr_key: &'a [u8],
+    pub(super) attr_value: &'a [u8],
+}
+
+/// The body as a string, so that no collector can re-encode it and the
+/// bytes a signature covers arrive as they were signed. JSON cannot
+/// carry a NUL or malformed UTF-8 unchanged: either is -EILSEQ.
+pub(super) fn string_log_payload(r: &StringRecord<'_>) -> Result<Buffer, c_int> {
+    let mut e = JsonEmit::growing(JSON_MAX);
+
+    log_open(
+        &mut e,
+        r.scope_name,
+        i64::from(r.severity_number),
+        r.severity_text,
+        r.event_name,
+    );
+    e.obj_open_key(b"body");
+    e.kv_string(b"stringValue", r.body);
+    e.obj_close();
+    e.arr_open(b"attributes");
+    kv_string(&mut e, r.attr_key, r.attr_value);
+    e.arr_close();
+    log_close(&mut e);
+    let buf = Buffer::from_emitter(&e);
+    if e.err() != 0 {
+        return Err(e.err());
+    }
+    Ok(buf)
+}
+
 /// The log that points at a map's snapshot in S3.
 pub(super) fn s3_reference(
     v: &MapView,
