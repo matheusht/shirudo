@@ -571,7 +571,9 @@ fn bind(tpm: *mut Tpm, event: &[u8; DIGEST_LEN], info: &mut ChainInitInfo) -> c_
     }
     let recorded = ret == 0 && (!rec.have_reset_count || rec.reset_count == info.reset_count);
     if recorded {
-        return rebind(tpm, &rec, &nv, &mut e, info);
+        // SAFETY: the connection tpm_open() opened, open until this
+        // function closes it.
+        return rebind(unsafe { &mut *tpm }, &rec, &nv, &mut e, info);
     }
     if nv.defined && nv.written {
         // SAFETY: the C's format and its argument.
@@ -683,7 +685,7 @@ fn bind(tpm: *mut Tpm, event: &[u8; DIGEST_LEN], info: &mut ChainInitInfo) -> c_
 /// The binding the record `rec` of this boot names: the register as it
 /// is when written under the recorded name, else -EEXIST.
 fn rebind(
-    tpm: *mut Tpm,
+    tpm: &mut Tpm,
     rec: &EventlogInit,
     nv: &TpmNvInfo,
     e: &mut Expectation,
@@ -1012,7 +1014,8 @@ pub(crate) fn status(st: &mut ChainStatus) -> c_int {
         return -ENODEV;
     }
     st.tpm = true;
-    let ret = status_on(tpm, st);
+    // SAFETY: the connection tpm_open_quiet() opened, closed below.
+    let ret = status_on(unsafe { &mut *tpm }, st);
 
     // SAFETY: the connection, closed once.
     unsafe { tpm_close(tpm) };
@@ -1020,7 +1023,7 @@ pub(crate) fn status(st: &mut ChainStatus) -> c_int {
 }
 
 /// chain_status() on the connection `tpm`.
-fn status_on(tpm: *mut Tpm, st: &mut ChainStatus) -> c_int {
+fn status_on(tpm: &mut Tpm, st: &mut ChainStatus) -> c_int {
     let mut e = Expectation::new();
     let mut values = [0u8; 2 * DIGEST_LEN];
     let mut nv: TpmNvInfo = zeroed();

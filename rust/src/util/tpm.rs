@@ -158,12 +158,7 @@ macro_rules! err {
 /// Starts a salted session bound to the session key: an audit HMAC
 /// session for commands without an authorization handle, or a policy
 /// session.
-pub(crate) fn session_start(
-    esys: *mut EsysContext,
-    key: EsysTr,
-    ty: u8,
-    session: &mut EsysTr,
-) -> c_int {
+pub(crate) fn session_start(t: &Tpm, key: EsysTr, ty: u8, session: &mut EsysTr) -> c_int {
     let sym = sym_def_null();
     let mut attrs = SESSION_CONTINUESESSION;
 
@@ -173,7 +168,7 @@ pub(crate) fn session_start(
     // SAFETY: the context, handles, a template and room for the session.
     let mut ret = unsafe {
         Esys_StartAuthSession(
-            esys,
+            t.esys,
             key,
             ESYS_TR_NONE,
             ESYS_TR_NONE,
@@ -188,13 +183,13 @@ pub(crate) fn session_start(
     };
     if ret == RC_SUCCESS {
         // SAFETY: the context and the session it started.
-        ret = unsafe { Esys_TRSess_SetAttributes(esys, *session, attrs, 0xff) };
+        ret = unsafe { Esys_TRSess_SetAttributes(t.esys, *session, attrs, 0xff) };
     }
     if ret != RC_SUCCESS {
         err!(c"tpm: start salted session: rc=0x%08x", ret);
         if *session != ESYS_TR_NONE {
             // SAFETY: the context and its session.
-            unsafe { Esys_FlushContext(esys, *session) };
+            unsafe { Esys_FlushContext(t.esys, *session) };
             *session = ESYS_TR_NONE;
         }
         return -EIO;
@@ -231,7 +226,7 @@ fn session_setup(t: &mut Tpm, active: bool) -> c_int {
         return -EACCES;
     }
     let mut session = t.session;
-    let ret = session_start(t.esys, t.session_key.handle, SE_HMAC, &mut session);
+    let ret = session_start(t, t.session_key.handle, SE_HMAC, &mut session);
 
     t.session = session;
     ret
@@ -397,7 +392,8 @@ unsafe fn close(t: *mut Tpm) {
         }
         let esys = tr.esys;
 
-        key_flush(esys, &mut tr.session_key);
+        // SAFETY: the connection's context, not yet finalized.
+        unsafe { key_flush(esys, &mut tr.session_key) };
         // SAFETY: the context, finalized once.
         unsafe { Esys_Finalize(&mut tr.esys) };
     }
@@ -612,17 +608,17 @@ fn nv_info(t: &Tpm, index: u32, info: &mut TpmNvInfo) -> c_int {
 }
 
 /// The owner hierarchy's password for the next command.
-fn owner_auth_set(t: &Tpm, auth: *const u8, len: usize) -> c_int {
+fn owner_auth_set(t: &Tpm, auth: &[u8]) -> c_int {
     let mut owner = Tpm2bDigest::zeroed();
 
-    if len > owner.buffer.len() {
+    let (Some(room), Ok(size)) = (
+        owner.buffer.get_mut(..auth.len()),
+        u16::try_from(auth.len()),
+    ) else {
         return -EINVAL;
-    }
-    if len != 0 {
-        // SAFETY: the caller's len bytes.
-        unsafe { ptr::copy_nonoverlapping(auth, owner.buffer.as_mut_ptr(), len) };
-        owner.size = len as u16;
-    }
+    };
+    room.copy_from_slice(auth);
+    owner.size = size;
     // SAFETY: the context, a handle and the password; then the copy
     // scrubbed.
     let ret = unsafe {
@@ -664,13 +660,12 @@ pub(crate) fn nv_define(
     t: &Tpm,
     index: u32,
     policy: &[u8; DIGEST_LEN],
-    owner_auth: *const u8,
-    owner_auth_len: usize,
+    owner_auth: &[u8],
 ) -> c_int {
     let mut public: Tpm2bNvPublic = zeroed();
     let nv_auth = Tpm2bDigest::zeroed();
     let mut nv = ESYS_TR_NONE;
-    let e = owner_auth_set(t, owner_auth, owner_auth_len);
+    let e = owner_auth_set(t, owner_auth);
 
     if e != 0 {
         return e;
@@ -703,19 +698,14 @@ pub(crate) fn nv_define(
     0
 }
 
-pub(crate) fn nv_undefine(
-    t: &Tpm,
-    index: u32,
-    owner_auth: *const u8,
-    owner_auth_len: usize,
-) -> c_int {
+pub(crate) fn nv_undefine(t: &Tpm, index: u32, owner_auth: &[u8]) -> c_int {
     let mut nv = 0;
     let e = nv_handle(t, index, &mut nv);
 
     if e != 0 {
         return e;
     }
-    let e = owner_auth_set(t, owner_auth, owner_auth_len);
+    let e = owner_auth_set(t, owner_auth);
 
     if e != 0 {
         tr_close(t, &mut nv);
@@ -893,7 +883,10 @@ pub(crate) fn writer_primary(
         // SAFETY: the configuration, filled.
         let c = unsafe { cfg.0.assume_init_ref() };
 
-        e = owner_auth_set(t, c.tpm_owner_auth.as_ptr(), c.tpm_owner_auth_len);
+        e = match c.tpm_owner_auth.get(..c.tpm_owner_auth_len) {
+            Some(auth) => owner_auth_set(t, auth),
+            None => -EINVAL,
+        };
     }
     // SAFETY: the configuration's bytes, scrubbed now as the C did.
     unsafe { explicit_bzero(cfg.ptr().cast(), size_of::<config::Config>()) };
@@ -1230,7 +1223,7 @@ fn policy_session_register(
         err!(c"tpm: register policy requires the NV writer public key");
         return -EACCES;
     }
-    let e = session_start(t.esys, t.session_key.handle, SE_POLICY, session);
+    let e = session_start(t, t.session_key.handle, SE_POLICY, session);
 
     if e != 0 {
         return e;
@@ -1565,7 +1558,8 @@ fn endorsement_primary(t: &Tpm, in_pub: &Tpm2bPublic, what: &CStr, key: &mut Tpm
         unsafe { Esys_Free(name.cast()) };
     }
     if e != 0 {
-        key_flush(t.esys, key);
+        // SAFETY: the open connection's context.
+        unsafe { key_flush(t.esys, key) };
     }
     e
 }
@@ -1629,9 +1623,14 @@ fn ek_create(t: &Tpm, rsa: bool, ek: &mut TpmKey) -> c_int {
 }
 
 /// Flushes the key's handle, if any, and forgets the key.
-fn key_flush(esys: *mut EsysContext, key: &mut TpmKey) {
+///
+/// # Safety
+///
+/// `esys` is the context of the open connection the key's handle
+/// belongs to, or anything when the key has none.
+unsafe fn key_flush(esys: *mut EsysContext, key: &mut TpmKey) {
     if key.handle != ESYS_TR_NONE && key.handle != 0 {
-        // SAFETY: the context and the key's handle.
+        // SAFETY: the caller's context, and the key's handle in it.
         unsafe { Esys_FlushContext(esys, key.handle) };
     }
     // SAFETY: the key's bytes.
@@ -1817,7 +1816,7 @@ fn activate_credential(
     id.credential[..cred.blob.len()].copy_from_slice(cred.blob);
     sec.size = cred.secret.len() as u16;
     sec.secret[..cred.secret.len()].copy_from_slice(cred.secret);
-    let e = session_start(t.esys, t.session_key.handle, SE_POLICY, &mut session);
+    let e = session_start(t, t.session_key.handle, SE_POLICY, &mut session);
 
     if e != 0 {
         return e;
@@ -2168,7 +2167,14 @@ mod capi {
     ) -> c_int {
         // SAFETY: the caller passes a connection, a digest and the
         // password.
-        unsafe { super::nv_define(&*t, index, arr(policy), owner_auth.cast(), owner_auth_len) }
+        unsafe {
+            super::nv_define(
+                &*t,
+                index,
+                arr(policy),
+                ffi::slice(owner_auth.cast(), owner_auth_len),
+            )
+        }
     }
 
     /// # Safety
@@ -2182,7 +2188,7 @@ mod capi {
         owner_auth_len: usize,
     ) -> c_int {
         // SAFETY: the caller passes a connection and the password.
-        unsafe { super::nv_undefine(&*t, index, owner_auth.cast(), owner_auth_len) }
+        unsafe { super::nv_undefine(&*t, index, ffi::slice(owner_auth.cast(), owner_auth_len)) }
     }
 
     /// # Safety
@@ -2301,7 +2307,9 @@ mod capi {
         } else {
             core::ptr::null_mut()
         };
-        super::key_flush(esys, key);
+        // SAFETY: the connection of a key with a handle, else NULL for a
+        // key with none.
+        unsafe { super::key_flush(esys, key) };
     }
 
     /// # Safety

@@ -162,7 +162,7 @@ fn authorize(
 ) -> Step {
     let mut name: *mut Tpm2bName = core::ptr::null_mut();
     let ret = (|| {
-        if session_start(t.esys, t.session_key.handle, SE_POLICY, session) != 0 {
+        if session_start(t, t.session_key.handle, SE_POLICY, session) != 0 {
             return Err(());
         }
         // SAFETY: the context, the session, and room for the index's name.
@@ -287,7 +287,7 @@ fn scenario(t: &Tpm, st: &mut State) -> Step {
         &mut public,
         &mut st.writer,
     ) != 0
-        || nv_define(t, TEST_NV_INDEX, &policy, core::ptr::null(), 0) != 0
+        || nv_define(t, TEST_NV_INDEX, &policy, &[]) != 0
     {
         return Err(());
     }
@@ -408,7 +408,7 @@ fn run(_: &[&CStr]) -> c_int {
     };
     let mut ok = scenario(tr, &mut st).is_ok();
     ok &= flush(tr.esys, &mut st.session).is_ok();
-    if st.defined && nv_undefine(tr, TEST_NV_INDEX, core::ptr::null(), 0) != 0 {
+    if st.defined && nv_undefine(tr, TEST_NV_INDEX, &[]) != 0 {
         ok = false;
     }
     ok &= flush(tr.esys, &mut st.writer).is_ok();
