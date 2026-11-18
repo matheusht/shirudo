@@ -28,6 +28,8 @@
 *.so.*
 *.upatch
 *.upatch.json
+# The vendored crates keep every file their checksums list.
+!/rust/vendor/**
 
 # Local bpf-next kernel and userspace dependency artifacts
 /artifacts
