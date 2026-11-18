@@ -41,3 +41,6 @@ fn utf8_width(s: &[u8]) -> usize {
         _ => 0,
     }
 }
+
+#[cfg(test)]
+mod tests;
