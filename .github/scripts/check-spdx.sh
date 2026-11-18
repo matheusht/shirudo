@@ -110,7 +110,7 @@ check_vendor() {
 # needs a tag only when it starts with a shebang.
 kind_of() {
 	case "$1" in
-	*.c|*.cocci|*.rs) echo c ;;
+	*.c|*.cocci|*.rs|*.rs.in) echo c ;;
 	*.h) echo h ;;
 	*.lua|*.lean) echo lua ;;
 	*.rst) echo rst ;;
