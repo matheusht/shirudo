@@ -87,12 +87,6 @@ impl Slist {
     pub(super) fn raw(&self) -> *mut CurlSlist {
         self.0
     }
-
-    pub(crate) fn into_raw(self) -> *mut CurlSlist {
-        let p = self.0;
-        core::mem::forget(self);
-        p
-    }
 }
 
 impl Drop for Slist {

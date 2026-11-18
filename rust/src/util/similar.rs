@@ -140,35 +140,3 @@ pub fn resolve<'a>(
     }
     found
 }
-
-mod capi {
-    use core::ffi::c_char;
-
-    use crate::ffi;
-
-    /// # Safety
-    ///
-    /// `input` is a C string, `candidates` holds `n` of them and `matches`
-    /// has room for `cap` indices.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn resolve(
-        input: *const c_char,
-        candidates: *const *const c_char,
-        n: usize,
-        matches: *mut usize,
-        cap: usize,
-    ) -> usize {
-        // SAFETY: the caller passes a C string.
-        let input = unsafe { ffi::c_str(input) };
-        // SAFETY: the caller passes `n` C strings.
-        let candidates = unsafe { ffi::slice(candidates, n) };
-        // SAFETY: the caller passes room for `cap` indices.
-        let matches = unsafe { ffi::zeroed_slice_mut(matches, cap) };
-        let candidate = |i: usize| {
-            // SAFETY: each of the candidates is a C string.
-            unsafe { ffi::c_str(candidates[i]) }
-        };
-
-        super::resolve(input, n, candidate, matches)
-    }
-}

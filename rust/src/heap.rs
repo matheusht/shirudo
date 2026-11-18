@@ -88,7 +88,6 @@ mod capi {
     /// # Safety
     ///
     /// None beyond the C library's allocator.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn xmalloc(size: usize) -> *mut c_void {
         // SAFETY: calloc() takes any size.
         unsafe { calloc(1, size.max(1)) }
@@ -100,7 +99,6 @@ mod capi {
     /// # Safety
     ///
     /// None beyond the C library's allocator.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn xcalloc(nmemb: usize, size: usize) -> *mut c_void {
         match nmemb.checked_mul(size) {
             // SAFETY: a size alone.
@@ -189,7 +187,6 @@ mod capi {
     ///
     /// `p` is NULL or a block of at least `size` bytes from this
     /// allocator, which the caller stops using.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn xfree(p: *mut c_void, size: usize) {
         if p.is_null() {
             return;

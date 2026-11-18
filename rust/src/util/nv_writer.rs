@@ -97,27 +97,11 @@ mod capi {
     /// # Safety
     ///
     /// `seed` has room for 32 bytes and `public` for 384, apart.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn nv_writer_create(seed: *mut u8, public: *mut u8) -> c_int {
         // SAFETY: the caller passes the room for both; nothing reads
         // either before writing it.
         unsafe {
             super::create(
-                &mut *seed.cast::<[u8; DIGEST_LEN]>(),
-                &mut *public.cast::<[u8; NV_RSA_BYTES]>(),
-            )
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `seed` has room for 32 bytes and `public` for 384, apart.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn nv_writer_read(seed: *mut u8, public: *mut u8) -> c_int {
-        // SAFETY: the caller passes the room for both; nothing reads
-        // either before writing it.
-        unsafe {
-            super::read(
                 &mut *seed.cast::<[u8; DIGEST_LEN]>(),
                 &mut *public.cast::<[u8; NV_RSA_BYTES]>(),
             )

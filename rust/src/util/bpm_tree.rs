@@ -184,15 +184,6 @@ impl TreeState {
     }
 }
 
-/// `struct tree_emit_extra`: what a publisher adds to an operation after
-/// its artifact, outside the operation digest.
-#[repr(C)]
-pub struct TreeEmitExtra {
-    pub(crate) operation:
-        Option<unsafe extern "C" fn(e: *mut JsonEmit, index: c_int, ctx: *mut c_void) -> c_int>,
-    pub(crate) ctx: *mut c_void,
-}
-
 /// What a publisher adds to the operation of an index, into its open
 /// object: the fixes, which no node reads.
 pub(crate) type Extra<'a> = &'a mut dyn FnMut(&mut JsonEmit, usize) -> c_int;
@@ -1281,19 +1272,16 @@ pub(crate) use capi::{
 mod capi {
     use core::ffi::{c_char, c_int};
 
-    use super::{
-        TreeEmitExtra, TreeOperation, TreePublication, TreeSelector, TreeSelectorKv, TreeState,
-    };
+    use super::{TreeOperation, TreePublication, TreeSelector, TreeSelectorKv};
     use crate::errno::EINVAL;
     use crate::ffi;
-    use crate::util::json::JsonEmit;
+
     use crate::util::json::MAX_BYTES;
 
     /// # Safety
     ///
     /// `kvs` and `n` are a selector's pairs from the xmalloc family, and
     /// `kv` room for a pointer.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn tree_selector_kv_add(
         kvs: *mut *mut TreeSelectorKv,
         n: *mut c_int,
@@ -1337,7 +1325,6 @@ mod capi {
     /// # Safety
     ///
     /// `body` holds `len` bytes and `out` is room for a publication.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn tree_parse(
         body: *const c_char,
         len: usize,
@@ -1372,160 +1359,5 @@ mod capi {
         };
         // SAFETY: the caller's operation.
         unsafe { super::publication_append(p, op) }
-    }
-
-    /// # Safety
-    ///
-    /// `p` is NULL or a publication whose operations come from the
-    /// xmalloc family, as many as its capacity says.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn tree_publication_free(p: *mut TreePublication) {
-        // SAFETY: the caller's publication.
-        if let Some(p) = unsafe { p.as_mut() } {
-            super::publication_free(p);
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `op` is an operation whose pairs are as its counts say, and `out`
-    /// room for 72 bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn tree_operation_digest(
-        op: *const TreeOperation,
-        out: *mut [u8; 72],
-    ) -> c_int {
-        // SAFETY: the caller's operation and room.
-        match unsafe { super::operation_digest(&*op) } {
-            Ok(digest) => {
-                // SAFETY: the caller's room.
-                unsafe { *out = digest };
-                0
-            }
-            Err(err) => err,
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `p` is a publication whose operations and pairs are as its counts
-    /// say, `extra` NULL or a publisher's extras, and `out` and `out_len`
-    /// room for the buffer and its length.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn tree_emit_publication(
-        p: *const TreePublication,
-        extra: *const TreeEmitExtra,
-        out: *mut *mut c_char,
-        out_len: *mut usize,
-    ) -> c_int {
-        // SAFETY: the caller's extras, NULL or with a callback that takes
-        // the emitter and the index for its context.
-        let mut call = unsafe { extra.as_ref() }.and_then(|x| {
-            let f = x.operation?;
-            Some(move |e: &mut JsonEmit, index: usize| {
-                // SAFETY: the caller's callback, on the emitter and its
-                // own context.
-                unsafe { f(e, index as c_int, x.ctx) }
-            })
-        });
-        let extra: Option<super::Extra<'_>> = call.as_mut().map(|f| f as super::Extra<'_>);
-        // SAFETY: the caller's publication and room.
-        match unsafe { super::emit_publication(&*p, extra) } {
-            Ok((body, _, len)) => {
-                // SAFETY: the caller's room.
-                unsafe {
-                    *out = body;
-                    *out_len = len;
-                }
-                0
-            }
-            Err(err) => err,
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `op` is an operation whose pairs are as its counts say.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn tree_operation_validate(op: *const TreeOperation) -> c_int {
-        // SAFETY: the caller's operation.
-        unsafe { super::operation_validate(&*op) }
-    }
-
-    /// # Safety
-    ///
-    /// `p` is a publication whose operations are as its count says.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn tree_publication_check(p: *const TreePublication) -> c_int {
-        // SAFETY: the caller's publication.
-        unsafe { super::publication_check(&*p) }
-    }
-
-    /// # Safety
-    ///
-    /// `p` is a publication whose operations and pairs are as its counts
-    /// say, and `bad_op` NULL or room for an index.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn tree_publication_verify(
-        p: *const TreePublication,
-        bad_op: *mut c_int,
-    ) -> c_int {
-        // SAFETY: the caller's publication.
-        let (ret, bad) = match unsafe { super::publication_verify(&*p) } {
-            Ok(()) => (0, -1),
-            Err((err, bad)) => (err, bad.map_or(-1, |i| i as c_int)),
-        };
-        // SAFETY: the caller's room, or NULL.
-        if let Some(b) = unsafe { bad_op.as_mut() } {
-            *b = bad;
-        }
-        ret
-    }
-
-    /// # Safety
-    ///
-    /// `pred` and `succ` are publications and `pred_manifest_digest` a C
-    /// string.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn tree_segment_precedes(
-        pred: *const TreePublication,
-        pred_manifest_digest: *const c_char,
-        succ: *const TreePublication,
-    ) -> c_int {
-        // SAFETY: the caller's publications and string.
-        unsafe { super::segment_precedes(&*pred, ffi::c_str(pred_manifest_digest), &*succ) }
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn tree_walk_within(base_seq: i64, last_seq: i64) -> c_int {
-        super::walk_within(base_seq, last_seq)
-    }
-
-    /// # Safety
-    ///
-    /// `p` is a publication whose operations are as its count says, and
-    /// `out` room for 32 bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn tree_history_at(
-        p: *const TreePublication,
-        seq: i64,
-        out: *mut [u8; 32],
-    ) -> c_int {
-        // SAFETY: the caller's publication and room.
-        unsafe { super::history_at(&*p, seq, &mut *out) }
-    }
-
-    /// # Safety
-    ///
-    /// `p` is a publication, `state` NULL or a state, and
-    /// `manifest_digest` a C string.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn tree_publication_follows(
-        p: *const TreePublication,
-        state: *const TreeState,
-        manifest_digest: *const c_char,
-    ) -> c_int {
-        // SAFETY: the caller's publication, state and string.
-        unsafe { super::publication_follows(&*p, state.as_ref(), ffi::c_str(manifest_digest)) }
     }
 }

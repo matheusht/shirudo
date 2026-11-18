@@ -1446,7 +1446,6 @@ mod capi {
     use super::Output;
     use crate::errno::EINVAL;
     use crate::sys::upatch_maps::MapView;
-    use crate::util::upatch::DecoderView;
 
     const JSON_MAX: usize = super::JSON_MAX;
 
@@ -1562,7 +1561,6 @@ mod capi {
     /// # Safety
     ///
     /// `path` is a C string or NULL; otherwise as upatch_decode_map_json().
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn upatch_decode_map_file_json(
         path: *const c_char,
         v: *const MapView,
@@ -1593,7 +1591,6 @@ mod capi {
     /// # Safety
     ///
     /// As upatch_decode_map_file_json().
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn upatch_decode_map_file_otel(
         path: *const c_char,
         v: *const MapView,
@@ -1605,26 +1602,6 @@ mod capi {
         }
         // SAFETY: the caller's arguments.
         unsafe { decode(path, v, true, JSON_MAX, out, out_len) }
-    }
-
-    /// For the fuzzer: one decoder run on the view, as the export runs
-    /// it.
-    ///
-    /// # Safety
-    ///
-    /// `d` is a decoder view whose source is valid, `v` a view, `out`
-    /// and `out_len` rooms.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_decode_run(
-        d: *const DecoderView,
-        v: *const MapView,
-        otel: bool,
-        max_bytes: usize,
-        out: *mut *mut c_char,
-        out_len: *mut usize,
-    ) -> c_int {
-        // SAFETY: the caller's arguments.
-        unsafe { hand(super::run(&*d, &*v, otel, max_bytes), out, out_len) }
     }
 }
 

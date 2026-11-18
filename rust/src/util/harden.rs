@@ -121,17 +121,3 @@ pub(crate) fn harden_self() -> c_int {
     }
     0
 }
-
-mod capi {
-    use core::ffi::c_int;
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn harden_stdio() {
-        super::harden_stdio();
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn harden_self() -> c_int {
-        super::harden_self()
-    }
-}

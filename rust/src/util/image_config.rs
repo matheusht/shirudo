@@ -434,54 +434,18 @@ fn clear() {
 pub(crate) use capi::{image_config_clear, image_config_set};
 
 mod capi {
-    use core::ffi::{CStr, c_char, c_int, c_uint};
+    use core::ffi::c_int;
 
-    use crate::errno::EINVAL;
     use crate::util::config::Config;
 
     /// # Safety
     ///
-    /// `out` points to room for a configuration.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn image_config_get(out: *mut Config) -> c_int {
-        // SAFETY: the caller passes the room.
-        unsafe { super::get(out) }
-    }
-
-    /// An entry of the image, opened from its verified root: an fd or
-    /// -errno.
-    #[unsafe(no_mangle)]
-    pub extern "C" fn image_open(which: c_uint, flags: c_int) -> c_int {
-        super::open(which, flags)
-    }
-
-    /// # Safety
-    ///
-    /// `path` is NULL or a C string.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn image_open_relative(path: *const c_char, flags: c_int) -> c_int {
-        if path.is_null() {
-            return -EINVAL;
-        }
-        // SAFETY: the caller passes a C string.
-        super::open_relative(unsafe { CStr::from_ptr(path) }, flags)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn image_config_validate(root_fd: c_int) -> c_int {
-        super::validate(root_fd)
-    }
-
-    /// # Safety
-    ///
     /// `bootstrap` points to a configuration.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn image_config_set(bootstrap: *const Config, root_fd: c_int) -> c_int {
         // SAFETY: the caller passes a configuration.
         unsafe { super::set(bootstrap, root_fd) }
     }
 
-    #[unsafe(no_mangle)]
     pub extern "C" fn image_config_clear() {
         super::clear();
     }

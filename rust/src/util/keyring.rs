@@ -682,7 +682,6 @@ mod capi {
     /// # Safety
     ///
     /// `certs` holds `n` certificates.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn keyring_holds_exactly(
         keyring: i32,
         certs: *const KeyringCert,
@@ -692,7 +691,6 @@ mod capi {
         unsafe { super::holds_exactly(keyring, ffi::slice(certs, n)) }
     }
 
-    #[unsafe(no_mangle)]
     pub extern "C" fn keyring_unlink_key(keyring: i32, key: i32) -> c_int {
         // SAFETY: numbers alone.
         if unsafe {
@@ -730,21 +728,5 @@ mod capi {
     /// No restriction type: the keyring rejects every further addition.
     pub extern "C" fn keyring_dm_verity_seal() -> c_int {
         super::keyctl_spec(KEYCTL_RESTRICT_KEYRING, KEY_SPEC_DM_VERITY_KEYRING).min(0) as c_int
-    }
-
-    /// [`super::seal_set`]: enrols the trusted set in the keyring `spec`
-    /// names, whose serial is `ring`, and seals it.
-    ///
-    /// # Safety
-    ///
-    /// `set` points to a loaded set.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn keyring_seal_set(
-        spec: i32,
-        ring: i32,
-        set: *const crate::util::keys::TrustedSet,
-    ) -> c_int {
-        // SAFETY: the caller passes a set.
-        super::seal_set(spec, ring, unsafe { &*set })
     }
 }

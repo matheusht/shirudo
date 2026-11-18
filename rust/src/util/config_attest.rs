@@ -527,7 +527,6 @@ mod capi {
     ///
     /// `view` is NULL or points to a view whose events are NULL or from
     /// xreallocarray().
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn config_evidence_clear(view: *mut Evidence) {
         // SAFETY: the caller passes the view.
         unsafe { super::clear(view) }
@@ -548,7 +547,6 @@ mod capi {
     ///
     /// `evidence` holds `length` bytes, and `out` points to room for a
     /// view.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn config_evidence_parse(
         evidence: *const c_char,
         length: usize,
@@ -563,7 +561,6 @@ mod capi {
     /// `view` points to a view, `pcrs` to 24 PCR values, `expected_root`
     /// is NULL or points to 32 bytes, and `reason` points to where the
     /// reason goes.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn config_evidence_verify(
         view: *const Evidence,
         quote_mask: u32,

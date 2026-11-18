@@ -346,10 +346,6 @@ mod tests;
 mod capi {
     use core::ffi::{c_char, c_int};
 
-    use super::QuoteResult;
-    use crate::ffi;
-    use crate::util::json::JsonEmit;
-
     /// # Safety
     ///
     /// `argv` holds `argc` C strings.
@@ -357,38 +353,5 @@ mod capi {
     pub unsafe extern "C" fn quote_check_main(argc: c_int, argv: *const *const c_char) -> c_int {
         // SAFETY: the caller's arguments, each a C string.
         super::quote_check(unsafe { crate::builtin::words(argc, argv) })
-    }
-
-    /// # Safety
-    ///
-    /// `row` holds `len` bytes and `res` is room for a result.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn quote_row_check(
-        row: *const c_char,
-        len: usize,
-        res: *mut QuoteResult,
-    ) -> c_int {
-        // SAFETY: the caller's row and room.
-        let (row, res) = unsafe { (ffi::slice(row.cast::<u8>(), len), &mut *res) };
-
-        match super::row_check(row, res) {
-            Ok(()) => 0,
-            Err(err) => err,
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `res` is a result and `line` has room for `cap` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn quote_row_emit(
-        res: *const QuoteResult,
-        line: *mut c_char,
-        cap: usize,
-    ) -> c_int {
-        let mut e = JsonEmit::fixed(line, cap);
-
-        // SAFETY: the caller's result.
-        super::row_emit(unsafe { &*res }, &mut e)
     }
 }

@@ -1256,59 +1256,15 @@ mod fuzz;
 mod capi {
     use core::ffi::{c_char, c_int};
 
-    use super::{DumpCost, RodataRange};
-    use crate::bpf::btf::Btf;
+    use super::RodataRange;
+
     use crate::errno::EINVAL;
     use crate::ffi;
     use crate::util::upatch::Upatch;
 
     /// # Safety
     ///
-    /// `btf` is NULL or a BTF shirudo_btf_new() made, `buf` holds `cap`
-    /// bytes, and `off` points to an offset into them.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_rodata_type_name(
-        btf: *const Btf,
-        id: u32,
-        buf: *mut c_char,
-        cap: usize,
-        off: *mut usize,
-        depth: u32,
-    ) -> c_int {
-        // SAFETY: the caller passes the BTF, the room and the offset.
-        let Some(btf) = (unsafe { btf.as_ref() }) else {
-            return -EINVAL;
-        };
-        // SAFETY: as above.
-        unsafe {
-            super::append_type_name(btf, id, ffi::bytes_mut(buf.cast(), cap), &mut *off, depth)
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `btf` is NULL or a BTF shirudo_btf_new() made, and `cost` holds a
-    /// cost for each of its types.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_rodata_dump_cost(
-        btf: *const Btf,
-        id: u32,
-        depth: u32,
-        cost: *mut DumpCost,
-    ) -> c_int {
-        // SAFETY: the caller passes the BTF.
-        let Some(btf) = (unsafe { btf.as_ref() }) else {
-            return -EINVAL;
-        };
-        // SAFETY: the caller's cost for each of the types.
-        let costs = unsafe { core::slice::from_raw_parts_mut(cost, btf.type_cnt() as usize) };
-        super::dump_cost(btf, id, depth, costs)
-    }
-
-    /// # Safety
-    ///
     /// `u` is an open container, and `path` a C string.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn upatch_rodata_print(
         u: *const Upatch,
         path: *const c_char,
@@ -1322,7 +1278,6 @@ mod capi {
     ///
     /// `u` is NULL or an open container, `symbol` NULL or a C string and
     /// `range` NULL or room for a range.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn upatch_rodata_symbol_range(
         u: *const Upatch,
         symbol: *const c_char,
@@ -1340,7 +1295,6 @@ mod capi {
     ///
     /// `u` is NULL or an open container, and `offset` NULL or room for
     /// one.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn upatch_rodata_data_offset(
         u: *const Upatch,
         offset: *mut u32,

@@ -80,7 +80,6 @@ pub struct ChainStatus {
     pub(crate) init: EventlogInit,
 }
 
-const _: () = assert!(size_of::<ChainLive>() == 72);
 const _: () = assert!(size_of::<MeasuredUpatch>() == 322);
 const _: () = assert!(size_of::<ChainInitInfo>() == 696);
 const _: () = assert!(core::mem::offset_of!(ChainInitInfo, reset_count) == 388);
@@ -933,7 +932,6 @@ unsafe fn read(out: *mut u8) -> c_int {
 }
 
 /// The register as the TPM reports it, over the session init pinned.
-#[repr(C)]
 pub(crate) struct ChainLive {
     pub(crate) name: [u8; NAME_LEN],
     pub(crate) reset_count: u32,
@@ -1105,7 +1103,7 @@ mod tests;
 mod capi {
     use core::ffi::{c_char, c_int};
 
-    use super::{ChainInitInfo, ChainLive, ChainStatus, DIGEST_LEN, MeasuredUpatch};
+    use super::{DIGEST_LEN, MeasuredUpatch};
 
     /// # Safety
     ///
@@ -1147,7 +1145,6 @@ mod capi {
     ///
     /// `tag` and `name` are C strings, `payload` a digest and `event`
     /// room for one.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn chain_upatch_event(
         tag: *const c_char,
         name: *const c_char,
@@ -1161,7 +1158,6 @@ mod capi {
     /// # Safety
     ///
     /// `operation_digest` is a digest and `event` room for one.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn chain_tree_event(
         seq: i64,
         operation_digest: *const u8,
@@ -1195,47 +1191,14 @@ mod capi {
     /// # Safety
     ///
     /// `chain` and `event` are digests, which may be the same.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn chain_fold(chain: *mut u8, event: *const u8) -> c_int {
         // SAFETY: the caller passes two digests.
         unsafe { super::fold(chain, event) }
     }
 
-    #[unsafe(no_mangle)]
-    pub extern "C" fn chain_upatch_tag(ty: u32, load: bool) -> *const c_char {
-        match (ty, load) {
-            (1, true) => c"shirudo-upatch".as_ptr(),
-            (1, false) => c"shirudo-unload".as_ptr(),
-            (2, true) => c"shirudo-java".as_ptr(),
-            (2, false) => c"shirudo-java-unload".as_ptr(),
-            _ => core::ptr::null(),
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `out` is room for the live register.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn chain_live(out: *mut ChainLive) -> c_int {
-        // SAFETY: the caller provides room for the result.
-        unsafe {
-            match super::live() {
-                Ok(value) => {
-                    out.write(value);
-                    0
-                }
-                Err(err) => {
-                    out.write_bytes(0, 1);
-                    err
-                }
-            }
-        }
-    }
-
     /// # Safety
     ///
     /// `name` is a name and `out` has room for `cap` bytes.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn chain_anchor(name: *const u8, out: *mut c_char, cap: usize) -> c_int {
         // SAFETY: the caller passes a name and the room.
         unsafe { super::anchor(name, out.cast(), cap) }
@@ -1243,17 +1206,7 @@ mod capi {
 
     /// # Safety
     ///
-    /// `event` is a digest and `info` a structure to fill.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn chain_init(event: *const u8, info: *mut ChainInitInfo) -> c_int {
-        // SAFETY: the caller passes a digest and the structure.
-        unsafe { super::init(&*event.cast(), &mut *info) }
-    }
-
-    /// # Safety
-    ///
     /// `event` is a digest and `out_chain` NULL or room for one.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn chain_extend(event: *const u8, out_chain: *mut u8) -> c_int {
         // SAFETY: the caller passes a digest and NULL or the room.
         unsafe { super::extend(&*event.cast(), out_chain) }
@@ -1262,7 +1215,6 @@ mod capi {
     /// # Safety
     ///
     /// `out` has room for a digest.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn chain_read(out: *mut u8) -> c_int {
         // SAFETY: the caller passes the room.
         unsafe { super::read(out) }
@@ -1270,14 +1222,5 @@ mod capi {
 
     pub extern "C" fn chain_bound() -> bool {
         super::bound()
-    }
-
-    /// # Safety
-    ///
-    /// `st` is a structure to fill.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn chain_status(st: *mut ChainStatus) -> c_int {
-        // SAFETY: the caller passes the structure.
-        unsafe { super::status(&mut *st) }
     }
 }

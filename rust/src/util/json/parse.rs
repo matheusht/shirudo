@@ -11,7 +11,7 @@ use core::ffi::{CStr, c_char, c_int, c_void};
 use core::ptr;
 
 use super::{MAX_BYTES, MAX_DEPTH, MAX_FIELDS, MAX_STRING_BYTES, utf8_width};
-use crate::errno::{E2BIG, EINVAL, ENOMEM, ENOSPC};
+use crate::errno::{E2BIG, EINVAL, ENOSPC};
 
 /// A negative errno, or the non-zero value a callback returned.
 type Result<T = ()> = core::result::Result<T, c_int>;
@@ -151,24 +151,6 @@ impl JsonMap {
             ctx,
         }
     }
-}
-
-/// `struct json_visitor`: what a walk calls for each token.
-#[repr(C)]
-pub struct JsonVisitor {
-    open: Option<unsafe extern "C" fn(ctx: *mut c_void, array: bool) -> c_int>,
-    close: Option<unsafe extern "C" fn(ctx: *mut c_void, array: bool) -> c_int>,
-    key: Option<unsafe extern "C" fn(ctx: *mut c_void, key: *const c_char) -> c_int>,
-    string: Option<unsafe extern "C" fn(ctx: *mut c_void, s: *const c_char) -> c_int>,
-    number: Option<
-        unsafe extern "C" fn(
-            ctx: *mut c_void,
-            text: *const c_char,
-            len: usize,
-            integer: bool,
-        ) -> c_int,
-    >,
-    literal: Option<unsafe extern "C" fn(ctx: *mut c_void, value: c_int) -> c_int>,
 }
 
 fn status(ret: c_int) -> Result {
@@ -861,6 +843,7 @@ fn parse(data: &[u8], fields: Fields) -> Result {
     Ok(())
 }
 
+#[cfg(any(test, shirudo_fuzz))]
 pub(crate) fn walk(data: &[u8], visitor: &mut dyn Visit) -> Result {
     let mut scratch = Vec::new();
 
@@ -870,7 +853,7 @@ pub(crate) fn walk(data: &[u8], visitor: &mut dyn Visit) -> Result {
     // A decoded string is never longer than its encoding.
     scratch
         .try_reserve_exact(data.len() + 1)
-        .map_err(|_| -ENOMEM)?;
+        .map_err(|_| -crate::errno::ENOMEM)?;
     scratch.resize(data.len() + 1, 0);
 
     let mut p = Parser {
@@ -896,127 +879,4 @@ pub(crate) fn walk(data: &[u8], visitor: &mut dyn Visit) -> Result {
 /// but the sinks' callbacks touches them during the parse.
 pub(crate) unsafe fn parse_schema(data: &[u8], fields: *mut JsonField, n: usize) -> c_int {
     errno(parse(data, Fields { ptr: fields, n }))
-}
-
-mod capi {
-    use core::ffi::{CStr, c_char, c_int, c_void};
-
-    use super::{Fields, JsonField, JsonVisitor, MAX_BYTES, Result, Visit, errno, status};
-    use crate::errno::{E2BIG, EINVAL};
-    use crate::ffi;
-
-    /// A C visitor and the context its callbacks take.
-    struct CVisitor {
-        v: *const JsonVisitor,
-        ctx: *mut c_void,
-    }
-
-    impl CVisitor {
-        fn visitor(&self) -> &JsonVisitor {
-            // SAFETY: json_walk()'s caller passes a valid visitor, which
-            // stays valid for the walk.
-            unsafe { &*self.v }
-        }
-    }
-
-    impl Visit for CVisitor {
-        fn open(&mut self, array: bool) -> Result {
-            match self.visitor().open {
-                // SAFETY: a callback of the visitor, with its context.
-                Some(f) => status(unsafe { f(self.ctx, array) }),
-                None => Ok(()),
-            }
-        }
-
-        fn close(&mut self, array: bool) -> Result {
-            match self.visitor().close {
-                // SAFETY: a callback of the visitor, with its context.
-                Some(f) => status(unsafe { f(self.ctx, array) }),
-                None => Ok(()),
-            }
-        }
-
-        fn key(&mut self, key: &CStr) -> Result {
-            match self.visitor().key {
-                // SAFETY: a callback of the visitor, with its context and
-                // a C string it may not keep.
-                Some(f) => status(unsafe { f(self.ctx, key.as_ptr()) }),
-                None => Ok(()),
-            }
-        }
-
-        fn string(&mut self, s: &CStr) -> Result {
-            match self.visitor().string {
-                // SAFETY: a callback of the visitor, with its context and
-                // a C string it may not keep.
-                Some(f) => status(unsafe { f(self.ctx, s.as_ptr()) }),
-                None => Ok(()),
-            }
-        }
-
-        fn number(&mut self, text: &[u8], integer: bool) -> Result {
-            let Some(f) = self.visitor().number else {
-                return Ok(());
-            };
-
-            // SAFETY: a callback of the visitor, with its context and the
-            // text of the number in the caller's document.
-            status(unsafe { f(self.ctx, text.as_ptr().cast(), text.len(), integer) })
-        }
-
-        fn literal(&mut self, value: c_int) -> Result {
-            match self.visitor().literal {
-                // SAFETY: a callback of the visitor, with its context.
-                Some(f) => status(unsafe { f(self.ctx, value) }),
-                None => Ok(()),
-            }
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `data` holds `len` bytes, and `fields` holds `n_fields` fields of
-    /// a valid schema, as json.h describes them.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn json_parse(
-        data: *const c_char,
-        len: usize,
-        fields: *mut JsonField,
-        n_fields: usize,
-    ) -> c_int {
-        if len > MAX_BYTES {
-            return -E2BIG;
-        }
-        // SAFETY: the caller passes len bytes at data.
-        let data = unsafe { ffi::slice(data.cast::<u8>(), len) };
-        let fields = Fields {
-            ptr: fields,
-            n: n_fields,
-        };
-
-        errno(super::parse(data, fields))
-    }
-
-    /// # Safety
-    ///
-    /// `data` holds `len` bytes, and `v` is NULL or a valid visitor whose
-    /// callbacks take `ctx`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn json_walk(
-        data: *const c_char,
-        len: usize,
-        v: *const JsonVisitor,
-        ctx: *mut c_void,
-    ) -> c_int {
-        if len > MAX_BYTES {
-            return -E2BIG;
-        }
-        if v.is_null() {
-            return -EINVAL;
-        }
-        // SAFETY: the caller passes len bytes at data.
-        let data = unsafe { ffi::slice(data.cast::<u8>(), len) };
-
-        errno(super::walk(data, &mut CVisitor { v, ctx }))
-    }
 }

@@ -1653,23 +1653,3 @@ pub(crate) fn stage_cancel() -> c_int {
     // SAFETY: the open journal.
     with_journal(|j| unsafe { config_update_clear_staged(j) })
 }
-
-mod capi {
-    use core::ffi::{c_int, c_void};
-
-    /// The retry the removal of a rejected candidate's mapping makes,
-    /// with `remove` in its place: called with `ctx` until it gives
-    /// other than -EBUSY, 100 times at most, 10 ms apart.
-    ///
-    /// # Safety
-    ///
-    /// `remove` is safe to call with `ctx`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn image_retry_busy(
-        remove: unsafe extern "C" fn(ctx: *mut c_void) -> c_int,
-        ctx: *mut c_void,
-    ) -> c_int {
-        // SAFETY: the caller's callback with its context.
-        super::retry_busy(|| unsafe { remove(ctx) })
-    }
-}

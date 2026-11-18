@@ -734,30 +734,3 @@ pub(crate) fn image_guards_ready() -> c_int {
     }
     0
 }
-
-mod capi {
-    use core::ffi::c_int;
-
-    use super::ConfigRootGuard;
-
-    /// # Safety
-    ///
-    /// `root` points to 32 bytes, and `guard` to room for a guard.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn config_root_begin(
-        root: *const u8,
-        guard: *mut ConfigRootGuard,
-    ) -> c_int {
-        // SAFETY: the caller's root and room.
-        unsafe { super::config_root_begin(&*root.cast::<[u8; 32]>(), &mut *guard) }
-    }
-
-    /// # Safety
-    ///
-    /// `guard` is one config_root_begin() filled.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn config_root_end(guard: *mut ConfigRootGuard) -> c_int {
-        // SAFETY: the caller's guard.
-        super::config_root_end(unsafe { &mut *guard })
-    }
-}

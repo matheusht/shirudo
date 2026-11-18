@@ -303,6 +303,7 @@ unsafe fn bpm(argc: c_int, argv: *const *const c_char) -> c_int {
 
 /// For the image CLI test: the key file registered source `name`
 /// verifies with, open as `bpm repo update` opens it, or -errno.
+#[cfg(feature = "test-helpers")]
 pub(crate) fn source_key_open(name: &[u8]) -> c_int {
     match source::load(name) {
         Ok(s) => s.key_open(),
@@ -315,30 +316,11 @@ pub(crate) use capi::cmd_bpm;
 mod capi {
     use core::ffi::{c_char, c_int};
 
-    use crate::ffi;
-    use crate::util::initrd;
-
     /// # Safety
     ///
     /// `argv` holds `argc` C strings.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn cmd_bpm(argc: c_int, argv: *const *const c_char) -> c_int {
         // SAFETY: the caller's arguments.
         unsafe { super::bpm(argc, argv) }
-    }
-
-    /// # Safety
-    ///
-    /// `name` is a C string.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn bpm_source_key_open(name: *const c_char) -> c_int {
-        // SAFETY: the caller's C string.
-        super::source_key_open(unsafe { ffi::c_str(name) })
-    }
-
-    /// The certificate `bpm tree sync` verifies publications against.
-    #[unsafe(no_mangle)]
-    pub extern "C" fn bpm_tree_certificate() -> *const c_char {
-        initrd::cert_path().as_ptr()
     }
 }

@@ -14,13 +14,12 @@ mod parse;
 mod policy;
 
 pub(crate) use capi::{
-    shirudo_tpm_ek_policy, tpm_attest_parse, tpm_credential_protect, tpm_ecc_public_parse,
-    tpm_kdfe, tpm_nv_name, tpm_object_name, tpm_public_parse, tpm_register_policy,
+    EK_POLICY, tpm_attest_parse, tpm_credential_protect, tpm_ecc_public_parse, tpm_kdfe,
+    tpm_nv_name, tpm_object_name, tpm_public_parse, tpm_register_policy,
 };
 pub(crate) use parse::{attest_parse, public_marshal, public_parse};
 pub(crate) use policy::{
-    nv_extend_cphash, object_name, policy_nv_written, policy_or, register_policy_final,
-    writer_auth_hash, writer_public,
+    nv_extend_cphash, object_name, register_policy_final, writer_auth_hash, writer_public,
 };
 /// The rest of what test-tpm-wire drives.
 #[cfg(feature = "test-helpers")]

@@ -56,45 +56,9 @@ pub(crate) use capi::config_measure_pcr_valid;
 mod capi {
     use core::ffi::c_int;
 
-    use super::{event, pcr_valid};
-    use crate::errno::EINVAL;
-    use crate::util::crypto_openssl::sha256_buffer;
+    use super::pcr_valid;
 
     pub extern "C" fn config_measure_pcr_valid(pcr: u32) -> c_int {
         pcr_valid(pcr)
-    }
-
-    /// The config register index accepted by the remaining C callers.
-    #[unsafe(no_mangle)]
-    pub extern "C" fn config_measure_nvpcr(pcr: u32) -> bool {
-        pcr == 0x0181_8E04
-    }
-
-    /// # Safety
-    ///
-    /// out points to 32 writable bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn config_measure_nvpcr_initial(out: *mut u8) -> c_int {
-        let zeros = [0u8; 64];
-
-        // SAFETY: the input is 64 bytes and the caller provides the digest room.
-        unsafe { sha256_buffer(zeros.as_ptr().cast(), zeros.len(), out) }
-    }
-
-    /// # Safety
-    ///
-    /// `root_hash` is NULL or holds 32 bytes, and `out` is NULL or has
-    /// room for 32.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn config_measure_event(
-        kind: c_int,
-        root_hash: *const u8,
-        out: *mut u8,
-    ) -> c_int {
-        if root_hash.is_null() || out.is_null() {
-            return -EINVAL;
-        }
-        // SAFETY: the caller passes 32 bytes at root_hash.
-        event(kind, unsafe { &*root_hash.cast::<[u8; 32]>() }, out)
     }
 }

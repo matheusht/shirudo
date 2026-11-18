@@ -1336,7 +1336,6 @@ mod capi {
     ///
     /// `image` is NULL or an open image, `name` NULL or a C string, and
     /// `out` NULL or room for a mapping.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn dm_verity_create(
         image: *const ConfigImageOpen,
         name: *const c_char,
@@ -1362,7 +1361,6 @@ mod capi {
     /// # Safety
     ///
     /// `device` is NULL or a mapping, and `image` NULL or an open image.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn dm_verity_verify(
         device: *const DmVerity,
         image: *const ConfigImageOpen,
@@ -1386,7 +1384,6 @@ mod capi {
     /// # Safety
     ///
     /// `device` is NULL or a mapping.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn dm_verity_remove(device: *mut DmVerity, deferred: bool) -> c_int {
         // SAFETY: the caller's mapping, or NULL.
         match unsafe { device.as_mut() } {
@@ -1398,7 +1395,6 @@ mod capi {
     /// # Safety
     ///
     /// `device` is NULL or a mapping.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn dm_verity_close(device: *mut DmVerity) {
         // SAFETY: the caller's mapping, or NULL.
         if let Some(device) = unsafe { device.as_mut() } {

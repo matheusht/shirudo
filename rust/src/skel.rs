@@ -83,13 +83,3 @@ impl EmbeddedBpf {
 pub(crate) fn embedded() -> [&'static EmbeddedBpf; 2] {
     [&BPF2_BLOB, &SEAL_BLOB]
 }
-
-#[unsafe(no_mangle)]
-pub extern "C" fn bpf2_blob() -> *const EmbeddedBpf {
-    &BPF2_BLOB
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn seal_blob() -> *const EmbeddedBpf {
-    &SEAL_BLOB
-}

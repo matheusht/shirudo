@@ -528,7 +528,6 @@ mod capi {
     ///
     /// `cfg` is NULL or a configuration to fill, and `path` NULL or a C
     /// string.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn config_load_path(cfg: *mut Config, path: *const c_char) -> c_int {
         if cfg.is_null() || path.is_null() {
             return -EINVAL;

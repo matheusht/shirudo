@@ -9,12 +9,12 @@ use core::ffi::{CStr, c_int};
 use super::{helper_main, out};
 use crate::util::hex::{decode, encode};
 use crate::util::tpm_wire::{
-    CREDENTIAL_LEN, DIGEST_LEN, HmacKey, ID_OBJECT_LEN, NAME_LEN, NV_RSA_BYTES,
+    CREDENTIAL_LEN, DIGEST_LEN, EK_POLICY, HmacKey, ID_OBJECT_LEN, NAME_LEN, NV_RSA_BYTES,
     NV_RSA_PUBLIC_AREA_LEN, RegisterPolicy, ST_ATTEST_QUOTE, TpmAttest, TpmEccPublic, TpmPublic,
     attest_parse, credential_protect, ecc_public_parse, ecdsa_signature_parse, kdfa, kdfe,
     nv_extend_cphash, nv_name, object_name, policy_command_code, policy_nv_written, policy_or,
     policy_pcr, policy_signed, public_marshal, public_parse, register_policy,
-    register_policy_final, shirudo_tpm_ek_policy, writer_auth_hash, writer_public,
+    register_policy_final, writer_auth_hash, writer_public,
 };
 
 helper_main!(shirudo_helper_test_tpm_wire, run);
@@ -314,7 +314,7 @@ fn run_case(args: &[&CStr]) -> Result<(), Fail> {
             digest(|d| kdfe(&z, a(3).to_bytes(), &u, &v, d))
         }
         (b"ek-policy", _) => {
-            puthex(&shirudo_tpm_ek_policy);
+            puthex(&EK_POLICY);
             Ok(())
         }
         (b"credential", 5) => {

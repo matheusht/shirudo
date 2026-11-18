@@ -140,13 +140,6 @@ impl Buffer {
         // SAFETY: the len bytes written.
         unsafe { crate::ffi::slice(self.ptr, self.len) }
     }
-
-    /// The buffer, its length, for C to xfree() with the size it knows.
-    fn into_raw(self) -> (*mut u8, usize) {
-        let out = (self.ptr, self.len);
-        core::mem::forget(self);
-        out
-    }
 }
 
 impl Drop for Buffer {
@@ -345,8 +338,6 @@ mod capi {
     use core::ffi::{CStr, c_char, c_int};
 
     use super::{OtelOpts, http, otlp};
-    use crate::sys::curl::CurlSlist;
-    use crate::sys::upatch_maps::MapView;
 
     fn opts<'a>(p: *const OtelOpts) -> Option<&'a OtelOpts> {
         // SAFETY: the caller's options, or NULL.
@@ -355,151 +346,6 @@ mod capi {
 
     fn path<'a>(p: *const c_char) -> Option<&'a CStr> {
         super::opt_cstr(p)
-    }
-
-    /// The signal of [`super::classify`] into `signal`, and why into the
-    /// `reason_sz` bytes at `reason`: 0, -EINVAL, or -E2BIG when the
-    /// reason for a metric does not fit.
-    ///
-    /// # Safety
-    ///
-    /// `v` is a view, `signal` room for one and `reason` for `reason_sz`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_maps_otel_classify(
-        v: *const MapView,
-        signal: *mut c_int,
-        reason: *mut c_char,
-        reason_sz: usize,
-    ) -> c_int {
-        if v.is_null() || signal.is_null() {
-            return -crate::errno::EINVAL;
-        }
-        // SAFETY: the caller's view.
-        let (sig, why) = super::classify(unsafe { &*v });
-        // SAFETY: the caller's room.
-        unsafe { *signal = sig };
-        if reason_sz == 0 {
-            return if sig == super::METRIC {
-                -crate::errno::E2BIG
-            } else {
-                0
-            };
-        }
-        let fits = why.len() < reason_sz;
-        // A metric's reason is all or nothing, as strsprintf() writes it.
-        let n = if fits {
-            why.len()
-        } else if sig == super::METRIC {
-            0
-        } else {
-            reason_sz - 1
-        };
-        // SAFETY: the caller's room for reason_sz bytes.
-        unsafe {
-            core::ptr::copy_nonoverlapping(why.as_ptr(), reason.cast::<u8>(), n);
-            *reason.add(n) = 0;
-        }
-        if !fits && sig == super::METRIC {
-            -crate::errno::E2BIG
-        } else {
-            0
-        }
-    }
-
-    fn build(
-        p: *const c_char,
-        v: *const MapView,
-        out: *mut *mut c_char,
-        out_len: *mut usize,
-        f: impl FnOnce(&CStr, &MapView) -> Result<super::Buffer, c_int>,
-    ) -> c_int {
-        let Some(p) = path(p) else {
-            return -crate::errno::EINVAL;
-        };
-        // SAFETY: the caller's view.
-        match f(p, unsafe { &*v }) {
-            Ok(buf) => {
-                let (ptr, len) = buf.into_raw();
-                // SAFETY: the caller's rooms; it frees the buffer with
-                // xfree(buf, JSON_MAX_BYTES).
-                unsafe {
-                    *out = ptr.cast();
-                    *out_len = len;
-                }
-                0
-            }
-            Err(err) => err,
-        }
-    }
-
-    /// The log a map becomes through the decoder at `path`, for offline
-    /// use: the buffer for xfree(buf, JSON_MAX_BYTES).
-    ///
-    /// # Safety
-    ///
-    /// `path` is a C string or NULL, `v` a view, `out` and `out_len`
-    /// rooms.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_maps_otel_build_log_file(
-        path: *const c_char,
-        v: *const MapView,
-        out: *mut *mut c_char,
-        out_len: *mut usize,
-    ) -> c_int {
-        build(path, v, out, out_len, |p, v| {
-            otlp::log_payload(Some(p), v, 0)
-        })
-    }
-
-    /// The metrics a map becomes through the decoder at `path`.
-    ///
-    /// # Safety
-    ///
-    /// As upatch_maps_otel_build_log_file().
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_maps_otel_build_metric_file(
-        path: *const c_char,
-        v: *const MapView,
-        out: *mut *mut c_char,
-        out_len: *mut usize,
-    ) -> c_int {
-        build(path, v, out, out_len, |p, v| {
-            otlp::metric_payload(Some(p), v)
-        })
-    }
-
-    /// # Safety
-    ///
-    /// `v` is a view or NULL, `opts` options or NULL.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_maps_otel_send(
-        v: *const MapView,
-        mode: c_int,
-        opts: *const OtelOpts,
-    ) -> c_int {
-        // SAFETY: the caller's view.
-        match unsafe { v.as_ref() } {
-            Some(v) => super::send_file(None, v, mode, self::opts(opts)),
-            None => -crate::errno::EINVAL,
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `path` is a C string or NULL, `v` a view or NULL, `opts` options
-    /// or NULL.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_maps_otel_send_file(
-        path: *const c_char,
-        v: *const MapView,
-        mode: c_int,
-        opts: *const OtelOpts,
-    ) -> c_int {
-        // SAFETY: the caller's view.
-        match unsafe { v.as_ref() } {
-            Some(v) => super::send_file(self::path(path), v, mode, self::opts(opts)),
-            None => -crate::errno::EINVAL,
-        }
     }
 
     /// Sends the `body_len` bytes at `body` as the string body of one
@@ -511,7 +357,6 @@ mod capi {
     ///
     /// `opts` is options or NULL; the strings are C strings, and `body`
     /// holds `body_len` bytes.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn otel_send_log_string(
         opts: *const OtelOpts,
         scope_name: *const c_char,
@@ -548,40 +393,11 @@ mod capi {
         http::send_log_string(self::opts(opts), &record)
     }
 
-    /// The seconds a Retry-After of `value` asks to wait from `now`, at
-    /// most 30: 0 or -EINVAL.
-    ///
-    /// # Safety
-    ///
-    /// `value` is a C string or NULL and `seconds` room or NULL.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn otel_retry_after(
-        value: *const c_char,
-        now: i64,
-        seconds: *mut u64,
-    ) -> c_int {
-        let Some(value) = path(value) else {
-            return -crate::errno::EINVAL;
-        };
-        if seconds.is_null() {
-            return -crate::errno::EINVAL;
-        }
-        match http::retry_after(value.to_bytes(), now) {
-            Ok(s) => {
-                // SAFETY: the caller's room.
-                unsafe { *seconds = s };
-                0
-            }
-            Err(err) => err,
-        }
-    }
-
     /// The OTLP severity of a status verdict, its text into `text`.
     ///
     /// # Safety
     ///
     /// `status` is a C string and `text` room for a pointer.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn status_otel_severity(
         status: *const c_char,
         text: *mut *const c_char,
@@ -591,87 +407,6 @@ mod capi {
         // SAFETY: the caller's room.
         unsafe { *text = t.as_ptr() };
         n
-    }
-
-    /// For the fuzzer: what the header callback makes of one response
-    /// header line of `len` bytes, 1 with a Retry-After into `seconds`.
-    ///
-    /// # Safety
-    ///
-    /// `line` holds `len` bytes and `seconds` is room.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn otel_header_retry_after(
-        line: *const c_char,
-        len: usize,
-        seconds: *mut u64,
-    ) -> c_int {
-        // SAFETY: the caller's bytes.
-        match http::header_retry_after(unsafe { crate::ffi::slice(line.cast(), len) }) {
-            Some(s) => {
-                // SAFETY: the caller's room.
-                unsafe { *seconds = s };
-                1
-            }
-            None => 0,
-        }
-    }
-
-    /// For the fuzzer: the check a collector's 200 body gets for a
-    /// partial success of `signal`: 0, -EREMOTEIO or -EBADMSG.
-    ///
-    /// # Safety
-    ///
-    /// `body` holds `len` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn otel_partial_success(
-        signal: c_int,
-        body: *const c_char,
-        len: usize,
-    ) -> c_int {
-        // SAFETY: the caller's bytes.
-        http::check_partial_success(signal, unsafe { crate::ffi::slice(body.cast(), len) })
-    }
-
-    /// For the fuzzer: the header lines OTEL_EXPORTER_OTLP_HEADERS of
-    /// `input` makes, into `*out` for curl_slist_free_all(): 0 or -errno.
-    ///
-    /// # Safety
-    ///
-    /// `input` is a C string and `out` room for a list.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn otel_configured_headers(
-        input: *const c_char,
-        out: *mut *mut CurlSlist,
-    ) -> c_int {
-        // SAFETY: the caller's C string.
-        let input = unsafe { CStr::from_ptr(input) }.to_bytes();
-        let mut list = http::Slist::default();
-        let ret = http::configured_headers(&mut list, input, false);
-        // SAFETY: the caller's room, the list handed over.
-        unsafe { *out = list.into_raw() };
-        ret
-    }
-
-    /// For the fuzzer: whether `s` is an HTTP field name.
-    ///
-    /// # Safety
-    ///
-    /// `s` is a C string.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn otel_header_name_ok(s: *const c_char) -> bool {
-        // SAFETY: the caller's C string.
-        http::header_name_ok(unsafe { CStr::from_ptr(s) }.to_bytes())
-    }
-
-    /// For the fuzzer: whether `s` is an HTTP field value.
-    ///
-    /// # Safety
-    ///
-    /// `s` is a C string.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn otel_header_value_ok(s: *const c_char) -> bool {
-        // SAFETY: the caller's C string.
-        http::header_value_ok(unsafe { CStr::from_ptr(s) }.to_bytes())
     }
 }
 

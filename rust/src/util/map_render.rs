@@ -392,33 +392,3 @@ pub(crate) fn emit_json_object(e: &mut JsonEmit, v: &MapView) {
     emit_json_fields(e, v);
     e.obj_close();
 }
-
-mod capi {
-
-    use crate::sys::upatch_maps::MapView;
-    use crate::util::json::JsonEmit;
-
-    /// # Safety
-    ///
-    /// `e` is an emitter, and `v` a view or NULL, which emits nothing.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_maps_emit_json_fields(e: *mut JsonEmit, v: *const MapView) {
-        // SAFETY: the caller's emitter, and its view or NULL.
-        let (e, v) = unsafe { (&mut *e, v.as_ref()) };
-        if let Some(v) = v {
-            super::emit_json_fields(e, v);
-        }
-    }
-
-    /// # Safety
-    ///
-    /// As upatch_maps_emit_json_fields().
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_maps_emit_json_object(e: *mut JsonEmit, v: *const MapView) {
-        // SAFETY: the caller's emitter, and its view or NULL.
-        let (e, v) = unsafe { (&mut *e, v.as_ref()) };
-        if let Some(v) = v {
-            super::emit_json_object(e, v);
-        }
-    }
-}

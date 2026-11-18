@@ -1352,6 +1352,7 @@ fn emit_status(e: &mut JsonEmit) {
 ///
 /// `path` is a C string, `s` a selector, and `values` and `found` room
 /// for an entry for each of its kconfig pairs.
+#[cfg(any(test, shirudo_fuzz))]
 unsafe fn kconfig_read(
     path: *const c_char,
     s: *const TreeSelector,
@@ -1405,7 +1406,7 @@ mod fuzz;
 mod capi {
     use core::ffi::{c_char, c_int};
 
-    use super::{TreeKv, TreeOperation, TreePending, TreeSelector, TreeState};
+    use super::{TreeOperation, TreePending, TreeSelector, TreeState};
     use crate::util::json::JsonEmit;
 
     /// # Safety
@@ -1504,36 +1505,5 @@ mod capi {
     pub unsafe extern "C" fn tree_emit_status(e: *mut JsonEmit) {
         // SAFETY: the caller passes an emitter.
         super::emit_status(unsafe { &mut *e })
-    }
-
-    /// # Safety
-    ///
-    /// `path` is a C string, `s` a selector, and `values` and `found`
-    /// room for an entry for each of its kconfig pairs.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn tree_kconfig_read(
-        path: *const c_char,
-        s: *const TreeSelector,
-        values: *mut [u8; super::STRING_MAX],
-        found: *mut bool,
-        gz: bool,
-    ) -> c_int {
-        // SAFETY: the caller passes a path, a selector and room.
-        unsafe { super::kconfig_read(path, s, values, found, gz) }
-    }
-
-    /// # Safety
-    ///
-    /// `path` is a C string, and `labels` room for `max` pairs.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn tree_labels_read(
-        path: *const c_char,
-        labels: *mut TreeKv,
-        n: *mut c_int,
-        max: c_int,
-    ) -> c_int {
-        // SAFETY: the caller passes a path and room for the pairs and
-        // their count.
-        unsafe { super::read_config_file(path, labels, &mut *n, max) }
     }
 }

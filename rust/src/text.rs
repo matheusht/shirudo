@@ -317,7 +317,6 @@ pub(crate) mod capi {
     /// # Safety
     ///
     /// `s` holds `len` bytes.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn digits(s: *const c_char, len: usize) -> usize {
         // SAFETY: the caller's bytes.
         super::digits(unsafe { bytes(s, len) })
@@ -337,7 +336,6 @@ pub(crate) mod capi {
     /// # Safety
     ///
     /// `s` holds `len` bytes, and `out` is room for the value.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn parse_u64(
         s: *const c_char,
         len: usize,
@@ -364,24 +362,8 @@ pub(crate) mod capi {
 
     /// # Safety
     ///
-    /// As parse_u64().
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn parse_s64(
-        s: *const c_char,
-        len: usize,
-        min: i64,
-        max: i64,
-        out: *mut i64,
-    ) -> c_int {
-        // SAFETY: the caller's bytes.
-        put(super::parse_s64(unsafe { bytes(s, len) }, min, max), out)
-    }
-
-    /// # Safety
-    ///
     /// `dst` is room for `size` bytes, and `src` a C string or `size`
     /// readable bytes.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn strscpy(dst: *mut c_char, src: *const c_char, size: usize) -> isize {
         if size == 0 {
             return -(E2BIG as isize);

@@ -206,63 +206,9 @@ pub(crate) fn chunk_validate(
 pub(crate) use capi::serializer_lock_acquire;
 
 mod capi {
-    use core::ffi::{CStr, c_char, c_int};
-
-    use super::SerialChunk;
-    use crate::errno::EINVAL;
-
-    /// # Safety
-    ///
-    /// `dir` is NULL or a C string.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn serializer_lock_acquire_at(dir: *const c_char, map_id: u32) -> c_int {
-        if dir.is_null() {
-            return -EINVAL;
-        }
-        // SAFETY: the caller passes a C string.
-        super::lock_acquire_at(unsafe { CStr::from_ptr(dir) }, map_id)
-    }
+    use core::ffi::c_int;
 
     pub extern "C" fn serializer_lock_acquire(map_id: u32) -> c_int {
         super::lock_acquire_at(super::LOCKS_DIR, map_id)
-    }
-
-    /// # Safety
-    ///
-    /// `out` is NULL or points to a u64.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn serializer_new_invocation_id(out: *mut u64) -> c_int {
-        if out.is_null() {
-            return -EINVAL;
-        }
-        // SAFETY: the caller passes a u64.
-        super::new_invocation_id(unsafe { &mut *out })
-    }
-
-    /// # Safety
-    ///
-    /// `c` is NULL or points to a chunk.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn serial_chunk_validate(
-        c: *const SerialChunk,
-        want_index: u32,
-        total_chunks: u32,
-        page_index: u32,
-        cursor: u64,
-        next_cursor: u64,
-        invocation_id: u64,
-    ) -> c_int {
-        // SAFETY: the caller passes NULL or a chunk.
-        let c = unsafe { c.as_ref() };
-
-        super::chunk_validate(
-            c,
-            want_index,
-            total_chunks,
-            page_index,
-            cursor,
-            next_cursor,
-            invocation_id,
-        )
     }
 }

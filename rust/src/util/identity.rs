@@ -71,12 +71,3 @@ fn lookup(fd: c_int, out: &mut Identity) -> c_int {
     }
     0
 }
-
-mod capi {
-    use core::ffi::c_int;
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn enforcement_active() -> c_int {
-        super::enforcement_active()
-    }
-}

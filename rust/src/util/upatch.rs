@@ -1159,7 +1159,7 @@ mod capi {
     use core::ffi::{c_char, c_int, c_void};
     use core::ptr;
 
-    use super::{DecoderView, NAME_MAX, ProgSpec, Upatch, at};
+    use super::{DecoderView, NAME_MAX, Upatch, at};
     use crate::errno::EINVAL;
     use crate::ffi;
     use crate::sys::libc::Dirent;
@@ -1168,7 +1168,6 @@ mod capi {
     /// # Safety
     ///
     /// `path` is a C string, and `out` points to room for a container.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn upatch_open(path: *const c_char, out: *mut Upatch) -> c_int {
         // SAFETY: the caller passes the path and the room.
         unsafe { super::open_path(path, out) }
@@ -1186,7 +1185,6 @@ mod capi {
     ///
     /// `data` is NULL or points to `size` bytes that stay valid while
     /// the container is open, and `out` to room for a container.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn upatch_open_memory(
         data: *const c_void,
         size: usize,
@@ -1199,7 +1197,6 @@ mod capi {
     /// # Safety
     ///
     /// `u` is a container, open or closed.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn upatch_close(u: *mut Upatch) {
         // SAFETY: the caller passes a container.
         super::close_upatch(unsafe { &mut *u });
@@ -1211,76 +1208,6 @@ mod capi {
     pub unsafe extern "C" fn upatch_header_name(u: *const Upatch, out: *mut c_char) {
         // SAFETY: the caller passes a container and the room.
         unsafe { super::header_name(&*u, &mut *out.cast::<[u8; NAME_MAX + 1]>()) };
-    }
-
-    /// # Safety
-    ///
-    /// `u` is a container.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_signed_name(u: *const Upatch) -> *const c_char {
-        // SAFETY: the caller passes a container.
-        super::signed_name(unsafe { &*u })
-    }
-
-    /// # Safety
-    ///
-    /// `u` is a container, and `len` points to room for its length.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_signed_attach(
-        u: *const Upatch,
-        len: *mut u32,
-    ) -> *const c_void {
-        // SAFETY: the caller passes a container and the room.
-        let (u, len) = unsafe { (&*u, &mut *len) };
-
-        *len = if u.map.is_null() {
-            0
-        } else {
-            u.signed_attach_len
-        };
-        if u.map.is_null() {
-            ptr::null()
-        } else {
-            u.signed_attach.cast()
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `u` is a container.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_signed_unload_payload(u: *const Upatch) -> *const u8 {
-        // SAFETY: the caller passes a container.
-        let u = unsafe { &*u };
-
-        if u.map.is_null() {
-            ptr::null()
-        } else {
-            u.signed_unload_payload
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `u` is a container, and `len` points to room for its length.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_signed_policy_labels(
-        u: *const Upatch,
-        len: *mut u32,
-    ) -> *const c_void {
-        // SAFETY: the caller passes a container and the room.
-        let (u, len) = unsafe { (&*u, &mut *len) };
-
-        *len = if u.map.is_null() {
-            0
-        } else {
-            u.signed_policy_labels_len
-        };
-        if u.map.is_null() {
-            ptr::null()
-        } else {
-            u.signed_policy_labels
-        }
     }
 
     /// # Safety
@@ -1299,7 +1226,6 @@ mod capi {
     /// # Safety
     ///
     /// `u` is a container.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn upatch_signature(u: *const Upatch) -> *const c_void {
         // SAFETY: the caller passes a container.
         let u = unsafe { &*u };
@@ -1338,26 +1264,7 @@ mod capi {
 
     /// # Safety
     ///
-    /// `u` is a container.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_is_unload(u: *const Upatch) -> bool {
-        // SAFETY: the caller passes a container.
-        super::is_unload(unsafe { &*u })
-    }
-
-    /// # Safety
-    ///
-    /// `u` is a container.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn upatch_has_decoders(u: *const Upatch) -> bool {
-        // SAFETY: the caller passes a container.
-        super::has_decoders(unsafe { &*u })
-    }
-
-    /// # Safety
-    ///
     /// `u` is a container, and `out` NULL or room for a view.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn upatch_decoder_view(
         u: *const Upatch,
         idx: u32,
@@ -1403,30 +1310,5 @@ mod capi {
                 c".upatch".as_ptr(),
             ))
         }
-    }
-
-    /// # Safety
-    ///
-    /// `specs` is NULL or what prog_specs_parse() gave for `nr_progs`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn prog_specs_free(specs: *mut ProgSpec, nr_progs: u32) {
-        // SAFETY: the caller passes the specs.
-        unsafe { super::specs_free(specs, nr_progs) }
-    }
-
-    /// # Safety
-    ///
-    /// `metadata` is NULL or points to `metadata_len` bytes, and `out`
-    /// to room for a pointer.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn prog_specs_parse(
-        metadata: *const c_void,
-        metadata_len: u32,
-        nr_maps: u32,
-        nr_progs: u32,
-        out: *mut *mut ProgSpec,
-    ) -> c_int {
-        // SAFETY: the caller passes the metadata and the room.
-        unsafe { super::specs_parse(metadata, metadata_len, nr_maps, nr_progs, out) }
     }
 }

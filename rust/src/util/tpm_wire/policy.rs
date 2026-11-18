@@ -59,7 +59,7 @@ fn policy_hash(prev: &Digest, cc: u32, a: &[u8], b: &[u8], out: &mut Digest) -> 
     0
 }
 
-pub(crate) fn policy_nv_written(prev: &Digest, written: bool, out: &mut Digest) -> c_int {
+pub(super) fn policy_nv_written(prev: &Digest, written: bool, out: &mut Digest) -> c_int {
     policy_hash(prev, CC_POLICY_NV_WRITTEN, &[u8::from(written)], &[], out)
 }
 
@@ -78,7 +78,7 @@ pub(crate) fn policy_pcr(prev: &Digest, mask: u32, pcr_digest: &Digest, out: &mu
     policy_hash(prev, CC_POLICY_PCR, &pcr_selection(mask), pcr_digest, out)
 }
 
-pub(crate) fn policy_or(a: &Digest, b: &Digest, out: &mut Digest) -> c_int {
+pub(super) fn policy_or(a: &Digest, b: &Digest, out: &mut Digest) -> c_int {
     policy_hash(&[0; DIGEST_LEN], CC_POLICY_OR, a, b, out)
 }
 

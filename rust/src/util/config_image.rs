@@ -325,7 +325,7 @@ pub(crate) use capi::{config_image_close, config_image_open, config_image_open_r
 mod capi {
     use core::ffi::{CStr, c_char, c_int};
 
-    use super::{ConfigImage, ConfigImageOpen, open_image, read_header};
+    use super::{ConfigImage, ConfigImageOpen, open_image};
     use crate::errno::EINVAL;
 
     /// `src` into `dst` field by field after its bytes are zeroed, so that
@@ -365,27 +365,6 @@ mod capi {
 
     /// # Safety
     ///
-    /// `out` is NULL or an image to fill.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn config_image_read_header(
-        hash_fd: c_int,
-        out: *mut ConfigImage,
-    ) -> c_int {
-        if out.is_null() {
-            return -EINVAL;
-        }
-        match read_header(hash_fd) {
-            Ok(image) => {
-                // SAFETY: the caller's image.
-                unsafe { store_image(out, &image) };
-                0
-            }
-            Err(e) => e,
-        }
-    }
-
-    /// # Safety
-    ///
     /// `prefix` is NULL or a C string, `expected_root` NULL or 32 bytes,
     /// and `out` NULL or an image to fill.
     unsafe fn open(
@@ -418,7 +397,6 @@ mod capi {
     /// # Safety
     ///
     /// `prefix` is NULL or a C string and `out` NULL or an image to fill.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn config_image_open(
         prefix: *const c_char,
         out: *mut ConfigImageOpen,
@@ -431,7 +409,6 @@ mod capi {
     ///
     /// `prefix` is NULL or a C string, `expected_root` NULL or 32 bytes,
     /// and `out` NULL or an image to fill.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn config_image_open_root(
         prefix: *const c_char,
         expected_root: *const u8,
@@ -447,7 +424,6 @@ mod capi {
     /// # Safety
     ///
     /// `image` is NULL or an image whose fds it may close.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn config_image_close(image: *mut ConfigImageOpen) {
         if !image.is_null() {
             // SAFETY: the caller passes its image.

@@ -88,48 +88,5 @@ pub(crate) fn quote(body: &[u8]) -> Result<Vec<u8>, c_int> {
     quoted
 }
 
-/// `text` and its terminator into the `cap` bytes at `out`, or -E2BIG
-/// with `out` empty.
-///
-/// # Safety
-///
-/// `out` is room for `cap` bytes.
-unsafe fn put(text: &[u8], out: *mut u8, cap: usize) -> c_int {
-    // SAFETY: the caller's room.
-    let out = unsafe { crate::ffi::bytes_mut(out, cap) };
-    if text.len() < out.len() {
-        out[..text.len()].copy_from_slice(text);
-        out[text.len()] = 0;
-        return 0;
-    }
-    if let Some(first) = out.first_mut() {
-        *first = 0;
-    }
-    -E2BIG
-}
-
 #[cfg(test)]
 mod tests;
-
-mod capi {
-    use core::ffi::{c_char, c_int};
-
-    /// # Safety
-    ///
-    /// `body` holds `len` bytes, and `quote` is room for `cap` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn keepalive_quote(
-        body: *const c_char,
-        len: usize,
-        quote: *mut c_char,
-        cap: usize,
-    ) -> c_int {
-        // SAFETY: the caller's body and room.
-        unsafe {
-            match super::quote(crate::ffi::slice(body.cast(), len)) {
-                Ok(text) => super::put(&text, quote.cast(), cap),
-                Err(err) => err,
-            }
-        }
-    }
-}

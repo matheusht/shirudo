@@ -9,12 +9,10 @@ use super::records::{self, EventlogInit, LineFn, UpatchFn};
 use crate::ffi;
 use crate::util::json::JsonEmit;
 
-#[unsafe(no_mangle)]
 pub extern "C" fn eventlog_path() -> *const c_char {
     super::path().as_ptr()
 }
 
-#[unsafe(no_mangle)]
 pub extern "C" fn eventlog_pending_path() -> *const c_char {
     super::pending_path().as_ptr()
 }
@@ -22,7 +20,6 @@ pub extern "C" fn eventlog_pending_path() -> *const c_char {
 /// # Safety
 ///
 /// `json_line` is a C string.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn eventlog_append(json_line: *const c_char) -> c_int {
     // SAFETY: the caller passes a C string.
     super::append(unsafe { CStr::from_ptr(json_line) })
@@ -31,7 +28,6 @@ pub unsafe extern "C" fn eventlog_append(json_line: *const c_char) -> c_int {
 /// # Safety
 ///
 /// `path` and `json_line` are C strings.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn eventlog_append_to(
     path: *const c_char,
     json_line: *const c_char,
@@ -40,7 +36,6 @@ pub unsafe extern "C" fn eventlog_append_to(
     unsafe { super::append_to(CStr::from_ptr(path), CStr::from_ptr(json_line)) }
 }
 
-#[unsafe(no_mangle)]
 pub extern "C" fn eventlog_adopt_pending() -> c_int {
     super::adopt_pending_locked()
 }
@@ -56,7 +51,6 @@ pub extern "C" fn eventlog_unlock(fd: c_int) {
 /// # Safety
 ///
 /// `out` has room for a digest.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn eventlog_replay(out: *mut u8) -> c_int {
     // SAFETY: the caller passes room for 32 bytes.
     records::replay(unsafe { &mut *out.cast::<[u8; 32]>() })
@@ -65,7 +59,6 @@ pub unsafe extern "C" fn eventlog_replay(out: *mut u8) -> c_int {
 /// # Safety
 ///
 /// `out` is an init record to fill.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn eventlog_boot_init(out: *mut EventlogInit) -> c_int {
     // SAFETY: the caller passes the structure, all of whose bits zeroed
     // are a valid one.
@@ -78,7 +71,6 @@ pub unsafe extern "C" fn eventlog_boot_init(out: *mut EventlogInit) -> c_int {
 /// # Safety
 ///
 /// `cb` takes `ctx`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn eventlog_boot_lines(cb: Option<LineFn>, ctx: *mut c_void) -> c_int {
     records::boot_lines(cb, ctx)
 }
@@ -164,7 +156,6 @@ pub extern "C" fn eventlog_would_exceed(max_bytes: u64) -> c_int {
 /// # Safety
 ///
 /// `out` has room for `cap` bytes.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn eventlog_timestamp(out: *mut c_char, cap: usize) {
     // SAFETY: the caller passes the room.
     super::timestamp(unsafe { ffi::bytes_mut(out.cast(), cap) })
@@ -173,7 +164,6 @@ pub unsafe extern "C" fn eventlog_timestamp(out: *mut c_char, cap: usize) {
 /// # Safety
 ///
 /// `out` has room for `cap` bytes, at least one.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn eventlog_boot_id(out: *mut c_char, cap: usize) {
     // SAFETY: the caller passes the room.
     super::read_boot_id(unsafe { ffi::bytes_mut(out.cast(), cap) })

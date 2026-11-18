@@ -100,28 +100,3 @@ mod tests;
 
 #[cfg(shirudo_fuzz)]
 mod fuzz;
-
-mod capi {
-    use core::ffi::{c_char, c_int, c_void};
-
-    use super::from_notes;
-    use crate::errno::EINVAL;
-    use crate::ffi;
-
-    /// # Safety
-    ///
-    /// `notes` is NULL or holds `notes_len` bytes, and `out` is NULL or
-    /// has room for `KERNEL_BUILD_ID_STRING_MAX` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn kernel_build_id_from_notes(
-        notes: *const c_void,
-        notes_len: usize,
-        out: *mut c_char,
-    ) -> c_int {
-        if notes.is_null() || out.is_null() {
-            return -EINVAL;
-        }
-        // SAFETY: the caller passes the notes and the room.
-        unsafe { from_notes(ffi::slice(notes.cast(), notes_len), out) }
-    }
-}

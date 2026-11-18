@@ -58,7 +58,6 @@ mod capi {
     /// # Safety
     ///
     /// `inp` holds `n` bytes, and `out` room for `2 * n + 1`.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn hex_encode(inp: *const u8, n: usize, out: *mut c_char) {
         // SAFETY: the caller's bytes and room.
         let (inp, out) = unsafe {
@@ -72,18 +71,9 @@ mod capi {
         out[hex.len()] = 0;
     }
 
-    #[unsafe(no_mangle)]
-    pub extern "C" fn hex_nibble(c: c_int) -> c_int {
-        u8::try_from(c)
-            .ok()
-            .and_then(super::nibble)
-            .map_or(-1, c_int::from)
-    }
-
     /// # Safety
     ///
     /// `hex` is a C string, and `out` room for `n` bytes.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn hex_decode(hex: *const c_char, out: *mut u8, n: usize) -> c_int {
         // SAFETY: the caller's C string.
         let len = unsafe { strlen(hex) };

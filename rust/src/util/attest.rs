@@ -53,11 +53,11 @@ use crate::util::tpm::{
     tpm_quote,
 };
 use crate::util::tpm_wire::{
-    ALG_ECC, ALG_RSA, CREDENTIAL_LEN, ID_OBJECT_LEN, NAME_LEN, NV_RSA_BYTES, ST_ATTEST_NV,
-    ST_ATTEST_QUOTE, TpmAttest, TpmEccPublic, TpmPublic, attest_signer,
-    attest_verify as signature_verify, shirudo_tpm_ek_policy, tpm_attest_parse,
-    tpm_credential_protect, tpm_ecc_public_parse, tpm_kdfe, tpm_nv_name, tpm_object_name,
-    tpm_public_parse, tpm_register_policy,
+    ALG_ECC, ALG_RSA, CREDENTIAL_LEN, EK_POLICY, ID_OBJECT_LEN, NAME_LEN, NV_RSA_BYTES,
+    ST_ATTEST_NV, ST_ATTEST_QUOTE, TpmAttest, TpmEccPublic, TpmPublic, attest_signer,
+    attest_verify as signature_verify, tpm_attest_parse, tpm_credential_protect,
+    tpm_ecc_public_parse, tpm_kdfe, tpm_nv_name, tpm_object_name, tpm_public_parse,
+    tpm_register_policy,
 };
 use crate::util::upatch::{NAME_MAX as UPATCH_NAME_MAX, upatch_name_valid};
 
@@ -1504,7 +1504,7 @@ unsafe fn verify_parsed(
             parsed
                 && ek_pub.attrs == EK_ATTRS
                 && ek_pub.policy_len == 32
-                && !memneq_explicit(&ek_pub.policy, &shirudo_tpm_ek_policy),
+                && !memneq_explicit(&ek_pub.policy, &EK_POLICY),
             c"endorsement key: TCG default template under the endorsement policy"
         );
     } else {
@@ -2257,7 +2257,7 @@ unsafe fn make(
         rep,
         public.attrs == EK_ATTRS
             && public.policy_len == 32
-            && !memneq_explicit(&public.policy, &shirudo_tpm_ek_policy),
+            && !memneq_explicit(&public.policy, &EK_POLICY),
         c"endorsement key: TCG default template under the endorsement policy"
     );
     if top[2].seen() {
@@ -2543,7 +2543,6 @@ mod capi {
     /// # Safety
     ///
     /// `path` is a C string and `out` room for a challenge.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn attest_challenge_read(
         path: *const c_char,
         out: *mut AttestChallenge,
@@ -2557,7 +2556,6 @@ mod capi {
     /// `nonce` holds `nonce_len` bytes, `c` is NULL or a challenge,
     /// `update` NULL or a journal, and `out`, `len` and `cap` rooms.
     #[allow(clippy::too_many_arguments)]
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn attest_evidence_config(
         nonce: *const u8,
         nonce_len: usize,
@@ -2583,7 +2581,6 @@ mod capi {
     /// for a credential, `out`, `out_len` and `cap` rooms, and `report`
     /// room for `report_cap` bytes.
     #[allow(clippy::too_many_arguments)]
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn attest_challenge_make(
         evidence: *const c_char,
         len: usize,
@@ -2616,7 +2613,6 @@ mod capi {
     ///
     /// `evidence` holds `len` bytes, `expect` is an expectation, and
     /// `report` has room for `report_cap` bytes.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn attest_verify(
         evidence: *const c_char,
         len: usize,

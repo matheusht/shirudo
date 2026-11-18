@@ -44,18 +44,3 @@ fn quote_of_the_largest_fields_fits() {
             - 3
     );
 }
-
-#[test]
-fn quote_refuses_a_buffer_one_byte_short() {
-    let (att, ak) = small();
-    let text = format(&att, &ak).unwrap();
-    let mut out = [0xffu8; 64];
-
-    // SAFETY: room for 64 bytes, of which each call is given fewer.
-    unsafe {
-        assert_eq!(put(&text, out.as_mut_ptr(), WANT.len()), -E2BIG);
-        assert_eq!(out[0], 0);
-        assert_eq!(put(&text, out.as_mut_ptr(), WANT.len() + 1), 0);
-    }
-    assert_eq!(crate::text::cstr(&out), WANT);
-}

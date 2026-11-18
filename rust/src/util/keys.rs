@@ -1431,7 +1431,6 @@ mod capi {
     ///
     /// `keys_dir` is a C string, `revoked_dir` NULL or one, and `set`
     /// room for a set.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn keys_load(
         keys_dir: *const c_char,
         revoked_dir: *const c_char,
@@ -1445,7 +1444,6 @@ mod capi {
     /// # Safety
     ///
     /// `primary` is a C string, and `set` room for a set.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn keys_load_image_at(
         primary: *const c_char,
         keys_fd: c_int,
@@ -1556,7 +1554,6 @@ mod capi {
     ///
     /// `path` is a C string, and `out` and `out_sz` room for the bytes
     /// and their length.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn keys_read_der(
         path: *const c_char,
         out: *mut *mut u8,
@@ -1583,7 +1580,6 @@ mod capi {
     ///
     /// `der` holds `der_sz` bytes, and `sha256` and `fingerprint` are room
     /// for 32 bytes each.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn keys_digest_der(
         der: *const u8,
         der_sz: usize,
@@ -1635,7 +1631,6 @@ mod capi {
     /// # Safety
     ///
     /// `set` is a set, and `out` room for 32 bytes.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn keys_set_digest(set: *const TrustedSet, out: *mut [u8; 32]) -> c_int {
         // SAFETY: the caller passes a set and room.
         let (set, out) = unsafe { (&*set, &mut *out) };
@@ -1675,30 +1670,6 @@ mod capi {
     ) -> c_int {
         // SAFETY: the caller passes the bytes and room.
         unsafe { super::vouch_payload(der, der_sz, &mut *out, &mut *out_sz) }
-    }
-
-    /// # Safety
-    ///
-    /// `set` is a set, `der` and `sig` hold `der_sz` and `sig_sz` bytes,
-    /// and `voucher` is room for 32.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn keys_verify_signature(
-        set: *const TrustedSet,
-        payload: *const u8,
-        payload_sz: usize,
-        sig: *const u8,
-        sig_sz: usize,
-        signer: *mut u8,
-    ) -> c_int {
-        // SAFETY: the caller passes a set, the bytes and room or NULL.
-        unsafe {
-            super::verify_signature(
-                &*set,
-                crate::ffi::slice(payload, payload_sz),
-                crate::ffi::slice(sig, sig_sz),
-                signer.cast::<[u8; 32]>().as_mut(),
-            )
-        }
     }
 
     /// # Safety
