@@ -213,7 +213,9 @@ rust_notice() {
 		# installed the standard library.
 		std=$(find "$sysroot/lib/rustlib" -name 'libstd-*.rlib' 2>/dev/null | head -n 1)
 		[ -n "$std" ] || die "cannot find the Rust standard library under $sysroot"
-		owner=$(dpkg -S "$std" 2>/dev/null | sed -n 's/: .*//;s/,.*//;1p') || :
+		# dpkg names a package of one architecture among several with it,
+		# libstd-rust-1.93-dev:amd64; its documentation goes by the name alone.
+		owner=$(dpkg -S "$std" 2>/dev/null | sed -n 's/: .*//;s/,.*//;s/:.*//;1p') || :
 		[ -n "$owner" ] && [ -f "$docroot/$owner/copyright" ] ||
 			die "cannot find the copyright of the Rust standard library at $std"
 		cp "$docroot/$owner/copyright" "$out/rust-library-copyright"
