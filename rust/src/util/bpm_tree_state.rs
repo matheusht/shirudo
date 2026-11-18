@@ -735,8 +735,8 @@ unsafe fn pending_read(out: *mut TreePending) -> c_int {
 
 /// The operation a sync starts recorded as pending: 0 or -errno.
 fn pending_write(op: &TreeOperation) -> c_int {
-    let mut buf = [0 as c_char; 1024];
-    let mut e = JsonEmit::fixed(buf.as_mut_ptr(), buf.len());
+    let mut buf = [0u8; 1024];
+    let mut e = JsonEmit::fixed(&mut buf);
 
     e.obj_open();
     e.kv_int(b"schema", 1);
@@ -757,8 +757,8 @@ fn pending_write(op: &TreeOperation) -> c_int {
     unsafe {
         seal_write_file(
             tree_path(PENDING).as_ptr(),
-            buf.as_ptr().cast(),
-            e.written(),
+            e.output().as_ptr().cast(),
+            e.output().len(),
             0o600,
         )
     }
@@ -839,8 +839,8 @@ unsafe fn state_read(path: *const c_char, out: *mut TreeState) -> c_int {
 
 /// The tree state written whole in place of what was there: 0 or -errno.
 fn state_write(s: &TreeState) -> c_int {
-    let mut buf = [0 as c_char; 4096];
-    let mut e = JsonEmit::fixed(buf.as_mut_ptr(), buf.len());
+    let mut buf = [0u8; 4096];
+    let mut e = JsonEmit::fixed(&mut buf);
 
     e.obj_open();
     e.kv_int(b"schema", 1);
@@ -877,8 +877,8 @@ fn state_write(s: &TreeState) -> c_int {
     unsafe {
         seal_write_file(
             tree_path(STATE).as_ptr(),
-            buf.as_ptr().cast(),
-            e.written(),
+            e.output().as_ptr().cast(),
+            e.output().len(),
             0o600,
         )
     }
@@ -898,7 +898,7 @@ unsafe fn event_append(
 ) -> c_int {
     let mut digest = [0u8; 32];
     let mut root = [0 as c_char; 65];
-    let mut buf = [0 as c_char; 1024];
+    let mut buf = [0u8; 1024];
 
     // SAFETY: the caller's string, and room for a digest.
     if unsafe { sha256_digest_decode(operation_digest, digest.as_mut_ptr()) } != 0 {
@@ -906,7 +906,7 @@ unsafe fn event_append(
     }
     // SAFETY: the caller's 32 bytes, and room for their hex digits.
     unsafe { hex_encode(projection_root, 32, root.as_mut_ptr()) };
-    let mut e = JsonEmit::fixed(buf.as_mut_ptr(), buf.len());
+    let mut e = JsonEmit::fixed(&mut buf);
 
     e.obj_open();
     e.kv_int(b"schema", 1);
@@ -926,7 +926,13 @@ unsafe fn event_append(
         return ret;
     }
     // SAFETY: a C string, and the bytes emitted.
-    unsafe { seal_append_line(tree_path(EVENTLOG).as_ptr(), buf.as_ptr(), e.written()) }
+    unsafe {
+        seal_append_line(
+            tree_path(EVENTLOG).as_ptr(),
+            e.output().as_ptr().cast(),
+            e.output().len(),
+        )
+    }
 }
 
 /// What the eventlog's records, whole lines in order, chain to: each
@@ -1052,7 +1058,7 @@ fn outcome_valid(outcome: i64) -> bool {
 }
 
 fn outcome_emit(line: &OutcomeLine, buf: &mut [u8; OUTCOME_LINE_MAX]) -> Result<usize, c_int> {
-    let mut e = JsonEmit::fixed(buf.as_mut_ptr().cast(), buf.len());
+    let mut e = JsonEmit::fixed(buf);
 
     e.obj_open();
     e.kv_int(b"schema", 1);

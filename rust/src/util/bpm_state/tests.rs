@@ -21,7 +21,7 @@ fn entry(name: &[u8], version: &[u8]) -> BpmStateEntry {
 fn emitted(st: &[BpmStateEntry], cap: usize) -> (c_int, Vec<u8>) {
     let mut buf = vec![0u8; cap];
     let mut len = 0;
-    let ret = emit(st, buf.as_mut_ptr().cast(), cap, &mut len);
+    let ret = emit(st, &mut buf, &mut len);
 
     buf.truncate(len);
     (ret, buf)

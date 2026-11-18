@@ -177,7 +177,9 @@ pub(crate) unsafe fn report_emit(path: *const c_char, r: &OpReport) -> c_int {
     if buf.is_null() {
         return -ENOMEM;
     }
-    let mut e = JsonEmit::fixed(buf, cap);
+    // SAFETY: the cap bytes xmalloc() gave, which nothing else touches
+    // until the emitter is done.
+    let mut e = unsafe { JsonEmit::fixed_raw(buf, cap) };
 
     // SAFETY: the caller passes the strings.
     unsafe { encode(&mut e, r, vlog, &nv_index[..n]) };

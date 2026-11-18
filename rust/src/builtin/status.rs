@@ -1975,14 +1975,14 @@ fn status(args: &[*const c_char]) -> c_int {
     }
     if json_stdout {
         let mut buf = vec![0u8; r.json_cap(include_eventlog)];
-        let mut e = JsonEmit::fixed(buf.as_mut_ptr().cast(), buf.len());
+        let mut e = JsonEmit::fixed(&mut buf);
 
         r.emit_json(&mut e, &cin, include_eventlog);
         if e.err() != 0 {
             eprint(&[b"status: json encode failed: ", strerr(-e.err()), b"\n"].concat());
             ret = 1;
         } else {
-            print(&[&buf[..e.written()], b"\n"].concat());
+            print(&[e.output(), b"\n"].concat());
         }
     } else if !keepalive && !otel {
         r.print_human(&cin, show_full, include_eventlog);

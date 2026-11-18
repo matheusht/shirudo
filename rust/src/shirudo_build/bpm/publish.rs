@@ -138,7 +138,7 @@ pub(super) fn artifact_manifest(
     layers: &[&Descriptor],
 ) -> Result<Vec<u8>, c_int> {
     let mut buf = vec![0u8; MANIFEST_CAP];
-    let mut e = JsonEmit::fixed(buf.as_mut_ptr().cast(), buf.len());
+    let mut e = JsonEmit::fixed(&mut buf);
 
     e.obj_open();
     e.kv_int(b"schemaVersion", 2);
@@ -154,7 +154,8 @@ pub(super) fn artifact_manifest(
     if e.err() != 0 {
         return Err(e.err());
     }
-    buf.truncate(e.written());
+    let n = e.written();
+    buf.truncate(n);
     Ok(buf)
 }
 
@@ -311,7 +312,7 @@ fn push_index(
         return -EIO;
     }
     let mut body = vec![0u8; 4096 + entries.len() * 4096];
-    let mut j = JsonEmit::fixed(body.as_mut_ptr().cast(), body.len());
+    let mut j = JsonEmit::fixed(&mut body);
     j.obj_open();
     j.kv_int(b"schema", 1);
     j.kv_string(b"generated_at", cstr(&stamp));
@@ -332,7 +333,8 @@ fn push_index(
     if j.err() != 0 {
         return j.err();
     }
-    body.truncate(j.written());
+    let n = j.written();
+    body.truncate(n);
     let result = (|| {
         let sig = sign_detached(&body, keys)?;
         let config = push_blob(c, index_repo, b"{}", EMPTY_CONFIG_MEDIA)?;
@@ -385,7 +387,7 @@ fn push_package(
     let layer = push_blob(&mut c, &repo, &archive_body, PACKAGE_MEDIA)?;
 
     let mut buf = vec![0u8; MANIFEST_CAP];
-    let mut e = JsonEmit::fixed(buf.as_mut_ptr().cast(), buf.len());
+    let mut e = JsonEmit::fixed(&mut buf);
     e.obj_open();
     e.kv_int(b"schemaVersion", 2);
     e.kv_string(b"mediaType", IMAGE_MANIFEST);
@@ -403,7 +405,8 @@ fn push_package(
     if e.err() != 0 {
         return Err(e.err());
     }
-    buf.truncate(e.written());
+    let n = e.written();
+    buf.truncate(n);
     let manifest = buf;
     let package_digest = [b"sha256:", &sha256_text(&manifest)?[..]].concat();
     // By digest until the index takes the version, so a refused re-push
@@ -415,7 +418,7 @@ fn push_package(
     let key_config = push_blob(&mut c, &repo, b"{}", EMPTY_CONFIG_MEDIA)?;
     let key_layer = push_blob(&mut c, &repo, info.cert(), PUBLIC_KEY_MEDIA)?;
     let mut buf = vec![0u8; MANIFEST_CAP];
-    let mut e = JsonEmit::fixed(buf.as_mut_ptr().cast(), buf.len());
+    let mut e = JsonEmit::fixed(&mut buf);
     e.obj_open();
     e.kv_int(b"schemaVersion", 2);
     e.kv_string(b"mediaType", IMAGE_MANIFEST);
@@ -433,7 +436,8 @@ fn push_package(
     if e.err() != 0 {
         return Err(e.err());
     }
-    buf.truncate(e.written());
+    let n = e.written();
+    buf.truncate(n);
     let key_digest = [b"sha256:", &sha256_text(&buf)?[..]].concat();
     put_manifest(&mut c, &repo, &key_digest, &buf)?;
     if let (Some(keys), Some(index_repo)) = (index_keys, &index_repo) {

@@ -200,7 +200,7 @@ fn print_preflight(r: &PreflightResult) {
 fn print_preflight_json(r: &PreflightResult) -> c_int {
     let n = usize::try_from(r.n).unwrap_or(0);
     let mut buf = [0u8; 8192];
-    let mut e = JsonEmit::fixed(buf.as_mut_ptr().cast(), buf.len());
+    let mut e = JsonEmit::fixed(&mut buf);
 
     e.obj_open();
     e.kv_int(b"schema", 1);

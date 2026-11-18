@@ -799,7 +799,7 @@ fn event_record(
     reason: Option<&[u8]>,
 ) -> Result<Vec<u8>, c_int> {
     let mut buf = vec![0u8; 4096];
-    let mut e = JsonEmit::fixed(buf.as_mut_ptr().cast(), buf.len());
+    let mut e = JsonEmit::fixed(&mut buf);
     // SAFETY: the emitter, a C string and the event's digest.
     unsafe { eventlog_record_open(&mut e, ty.as_ptr(), event.as_ptr()) };
     e.obj_open_key(b"upatch");

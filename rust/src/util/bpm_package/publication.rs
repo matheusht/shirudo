@@ -87,7 +87,7 @@ pub(super) fn emit_tree_manifest(
         return Err(-EINVAL);
     }
     let config = Descriptor::of(EMPTY_CONFIG_MEDIA, &[b"sha256:", cstr(&hex)].concat(), 2);
-    let mut e = JsonEmit::fixed(out.as_mut_ptr().cast(), out.len());
+    let mut e = JsonEmit::fixed(&mut *out);
     e.obj_open();
     e.kv_int(b"schemaVersion", 2);
     e.kv_string(b"mediaType", MANIFEST_MEDIA.to_bytes());

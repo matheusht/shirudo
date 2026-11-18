@@ -1027,9 +1027,9 @@ unsafe fn get_entrypoint(l: *mut LuaState, entrypoint: &CStr) -> bool {
 }
 
 /// What the closure a decoder runs in reads and writes.
-struct Call<'a> {
+struct Call<'a, 'b> {
     view: &'a MapView,
-    e: &'a mut JsonEmit,
+    e: &'a mut JsonEmit<'b>,
     otel: bool,
     ret: c_int,
 }
@@ -1041,7 +1041,7 @@ unsafe extern "C-unwind" fn call_decoder(l: *mut LuaState) -> c_int {
     // SAFETY: the closure's state and upvalues, the call live across the
     // pcall that runs this.
     unsafe {
-        let call = &mut *lua_touserdata(l, lua_upvalueindex(1)).cast::<Call<'_>>();
+        let call = &mut *lua_touserdata(l, lua_upvalueindex(1)).cast::<Call<'_, '_>>();
         lua_pushvalue(l, lua_upvalueindex(2));
         push_map_input(l, call.view);
         lua_call(l, 1, 1);

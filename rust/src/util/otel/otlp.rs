@@ -319,7 +319,7 @@ pub(super) fn log_payload(
     record_max: usize,
 ) -> Result<Buffer, c_int> {
     let mut buf = Buffer::alloc(JSON_MAX).ok_or(-ENOMEM)?;
-    let mut e = JsonEmit::fixed(buf.ptr.cast(), buf.cap);
+    let mut e = JsonEmit::fixed(buf.room());
 
     log_open(
         &mut e,
@@ -368,7 +368,7 @@ pub(super) fn metric_payload(path: Option<&CStr>, v: &MapView) -> Result<Buffer,
         return Err(-EINVAL);
     }
     let mut buf = Buffer::alloc(JSON_MAX).ok_or(-ENOMEM)?;
-    let mut e = JsonEmit::fixed(buf.ptr.cast(), buf.cap);
+    let mut e = JsonEmit::fixed(buf.room());
     otlp_open(
         &mut e,
         b"resourceMetrics",
@@ -434,7 +434,7 @@ pub(super) fn s3_reference(
         return Err(-E2BIG);
     }
     let mut buf = Buffer::alloc(REFERENCE_MAX).ok_or(-ENOMEM)?;
-    let mut e = JsonEmit::fixed(buf.ptr.cast(), buf.cap);
+    let mut e = JsonEmit::fixed(buf.room());
 
     log_open(
         &mut e,

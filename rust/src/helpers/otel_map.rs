@@ -332,14 +332,15 @@ fn print_local_json() -> c_int {
         return 1;
     };
     let mut buf = [0u8; 4096];
-    let mut e = JsonEmit::fixed(buf.as_mut_ptr().cast::<c_char>(), buf.len());
+    let mut e = JsonEmit::fixed(&mut buf);
     e.obj_open();
     emit_json_fields(&mut e, &f.view);
     e.obj_close();
-    if e.err() == 0 {
+    let err = e.err();
+    if err == 0 {
         out_bytes(crate::text::cstr(&buf));
     }
-    exit(e.err())
+    exit(err)
 }
 
 /// The fixture sent through a decoder made for it, as `mode` says.

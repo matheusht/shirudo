@@ -16,7 +16,7 @@ fn use_log(dir: &TempDir) {
 /// adds.
 fn record(ty: &[u8], fill: u8, body: impl FnOnce(&mut JsonEmit)) -> Vec<u8> {
     let mut buf = [0u8; 1024];
-    let mut e = JsonEmit::fixed(buf.as_mut_ptr().cast(), buf.len());
+    let mut e = JsonEmit::fixed(&mut buf);
 
     record_open(&mut e, ty, &[fill; 32]);
     body(&mut e);

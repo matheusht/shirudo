@@ -210,7 +210,7 @@ pub(super) fn list(json: bool) -> Result {
 
     if json {
         let mut buf = [0u8; 8192];
-        let mut e = JsonEmit::fixed(buf.as_mut_ptr().cast(), buf.len());
+        let mut e = JsonEmit::fixed(&mut buf);
 
         e.obj_open();
         e.kv_int(b"schema", 1);
@@ -223,7 +223,7 @@ pub(super) fn list(json: bool) -> Result {
         if e.err() != 0 {
             return Err(e.err());
         }
-        print(&[&buf[..e.written()], b"\n"].concat());
+        print(&[e.output(), b"\n"].concat());
         return Ok(());
     }
     print(b"Package certificates:\n");

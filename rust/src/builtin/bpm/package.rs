@@ -548,7 +548,7 @@ pub(super) fn list(json: bool) -> c_int {
     };
     if json {
         let mut buf = vec![0u8; 256 + state.len() * 3 * MAX_NAME];
-        let mut e = JsonEmit::fixed(buf.as_mut_ptr().cast(), buf.len());
+        let mut e = JsonEmit::fixed(&mut buf);
 
         e.obj_open();
         e.kv_int(b"schema", 1);
@@ -565,7 +565,7 @@ pub(super) fn list(json: bool) -> c_int {
         if e.err() != 0 {
             return fail(b"list", e.err());
         }
-        print(&[&buf[..e.written()], b"\n"].concat());
+        print(&[e.output(), b"\n"].concat());
         return 0;
     }
     print(b"Installed packages:\n");

@@ -138,7 +138,7 @@ fn same_result(a: &QuoteResult, b: &QuoteResult) -> bool {
 fn check_line(res: &QuoteResult, ak: &[u8]) {
     let accepted = res.verdict == QUOTE_OK;
     let mut text = [b'x'; LINE_MAX + 1];
-    let mut e = JsonEmit::fixed(text.as_mut_ptr().cast(), LINE_MAX);
+    let mut e = JsonEmit::fixed(&mut text[..LINE_MAX]);
     if row_emit(res, &mut e) != 0 {
         abort();
     }

@@ -270,7 +270,7 @@ fn append_init_event(
 ) -> c_int {
     // Every set entry is a name, its digest and their keys.
     let mut buf = vec![0u8; 64 * 1024 + set.len() * (NAME_MAX + 128)];
-    let mut e = JsonEmit::fixed(buf.as_mut_ptr().cast(), buf.len());
+    let mut e = JsonEmit::fixed(&mut buf);
     let name_len = TPM_NAME_LEN.min(bound.name.len());
 
     // SAFETY: the emitter, a C string and the digest.
@@ -310,7 +310,7 @@ fn append_init_event(
         ));
         return e.err();
     }
-    let line = CString::new(buf[..e.written()].to_vec()).unwrap_or_default();
+    let line = CString::new(e.output().to_vec()).unwrap_or_default();
     // From the initrd the record waits under /run for the root file
     // system's init: the eventlog is on a root that is read-only here.
     let log = if init.initrd {

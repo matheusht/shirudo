@@ -43,7 +43,7 @@ fn append_init(log: &CStr, bound_in: &[u8], reset_count: u32) -> c_int {
     let nv_index = format!("0x{NV_INDEX:08X}");
 
     let mut buf = [0u8; 4096];
-    let mut e = JsonEmit::fixed(buf.as_mut_ptr().cast(), buf.len());
+    let mut e = JsonEmit::fixed(&mut buf);
     e.obj_open();
     e.kv_int(b"schema", 1);
     e.kv_string(b"ts", cstr(&ts));

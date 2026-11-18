@@ -235,7 +235,8 @@ fn record_encode(
     out: &mut [u8],
     length: &mut usize,
 ) -> c_int {
-    let mut emit = JsonEmit::fixed(out.as_mut_ptr().cast(), out.len() - 1);
+    let room = out.len() - 1;
+    let mut emit = JsonEmit::fixed(&mut out[..room]);
     let mut root = [0u8; 65];
     let mut initial = [0u8; 65];
 

@@ -301,13 +301,13 @@ fn check_rows() -> Result<(), c_int> {
             return Ok(());
         }
         let res = line_check(&line)?;
-        let mut e = JsonEmit::fixed(json.as_mut_ptr().cast(), json.len());
+        let mut e = JsonEmit::fixed(&mut json);
         match row_emit(&res, &mut e) {
             0 => {}
             err => return Err(err),
         }
         output
-            .write_all(&json[..e.written()])
+            .write_all(e.output())
             .and_then(|()| output.write_all(b"\n"))
             .and_then(|()| output.flush())
             .map_err(|_| -EIO)?;

@@ -170,7 +170,7 @@ fn measure_locked(op: &TreeOperation, digest: &[u8; 32]) -> Result {
         status(chain_extend(event.as_ptr(), chain.as_mut_ptr()))?;
     }
     hex_into(&chain, &mut chain_hex);
-    let mut e = JsonEmit::fixed(line.as_mut_ptr().cast(), line.len());
+    let mut e = JsonEmit::fixed(&mut line);
     // SAFETY: the emitter, a C string and the event.
     unsafe { eventlog_record_open(&mut e, c"tree_op".as_ptr(), event.as_ptr()) };
     e.obj_open_key(b"tree");
@@ -814,7 +814,7 @@ impl Sync {
 fn write_report(path: Option<&[u8]>, sync: &Sync, tpm: bool) -> Result {
     let (s, counts) = (&sync.state, &sync.counts);
     let mut buf = [0u8; 4096];
-    let mut e = JsonEmit::fixed(buf.as_mut_ptr().cast(), buf.len());
+    let mut e = JsonEmit::fixed(&mut buf);
 
     e.obj_open();
     e.kv_int(b"schema", 1);
@@ -834,7 +834,7 @@ fn write_report(path: Option<&[u8]>, sync: &Sync, tpm: bool) -> Result {
     if e.err() != 0 {
         return Err(e.err());
     }
-    let body = &buf[..e.written()];
+    let body = e.output();
     let Some(path) = path else {
         print(&[body, b"\n"].concat());
         return Ok(());

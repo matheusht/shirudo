@@ -165,7 +165,7 @@ fn environment(spec: &Spec, version: &[u8], fingerprint: &[u8]) -> Result<Vec<u8
     // SAFETY: the version, a static C string.
     let version_str = unsafe { crate::ffi::c_str(&raw const shirudo_version) };
     let mut buf = vec![0u8; MAX_JSON];
-    let mut e = JsonEmit::fixed(buf.as_mut_ptr().cast(), buf.len());
+    let mut e = JsonEmit::fixed(&mut buf);
     let cstr = crate::text::cstr;
 
     e.obj_open();
@@ -202,7 +202,8 @@ fn environment(spec: &Spec, version: &[u8], fingerprint: &[u8]) -> Result<Vec<u8
     if e.err() != 0 {
         return Err(e.err());
     }
-    buf.truncate(e.written());
+    let n = e.written();
+    buf.truncate(n);
     Ok(buf)
 }
 

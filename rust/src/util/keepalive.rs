@@ -270,9 +270,9 @@ pub(crate) fn emit(i: &Input<'_>, e: &mut JsonEmit) -> c_int {
 /// it.
 pub(crate) fn body(i: &Input<'_>) -> Result<Vec<u8>, c_int> {
     let mut buf = [0u8; BODY_MAX];
-    let mut e = JsonEmit::fixed(buf.as_mut_ptr().cast(), buf.len());
+    let mut e = JsonEmit::fixed(&mut buf);
     match emit(i, &mut e) {
-        0 => Ok(buf[..e.written()].to_vec()),
+        0 => Ok(e.output().to_vec()),
         err => Err(err),
     }
 }
@@ -449,7 +449,8 @@ mod capi {
                 count: i.count,
                 not_ok: i.not_ok,
             };
-            let mut e = JsonEmit::fixed(buf, cap);
+            // SAFETY: the caller gave cap writable bytes at buf.
+            let mut e = JsonEmit::fixed_raw(buf, cap);
             let ret = super::emit(&input, &mut e);
             if ret != 0 {
                 if cap != 0 {

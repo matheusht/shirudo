@@ -447,7 +447,7 @@ fn malformed_utf8_is_refused() {
 /// The text a fixed emitter of `cap` bytes wrote, and its error.
 fn fixed(cap: usize, emit: impl FnOnce(&mut JsonEmit)) -> (c_int, Vec<u8>) {
     let mut buf = vec![0u8; cap];
-    let mut e = JsonEmit::fixed(buf.as_mut_ptr().cast(), cap);
+    let mut e = JsonEmit::fixed(&mut buf[..cap]);
     emit(&mut e);
     let n = e.written();
     (e.err(), buf[..n].to_vec())

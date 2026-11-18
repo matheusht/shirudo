@@ -1544,7 +1544,7 @@ pub(crate) fn status(json: bool) -> c_int {
         return ret;
     }
     let mut buf = [0u8; 768];
-    let mut e = JsonEmit::fixed(buf.as_mut_ptr().cast(), buf.len());
+    let mut e = JsonEmit::fixed(&mut buf);
     e.obj_open();
     e.kv_string(b"root_hash", root.as_bytes());
     match &next_root {
@@ -1561,7 +1561,7 @@ pub(crate) fn status(json: bool) -> c_int {
     if e.err() != 0 {
         return e.err();
     }
-    print(&[&buf[..e.written()], b"\n"].concat());
+    print(&[e.output(), b"\n"].concat());
     ret
 }
 

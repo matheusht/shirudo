@@ -596,7 +596,7 @@ fn body_refuses_a_string_that_is_not_utf8() {
 /// emit() of `i` into a buffer of `cap` bytes.
 fn emit_into(i: &Input<'_>, cap: usize) -> (c_int, usize) {
     let mut buf = vec![0u8; cap];
-    let mut e = JsonEmit::fixed(buf.as_mut_ptr().cast(), cap);
+    let mut e = JsonEmit::fixed(&mut buf[..cap]);
     let ret = emit(i, &mut e);
     (ret, e.written())
 }

@@ -92,7 +92,7 @@ fn map_locks() -> Result<(), &'static str> {
 /// fails.
 fn emitted(cap: usize, emit: impl FnOnce(&mut JsonEmit)) -> Option<String> {
     let mut buf = vec![0u8; cap];
-    let mut e = JsonEmit::fixed(buf.as_mut_ptr().cast(), cap);
+    let mut e = JsonEmit::fixed(&mut buf[..cap]);
     emit(&mut e);
     if e.err() != 0 {
         return None;

@@ -6,8 +6,8 @@
 
 use core::ffi::{CStr, c_char, c_int, c_void};
 
-use crate::errno::{E2BIG, EINVAL, ENOENT, ENOMEM};
-use crate::heap::{xfree, xmalloc};
+use crate::errno::{E2BIG, EINVAL, ENOENT};
+use crate::heap::xfree;
 use crate::sys::libc::PATH_MAX;
 use crate::text::{cstr, strsprintf};
 use crate::util::bpm_oci::{MAX_NAME, name_ok, version_ok};
@@ -133,8 +133,8 @@ unsafe fn parse(body: &[u8], st: *mut BpmStateEntry, n: &mut c_int) -> c_int {
 
 /// The entries as the document parse() reads, into `buf`, and its length
 /// into `len`: 0 or -E2BIG.
-fn emit(st: &[BpmStateEntry], buf: *mut c_char, cap: usize, len: &mut usize) -> c_int {
-    let mut e = JsonEmit::fixed(buf, cap);
+fn emit(st: &[BpmStateEntry], buf: &mut [u8], len: &mut usize) -> c_int {
+    let mut e = JsonEmit::fixed(buf);
 
     e.obj_open();
     e.kv_int(b"schema", 1);
@@ -206,13 +206,8 @@ pub(crate) fn read_all() -> Result<Vec<BpmStateEntry>, c_int> {
 
 pub(crate) fn write(st: &[BpmStateEntry]) -> c_int {
     let mut len = 0usize;
-    // SAFETY: a size alone.
-    let buf: *mut c_char = unsafe { xmalloc(STATE_EMIT_MAX) }.cast();
-
-    if buf.is_null() {
-        return -ENOMEM;
-    }
-    let mut ret = emit(st, buf, STATE_EMIT_MAX, &mut len);
+    let mut buf = vec![0u8; STATE_EMIT_MAX];
+    let mut ret = emit(st, &mut buf, &mut len);
 
     if ret == 0 {
         // SAFETY: a C string and a mode.
@@ -220,10 +215,8 @@ pub(crate) fn write(st: &[BpmStateEntry]) -> c_int {
     }
     if ret == 0 {
         // SAFETY: a C string, the len bytes emitted, and a mode.
-        ret = unsafe { seal_write_file(STATE_PATH.as_ptr(), buf.cast(), len, 0o600) };
+        ret = unsafe { seal_write_file(STATE_PATH.as_ptr(), buf.as_ptr().cast(), len, 0o600) };
     }
-    // SAFETY: what xmalloc() gave, and its size.
-    unsafe { xfree(buf.cast(), STATE_EMIT_MAX) };
     ret
 }
 

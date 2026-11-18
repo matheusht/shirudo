@@ -229,7 +229,7 @@ fn save(s: &Source) -> Result {
 /// `bpm config register list`.
 pub(super) fn list(json: bool) -> c_int {
     let mut buf = [0u8; 8192];
-    let mut e = JsonEmit::fixed(buf.as_mut_ptr().cast(), buf.len());
+    let mut e = JsonEmit::fixed(&mut buf);
     let mut count = 0;
 
     if json {
@@ -259,7 +259,7 @@ pub(super) fn list(json: bool) -> c_int {
         if e.err() != 0 {
             return 1;
         }
-        print(&[&buf[..e.written()], b"\n"].concat());
+        print(&[e.output(), b"\n"].concat());
     } else if count == 0 {
         print(b"  none\n");
     }

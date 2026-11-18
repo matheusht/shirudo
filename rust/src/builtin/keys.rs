@@ -254,7 +254,7 @@ fn print_fpr(label: &[u8], fpr: &[u8; 32]) {
 }
 
 /// Where the material goes: text to stdout, or the JSON being built.
-type Out<'a> = Option<&'a mut JsonEmit>;
+type Out<'a> = Option<&'a mut JsonEmit<'a>>;
 
 fn dump_cert(out: &mut Out, cert: &X509, path: &CStr, spki: &[u8; 32]) {
     let (subj, iss) = (cert.subject_name(), cert.issuer_name());
@@ -979,7 +979,7 @@ fn keys_add(args: &[*const c_char]) -> c_int {
 
 fn append_key_event(ty: &CStr, fp_hex: &[u8], sha_hex: &[u8], event: &[u8; 32]) -> c_int {
     let mut buf = [0u8; 1024];
-    let mut e = JsonEmit::fixed(buf.as_mut_ptr().cast(), buf.len());
+    let mut e = JsonEmit::fixed(&mut buf);
 
     // SAFETY: the emitter, a C string and the event.
     unsafe { eventlog_record_open(&mut e, ty.as_ptr(), event.as_ptr()) };
@@ -1262,7 +1262,7 @@ fn keys_show(args: &[*const c_char]) -> c_int {
     // the on-disk cert and signing key, then the kernel keyrings once
     // `shirudo init` has filled them.
     let mut buf = if json { vec![0u8; 65536] } else { Vec::new() };
-    let mut emitter = json.then(|| JsonEmit::fixed(buf.as_mut_ptr().cast(), buf.len()));
+    let mut emitter = json.then(|| JsonEmit::fixed(&mut buf));
     let mut out: Out = emitter.as_mut();
     let (mut shown, mut ret) = (false, 0);
 

@@ -6,6 +6,7 @@
 //! checks it once after the final close.
 
 use core::ffi::{c_char, c_int};
+use core::marker::PhantomData;
 
 use super::{EMIT_MAX_DEPTH, utf8_width};
 use crate::errno::{E2BIG, EILSEQ, ENOMEM, ENOSPC};
@@ -15,7 +16,7 @@ use crate::heap::xreallocarray;
 /// are the caller's, or with `max` set the emitter's: it grows `buf`,
 /// which the caller frees with `xfree(buf, cap)`.
 #[repr(C)]
-pub struct JsonEmit {
+pub struct JsonEmit<'a> {
     buf: *mut c_char,
     cap: usize,
     len: usize,
@@ -24,6 +25,9 @@ pub struct JsonEmit {
     depth: u32,
     nonempty: [u64; EMIT_MAX_DEPTH as usize / 64],
     value_pending: bool,
+    /// The caller's buffer, which a fixed emitter writes for as long as
+    /// it lives.
+    _buf: PhantomData<&'a mut [u8]>,
 }
 
 /// The `\u00XX` escape of a control character.
@@ -81,10 +85,21 @@ fn format_u64_full(mut n: u64, buf: &mut [u8; 20]) -> &[u8] {
     &buf[pos..]
 }
 
-impl JsonEmit {
+impl<'a> JsonEmit<'a> {
+    /// An emitter into `buf`, which it does not grow.
+    pub(crate) fn fixed(buf: &'a mut [u8]) -> Self {
+        // SAFETY: the slice's bytes, which the emitter borrows.
+        unsafe { Self::fixed_raw(buf.as_mut_ptr().cast(), buf.len()) }
+    }
+
     /// An emitter into the `cap` bytes at `buf`, which it does not grow,
-    /// as a C caller sets one up.
-    pub(crate) fn fixed(buf: *mut c_char, cap: usize) -> Self {
+    /// as a C-shaped caller hands one over.
+    ///
+    /// # Safety
+    ///
+    /// `buf` is valid for writes of `cap` bytes for as long as the
+    /// emitter lives, and nothing else reads or writes them meanwhile.
+    pub(crate) unsafe fn fixed_raw(buf: *mut c_char, cap: usize) -> Self {
         JsonEmit {
             buf,
             cap,
@@ -94,6 +109,7 @@ impl JsonEmit {
             depth: 0,
             nonempty: [0; EMIT_MAX_DEPTH as usize / 64],
             value_pending: false,
+            _buf: PhantomData,
         }
     }
 
@@ -110,7 +126,18 @@ impl JsonEmit {
             depth: 0,
             nonempty: [0; EMIT_MAX_DEPTH as usize / 64],
             value_pending: false,
+            _buf: PhantomData,
         }
+    }
+
+    /// What the emitter has written.
+    pub(crate) fn output(&self) -> &[u8] {
+        if self.buf.is_null() {
+            return &[];
+        }
+        // SAFETY: the bytes of the buffer the emitter has written, which
+        // it borrows or owns.
+        unsafe { core::slice::from_raw_parts(self.buf.cast::<u8>(), self.len.min(self.cap)) }
     }
 
     /// The buffer, its capacity and the bytes written into it.

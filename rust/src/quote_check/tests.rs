@@ -199,7 +199,7 @@ fn verdict_after(f: impl FnOnce(&mut Quote)) -> c_int {
 fn line(row: &[u8]) -> Vec<u8> {
     let res = checked(row);
     let mut buf = [0u8; LINE_MAX];
-    let mut e = JsonEmit::fixed(buf.as_mut_ptr().cast(), buf.len());
+    let mut e = JsonEmit::fixed(&mut buf);
     assert_eq!(row_emit(&res, &mut e), 0);
     let n = e.written();
     buf[..n].to_vec()

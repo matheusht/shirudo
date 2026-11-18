@@ -915,7 +915,7 @@ fn buffer(n: usize) -> Result<Vec<u8>, c_int> {
 /// The operation's selector's pairs are as its counts say.
 pub(crate) unsafe fn operation_digest(op: &TreeOperation) -> Result<[u8; 72], c_int> {
     let mut body = buffer(DIGEST_BODY_MAX)?;
-    let mut e = JsonEmit::fixed(body.as_mut_ptr().cast(), body.len());
+    let mut e = JsonEmit::fixed(&mut body);
     let mut digest = [0; 32];
 
     e.obj_open();
@@ -926,7 +926,7 @@ pub(crate) unsafe fn operation_digest(op: &TreeOperation) -> Result<[u8; 72], c_
     if ret != 0 {
         return Err(ret);
     }
-    if sha256_into(&body[..e.written()], &mut digest) != 0 {
+    if sha256_into(e.output(), &mut digest) != 0 {
         return Err(-EIO);
     }
     Ok(sha256_digest_encode(&digest))

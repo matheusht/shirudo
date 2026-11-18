@@ -1143,7 +1143,7 @@ impl Append<'_> {
         );
         let config = Descriptor::of(EMPTY_CONFIG_MEDIA.to_bytes(), &sha256_digest(b"{}")?, 2);
         let mut buf = vec![0u8; MANIFEST_CAP];
-        let mut e = JsonEmit::fixed(buf.as_mut_ptr().cast(), buf.len());
+        let mut e = JsonEmit::fixed(&mut buf);
         e.obj_open();
         e.kv_int(b"schemaVersion", 2);
         e.kv_string(b"mediaType", MANIFEST_MEDIA.to_bytes());
@@ -1159,7 +1159,8 @@ impl Append<'_> {
         if e.err() != 0 {
             return Err(e.err());
         }
-        buf.truncate(e.written());
+        let n = e.written();
+        buf.truncate(n);
         let a: &mut TreeArtifact = &mut self.op.0.artifact;
         copy(&mut a.manifest_digest, &sha256_digest(&buf)?);
         copy(&mut a.payload_sha256, cstr(&sha256_digest_encode(&payload)));

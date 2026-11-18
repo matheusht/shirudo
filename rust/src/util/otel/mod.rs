@@ -123,6 +123,12 @@ impl Buffer {
         (!ptr.is_null()).then_some(Buffer { ptr, cap, len: 0 })
     }
 
+    /// All the room the buffer has, for an emitter to fill.
+    fn room(&mut self) -> &mut [u8] {
+        // SAFETY: the cap bytes xmalloc() gave the buffer, zeroed.
+        unsafe { core::slice::from_raw_parts_mut(self.ptr, self.cap) }
+    }
+
     /// The buffer a growing emitter made.
     fn from_emitter(e: &JsonEmit) -> Self {
         let (ptr, cap, len) = e.parts();

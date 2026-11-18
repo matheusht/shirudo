@@ -161,7 +161,7 @@ fn record_head(e: &mut JsonEmit, index: u32, event: &[u8; 32], ty: &[u8]) {
 /// The record `fill` emits appended to the log.
 fn append(fill: impl FnOnce(&mut JsonEmit)) -> c_int {
     let mut buf = [0u8; 4096];
-    let mut e = JsonEmit::fixed(buf.as_mut_ptr().cast(), buf.len());
+    let mut e = JsonEmit::fixed(&mut buf);
     fill(&mut e);
     if e.err() != 0 {
         return e.err();
@@ -628,7 +628,7 @@ fn forge(args: &[&CStr]) -> c_int {
     );
     let nv_index = format!("0x{index:08X}");
     let mut buf = vec![0u8; 32 * 1024];
-    let mut e = JsonEmit::fixed(buf.as_mut_ptr().cast(), buf.len());
+    let mut e = JsonEmit::fixed(&mut buf);
     // SAFETY: the version ID, a static C string.
     let version_id = unsafe { CStr::from_ptr(&raw const shirudo_version_id) };
     e.obj_open();
@@ -710,7 +710,7 @@ fn forge(args: &[&CStr]) -> c_int {
     if e.err() != 0 {
         return 1;
     }
-    out_bytes(&buf[..e.written()]);
+    out_bytes(e.output());
     out("\n");
     0
 }

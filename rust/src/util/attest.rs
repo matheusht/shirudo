@@ -703,7 +703,9 @@ unsafe fn evidence(
     // SAFETY: the caller's nonce, and room for its hex and a NUL.
     unsafe { hex_encode(nonce, nonce_len, nonce_hex.as_mut_ptr().cast()) };
 
-    let mut e = JsonEmit::fixed(*out, need);
+    // SAFETY: the need bytes xmalloc() gave at *out, which nothing else
+    // touches until the emitter is done.
+    let mut e = unsafe { JsonEmit::fixed_raw(*out, need) };
     e.obj_open();
     e.kv_int(b"schema", 1);
     e.kv_string(b"kind", b"shirudo-attestation");
@@ -2421,7 +2423,9 @@ unsafe fn make(
     if (*out).is_null() {
         return -ENOMEM;
     }
-    let mut e = JsonEmit::fixed(*out, *cap);
+    // SAFETY: the *cap bytes xmalloc() gave at *out, which nothing else
+    // touches until the emitter is done.
+    let mut e = unsafe { JsonEmit::fixed_raw(*out, *cap) };
     e.obj_open();
     e.kv_int(b"schema", 1);
     e.kv_string(b"kind", b"shirudo-credential");

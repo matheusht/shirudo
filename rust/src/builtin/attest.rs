@@ -707,14 +707,14 @@ fn apply_event(spec: &[u8], chain: &mut [u8; 32]) -> Result<(), c_int> {
 }
 
 /// The values predict prints: `key: value` lines, or members of JSON.
-struct Predicted {
-    json: Option<(Vec<u8>, JsonEmit)>,
+struct Predicted<'a> {
+    json: Option<JsonEmit<'a>>,
 }
 
-impl Predicted {
+impl Predicted<'_> {
     fn kv(&mut self, key: &[u8], value: &[u8]) {
         match &mut self.json {
-            Some((_, e)) => e.kv_string(key, value),
+            Some(e) => e.kv_string(key, value),
             None => print(&[key, b": ", value, b"\n"].concat()),
         }
     }
@@ -831,14 +831,11 @@ fn predict(args: &[*const c_char]) -> c_int {
     if certs.is_empty() {
         return usage(&p, "--cert is required");
     }
+    let mut json_buf = vec![0u8; 4096];
     let mut out = Predicted {
-        json: json.then(|| {
-            let buf = vec![0u8; 4096];
-            let e = JsonEmit::fixed(buf.as_ptr().cast_mut().cast(), buf.len());
-            (buf, e)
-        }),
+        json: json.then(|| JsonEmit::fixed(&mut json_buf)),
     };
-    if let Some((_, e)) = &mut out.json {
+    if let Some(e) = &mut out.json {
         e.obj_open();
         e.kv_int(b"schema", 1);
     }
@@ -947,13 +944,13 @@ fn predict(args: &[*const c_char]) -> c_int {
         .as_bytes()]);
         return EXIT_USAGE;
     }
-    if let Some((buf, e)) = &mut out.json {
+    if let Some(e) = &mut out.json {
         e.obj_close();
         if e.err() != 0 {
             error(&[b"attest predict: json encode failed"]);
             return 1;
         }
-        print(&[&buf[..e.written()], b"\n"].concat());
+        print(&[e.output(), b"\n"].concat());
     }
     0
 }
@@ -962,7 +959,7 @@ fn predict(args: &[*const c_char]) -> c_int {
 /// the text.
 fn report_json(report: &[u8], verdict: &[u8]) -> c_int {
     let mut buf = vec![0u8; 2 * REPORT_MAX];
-    let mut e = JsonEmit::fixed(buf.as_mut_ptr().cast(), buf.len());
+    let mut e = JsonEmit::fixed(&mut buf);
 
     e.obj_open();
     e.kv_int(b"schema", 1);
