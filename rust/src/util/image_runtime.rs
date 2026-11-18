@@ -48,11 +48,9 @@ use crate::util::crypto_openssl::{
 };
 use crate::util::dm_verity::{self, DmVerity, minor};
 use crate::util::identity;
-use crate::util::image_bootstrap::{
-    ImageBootstrap, image_bootstrap_read, image_bootstrap_read_fd, path_valid,
-};
+use crate::util::image_bootstrap::{self, ImageBootstrap, path_valid};
 use crate::util::image_cache::{SEAL_LABEL, XATTR_SEAL, fetch_verified};
-use crate::util::image_config::{image_config_clear, image_config_set};
+use crate::util::image_config;
 use crate::util::image_guards::image_guards_ready;
 use crate::util::image_keys::{self, RUNTIME_CERT_PATH};
 use crate::util::io::{kernel_dev, read_whole};
@@ -470,8 +468,7 @@ fn load_runtime_config(s: &mut State, trusted_boot: bool) -> c_int {
         Err(err) => return err,
     };
     s.bootstrap.n_certificates = 0;
-    // SAFETY: the open file and the bootstrap to fill.
-    let mut ret = unsafe { image_bootstrap_read_fd(conf.as_raw_fd(), &mut s.bootstrap, false) };
+    let mut ret = image_bootstrap::read_fd(conf.as_raw_fd(), &mut s.bootstrap, false);
     if ret == 0 {
         // SAFETY: the config to fill, the open file and its label.
         ret = unsafe {
@@ -489,8 +486,7 @@ fn load_runtime_config(s: &mut State, trusted_boot: bool) -> c_int {
     if s.bootstrap.config[0] == 0 || s.bootstrap.n_certificates == 0 || !s.bootstrap.have_pcr {
         return -EINVAL;
     }
-    // SAFETY: the bootstrap config, without a config image.
-    let ret = unsafe { image_config_set(&s.bootstrap_config, -1) };
+    let ret = image_config::set(&s.bootstrap_config, -1);
     if ret != 0 {
         return ret;
     }
@@ -876,8 +872,7 @@ fn activate_config(s: &mut State, boot: bool) -> c_int {
     if ret != 0 {
         return ret;
     }
-    // SAFETY: the bootstrap config and the open config image.
-    unsafe { image_config_set(&s.bootstrap_config, dir.as_raw_fd()) }
+    image_config::set(&s.bootstrap_config, dir.as_raw_fd())
 }
 
 unsafe extern "C" fn prepare_update(_: *mut c_void, target: *const ConfigUpdateTarget) -> c_int {
@@ -1102,9 +1097,7 @@ pub(crate) fn bootstrap_load() -> c_int {
             s.bootstrap.have_root = true;
             load_runtime_config(s, false)
         } else {
-            // SAFETY: a C string and the bootstrap to fill.
-            let mut ret =
-                unsafe { image_bootstrap_read(CONF_PATH.as_ptr(), &mut s.bootstrap, true) };
+            let mut ret = image_bootstrap::read(CONF_PATH, &mut s.bootstrap, true);
             if ret == 0 && (s.bootstrap.runtime[0] == 0 || !s.bootstrap.have_root) {
                 ret = -EINVAL;
             }
@@ -1121,8 +1114,7 @@ pub(crate) fn bootstrap_load() -> c_int {
         if ret != 0 {
             return ret;
         }
-        // SAFETY: the bootstrap config, without a config image.
-        let ret = unsafe { image_config_set(&s.bootstrap_config, -1) };
+        let ret = image_config::set(&s.bootstrap_config, -1);
         if ret != 0 {
             return ret;
         }
@@ -1191,7 +1183,7 @@ pub(crate) fn boot_keys_close() -> c_int {
         if !s.boot_keys_open {
             return 0;
         }
-        image_config_clear();
+        image_config::clear();
         s.candidate_fd = None;
         s.certificates.clear();
         let mut ret = 0;
@@ -1305,8 +1297,7 @@ fn config_mount_check(s: &State, record: &ConfigUpdateRecord) -> c_int {
         if ret != 0 {
             return ret;
         }
-        // SAFETY: the bootstrap config and the open config image.
-        unsafe { image_config_set(&s.bootstrap_config, dir.as_raw_fd()) }
+        image_config::set(&s.bootstrap_config, dir.as_raw_fd())
     })();
     dm_verity::close_loops(&mut device);
     ret
@@ -1520,7 +1511,7 @@ pub(crate) fn status(json: bool) -> c_int {
 /// bootstrap's secrets wiped.
 pub(crate) fn leave() {
     boot_keys_close();
-    image_config_clear();
+    image_config::clear();
     let open = journal_open();
     with_state(|s| close_candidate(s, open));
     collect_mappings(open);

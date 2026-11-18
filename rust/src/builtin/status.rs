@@ -37,7 +37,7 @@ use crate::util::eventlog::{eventlog_lock, eventlog_path, eventlog_replay, event
 use crate::util::format::{fputs_sanitized, human_size};
 use crate::util::help::{Help, HelpSection};
 use crate::util::identity;
-use crate::util::image_bootstrap::{ImageBootstrap, image_bootstrap_read};
+use crate::util::image_bootstrap::{self, ImageBootstrap};
 use crate::util::image_runtime;
 use crate::util::initrd;
 use crate::util::integrity::{self, IntegrityCounts};
@@ -675,8 +675,7 @@ impl KeyringView {
                 .iter()
                 .any(|key| !links.iter().any(|l| l.serial == *key));
         }
-        // SAFETY: a C string and the bootstrap to fill.
-        let mut rc = unsafe { image_bootstrap_read(RUNTIME_CONF_PATH.as_ptr(), &mut *boot, false) };
+        let mut rc = image_bootstrap::read(RUNTIME_CONF_PATH, &mut boot, false);
         if rc == 0 && boot.n_certificates == 0 {
             rc = -ENOENT;
         }

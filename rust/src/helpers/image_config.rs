@@ -17,10 +17,8 @@ use super::{helper_main, out};
 use crate::errno::{EINVAL, EIO};
 use crate::text::cstr;
 use crate::util::config::{Config, config_load_path};
-use crate::util::image_bootstrap::{ImageBootstrap, image_bootstrap_read};
-use crate::util::image_config::{
-    REGISTRIES, get, image_config_clear, image_config_set, open, open_relative, validate,
-};
+use crate::util::image_bootstrap::{self, ImageBootstrap};
+use crate::util::image_config::{self, REGISTRIES, get, open, open_relative, validate};
 
 helper_main!(shirudo_helper_test_image_config, run);
 
@@ -31,13 +29,11 @@ fn text(field: &[u8]) -> std::borrow::Cow<'_, str> {
 fn read_bootstrap(args: &[&CStr]) -> c_int {
     // SAFETY: a bootstrap of nothing read, for which zeros are the value.
     let mut boot: Box<ImageBootstrap> = Box::new(unsafe { core::mem::zeroed() });
-    // SAFETY: a C string and the bootstrap to fill.
-    let mut ret = unsafe { image_bootstrap_read(args[2].as_ptr(), &mut *boot, true) };
+    let mut ret = image_bootstrap::read(args[2], &mut boot, true);
     if ret == 0
         && let Some(runtime) = args.get(3)
     {
-        // SAFETY: as above.
-        ret = unsafe { image_bootstrap_read(runtime.as_ptr(), &mut *boot, false) };
+        ret = image_bootstrap::read(runtime, &mut boot, false);
     }
     if ret == 0 {
         let root = crate::util::hex::encode(&boot.runtime_root);
@@ -99,8 +95,7 @@ fn with_image(args: &[&CStr], root: c_int) -> c_int {
     bootstrap.tpm_owner_auth[..15].copy_from_slice(b"bootstrap-owner");
     bootstrap.tpm_owner_auth_len = 15;
     let _ = crate::text::strscpy(&mut bootstrap.tpm_tcti, b"bootstrap-tcti");
-    // SAFETY: the config and the image's root, open.
-    let set = || unsafe { image_config_set(&*bootstrap, root) };
+    let set = || image_config::set(&bootstrap, root);
     match (args[1].to_bytes(), args.get(3)) {
         (b"validate", _) => validate(root),
         (b"effective", _) => match set() {
@@ -130,7 +125,7 @@ fn run(args: &[&CStr]) -> c_int {
         return 1;
     };
     let ret = with_image(args, root.as_raw_fd());
-    image_config_clear();
+    image_config::clear();
     drop(root);
     out(&format!("rc={ret}\n"));
     c_int::from(ret != 0)

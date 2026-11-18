@@ -19,7 +19,7 @@ use super::out;
 use crate::builtin::{cmd_bpm, cmd_config, cmd_keys, source_key_open};
 use crate::errno::EIO;
 use crate::util::config::{Config, config_load_path};
-use crate::util::image_config::{image_config_clear, image_config_set};
+use crate::util::image_config;
 
 /// The image's config set from a bootstrap of no file but the TPM's
 /// owner auth and TCTI, or why not.
@@ -40,8 +40,7 @@ fn use_image(root: &CStr) -> bool {
     bootstrap.tpm_owner_auth[..15].copy_from_slice(b"bootstrap-owner");
     bootstrap.tpm_owner_auth_len = 15;
     let _ = crate::text::strscpy(&mut bootstrap.tpm_tcti, b"bootstrap-tcti");
-    // SAFETY: the config and the image's directory, open.
-    unsafe { image_config_set(&*bootstrap, dir.as_raw_fd()) == 0 }
+    image_config::set(&bootstrap, dir.as_raw_fd()) == 0
 }
 
 /// The first line of the key file of source `name`, as bpm opens it.
@@ -96,6 +95,6 @@ pub unsafe extern "C" fn shirudo_helper_test_image_cli(
         }
         _ => 2,
     };
-    image_config_clear();
+    image_config::clear();
     c_int::from(ret != 0)
 }

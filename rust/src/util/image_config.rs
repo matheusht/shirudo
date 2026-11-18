@@ -360,16 +360,12 @@ pub(crate) fn validate(root_fd: c_int) -> c_int {
 /// The image's configuration over the bootstrap one, from the verified
 /// root at `root_fd`, or the bootstrap one alone without a root: 0, or
 /// -errno with nothing changed.
-///
-/// # Safety
-///
-/// `bootstrap` points to a configuration.
-unsafe fn set(bootstrap: *const Config, root_fd: c_int) -> c_int {
+pub(crate) fn set(bootstrap: &Config, root_fd: c_int) -> c_int {
     let mut candidate = Scrubbed(MaybeUninit::uninit());
     let mut fd = -1;
 
     // SAFETY: the bootstrap configuration, every byte of it, into the
-    // candidate.
+    // candidate's room.
     unsafe { core::ptr::copy_nonoverlapping(bootstrap, candidate.ptr(), 1) };
     if root_fd >= 0 {
         let ret = validate(root_fd);
@@ -383,8 +379,8 @@ unsafe fn set(bootstrap: *const Config, root_fd: c_int) -> c_int {
         }
         // SAFETY: the candidate's room, and the copy of the root.
         let ret = unsafe { load_root(candidate.ptr(), fd) };
-        // SAFETY: the candidate, filled, and the caller's bootstrap.
-        let (c, b) = unsafe { (&mut *candidate.ptr(), &*bootstrap) };
+        // SAFETY: the candidate, filled.
+        let (c, b) = (unsafe { &mut *candidate.ptr() }, bootstrap);
 
         if ret != 0 || !c.map_export_valid || !c.tls_classical_hosts_valid {
             // SAFETY: the copy fcntl() gave, closed once.
@@ -417,7 +413,7 @@ unsafe fn set(bootstrap: *const Config, root_fd: c_int) -> c_int {
 }
 
 /// Forgets the image: its root closed, its configuration scrubbed.
-fn clear() {
+pub(crate) fn clear() {
     // SAFETY: the state, written at startup alone.
     unsafe {
         let config_fd = &mut *STATE.config_fd.get();
@@ -428,25 +424,5 @@ fn clear() {
         *config_fd = -1;
         *STATE.active.get() = false;
         explicit_bzero(STATE.effective.get().cast(), size_of::<Config>());
-    }
-}
-
-pub(crate) use capi::{image_config_clear, image_config_set};
-
-mod capi {
-    use core::ffi::c_int;
-
-    use crate::util::config::Config;
-
-    /// # Safety
-    ///
-    /// `bootstrap` points to a configuration.
-    pub unsafe extern "C" fn image_config_set(bootstrap: *const Config, root_fd: c_int) -> c_int {
-        // SAFETY: the caller passes a configuration.
-        unsafe { super::set(bootstrap, root_fd) }
-    }
-
-    pub extern "C" fn image_config_clear() {
-        super::clear();
     }
 }

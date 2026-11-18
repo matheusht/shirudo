@@ -5,17 +5,19 @@
 //! and config images and the config's verification keys are, the runtime
 //! image's root hash and the PCR the config is measured into.
 
-use core::ffi::{CStr, c_char, c_int};
-use core::ptr;
+use core::ffi::{CStr, c_int};
 
 use super::config_measure::pcr_valid;
 use crate::errno::{E2BIG, EEXIST, EINVAL, EIO, ENAMETOOLONG, EPERM};
-use crate::ffi;
-use crate::sys::libc::{File, PATH_MAX, fclose, ferror, free};
+use crate::sys::libc::{F_DUPFD_CLOEXEC, PATH_MAX, errno, fcntl};
 use crate::text::{contains, cstr, parse_u64, strscpy, trim_blanks};
 use crate::util::hex::hex_decode;
-use crate::util::io::read_text_line;
 use crate::util::keys::KEYS_MAX;
+use std::ffi::OsStr;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::os::fd::{FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
 
 const RUNTIME_DIR_PREFIX: &[u8] = b"/run/shirudo/runtime/";
 /// `TPM_CONFIG_NVPCR_INDEX` and `_NAME` in include/shirudo/tpm.h.
@@ -126,120 +128,68 @@ fn apply(boot: &mut ImageBootstrap, key: &[u8], value: &CStr, initial: bool) -> 
     }
 }
 
-/// The lines of the stream `f`, which this consumes and closes, into
-/// `boot`; only the `initial` read takes the runtime image and its root.
-///
-/// # Safety
-///
-/// `f` is an open stream nothing else uses.
-unsafe fn parse(f: *mut File, boot: &mut ImageBootstrap, initial: bool) -> c_int {
-    let mut line: *mut c_char = ptr::null_mut();
-    let mut capacity = 0usize;
-    let mut ret = 0;
-
-    // SAFETY: the caller's stream, and getline()'s line, the len bytes
-    // before its NUL.
-    unsafe {
-        loop {
-            let got = read_text_line(f, &mut line, &mut capacity, PATH_MAX + 127);
-
-            if got == 0 {
-                break;
-            }
-            if got < 0 {
-                ret = got;
-                break;
-            }
-            let len = CStr::from_ptr(line).to_bytes().len();
-            let buf = ffi::bytes_mut(line.cast(), len + 1);
-            let (ls, le) = trim_blanks(buf, 0, len);
-            if ls == le || buf[ls] == b'#' {
-                continue;
-            }
-            let Some(eq) = buf[ls..le].iter().position(|&c| c == b'=').map(|i| ls + i) else {
-                ret = -EINVAL;
-                break;
-            };
-            buf[eq] = 0;
-            let (ks, ke) = trim_blanks(buf, ls, eq);
-            let (vs, _) = trim_blanks(buf, eq + 1, le);
-            let key = &buf[ks..ke];
-            let value = CStr::from_bytes_until_nul(&buf[vs..]).unwrap_or(c"");
-            ret = apply(boot, key, value, initial);
-            if ret != 0 {
-                break;
-            }
+/// The lines of `text` into `boot`, each as getline() gave it, its
+/// newline included; only the `initial` read takes the runtime image and
+/// its root.
+fn parse(text: &[u8], boot: &mut ImageBootstrap, initial: bool) -> c_int {
+    for line in text.split_inclusive(|&c| c == b'\n') {
+        if line.contains(&0) {
+            return -EINVAL;
         }
-        if ferror(f) != 0 && ret == 0 {
-            ret = -EIO;
+        if line.strip_suffix(b"\n").unwrap_or(line).len() > PATH_MAX + 127 {
+            return -E2BIG;
         }
-        free(line.cast());
-        fclose(f);
+        // The line as the C string the C trimmed in place.
+        let mut buf = [line, b"\0"].concat();
+        let (ls, le) = trim_blanks(&mut buf, 0, line.len());
+        if ls == le || buf[ls] == b'#' {
+            continue;
+        }
+        let Some(eq) = buf[ls..le].iter().position(|&c| c == b'=').map(|i| ls + i) else {
+            return -EINVAL;
+        };
+        buf[eq] = 0;
+        let (ks, ke) = trim_blanks(&mut buf, ls, eq);
+        let (vs, _) = trim_blanks(&mut buf, eq + 1, le);
+        let value = CStr::from_bytes_until_nul(&buf[vs..]).unwrap_or(c"");
+        let ret = apply(boot, &buf[ks..ke], value, initial);
+        if ret != 0 {
+            return ret;
+        }
     }
-    ret
+    0
 }
 
-pub(crate) use capi::{image_bootstrap_read, image_bootstrap_read_fd};
+/// The bootstrap file at `path` into `boot`.
+pub(crate) fn read(path: &CStr, boot: &mut ImageBootstrap, initial: bool) -> c_int {
+    match std::fs::read(OsStr::from_bytes(path.to_bytes())) {
+        Ok(text) => parse(&text, boot, initial),
+        Err(e) => -e.raw_os_error().unwrap_or(EIO),
+    }
+}
+
+/// The bootstrap file open at `fd`, from its start, into `boot`, through
+/// a copy of the fd: the caller keeps its own.
+pub(crate) fn read_fd(fd: c_int, boot: &mut ImageBootstrap, initial: bool) -> c_int {
+    // SAFETY: the caller's fd, and a minimum.
+    let copy = unsafe { fcntl(fd, F_DUPFD_CLOEXEC, 3) };
+    if copy < 0 {
+        return -errno();
+    }
+    // SAFETY: the copy fcntl() gave, owned from here.
+    let mut f = File::from(unsafe { OwnedFd::from_raw_fd(copy) });
+    let mut text = Vec::new();
+    match f
+        .seek(SeekFrom::Start(0))
+        .and_then(|_| f.read_to_end(&mut text))
+    {
+        Ok(_) => parse(&text, boot, initial),
+        Err(e) => -e.raw_os_error().unwrap_or(EIO),
+    }
+}
 
 #[cfg(shirudo_fuzz)]
 mod fuzz;
 
-mod capi {
-    use core::ffi::{c_char, c_int};
-
-    use super::{ImageBootstrap, parse};
-
-    use crate::sys::libc::{F_DUPFD_CLOEXEC, SEEK_SET, close, errno, fcntl, fdopen, fopen, lseek};
-
-    /// # Safety
-    ///
-    /// `path` is a C string and `boot` a bootstrap to fill.
-    pub unsafe extern "C" fn image_bootstrap_read(
-        path: *const c_char,
-        boot: *mut ImageBootstrap,
-        initial: bool,
-    ) -> c_int {
-        // SAFETY: the caller passes a C string and its bootstrap.
-        unsafe {
-            let f = fopen(path, c"re".as_ptr());
-            if f.is_null() {
-                return -errno();
-            }
-            parse(f, &mut *boot, initial)
-        }
-    }
-
-    /// A copy of `fd` is read from its start; the caller keeps its own.
-    ///
-    /// # Safety
-    ///
-    /// `boot` is a bootstrap to fill.
-    pub unsafe extern "C" fn image_bootstrap_read_fd(
-        fd: c_int,
-        boot: *mut ImageBootstrap,
-        initial: bool,
-    ) -> c_int {
-        // SAFETY: the caller's bootstrap, and the copy of its fd, which
-        // the stream takes over or which is closed here.
-        unsafe {
-            let copy = fcntl(fd, F_DUPFD_CLOEXEC, 3);
-            if copy < 0 {
-                return -errno();
-            }
-            if lseek(copy, 0, SEEK_SET) < 0 {
-                let ret = -errno();
-
-                close(copy);
-                return ret;
-            }
-            let f = fdopen(copy, c"r".as_ptr());
-            if f.is_null() {
-                let ret = -errno();
-
-                close(copy);
-                return ret;
-            }
-            parse(f, &mut *boot, initial)
-        }
-    }
-}
+#[cfg(test)]
+mod tests;
