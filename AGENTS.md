@@ -137,8 +137,13 @@ carries a change.
   secrets, `rust/src/util/json/` for all JSON and `rust/src/log.rs` for
   all logging. Code that a second place needs moves into
   `rust/src/util/` with unit cases rather than being copied.
-- A function that can fail returns 0 or a negative errno, or a `Result`
-  whose error is one. Internal names carry no `shirudo_` prefix.
+- Rust is safe at its signatures: a raw pointer only in an `unsafe fn`
+  at the edge with C, a failure as a `Result` whose error is a negative
+  errno, what is acquired released by `Drop`, nothing from outside
+  indexed, unwrapped or cast with `as` unchecked, and no `static mut`.
+  C-shaped code a change touches is brought to these in the same
+  series; the `coding` skill gives the rules with their reasons.
+  Internal names carry no `shirudo_` prefix.
 - C zero-initialises with `= {}`, spells integers `__u8` to `__u64` and
   `__s8` to `__s64`, names a return code `ret` and puts locals in
   reverse-Christmas-tree order. No `(void)` casts.

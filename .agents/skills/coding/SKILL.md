@@ -571,9 +571,46 @@ its point of no return:
 Most userspace is the `shirudo` crate under `rust/`, a static library
 every binary links. Much of it keeps the shape of the C it replaced:
 raw pointers, `c_int` results and `capi` submodules that hold the
-pointer-shaped interface of a C header that is gone. Write safe code
-over slices and Rust types, and take the pointer forms only where the
-code a change joins still passes pointers.
+pointer-shaped interface of a C header that is gone. New and changed
+code follows the rules below, and the C-shaped code a change touches
+is brought to them in the same series: its callers take the safe form
+and the C-shaped one goes.
+
+- A safe function takes references, slices, `&CStr`, fixed-size arrays
+  and owned types. A raw pointer is for an `unsafe fn` at the edge with
+  C, whose `# Safety` says what it must point at, and is made a
+  reference or a slice there once, through `rust/src/ffi.rs`; a safe
+  function that dereferences a pointer it was given is unsound however
+  its callers use it.
+- A failure is a `Result`, its error a negative errno, passed on with
+  `?`. What a function finds goes in the `Ok`, not through an
+  out-parameter beside a status. A bare `c_int` status stays only where
+  C calls the function, as a callback of libcurl or LuaJIT does.
+- What is acquired is released by `Drop`: a descriptor as an `OwnedFd`
+  or a `File`, an allocation of C in a type whose `Drop` frees it, as
+  `Publication` and `Member` do, a lock in a guard. A `close()`, an
+  `xfree()` or a `libc_free()` on a return path is a leak on the path
+  that forgets it.
+- Nothing from outside panics: data read from a file, the network, the
+  kernel or the command line is taken with `get()`, `split_at_checked()`
+  and their kin, never indexed past a length the code has not checked,
+  and never `unwrap()`ed. `expect()` states only an invariant the code
+  itself made, in its message. A panic aborts the command.
+- `as` converts only where the value fits by construction, a `u8` into
+  a `u32`, a constant into its type. A length, a count or an offset from
+  outside goes through `try_from()`, and its error refuses the input.
+- No `static mut` of the crate's own; a value set once is a `OnceLock`,
+  a counter an atomic, anything else is passed to who needs it.
+- `unsafe` covers the one operation that needs it. A foreign function
+  the crate calls in more than one place gets a safe wrapper beside its
+  declaration, and the callers call that.
+- `mem::zeroed()` is for a `#[repr(C)]` type whose C definition takes
+  all zeros as a valid value; a Rust type has a constructor or
+  `Default`.
+- Visibility is as narrow as the callers allow, `pub(super)` before
+  `pub(crate)`; `pub` and `#[unsafe(no_mangle)]` are for the entry
+  points the `main()` objects, the test helpers and the fuzz targets
+  call.
 
 - The commands are `rust/src/builtin/`, one module for each, which the
   table of `rust/src/builtin/commands.rs` dispatches to; what more than
@@ -589,8 +626,8 @@ code a change joins still passes pointers.
   `testing/helper/main.rs.in`, which hands the command line to the
   crate, so that the tests can link the crate with a `main()` of their
   own.
-- A function that can fail returns 0 or a negative errno of
-  `rust/src/errno.rs`, or a `Result` whose error is one.
+- An errno is a constant of `rust/src/errno.rs`, negative wherever a
+  function hands it back.
 - `rust/src/ffi.rs` turns what C hands over into Rust views: `c_str()`
   for a C string, `slice()` for an array that may be NULL when empty,
   `bytes_mut()` for a C buffer to write into as it is, and `c_splice!`
