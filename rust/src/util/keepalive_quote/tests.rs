@@ -2,6 +2,12 @@
 // Copyright (c) 2026 Authors of shirudo
 
 use super::*;
+use crate::util::tpm::{ATTEST_MAX, PUBLIC_MAX, SIGNATURE_MAX};
+
+/// The room base64 takes for `n` bytes, its terminator included.
+const fn base64_size(n: usize) -> usize {
+    4 * n.div_ceil(3) + 1
+}
 
 const WANT: &[u8] = b"attest=/1RD;sig=ABg=;ak=ACMACw==";
 

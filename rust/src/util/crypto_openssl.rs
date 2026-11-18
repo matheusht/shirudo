@@ -282,6 +282,19 @@ pub(crate) unsafe fn sha256_buffer(data: *const c_void, len: usize, out: *mut u8
     ret
 }
 
+/// `data` in padded base64 on one line: -EINVAL for more bytes than an
+/// int counts.
+pub(crate) fn base64(data: &[u8]) -> Result<Vec<u8>, c_int> {
+    if data.len() > c_int::MAX as usize {
+        return Err(-EINVAL);
+    }
+    let text = base64::encode_block(data);
+    if text.len() != 4 * data.len().div_ceil(3) {
+        return Err(-EIO);
+    }
+    Ok(text.into_bytes())
+}
+
 /// # Safety
 ///
 /// `data` is NULL or holds `len` bytes, and `out` is NULL or has room
@@ -301,10 +314,10 @@ pub(crate) unsafe fn base64_encode(
         return -EINVAL;
     }
     // SAFETY: the caller's data.
-    let text = base64::encode_block(unsafe { slice(data, len) });
-    if text.len() != need - 1 {
-        return -EIO;
-    }
+    let text = match base64(unsafe { slice(data, len) }) {
+        Ok(text) => text,
+        Err(err) => return err,
+    };
     // SAFETY: the caller's room for need bytes.
     unsafe {
         ptr::copy_nonoverlapping(text.as_ptr(), out.cast(), text.len());
