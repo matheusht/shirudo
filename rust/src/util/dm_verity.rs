@@ -6,15 +6,14 @@
 //! device-mapper's verity target, and the mappings listed, inspected, read
 //! back whole, mounted and removed.
 
-use core::ffi::{CStr, c_char, c_int, c_long, c_ulong, c_void};
+use core::ffi::{CStr, c_char, c_int, c_long, c_ulong};
 use core::mem::MaybeUninit;
 use core::ptr;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 use crate::errno::{
-    EEXIST, EINTR, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENODEV, ENOENT, ENOMEM, EOVERFLOW,
-    ESTALE,
+    EEXIST, EINTR, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENODEV, ENOENT, EOVERFLOW, ESTALE,
 };
-use crate::heap::{xcalloc, xfree};
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, O_CLOEXEC, O_DIRECT, O_NOFOLLOW, O_NONBLOCK,
@@ -132,9 +131,8 @@ const _: () = assert!(size_of::<DmTargetSpec>() == 40);
 const _: () = assert!(size_of::<LoopInfo64>() == 232);
 const _: () = assert!(size_of::<LoopConfig>() == 304);
 
-/// `struct dm_verity`: a mapping of an image, its device and the loop
-/// devices of its parts, -1 for one not open.
-#[repr(C)]
+/// A mapping of an image, its device and the loop devices of its
+/// parts, -1 for one not open.
 pub struct DmVerity {
     pub(crate) image: ConfigImage,
     pub(crate) name: [u8; DM_NAME_LEN],
@@ -146,32 +144,12 @@ pub struct DmVerity {
     pub(crate) hash_loop_fd: c_int,
 }
 
-const _: () = assert!(size_of::<DmVerity>() == 4344);
-
-/// What dm_verity_list() calls with each mapping.
-type DmVerityCb = unsafe extern "C" fn(name: *const c_char, device: u64, ctx: *mut c_void) -> c_int;
-
 /// A structure all of whose bits zeroed are a value of it, as `= {}`
 /// gives it in C.
 fn zeroed<T>() -> T {
     // SAFETY: called only for structures of integers and arrays, for
     // which all-zero bytes are a value.
     unsafe { MaybeUninit::zeroed().assume_init() }
-}
-
-/// `{ .data_loop_fd = -1, .hash_loop_fd = -1 }` into `out`, every other
-/// byte zero.
-///
-/// # Safety
-///
-/// `out` is room for a mapping.
-unsafe fn empty_into(out: *mut DmVerity) {
-    // SAFETY: the caller's room, zeroed whole, padding too.
-    unsafe {
-        out.write_bytes(0, 1);
-        (*out).data_loop_fd = -1;
-        (*out).hash_loop_fd = -1;
-    }
 }
 
 impl DmVerity {
@@ -245,16 +223,6 @@ fn dm_name_ok(name: &[u8]) -> bool {
         .all(|(n, &c)| n < 127 && (c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.')))
 }
 
-/// The C string at `name`, or None for NULL.
-///
-/// # Safety
-///
-/// `name` is NULL or a C string.
-unsafe fn c_name<'a>(name: *const c_char) -> Option<&'a [u8]> {
-    // SAFETY: the caller's C string, or NULL.
-    (!name.is_null()).then(|| unsafe { CStr::from_ptr(name) }.to_bytes())
-}
-
 /// dm_init(): the buffer zeroed with the header of a command on `name`.
 fn dm_init(buf: &mut DmBuffer, name: &[u8]) {
     *buf = DmBuffer {
@@ -317,96 +285,78 @@ fn dm_control_open() -> c_int {
     fd
 }
 
-/// dm_verity_list(): `callback` with each device-mapper device's name and
-/// number, until it returns other than 0.
-///
-/// # Safety
-///
-/// `callback` is NULL or takes `ctx`.
-unsafe fn list(callback: Option<DmVerityCb>, ctx: *mut c_void) -> c_int {
+/// Each device-mapper device's name and number to `f`, until it returns
+/// other than 0: 0, what it returned, or -errno.
+pub(crate) fn list(mut f: impl FnMut(&CStr, u64) -> c_int) -> c_int {
     const CAPACITY: usize = 64 * 1024;
-    let Some(callback) = callback else {
-        return -EINVAL;
-    };
     let control = dm_control_open();
     if control < 0 {
         return control;
     }
-    // SAFETY: an allocation, freed below by its size.
-    let buffer = unsafe { xcalloc(1, CAPACITY) }.cast::<u8>();
-    if buffer.is_null() {
-        // SAFETY: the control's fd, closed once.
-        unsafe { close(control) };
-        return -ENOMEM;
-    }
-    let io = buffer.cast::<DmIoctl>();
-    // SAFETY: the allocation, zeroed, its header and the entries the
-    // kernel wrote after it, read within the size it reports and checked
-    // as the C checked them; the callback with a name the entry holds.
+    // SAFETY: the fd dm_control_open() opened, owned from here.
+    let control = unsafe { OwnedFd::from_raw_fd(control) };
+    // Words, for the alignment of the header the kernel reads and writes.
+    let mut words = vec![0u64; CAPACITY / 8];
+    let io = words.as_mut_ptr().cast::<DmIoctl>();
+    // SAFETY: the header at the start of the zeroed buffer, which holds
+    // CAPACITY bytes and is aligned for it.
     unsafe {
         (*io).version[0] = DM_VERSION_MAJOR;
         (*io).data_size = CAPACITY as u32;
         (*io).data_start = size_of::<DmIoctl>() as u32;
-        let mut ret = if ioctl(control, DM_LIST_DEVICES, io) != 0 {
-            -errno()
-        } else {
-            0
-        };
-        if ret == 0 && (*io).flags & DM_BUFFER_FULL_FLAG != 0 {
-            ret = -EOVERFLOW;
-        }
-        if ret == 0
-            && ((*io).data_size as usize > CAPACITY
-                || ((*io).data_start as usize) < size_of::<DmIoctl>()
-                || (*io).data_start > (*io).data_size
-                || (*io).data_start % 8 != 0)
-        {
-            ret = -EINVAL;
-        }
-        let mut offset = (*io).data_start as usize;
-        while ret == 0 && offset < (*io).data_size as usize {
-            let mut avail = (*io).data_size as usize - offset;
-            if avail < NAME_LIST_HEADER + 1 {
-                ret = -EINVAL;
-                break;
-            }
-            let entry = buffer.add(offset);
-            let device = entry.cast::<u64>().read_unaligned();
-            let next = entry.add(8).cast::<u32>().read_unaligned();
-            let name = entry.add(NAME_LIST_HEADER);
-            if device == 0 {
-                if next != 0 || *name != 0 {
-                    ret = -EINVAL;
-                }
-                break;
-            }
-            if next != 0 {
-                if next as usize > avail || next % 8 != 0 || (next as usize) < NAME_LIST_HEADER + 1
-                {
-                    ret = -EINVAL;
-                    break;
-                }
-                avail = next as usize;
-            }
-            avail -= NAME_LIST_HEADER;
-            if avail > DM_NAME_LEN {
-                avail = DM_NAME_LEN;
-            }
-            let bytes = core::slice::from_raw_parts(name, avail);
-            if !bytes.contains(&0) || bytes[0] == 0 {
-                ret = -EINVAL;
-                break;
-            }
-            ret = callback(name.cast(), device, ctx);
-            if next == 0 {
-                break;
-            }
-            offset += next as usize;
-        }
-        xfree(buffer.cast(), CAPACITY);
-        close(control);
-        ret
     }
+    // SAFETY: the control's fd, and the buffer of CAPACITY bytes the
+    // header describes.
+    if unsafe { ioctl(control.as_raw_fd(), DM_LIST_DEVICES, io) } != 0 {
+        return -errno();
+    }
+    // SAFETY: the header the kernel left at the start of the buffer.
+    let io = unsafe { io.read() };
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_ne_bytes()).collect();
+    if io.flags & DM_BUFFER_FULL_FLAG != 0 {
+        return -EOVERFLOW;
+    }
+    let (size, start) = (io.data_size as usize, io.data_start as usize);
+    if size > CAPACITY || start < size_of::<DmIoctl>() || start > size || start % 8 != 0 {
+        return -EINVAL;
+    }
+    let mut offset = start;
+    while offset < size {
+        let mut avail = size - offset;
+        if avail < NAME_LIST_HEADER + 1 {
+            return -EINVAL;
+        }
+        let entry = &bytes[offset..size];
+        let device = u64::from_ne_bytes(entry[..8].try_into().unwrap_or_default());
+        let next = u32::from_ne_bytes(entry[8..12].try_into().unwrap_or_default());
+        if device == 0 {
+            return if next != 0 || entry[NAME_LIST_HEADER] != 0 {
+                -EINVAL
+            } else {
+                0
+            };
+        }
+        if next != 0 {
+            if next as usize > avail || next % 8 != 0 || (next as usize) < NAME_LIST_HEADER + 1 {
+                return -EINVAL;
+            }
+            avail = next as usize;
+        }
+        let name = &entry[NAME_LIST_HEADER..avail];
+        let name = &name[..name.len().min(DM_NAME_LEN)];
+        let Ok(name) = CStr::from_bytes_until_nul(name) else {
+            return -EINVAL;
+        };
+        if name.is_empty() {
+            return -EINVAL;
+        }
+        let ret = f(name, device);
+        if ret != 0 || next == 0 {
+            return ret;
+        }
+        offset += next as usize;
+    }
+    0
 }
 
 /// A free loop device attached read-only to the file at `file_fd`, `bytes`
@@ -626,38 +576,20 @@ fn check_table(buf: &mut DmBuffer, image: &ConfigImage, device: &mut DmVerity) -
     0
 }
 
-/// dm_verity_inspect(): the live mapping `name` checked against `image`,
-/// into `*out`.
-///
-/// # Safety
-///
-/// `name` is NULL or a C string, `image` NULL or an image, and `out`
-/// NULL or room for a mapping.
-unsafe fn inspect(name: *const c_char, image: *const ConfigImage, out: *mut DmVerity) -> c_int {
-    // SAFETY: the caller's C string, or NULL.
-    let name = unsafe { c_name(name) };
-    // SAFETY: the caller's image, or NULL.
-    let image = unsafe { image.as_ref() };
-    let (Some(name), Some(image), false) = (name, image, out.is_null()) else {
-        return -EINVAL;
-    };
+/// The live mapping `name` checked against `image`.
+pub(crate) fn inspect(name: &CStr, image: &ConfigImage) -> Result<DmVerity, c_int> {
+    let name = name.to_bytes();
     if !dm_name_ok(name) {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
-    let mut device: DmVerity = zeroed();
+    let mut device = DmVerity::empty();
     let mut buf = DmBuffer {
         bytes: [0; DM_BUFFER_SIZE],
     };
 
-    // SAFETY: a mapping with no loop devices into its room and the
-    // caller's.
-    unsafe {
-        empty_into(&mut device);
-        empty_into(out);
-    }
     let control = dm_control_open();
     if control < 0 {
-        return control;
+        return Err(control);
     }
     dm_init(&mut buf, name);
     io(&mut buf).flags = DM_STATUS_TABLE_FLAG;
@@ -670,20 +602,46 @@ unsafe fn inspect(name: *const c_char, image: *const ConfigImage, out: *mut DmVe
     }
     // SAFETY: the control's fd, closed once.
     unsafe { close(control) };
-    if ret == 0 {
-        let _ = strscpy(&mut device.name, name);
-        // SAFETY: the image and the mapping, copied whole as the C's
-        // assignments copy them.
-        unsafe {
-            ptr::copy_nonoverlapping(image, &mut device.image, 1);
-            ptr::copy_nonoverlapping(&device, out, 1);
-        }
+    if ret != 0 {
+        return Err(ret);
     }
-    ret
+    let _ = strscpy(&mut device.name, name);
+    device.image = *image;
+    Ok(device)
 }
 
-/// dm_verity_close(): the loop devices' fds closed.
-fn close_loops(device: &mut DmVerity) {
+/// `made` into `device`, or an empty mapping in its place when it failed:
+/// 0 or -errno, for the callers that keep a mapping across steps.
+pub(crate) fn place(made: Result<DmVerity, c_int>, device: &mut DmVerity) -> c_int {
+    match made {
+        Ok(made) => {
+            *device = made;
+            0
+        }
+        Err(err) => {
+            *device = DmVerity::empty();
+            err
+        }
+    }
+}
+
+/// The live mapping of `device`'s name inspected against `image` into
+/// `checked`: 0 or -errno.
+fn recheck(device: &DmVerity, image: &ConfigImage, checked: &mut DmVerity) -> c_int {
+    let Ok(name) = CStr::from_bytes_until_nul(&device.name) else {
+        return -EINVAL;
+    };
+    match inspect(name, image) {
+        Ok(live) => {
+            *checked = live;
+            0
+        }
+        Err(err) => err,
+    }
+}
+
+/// The loop devices' fds closed.
+pub(crate) fn close_loops(device: &mut DmVerity) {
     // SAFETY: the mapping's fds, each closed once.
     unsafe {
         if device.data_loop_fd >= 0 {
@@ -697,9 +655,9 @@ fn close_loops(device: &mut DmVerity) {
     device.hash_loop_fd = -1;
 }
 
-/// dm_verity_remove(): the mapping removed, at its last close with
+/// The mapping removed, at its last close with
 /// `deferred`, and its loop devices closed.
-fn remove(device: &mut DmVerity, deferred: bool) -> c_int {
+pub(crate) fn remove(device: &mut DmVerity, deferred: bool) -> c_int {
     let mut buf = DmBuffer {
         bytes: [0; DM_BUFFER_SIZE],
     };
@@ -830,24 +788,14 @@ fn signature_key(fd: c_int, description: &mut [u8; 64]) -> i32 {
     key as i32
 }
 
-/// dm_verity_create(): the image's parts attached to loop devices and
-/// mapped through verity as `name`, the mapping checked as live, into
-/// `*out`.
-///
-/// # Safety
-///
-/// `image` is NULL or an open image, `name` NULL or a C string, and
-/// `out` NULL or room for a mapping.
-unsafe fn create(image: *const ConfigImageOpen, name: *const c_char, out: *mut DmVerity) -> c_int {
-    // SAFETY: the caller's image and C string, or NULL.
-    let (image, name) = unsafe { (image.as_ref(), c_name(name)) };
-    let (Some(image), Some(name), false) = (image, name, out.is_null()) else {
-        return -EINVAL;
-    };
+/// The image's parts attached to loop devices and mapped through verity
+/// as `name`, the mapping checked as live.
+pub(crate) fn create(image: &ConfigImageOpen, name: &CStr) -> Result<DmVerity, c_int> {
+    let name = name.to_bytes();
     if !dm_name_ok(name) {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
-    let mut device: DmVerity = zeroed();
+    let mut device = DmVerity::empty();
     let mut root = [0u8; 65];
     let mut salt = [0u8; 65];
     let mut params = [0u8; 512];
@@ -866,18 +814,11 @@ unsafe fn create(image: *const ConfigImageOpen, name: *const c_char, out: *mut D
     let mut control = -1;
     let mut ret;
 
-    // SAFETY: a mapping with no loop devices into its room and the
-    // caller's.
-    unsafe {
-        empty_into(&mut device);
-        empty_into(out);
-    }
     ret = check_files(image.data_fd, image.hash_fd, &image.image);
     if ret != 0 {
-        return ret;
+        return Err(ret);
     }
-    // SAFETY: the image, copied whole as the C's assignment copies it.
-    unsafe { ptr::copy_nonoverlapping(&image.image, &mut device.image, 1) };
+    device.image = image.image;
     let _ = strscpy(&mut device.name, name);
     'out: {
         ret = loop_attach(
@@ -1020,15 +961,12 @@ unsafe fn create(image: *const ConfigImageOpen, name: *const c_char, out: *mut D
             dm_command(control, DM_DEV_REMOVE, &mut buf);
         }
         close_loops(&mut device);
-    } else {
-        // SAFETY: the mapping into the caller's room, copied whole.
-        unsafe { ptr::copy_nonoverlapping(&device, out, 1) };
     }
     if control >= 0 {
         // SAFETY: the control's fd, closed once.
         unsafe { close(control) };
     }
-    ret
+    if ret != 0 { Err(ret) } else { Ok(device) }
 }
 
 /// loop_open(): the loop device `device`, a block device of major 7.
@@ -1108,21 +1046,13 @@ fn loop_check(loop_fd: c_int, file_fd: c_int, bytes: u64) -> c_int {
 #[repr(C, align(4096))]
 struct DirectBuffer([u8; 65536]);
 
-/// dm_verity_verify(): the mapping read back whole through direct reads,
+/// The mapping read back whole through direct reads,
 /// which verify all its logical data, including blocks outside live
 /// files, and checked against the image before and after.
 ///
-/// # Safety
-///
-/// `device` is NULL or a mapping, and `image` NULL or an open image.
-unsafe fn verify(device: *const DmVerity, image: *const ConfigImageOpen) -> c_int {
-    // SAFETY: the caller's mapping and image, or NULL.
-    let (Some(device), Some(image)) = (unsafe { device.as_ref() }, unsafe { image.as_ref() })
-    else {
-        return -EINVAL;
-    };
+pub(crate) fn verify(device: &DmVerity, image: &ConfigImageOpen) -> c_int {
     let mut buffer = DirectBuffer([0; 65536]);
-    let mut checked: DmVerity = zeroed();
+    let mut checked = DmVerity::empty();
     let mut st = Statx::zeroed();
     let mut size = 0u64;
     let mut readonly: c_int = 0;
@@ -1135,9 +1065,7 @@ unsafe fn verify(device: *const DmVerity, image: *const ConfigImageOpen) -> c_in
         return ret;
     }
     let bytes = image.image.data_blocks.wrapping_mul(BLOCK_SIZE);
-    // SAFETY: the mapping's name, a C string within its array, the image,
-    // and room for what the mapping is.
-    ret = unsafe { inspect(device.name.as_ptr().cast(), &image.image, &mut checked) };
+    ret = recheck(device, &image.image, &mut checked);
     if ret != 0 {
         return ret;
     }
@@ -1214,8 +1142,7 @@ unsafe fn verify(device: *const DmVerity, image: *const ConfigImageOpen) -> c_in
             }
             offset += n as u64;
         }
-        // SAFETY: as above.
-        ret = unsafe { inspect(device.name.as_ptr().cast(), &image.image, &mut checked) };
+        ret = recheck(device, &image.image, &mut checked);
         if ret == 0
             && (checked.device != device.device
                 || checked.data_device != device.data_device
@@ -1247,29 +1174,20 @@ unsafe fn verify(device: *const DmVerity, image: *const ConfigImageOpen) -> c_in
     ret
 }
 
-/// dm_verity_mount(): the mapping mounted read-only at `mountpoint`, with
+/// The mapping mounted read-only at `mountpoint`, with
 /// no devices or setuid, and no execution unless `executable`, checked as
 /// the live mapping before and after.
 ///
-/// # Safety
-///
-/// `device` is NULL or a mapping, and `mountpoint` NULL or a C string.
-unsafe fn mount_at(device: *const DmVerity, mountpoint: *const c_char, executable: bool) -> c_int {
-    // SAFETY: the caller's mapping and C string, or NULL.
-    let (Some(device), Some(point)) = (unsafe { device.as_ref() }, unsafe { c_name(mountpoint) })
-    else {
-        return -EINVAL;
-    };
+pub(crate) fn mount_at(device: &DmVerity, mountpoint: &CStr, executable: bool) -> c_int {
+    let point = mountpoint.to_bytes();
     let mut flags = MS_RDONLY | MS_NODEV | MS_NOSUID;
-    let mut checked: DmVerity = zeroed();
+    let mut checked = DmVerity::empty();
     let mut st = Statx::zeroed();
 
     if point.first() != Some(&b'/') {
         return -EINVAL;
     }
-    // SAFETY: the mapping's name, a C string within its array, its image,
-    // and room for what the mapping is.
-    let mut ret = unsafe { inspect(device.name.as_ptr().cast(), &device.image, &mut checked) };
+    let mut ret = recheck(device, &device.image, &mut checked);
     if ret != 0 {
         return ret;
     }
@@ -1284,7 +1202,7 @@ unsafe fn mount_at(device: *const DmVerity, mountpoint: *const c_char, executabl
     if unsafe {
         mount(
             device.path.as_ptr().cast(),
-            mountpoint,
+            mountpoint.as_ptr(),
             c"ext4".as_ptr(),
             flags,
             c"noload".as_ptr().cast(),
@@ -1294,111 +1212,16 @@ unsafe fn mount_at(device: *const DmVerity, mountpoint: *const c_char, executabl
         return -errno();
     }
     // SAFETY: the caller's C string, and room for its state.
-    if unsafe { stat_path(mountpoint, false, &mut st) } != 0 {
+    if unsafe { stat_path(mountpoint.as_ptr(), false, &mut st) } != 0 {
         ret = -errno();
     } else if dev(&st) != device.device {
         ret = -ESTALE;
     } else {
-        // SAFETY: as above.
-        ret = unsafe { inspect(device.name.as_ptr().cast(), &device.image, &mut checked) };
+        ret = recheck(device, &device.image, &mut checked);
     }
     if ret != 0 {
         // SAFETY: the caller's C string.
-        unsafe { umount2(mountpoint, 0) };
+        unsafe { umount2(mountpoint.as_ptr(), 0) };
     }
     ret
-}
-
-pub(crate) use capi::{
-    dm_verity_close, dm_verity_create, dm_verity_inspect, dm_verity_list, dm_verity_mount,
-    dm_verity_remove, dm_verity_verify,
-};
-
-mod capi {
-    use core::ffi::{c_char, c_int, c_void};
-
-    use super::{DmVerity, DmVerityCb};
-    use crate::errno::EINVAL;
-    use crate::util::config_image::{ConfigImage, ConfigImageOpen};
-
-    /// # Safety
-    ///
-    /// `callback` is NULL or takes `ctx`.
-    pub unsafe extern "C" fn dm_verity_list(
-        callback: Option<DmVerityCb>,
-        ctx: *mut c_void,
-    ) -> c_int {
-        // SAFETY: the caller passes the callback and its context.
-        unsafe { super::list(callback, ctx) }
-    }
-
-    /// # Safety
-    ///
-    /// `image` is NULL or an open image, `name` NULL or a C string, and
-    /// `out` NULL or room for a mapping.
-    pub unsafe extern "C" fn dm_verity_create(
-        image: *const ConfigImageOpen,
-        name: *const c_char,
-        out: *mut DmVerity,
-    ) -> c_int {
-        // SAFETY: the caller passes what the function takes.
-        unsafe { super::create(image, name, out) }
-    }
-
-    /// # Safety
-    ///
-    /// `name` is NULL or a C string, `image` NULL or an image, and `out`
-    /// NULL or room for a mapping.
-    pub unsafe extern "C" fn dm_verity_inspect(
-        name: *const c_char,
-        image: *const ConfigImage,
-        out: *mut DmVerity,
-    ) -> c_int {
-        // SAFETY: the caller passes what the function takes.
-        unsafe { super::inspect(name, image, out) }
-    }
-
-    /// # Safety
-    ///
-    /// `device` is NULL or a mapping, and `image` NULL or an open image.
-    pub unsafe extern "C" fn dm_verity_verify(
-        device: *const DmVerity,
-        image: *const ConfigImageOpen,
-    ) -> c_int {
-        // SAFETY: the caller passes what the function takes.
-        unsafe { super::verify(device, image) }
-    }
-
-    /// # Safety
-    ///
-    /// `device` is NULL or a mapping, and `mountpoint` NULL or a C string.
-    pub unsafe extern "C" fn dm_verity_mount(
-        device: *const DmVerity,
-        mountpoint: *const c_char,
-        executable: bool,
-    ) -> c_int {
-        // SAFETY: the caller passes what the function takes.
-        unsafe { super::mount_at(device, mountpoint, executable) }
-    }
-
-    /// # Safety
-    ///
-    /// `device` is NULL or a mapping.
-    pub unsafe extern "C" fn dm_verity_remove(device: *mut DmVerity, deferred: bool) -> c_int {
-        // SAFETY: the caller's mapping, or NULL.
-        match unsafe { device.as_mut() } {
-            Some(device) => super::remove(device, deferred),
-            None => -EINVAL,
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `device` is NULL or a mapping.
-    pub unsafe extern "C" fn dm_verity_close(device: *mut DmVerity) {
-        // SAFETY: the caller's mapping, or NULL.
-        if let Some(device) = unsafe { device.as_mut() } {
-            super::close_loops(device);
-        }
-    }
 }

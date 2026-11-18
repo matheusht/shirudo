@@ -24,9 +24,7 @@ use crate::skel::bpf2::ExpectedRoot;
 use crate::sys::identity::{DEVICE_CONFIG, DeviceAuthority};
 use crate::util::bpf_sys::Attr;
 use crate::util::config_image::{ConfigImageOpen, config_image_close, config_image_open};
-use crate::util::dm_verity::{
-    DmVerity, dm_verity_close, dm_verity_create, dm_verity_remove, dm_verity_verify,
-};
+use crate::util::dm_verity::{self, DmVerity};
 use crate::util::io::kernel_dev;
 
 const BPF_MAP_LOOKUP_ELEM: c_long = 1;
@@ -285,11 +283,11 @@ fn config_root_test(mode: &[u8], prefix: &CStr) -> c_int {
         let mut opened: ConfigImageOpen = core::mem::zeroed();
         let mut ret = config_image_open(prefix.as_ptr(), &mut opened);
         if ret == 0 {
-            let mut device: Box<DmVerity> = Box::new(core::mem::zeroed());
+            let mut device = Box::new(DmVerity::empty());
             let name =
                 std::ffi::CString::new(format!("shirudo-verify-root-test-{}", std::process::id()))
                     .unwrap_or_default();
-            ret = dm_verity_create(&opened, name.as_ptr(), &mut *device);
+            ret = dm_verity::place(dm_verity::create(&opened, &name), &mut device);
             let created = ret == 0;
             let consumed = i32::from(mode == ROOT_WRONG);
             if ret == 0
@@ -303,14 +301,14 @@ fn config_root_test(mode: &[u8], prefix: &CStr) -> c_int {
                 ret = check_root_cleared();
             }
             if ret == 0 {
-                ret = dm_verity_verify(&*device, &opened);
+                ret = dm_verity::verify(&device, &opened);
             }
             if ret == 0 {
                 ret = check_classification(&device);
             }
             if created {
-                let cleanup = dm_verity_remove(&mut *device, true);
-                dm_verity_close(&mut *device);
+                let cleanup = dm_verity::remove(&mut device, true);
+                dm_verity::close_loops(&mut device);
                 if ret == 0 {
                     ret = cleanup;
                 }

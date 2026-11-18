@@ -27,9 +27,7 @@ use crate::util::config_image::{
     ConfigImageOpen, MAX_BYTES, SIG_MAX, config_image_close, config_image_open,
 };
 use crate::util::config_update::ConfigUpdateTarget;
-use crate::util::dm_verity::{
-    DmVerity, dm_verity_close, dm_verity_create, dm_verity_remove, dm_verity_verify,
-};
+use crate::util::dm_verity::{self, DmVerity};
 use crate::util::hex::hex_encode;
 use crate::util::io::write_complete;
 use crate::util::seal::seal_label;
@@ -280,22 +278,24 @@ unsafe fn verify_incoming(opened: &ConfigImageOpen, staging: *const c_char) -> c
     {
         return -ENAMETOOLONG;
     }
-    // SAFETY: the image, a C string, and the mapping to fill.
-    let ret = unsafe { dm_verity_create(opened, name.as_ptr().cast(), &mut device) };
+    let ret = dm_verity::place(
+        dm_verity::create(
+            opened,
+            CStr::from_bytes_until_nul(&name).unwrap_or_default(),
+        ),
+        &mut device,
+    );
     if ret != 0 {
         return ret;
     }
-    // SAFETY: the mapping made, and the image.
-    let ret = unsafe { dm_verity_verify(&device, opened) };
-    // SAFETY: as above.
-    let cleanup = unsafe { dm_verity_remove(&mut device, true) };
+    let ret = dm_verity::verify(&device, opened);
+    let cleanup = dm_verity::remove(&mut device, true);
     if cleanup != 0 {
         crate::log::warn(
             format!("image: cannot remove incoming mapping: {}", text(cleanup)).as_bytes(),
         );
     }
-    // SAFETY: the mapping, closed once.
-    unsafe { dm_verity_close(&mut device) };
+    dm_verity::close_loops(&mut device);
     if ret != 0 { ret } else { cleanup }
 }
 

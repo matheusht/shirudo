@@ -13,7 +13,7 @@
 //! borrow taken twice panics rather than aliases.
 
 use core::cell::RefCell;
-use core::ffi::{CStr, c_char, c_int, c_void};
+use core::ffi::{CStr, c_int, c_void};
 use core::ptr;
 use std::ffi::{CString, OsStr};
 use std::fs::{self, DirBuilder, OpenOptions};
@@ -48,10 +48,7 @@ use crate::util::config_update::{
 use crate::util::crypto_openssl::{
     key_algorithm, pubkey_digest, verify_detached_x509, x509_from_der,
 };
-use crate::util::dm_verity::{
-    DmVerity, dm_verity_close, dm_verity_create, dm_verity_inspect, dm_verity_list,
-    dm_verity_mount, dm_verity_remove, dm_verity_verify, minor,
-};
+use crate::util::dm_verity::{self, DmVerity, minor};
 use crate::util::identity;
 use crate::util::image_bootstrap::{
     ImageBootstrap, image_bootstrap_read, image_bootstrap_read_fd, path_valid,
@@ -545,28 +542,26 @@ fn mount_runtime(s: &mut State, trusted_boot: bool) -> c_int {
     }
     if ret == 0 {
         step = "create runtime dm-verity mapping";
-        // SAFETY: the open image, a C string and the mapping to fill.
-        ret = unsafe { dm_verity_create(&opened, RUNTIME_MAPPING.as_ptr(), &mut device) };
+        ret = dm_verity::place(dm_verity::create(&opened, RUNTIME_MAPPING), &mut device);
         created = ret == 0;
     }
     if ret == -EEXIST {
         step = "inspect runtime dm-verity mapping";
-        // SAFETY: a C string, the image and the mapping to fill.
-        ret = unsafe { dm_verity_inspect(RUNTIME_MAPPING.as_ptr(), &opened.image, &mut device) };
+        ret = dm_verity::place(
+            dm_verity::inspect(RUNTIME_MAPPING, &opened.image),
+            &mut device,
+        );
     }
     if ret == 0 {
         step = "verify runtime image";
-        // SAFETY: the mapping and its image.
-        ret = unsafe { dm_verity_verify(&device, &opened) };
+        ret = dm_verity::verify(&device, &opened);
     }
     if ret == 0 {
         step = "mount runtime image";
-        // SAFETY: the mapping and a C string.
-        ret = unsafe { dm_verity_mount(&device, RUNTIME_DIR.as_ptr(), true) };
+        ret = dm_verity::mount_at(&device, RUNTIME_DIR, true);
     }
     if ret != 0 && created {
-        // SAFETY: the mapping made above.
-        let cleanup = unsafe { dm_verity_remove(&mut device, false) };
+        let cleanup = dm_verity::remove(&mut device, false);
         if cleanup != 0 {
             warn(format!(
                 "image: cannot remove runtime mapping: {}",
@@ -574,8 +569,7 @@ fn mount_runtime(s: &mut State, trusted_boot: bool) -> c_int {
             ));
         }
     }
-    // SAFETY: the mapping, its fds closed once.
-    unsafe { dm_verity_close(&mut device) };
+    dm_verity::close_loops(&mut device);
     if ret == 0 && trusted_boot {
         s.boot_runtime = device;
     }
@@ -638,22 +632,18 @@ unsafe extern "C" fn pcr_extend(_: *mut c_void, pcr: u32, event: *const u8) -> c
 /// the active config's: a candidate an update or a stage is done with,
 /// or one an interrupted update left. One the guards did not watch being
 /// made is not shirudo's, and stays.
-unsafe extern "C" fn collect_mapping(name: *const c_char, device: u64, ctx: *mut c_void) -> c_int {
-    // SAFETY: the active config's device, which collect_mappings() gave.
-    let active = unsafe { *ctx.cast::<u64>() };
+fn collect_mapping(name: &CStr, device: u64, active: u64) -> c_int {
     if device == active || device_observed(device, None, DEVICE_CONFIG) != 0 {
         return 0;
     }
-    // SAFETY: the mapping's name, a C string.
-    let name = unsafe { CStr::from_ptr(name) }.to_bytes();
+    let name = name.to_bytes();
     let mut retired = DmVerity::empty();
     if name.len() >= retired.name.len() {
         return -ENAMETOOLONG;
     }
     copy_str(&mut retired.name, name);
     retired.device = device;
-    // SAFETY: the mapping, by name and device.
-    let ret = unsafe { dm_verity_remove(&mut retired, false) };
+    let ret = dm_verity::remove(&mut retired, false);
     if ret != 0 && ret != -EBUSY && ret != -ENXIO && ret != -ENODEV {
         warn(format!(
             "image: cannot remove retired mapping {}: {}",
@@ -668,9 +658,8 @@ fn collect_mappings(journal_open: bool) {
     if !journal_open {
         return;
     }
-    let mut active = fs::metadata(path(CONFIG_IMAGE_DIR)).map_or(0, |m| m.dev());
-    // SAFETY: the callback and the active device it reads.
-    let ret = unsafe { dm_verity_list(Some(collect_mapping), (&raw mut active).cast()) };
+    let active = fs::metadata(path(CONFIG_IMAGE_DIR)).map_or(0, |m| m.dev());
+    let ret = dm_verity::list(|name, device| collect_mapping(name, device, active));
     if ret != 0 {
         warn(format!(
             "image: cannot collect retired mappings: {}",
@@ -693,7 +682,7 @@ fn close_candidate(s: &mut State, journal_open: bool) {
     }
     // SAFETY: the candidate's mapping and image, their fds closed once.
     unsafe {
-        dm_verity_close(&mut s.candidate_device);
+        dm_verity::close_loops(&mut s.candidate_device);
         config_image_close(&mut s.candidate);
     }
 }
@@ -723,8 +712,7 @@ pub(crate) fn retry_busy_with(
 }
 
 fn remove_candidate(device: &mut DmVerity) -> c_int {
-    // SAFETY: the candidate's mapping.
-    retry_busy(|| unsafe { dm_verity_remove(device, false) })
+    retry_busy(|| dm_verity::remove(device, false))
 }
 
 /// The candidate's BPF trust set, valid; for a live update, also all
@@ -757,10 +745,7 @@ fn mount_candidate(s: &mut State) -> c_int {
         }
         let mut ret = mkdir_owned(CONFIG_CANDIDATE_DIR);
         if ret == 0 {
-            // SAFETY: the candidate's mapping and a C string.
-            ret = unsafe {
-                dm_verity_mount(&s.candidate_device, CONFIG_CANDIDATE_DIR.as_ptr(), false)
-            };
+            ret = dm_verity::mount_at(&s.candidate_device, CONFIG_CANDIDATE_DIR, false);
         }
         if ret != 0 {
             return ret;
@@ -809,16 +794,19 @@ fn prepare_config(s: &mut State, target: &ConfigUpdateTarget, purpose: Prepare) 
     let name = mapping_name(&target.root_hash);
     let mut created = false;
     // SAFETY: a C string, the candidate image and its mapping to fill.
-    let mut ret =
-        unsafe { dm_verity_inspect(name.as_ptr(), &s.candidate.image, &mut s.candidate_device) };
+    let mut ret = dm_verity::place(
+        dm_verity::inspect(&name, &s.candidate.image),
+        &mut s.candidate_device,
+    );
     if ret == -ENXIO || ret == -ENODEV || ret == -ENOENT {
-        // SAFETY: the candidate image, a C string and its mapping to fill.
-        ret = unsafe { dm_verity_create(&s.candidate, name.as_ptr(), &mut s.candidate_device) };
+        ret = dm_verity::place(
+            dm_verity::create(&s.candidate, &name),
+            &mut s.candidate_device,
+        );
         created = ret == 0;
     }
     if ret == 0 {
-        // SAFETY: the candidate's mapping and image.
-        ret = unsafe { dm_verity_verify(&s.candidate_device, &s.candidate) };
+        ret = dm_verity::verify(&s.candidate_device, &s.candidate);
     }
     if ret == 0 && !trusted_boot {
         ret = device_observed(
@@ -877,8 +865,7 @@ fn activate_config(s: &mut State, boot: bool) -> c_int {
                 return err;
             }
         }
-        // SAFETY: the candidate's mapping and a C string.
-        let ret = unsafe { dm_verity_mount(&s.candidate_device, CONFIG_IMAGE_DIR.as_ptr(), false) };
+        let ret = dm_verity::mount_at(&s.candidate_device, CONFIG_IMAGE_DIR, false);
         if ret != 0 {
             return ret;
         }
@@ -1233,8 +1220,7 @@ pub(crate) fn boot_keys_close() -> c_int {
                 }
             }
             if device.name[0] != 0 {
-                // SAFETY: the mapping, by name.
-                let err = unsafe { dm_verity_remove(device, false) };
+                let err = dm_verity::remove(device, false);
                 if ret == 0 && err != 0 && err != -ENXIO && err != -ENODEV {
                     ret = err;
                 }
@@ -1296,8 +1282,7 @@ fn config_mount_check(s: &State, record: &ConfigUpdateRecord) -> c_int {
     let mut device = DmVerity::empty();
     if ret == 0 {
         let name = mapping_name(&record.target.root_hash);
-        // SAFETY: a C string, the image and the mapping to fill.
-        ret = unsafe { dm_verity_inspect(name.as_ptr(), &opened.image, &mut device) };
+        ret = dm_verity::place(dm_verity::inspect(&name, &opened.image), &mut device);
     }
     // SAFETY: the image opened above.
     unsafe { config_image_close(&mut opened) };
@@ -1324,8 +1309,7 @@ fn config_mount_check(s: &State, record: &ConfigUpdateRecord) -> c_int {
         // SAFETY: the bootstrap config and the open config image.
         unsafe { image_config_set(&s.bootstrap_config, dir.as_raw_fd()) }
     })();
-    // SAFETY: the mapping, its fds closed once.
-    unsafe { dm_verity_close(&mut device) };
+    dm_verity::close_loops(&mut device);
     ret
 }
 
