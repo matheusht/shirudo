@@ -8,25 +8,28 @@
 //! caller supplies.
 
 use core::ffi::{CStr, c_char, c_int, c_void};
-use core::ptr;
+use std::ffi::OsStr;
+use std::fs::{File, OpenOptions};
+use std::io::{BufReader, Read, Write};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::OpenOptionsExt;
 
 use crate::errno::{
-    EBADMSG, EBUSY, EINPROGRESS, EINTR, EINVAL, EIO, ENODATA, ENOENT, EOVERFLOW, EPERM, ESTALE,
-    EUCLEAN, text,
+    EBADMSG, EBUSY, EINPROGRESS, EINVAL, EIO, ENODATA, ENOENT, EOVERFLOW, EPERM, ESTALE, EUCLEAN,
+    text,
 };
-use crate::ffi;
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
-    AT_EMPTY_PATH, EOF, File, LOCK_EX, LOCK_NB, O_APPEND, O_CLOEXEC, O_CREAT, O_DIRECTORY, O_EXCL,
-    O_NOFOLLOW, O_NONBLOCK, O_RDONLY, O_RDWR, O_WRONLY, S_IFMT, S_IFREG, STATX_BASIC_STATS, Statx,
-    close, errno, fclose, fdopen, ferror, fgetc, flock, fsync, ftello, ftruncate, geteuid, open,
-    openat, read, renameat, statx, unlinkat,
+    LOCK_EX, LOCK_NB, O_APPEND, O_CLOEXEC, O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_NONBLOCK,
+    O_RDONLY, O_RDWR, O_WRONLY, S_IFMT, S_IFREG, Statx, close, errno, flock, fsync, ftruncate,
+    geteuid, openat, renameat, unlinkat,
 };
 use crate::text::cstr;
-use crate::util::chain::chain_fold;
+use crate::util::chain::fold;
 use crate::util::config_measure::{self, EVENT_BOOT, EVENT_UPDATE};
-use crate::util::hex::{hex_decode, hex_encode};
-use crate::util::io::write_complete;
+use crate::util::hex;
+use crate::util::io::stat_fd;
 use crate::util::json::{JsonEmit, JsonField, parse_schema};
 
 /// `CONFIG_UPDATE_PREFIX_MAX`.
@@ -36,15 +39,19 @@ const RECORD_MAX: usize = 2 * PREFIX_MAX + 1024;
 /// EWOULDBLOCK, which is EAGAIN.
 const EWOULDBLOCK: c_int = crate::errno::EAGAIN;
 
-/// `enum config_update_checkpoint`: where a caller may stop the protocol.
-const CHECK_PENDING_SYNC: c_int = 1;
-const CHECK_EXTEND: c_int = 2;
-const CHECK_EVENT_SYNC: c_int = 3;
-const CHECK_ACTIVATE: c_int = 4;
-const CHECK_COMPLETE_SYNC: c_int = 5;
-const CHECK_STATE_WRITE: c_int = 6;
-const CHECK_STATE_RENAME: c_int = 7;
-const CHECK_EVENT_WRITE: c_int = 8;
+/// Where a caller may stop the protocol, numbered as the checkpoints
+/// test-config-update's SHIRUDO_TEST_CONFIG_CRASH and _FAIL name.
+#[derive(Clone, Copy)]
+enum Checkpoint {
+    PendingSync = 1,
+    Extend = 2,
+    EventSync = 3,
+    Activate = 4,
+    CompleteSync = 5,
+    StateWrite = 6,
+    StateRename = 7,
+    EventWrite = 8,
+}
 
 /// `struct config_update_target`: a config image's mapping prefix and
 /// its dm-verity root.
@@ -103,6 +110,14 @@ impl ConfigUpdateRecord {
     }
 }
 
+/// The TPM boot a reading was made in: the TPM's reset and restart
+/// counts.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct BootIdentity {
+    reset: u32,
+    restart: u32,
+}
+
 /// `struct config_update_ops`: what the caller does for the protocol.
 #[repr(C)]
 pub struct ConfigUpdateOps {
@@ -132,6 +147,11 @@ pub struct ConfigUpdate {
 /// `shirudo_config_cb`: what a walk of the events calls with each.
 pub type ConfigCb = unsafe extern "C" fn(r: *const ConfigUpdateRecord, ctx: *mut c_void) -> c_int;
 
+/// What the caller's operation returned, as a Result.
+fn op_result(ret: c_int) -> Result<(), c_int> {
+    if ret == 0 { Ok(()) } else { Err(ret) }
+}
+
 impl ConfigUpdate {
     /// A journal not open.
     pub(crate) const fn closed() -> Self {
@@ -159,96 +179,172 @@ impl ConfigUpdate {
         unsafe { &*self.ops }
     }
 
-    fn boot_identity(&self, reset: &mut u32, restart: &mut u32) -> c_int {
+    /// The directory of the open journal.
+    fn dir(&self) -> BorrowedFd<'_> {
+        // SAFETY: the open journal's directory, which only
+        // close_journal() closes.
+        unsafe { BorrowedFd::borrow_raw(self.dir_fd) }
+    }
+
+    fn boot_identity(&self) -> Result<BootIdentity, c_int> {
         let f = self.ops().boot_identity.expect("checked at open");
+        let mut boot = BootIdentity {
+            reset: 0,
+            restart: 0,
+        };
 
         // SAFETY: the caller's operation, its context, and room for both.
-        unsafe { f(self.ctx, reset, restart) }
+        op_result(unsafe { f(self.ctx, &mut boot.reset, &mut boot.restart) })?;
+        Ok(boot)
     }
 
-    fn pcr_read(&self, pcr: u32, out: &mut [u8; 32]) -> c_int {
+    fn pcr_read(&self, pcr: u32) -> Result<[u8; 32], c_int> {
         let f = self.ops().pcr_read.expect("checked at open");
+        let mut value = [0u8; 32];
 
         // SAFETY: the caller's operation, its context, and room.
-        unsafe { f(self.ctx, pcr, out.as_mut_ptr()) }
+        op_result(unsafe { f(self.ctx, pcr, value.as_mut_ptr()) })?;
+        Ok(value)
     }
 
-    fn pcr_extend(&self, pcr: u32, event: &[u8; 32]) -> c_int {
+    fn pcr_extend(&self, pcr: u32, event: &[u8; 32]) -> Result<(), c_int> {
         let f = self.ops().pcr_extend.expect("checked at open");
 
         // SAFETY: the caller's operation, its context, and the event.
-        unsafe { f(self.ctx, pcr, event.as_ptr()) }
+        op_result(unsafe { f(self.ctx, pcr, event.as_ptr()) })
     }
 
-    fn prepare(&self, target: *const ConfigUpdateTarget) -> c_int {
+    fn prepare(&self, target: &ConfigUpdateTarget) -> Result<(), c_int> {
         let f = self.ops().prepare.expect("checked at open");
 
         // SAFETY: the caller's operation, its context, and its target.
-        unsafe { f(self.ctx, target) }
+        op_result(unsafe { f(self.ctx, target) })
     }
 
-    fn activate(&self, target: *const ConfigUpdateTarget) -> c_int {
+    fn activate(&self, target: &ConfigUpdateTarget) -> Result<(), c_int> {
         let f = self.ops().activate.expect("checked at open");
 
         // SAFETY: the caller's operation, its context, and its target.
-        unsafe { f(self.ctx, target) }
+        op_result(unsafe { f(self.ctx, target) })
     }
 
-    fn seal(&self, fd: c_int) -> c_int {
+    fn seal(&self, fd: BorrowedFd<'_>) -> Result<(), c_int> {
         let f = self.ops().seal.expect("checked at open");
 
         // SAFETY: the caller's operation, its context, and an fd.
-        unsafe { f(self.ctx, fd) }
+        op_result(unsafe { f(self.ctx, fd.as_raw_fd()) })
     }
 
     /// The caller's checkpoint, which may stop the protocol there.
-    fn checkpoint(&self, point: c_int) -> c_int {
+    fn checkpoint(&self, point: Checkpoint) -> Result<(), c_int> {
         match self.ops().checkpoint {
             // SAFETY: the caller's operation and its context.
-            Some(f) => unsafe { f(self.ctx, point) },
-            None => 0,
+            Some(f) => op_result(unsafe { f(self.ctx, point as c_int) }),
+            None => Ok(()),
         }
     }
 }
 
-fn target_valid(target: Option<&ConfigUpdateTarget>) -> c_int {
-    let Some(t) = target else {
-        return -EINVAL;
-    };
-    let len = cstr(&t.prefix).len();
-
-    if len == 0 || len == PREFIX_MAX || t.prefix[0] != b'/' {
-        return -EINVAL;
-    }
-    if t.prefix[..len].iter().any(|&c| c < 0x20 || c == 0x7f) {
-        return -EINVAL;
-    }
-    0
+fn io_errno(e: std::io::Error) -> c_int {
+    -e.raw_os_error().unwrap_or(EIO)
 }
 
-/// `record` as one JSON line into `out`, with the prefix and whether it
-/// is pending for the state file: 0 with its length, or the emitter's
-/// error.
-fn record_encode(
+/// `name` in the directory `dir`, opened with `flags`, and `mode` for a
+/// file it creates.
+fn open_at(dir: BorrowedFd<'_>, name: &CStr, flags: c_int, mode: u32) -> Result<OwnedFd, c_int> {
+    // SAFETY: an open directory, a C string, flags and a mode.
+    let fd = unsafe { openat(dir.as_raw_fd(), name.as_ptr(), flags, mode) };
+    if fd < 0 {
+        return Err(-errno());
+    }
+    // SAFETY: the fd openat() gave, owned from here.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+fn unlink_at(dir: BorrowedFd<'_>, name: &CStr) -> Result<(), c_int> {
+    // SAFETY: an open directory and a C string.
+    if unsafe { unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+        return Err(-errno());
+    }
+    Ok(())
+}
+
+fn rename_at(dir: BorrowedFd<'_>, from: &CStr, to: &CStr) -> Result<(), c_int> {
+    // SAFETY: an open directory and two C strings.
+    if unsafe { renameat(dir.as_raw_fd(), from.as_ptr(), dir.as_raw_fd(), to.as_ptr()) } != 0 {
+        return Err(-errno());
+    }
+    Ok(())
+}
+
+/// fsync(2) of `fd`, which, unlike File::sync_all(), gives up on EINTR.
+fn sync(fd: BorrowedFd<'_>) -> Result<(), c_int> {
+    // SAFETY: an open fd.
+    if unsafe { fsync(fd.as_raw_fd()) } != 0 {
+        return Err(-errno());
+    }
+    Ok(())
+}
+
+fn truncate(fd: BorrowedFd<'_>, length: u64) -> Result<(), c_int> {
+    let length = i64::try_from(length).map_err(|_| -EINVAL)?;
+
+    // SAFETY: an open fd.
+    if unsafe { ftruncate(fd.as_raw_fd(), length) } != 0 {
+        return Err(-errno());
+    }
+    Ok(())
+}
+
+/// `fd` closed, the error of its close returned rather than dropped.
+fn close_checked(fd: OwnedFd) -> Result<(), c_int> {
+    // SAFETY: the fd, which the close takes over.
+    if unsafe { close(fd.into_raw_fd()) } != 0 {
+        return Err(-errno());
+    }
+    Ok(())
+}
+
+/// `write` on `file`, which is closed after whatever it returned: the
+/// error of the write, else the close's.
+fn closed_after(file: File, write: impl FnOnce(&File) -> Result<(), c_int>) -> Result<(), c_int> {
+    let written = write(&file);
+    let closed = close_checked(file.into());
+
+    written.and(closed)
+}
+
+/// All of `bytes` to `file`, through short writes and signals: -EIO for
+/// a write of nothing.
+fn write_all(mut file: &File, bytes: &[u8]) -> Result<(), c_int> {
+    file.write_all(bytes).map_err(io_errno)
+}
+
+fn euid() -> u32 {
+    // SAFETY: a call that takes nothing.
+    unsafe { geteuid() }
+}
+
+fn target_valid(target: &ConfigUpdateTarget) -> bool {
+    let prefix = cstr(&target.prefix);
+
+    prefix.len() < PREFIX_MAX
+        && prefix.starts_with(b"/")
+        && !prefix.iter().any(u8::is_ascii_control)
+}
+
+/// `record` as one JSON line in `out`, with the prefix and whether it is
+/// pending for the state file: the line, or the emitter's error.
+fn record_encode<'o>(
     record: &ConfigUpdateRecord,
     state: bool,
-    out: &mut [u8],
-    length: &mut usize,
-) -> c_int {
-    let room = out.len() - 1;
-    let mut emit = JsonEmit::fixed(&mut out[..room]);
-    let mut root = [0u8; 65];
-    let mut initial = [0u8; 65];
+    out: &'o mut [u8; RECORD_MAX],
+) -> Result<&'o [u8], c_int> {
+    let (body, _) = out.split_at_mut(RECORD_MAX - 1);
+    let mut emit = JsonEmit::fixed(body);
+    let root = hex::encode(&record.target.root_hash);
+    let initial = hex::encode(&record.initial_pcr);
 
-    // SAFETY: two digests, and room for their hex and NULs.
-    unsafe {
-        hex_encode(
-            record.target.root_hash.as_ptr(),
-            32,
-            root.as_mut_ptr().cast(),
-        );
-        hex_encode(record.initial_pcr.as_ptr(), 32, initial.as_mut_ptr().cast());
-    }
     emit.obj_open();
     emit.kv_int(b"schema", 1);
     emit.kv_int(b"sequence", record.sequence as i64);
@@ -256,26 +352,24 @@ fn record_encode(
     emit.kv_int(b"restart_count", i64::from(record.restart_count));
     emit.kv_int(b"pcr", i64::from(record.pcr));
     emit.kv_int(b"kind", i64::from(record.kind));
-    emit.kv_string(b"root_hash", cstr(&root));
-    emit.kv_string(b"initial_pcr", cstr(&initial));
+    emit.kv_string(b"root_hash", &root);
+    emit.kv_string(b"initial_pcr", &initial);
     if state {
         emit.kv_string(b"prefix", cstr(&record.target.prefix));
         emit.kv_bool(b"pending", record.pending);
     }
     emit.obj_close();
     if emit.err() != 0 {
-        return emit.err();
+        return Err(emit.err());
     }
     let n = emit.written();
 
     out[n] = b'\n';
-    *length = n + 1;
-    0
+    Ok(&out[..=n])
 }
 
-/// What a record's JSON gives before it is checked; the prefix goes
-/// straight into the record.
-struct RecordJson<'r> {
+/// What a record's JSON gives before it is checked.
+struct RecordJson {
     schema: i64,
     sequence: i64,
     reset: i64,
@@ -284,24 +378,14 @@ struct RecordJson<'r> {
     kind: i64,
     root: [u8; 65],
     initial: [u8; 65],
+    prefix: [u8; PREFIX_MAX],
     pending: bool,
-    record: &'r mut ConfigUpdateRecord,
 }
 
-/// The record in the `length` bytes at `data` into `record`, with the
-/// prefix and whether it is pending for the state file: 0, or -EBADMSG
-/// for one that is not a record, or the parser's error.
-///
-/// # Safety
-///
-/// `data` holds `length` bytes, or is NULL with none.
-unsafe fn record_decode(
-    data: *const u8,
-    length: usize,
-    state: bool,
-    record: &mut ConfigUpdateRecord,
-) -> c_int {
-    *record = ConfigUpdateRecord::zeroed();
+/// The record `data` holds, with the prefix and whether it is pending
+/// for the state file: -EBADMSG for one that is not a record, or the
+/// parser's error.
+fn record_decode(data: &[u8], state: bool) -> Result<ConfigUpdateRecord, c_int> {
     let mut json = RecordJson {
         schema: 0,
         sequence: 0,
@@ -311,8 +395,8 @@ unsafe fn record_decode(
         kind: 0,
         root: [0; 65],
         initial: [0; 65],
+        prefix: [0; PREFIX_MAX],
         pending: false,
-        record,
     };
     let fields = [
         JsonField::int(c"schema", |j: &mut RecordJson| &mut j.schema),
@@ -323,99 +407,79 @@ unsafe fn record_decode(
         JsonField::int(c"kind", |j| &mut j.kind),
         JsonField::string(c"root_hash", |j| &mut j.root),
         JsonField::string(c"initial_pcr", |j| &mut j.initial),
-        JsonField::string(c"prefix", |j| &mut j.record.target.prefix),
+        JsonField::string(c"prefix", |j| &mut j.prefix),
         JsonField::boolean(c"pending", |j| &mut j.pending),
     ];
-    // SAFETY: the caller's bytes.
-    let data = unsafe { ffi::slice(data, length) };
-    if let Err(err) = parse_schema(data, &fields, &mut json) {
-        return err;
-    }
-    let RecordJson {
-        schema,
-        sequence,
-        reset,
-        restart,
-        pcr,
-        kind,
-        root,
-        initial,
-        pending,
-        record,
-    } = json;
+    parse_schema(data, &fields, &mut json)?;
     let required = fields.len() - if state { 0 } else { 2 };
     if fields[..required].iter().any(|f| !f.seen()) {
-        return -EBADMSG;
+        return Err(-EBADMSG);
     }
-    if schema != 1
-        || sequence <= 0
-        || !(0..=i64::from(u32::MAX)).contains(&reset)
-        || !(0..=i64::from(u32::MAX)).contains(&restart)
-        || !(0..=15).contains(&pcr)
-        || config_measure::pcr_valid(pcr as u32) != 0
-        || (kind != i64::from(EVENT_BOOT) && kind != i64::from(EVENT_UPDATE))
-        // SAFETY: a C string the parser wrote, and room for a digest.
-        || unsafe { hex_decode(root.as_ptr().cast(), record.target.root_hash.as_mut_ptr(), 32) } != 0
-        // SAFETY: as above.
-        || unsafe { hex_decode(initial.as_ptr().cast(), record.initial_pcr.as_mut_ptr(), 32) } != 0
-        || (state && target_valid(Some(&record.target)) != 0)
+    let mut record = ConfigUpdateRecord::zeroed();
+    record.target.prefix = json.prefix;
+    if json.schema != 1
+        || json.sequence <= 0
+        || !(0..=i64::from(u32::MAX)).contains(&json.reset)
+        || !(0..=i64::from(u32::MAX)).contains(&json.restart)
+        || !(0..=15).contains(&json.pcr)
+        || config_measure::pcr_valid(json.pcr as u32) != 0
+        || (json.kind != i64::from(EVENT_BOOT) && json.kind != i64::from(EVENT_UPDATE))
+        || hex::decode(cstr(&json.root), &mut record.target.root_hash).is_err()
+        || hex::decode(cstr(&json.initial), &mut record.initial_pcr).is_err()
+        || (state && !target_valid(&record.target))
     {
-        return -EBADMSG;
+        return Err(-EBADMSG);
     }
-    record.sequence = sequence as u64;
-    record.reset_count = reset as u32;
-    record.restart_count = restart as u32;
-    record.pcr = pcr as u32;
-    record.kind = kind as c_int;
-    record.pending = pending;
-    0
+    record.sequence = json.sequence as u64;
+    record.reset_count = json.reset as u32;
+    record.restart_count = json.restart as u32;
+    record.pcr = json.pcr as u32;
+    record.kind = json.kind as c_int;
+    record.pending = json.pending;
+    Ok(record)
 }
 
-/// The status of the open `fd` into `st`, as fstat() gave it: 0 or
-/// -errno.
-fn stat_fd(fd: c_int, st: &mut Statx) -> c_int {
-    // SAFETY: the caller's fd, an empty path, and room for its status.
-    if unsafe { statx(fd, c"".as_ptr(), AT_EMPTY_PATH, STATX_BASIC_STATS, st) } != 0 {
-        return -errno();
-    }
-    0
-}
-
-/// Whether `fd` is a regular file of one link, the effective user's,
-/// that no one else may read or write: 0, -EPERM, or -errno.
-fn regular_file(fd: c_int) -> c_int {
+/// The status of `fd`, as fstat() gives it.
+fn status(fd: BorrowedFd<'_>) -> Result<Statx, c_int> {
     let mut st = Statx::zeroed();
 
-    let ret = stat_fd(fd, &mut st);
-    if ret != 0 {
-        return ret;
+    match stat_fd(fd.as_raw_fd(), &mut st) {
+        0 => Ok(st),
+        err => Err(err),
     }
+}
+
+/// The status of `fd` when it is a regular file of one link, the
+/// effective user's, that no one else may read or write: -EPERM when it
+/// is not.
+fn regular_file(fd: BorrowedFd<'_>) -> Result<Statx, c_int> {
+    let st = status(fd)?;
+
     if st.stx_mode & S_IFMT != S_IFREG || st.stx_nlink != 1 {
-        return -EPERM;
+        return Err(-EPERM);
     }
-    // SAFETY: a call that takes nothing.
-    if st.stx_uid != unsafe { geteuid() } || st.stx_mode & 0o77 != 0 {
-        return -EPERM;
+    if st.stx_uid != euid() || st.stx_mode & 0o77 != 0 {
+        return Err(-EPERM);
     }
-    0
+    Ok(st)
 }
 
 /// The journal's lock taken, waiting up to `wait_ms` for another
 /// command's, as the keepalive and map-export timers take turns.
-fn lock_wait(fd: c_int, wait_ms: u32) -> c_int {
+fn lock_wait(fd: BorrowedFd<'_>, wait_ms: u32) -> Result<(), c_int> {
     let pause = std::time::Duration::from_millis(100);
     let mut told = false;
     let mut waited: u32 = 0;
 
     loop {
-        // SAFETY: the caller's fd.
-        if unsafe { flock(fd, LOCK_EX | LOCK_NB) } == 0 {
-            return 0;
+        // SAFETY: the lock file's fd.
+        if unsafe { flock(fd.as_raw_fd(), LOCK_EX | LOCK_NB) } == 0 {
+            return Ok(());
         }
         let err = errno();
 
         if err != EWOULDBLOCK || waited >= wait_ms {
-            return -err;
+            return Err(-err);
         }
         if !told && waited >= 1000 {
             crate::log::info(
@@ -426,6 +490,51 @@ fn lock_wait(fd: c_int, wait_ms: u32) -> c_int {
         std::thread::sleep(pause);
         waited = waited.wrapping_add(100);
     }
+}
+
+/// The journal's directory at `directory` and its lock file, the lock
+/// taken, each sealed and synced; the operations of `u` seal them.
+fn open_files(
+    u: &ConfigUpdate,
+    directory: &CStr,
+    lock_wait_ms: u32,
+) -> Result<(OwnedFd, OwnedFd), c_int> {
+    let dir: OwnedFd = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_DIRECTORY | O_NOFOLLOW)
+        .open(OsStr::from_bytes(directory.to_bytes()))
+        .map_err(io_errno)?
+        .into();
+    let st = status(dir.as_fd())?;
+    if st.stx_uid != euid() || st.stx_mode & 0o22 != 0 {
+        return Err(-EPERM);
+    }
+    u.seal(dir.as_fd())?;
+    let lock = open_at(
+        dir.as_fd(),
+        c"lock",
+        O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK,
+        0o600,
+    )?;
+    regular_file(lock.as_fd())?;
+    lock_wait(lock.as_fd(), lock_wait_ms).inspect_err(|&err| {
+        if err == -EWOULDBLOCK {
+            crate::log::err(
+                &[
+                    &b"image: another shirudo command still holds the config operation lock "[..],
+                    directory.to_bytes(),
+                    b"/lock after ",
+                    format!("{}", lock_wait_ms / 1000).as_bytes(),
+                    b" seconds",
+                ]
+                .concat(),
+            );
+        }
+    })?;
+    u.seal(lock.as_fd())?;
+    sync(lock.as_fd())?;
+    sync(dir.as_fd())?;
+    Ok((dir, lock))
 }
 
 /// config_update_open().
@@ -467,62 +576,15 @@ unsafe fn open_journal(
     u.ops = ops;
     u.ctx = ctx;
     // SAFETY: the caller's C string.
-    u.dir_fd = unsafe { open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) };
-    if u.dir_fd < 0 {
-        return -errno();
+    let directory = unsafe { CStr::from_ptr(directory) };
+    match open_files(u, directory, o.lock_wait_ms) {
+        Ok((dir, lock)) => {
+            u.dir_fd = dir.into_raw_fd();
+            u.lock_fd = lock.into_raw_fd();
+            0
+        }
+        Err(err) => err,
     }
-    let ret = 'fail: {
-        let mut st = Statx::zeroed();
-
-        let ret = stat_fd(u.dir_fd, &mut st);
-        if ret != 0 {
-            break 'fail ret;
-        }
-        // SAFETY: a call that takes nothing.
-        if st.stx_uid != unsafe { geteuid() } || st.stx_mode & 0o22 != 0 {
-            break 'fail -EPERM;
-        }
-        let ret = u.seal(u.dir_fd);
-        if ret != 0 {
-            break 'fail ret;
-        }
-        // SAFETY: the directory's fd and a C string.
-        u.lock_fd = unsafe {
-            openat(
-                u.dir_fd,
-                c"lock".as_ptr(),
-                O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK,
-                0o600,
-            )
-        };
-        if u.lock_fd < 0 {
-            break 'fail -errno();
-        }
-        let ret = regular_file(u.lock_fd);
-        if ret != 0 {
-            break 'fail ret;
-        }
-        let ret = lock_wait(u.lock_fd, o.lock_wait_ms);
-        if ret != 0 {
-            if ret == -EWOULDBLOCK {
-                // SAFETY: the caller's directory, a C string.
-                let directory = unsafe { crate::ffi::c_str(directory) };
-                crate::log::err(&[&b"image: another shirudo command still holds the config operation lock "[..], directory, b"/lock after ", format!("{}", o.lock_wait_ms / 1000).as_bytes(), b" seconds"].concat());
-            }
-            break 'fail ret;
-        }
-        let ret = u.seal(u.lock_fd);
-        if ret != 0 {
-            break 'fail ret;
-        }
-        // SAFETY: the two fds.
-        if unsafe { fsync(u.lock_fd) } != 0 || unsafe { fsync(u.dir_fd) } != 0 {
-            break 'fail -errno();
-        }
-        return 0;
-    };
-    close_journal(u);
-    ret
 }
 
 /// config_update_close(): the journal's fds closed, the lock with them.
@@ -539,142 +601,26 @@ fn close_journal(u: &mut ConfigUpdate) {
     u.lock_fd = -1;
 }
 
-/// The selection record in the file `name` of the journal into `out`:
-/// `state`, the one in force, or `next-boot`, one staged for the boot
-/// after this.
-fn selection_read(u: &ConfigUpdate, name: &CStr, out: &mut ConfigUpdateRecord) -> c_int {
+/// The selection record in the file `name` of the journal directory
+/// `dir`: `state`, the one in force, or `next-boot`, one staged for the
+/// boot after this.
+fn selection_read(dir: BorrowedFd<'_>, name: &CStr) -> Result<ConfigUpdateRecord, c_int> {
     let mut wire = [0u8; RECORD_MAX];
-    let mut st = Statx::zeroed();
-    let mut done = 0usize;
+    let mut file = File::from(open_at(
+        dir,
+        name,
+        O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK,
+        0,
+    )?);
+    let st = regular_file(file.as_fd())?;
+    let size = usize::try_from(st.stx_size)
+        .ok()
+        .filter(|&size| size != 0 && size < wire.len())
+        .ok_or(-EBADMSG)?;
+    let line = &mut wire[..size];
 
-    if u.dir_fd < 0 {
-        return -EINVAL;
-    }
-    // SAFETY: the journal's directory and a C string.
-    let fd = unsafe {
-        openat(
-            u.dir_fd,
-            name.as_ptr(),
-            O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK,
-        )
-    };
-    if fd < 0 {
-        return -errno();
-    }
-    let mut ret = regular_file(fd);
-    if ret == 0 {
-        ret = stat_fd(fd, &mut st);
-    }
-    if ret == 0 && (st.stx_size == 0 || st.stx_size >= wire.len() as u64) {
-        ret = -EBADMSG;
-    }
-    while ret == 0 && done < st.stx_size as usize {
-        // SAFETY: the file's fd and the room left in wire.
-        let got = unsafe {
-            read(
-                fd,
-                wire[done..].as_mut_ptr().cast(),
-                st.stx_size as usize - done,
-            )
-        };
-
-        if got < 0 {
-            if errno() == EINTR {
-                continue;
-            }
-            ret = -errno();
-        } else if got == 0 {
-            ret = -EIO;
-        } else {
-            done += got as usize;
-        }
-    }
-    if ret == 0 {
-        // SAFETY: the bytes read.
-        ret = unsafe { record_decode(wire.as_ptr(), done, true, out) };
-    }
-    // SAFETY: the file's fd, closed once.
-    unsafe { close(fd) };
-    ret
-}
-
-/// config_update_read(): the state file's record into `out`.
-fn read_state(u: &ConfigUpdate, out: &mut ConfigUpdateRecord) -> c_int {
-    selection_read(u, c"state", out)
-}
-
-/// The selection file `name` replaced by `record`, through the sealed
-/// temporary file `temporary` renamed over it; `inject` lets the
-/// caller's checkpoints stop it.
-fn selection_save(
-    u: &ConfigUpdate,
-    record: &ConfigUpdateRecord,
-    name: &CStr,
-    temporary: &CStr,
-    inject: bool,
-) -> c_int {
-    let mut wire = [0u8; RECORD_MAX];
-    let mut length = 0;
-
-    let ret = record_encode(record, true, &mut wire, &mut length);
-    if ret != 0 {
-        return ret;
-    }
-    // SAFETY: the journal's directory and a C string.
-    if unsafe { unlinkat(u.dir_fd, temporary.as_ptr(), 0) } != 0 && errno() != ENOENT {
-        return -errno();
-    }
-    // SAFETY: as above.
-    let fd = unsafe {
-        openat(
-            u.dir_fd,
-            temporary.as_ptr(),
-            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
-            0o600,
-        )
-    };
-    if fd < 0 {
-        return -errno();
-    }
-    let mut ret = u.seal(fd);
-    if ret == 0 {
-        // SAFETY: the file's fd and the record's bytes.
-        ret = unsafe { write_complete(fd, wire.as_ptr().cast(), length) };
-    }
-    if ret == 0 && inject {
-        ret = u.checkpoint(CHECK_STATE_WRITE);
-    }
-    // SAFETY: the file's fd.
-    if ret == 0 && unsafe { fsync(fd) } != 0 {
-        ret = -errno();
-    }
-    // SAFETY: the file's fd, closed once.
-    if unsafe { close(fd) } != 0 && ret == 0 {
-        ret = -errno();
-    }
-    if ret == 0
-        // SAFETY: the journal's directory and two C strings.
-        && unsafe { renameat(u.dir_fd, temporary.as_ptr(), u.dir_fd, name.as_ptr()) } != 0
-    {
-        ret = -errno();
-    }
-    if ret == 0 && inject {
-        ret = u.checkpoint(CHECK_STATE_RENAME);
-    }
-    // SAFETY: the journal's directory.
-    if ret == 0 && unsafe { fsync(u.dir_fd) } != 0 {
-        ret = -errno();
-    }
-    if ret != 0 {
-        // SAFETY: the journal's directory and a C string.
-        unsafe { unlinkat(u.dir_fd, temporary.as_ptr(), 0) };
-    }
-    ret
-}
-
-/// The state file replaced by `record`.
-fn state_save(u: &ConfigUpdate, record: &ConfigUpdateRecord, inject: bool) -> c_int {
-    selection_save(u, record, c"state", c".state.tmp", inject)
+    file.read_exact(line).map_err(io_errno)?;
+    record_decode(line, true)
 }
 
 fn same_boot(a: &ConfigUpdateRecord, b: &ConfigUpdateRecord) -> bool {
@@ -694,470 +640,445 @@ fn same_event(a: &ConfigUpdateRecord, b: &ConfigUpdateRecord) -> bool {
         && a.target.root_hash == b.target.root_hash
 }
 
-/// Whether `record` may follow `previous`: 0 or -EUCLEAN.
-fn event_follows(previous: &ConfigUpdateRecord, record: &ConfigUpdateRecord) -> c_int {
+/// Whether `record` may follow `previous`: -EUCLEAN where it may not.
+fn event_follows(previous: &ConfigUpdateRecord, record: &ConfigUpdateRecord) -> Result<(), c_int> {
     if record.sequence != previous.sequence.wrapping_add(1) {
-        return -EUCLEAN;
+        return Err(-EUCLEAN);
     }
     if previous.sequence == 0 || !same_boot(previous, record) {
         return if record.kind == EVENT_BOOT {
-            0
+            Ok(())
         } else {
-            -EUCLEAN
+            Err(-EUCLEAN)
         };
     }
     if record.kind != EVENT_UPDATE
         || previous.pcr != record.pcr
         || previous.initial_pcr != record.initial_pcr
     {
-        return -EUCLEAN;
+        return Err(-EUCLEAN);
     }
-    0
+    Ok(())
 }
 
-/// The next line of `file` into `line`, its newline with it: 1, 0 at the
-/// end, -ENODATA for a last line without one, which only a later trusted
-/// boot may discard, or -EBADMSG for a NUL or a line too long.
-///
-/// # Safety
-///
-/// `file` is an open stream.
-unsafe fn read_line(file: *mut File, line: &mut [u8], length: &mut usize) -> c_int {
-    *length = 0;
-    loop {
-        // SAFETY: the caller's stream.
-        let c = unsafe { fgetc(file) };
+/// The next line of `bytes` in `line`, its newline with it, or None at
+/// the end: -ENODATA for a last line without one, which only a later
+/// trusted boot may discard, -EBADMSG for a NUL or a line too long, or
+/// -EIO where the read fails.
+fn read_line<'l>(
+    bytes: &mut impl Iterator<Item = std::io::Result<u8>>,
+    line: &'l mut [u8],
+) -> Result<Option<&'l [u8]>, c_int> {
+    let mut length = 0;
 
-        if c == EOF {
-            break;
-        }
-        if c == 0 || *length == line.len() {
-            return -EBADMSG;
-        }
-        line[*length] = c as u8;
-        *length += 1;
-        if c == c_int::from(b'\n') {
-            return 1;
+    for byte in bytes {
+        let c = byte.map_err(|_| -EIO)?;
+        let Some(slot) = line.get_mut(length).filter(|_| c != 0) else {
+            return Err(-EBADMSG);
+        };
+
+        *slot = c;
+        length += 1;
+        if c == b'\n' {
+            return Ok(Some(&line[..length]));
         }
     }
-    // SAFETY: as above.
-    if unsafe { ferror(file) } != 0 {
-        return -EIO;
-    }
-    if *length != 0 { -ENODATA } else { 0 }
+    if length != 0 { Err(-ENODATA) } else { Ok(None) }
 }
 
-/// The events file replayed: each event decoded, checked to follow the
-/// one before, folded into the PCR value from its boot's initial value,
-/// and handed to `consume`. The last event goes into `last`, the value
-/// into `value` and the offset after the last whole line into `end`,
-/// each unless NULL; `partial` forgives a torn last line.
-///
-/// # Safety
-///
-/// `value` is NULL or room for a digest, `end` NULL or room for an
-/// offset, and `consume` takes `ctx`.
-unsafe fn events_scan(
-    u: &ConfigUpdate,
-    last: &mut ConfigUpdateRecord,
-    value: *mut u8,
-    end: *mut i64,
+/// What the events replay to: the last event, the PCR value its boot's
+/// initial value and the events since fold to, and the offset after the
+/// last whole line.
+struct Replay {
+    last: ConfigUpdateRecord,
+    value: [u8; 32],
+    end: u64,
+}
+
+/// The events file of the journal directory `dir` replayed: each event
+/// decoded, checked to follow the one before, folded into the PCR value
+/// from its boot's initial value, and handed to `consume`; `partial`
+/// forgives a torn last line. A journal without one replays to nothing.
+fn events_scan(
+    dir: BorrowedFd<'_>,
     partial: bool,
-    consume: Option<ConfigCb>,
-    ctx: *mut c_void,
-) -> c_int {
-    let mut previous = ConfigUpdateRecord::zeroed();
-    let mut record = ConfigUpdateRecord::zeroed();
-    let mut running = [0u8; 32];
-    let mut digest = [0u8; 32];
-    let mut wire = [0u8; RECORD_MAX];
-    let mut length = 0;
-
-    // A journal found absent leaves each of them empty.
-    *last = ConfigUpdateRecord::zeroed();
-    if !value.is_null() {
-        // SAFETY: the caller's room for a digest.
-        unsafe { value.write_bytes(0, 32) };
-    }
-    if !end.is_null() {
-        // SAFETY: the caller's room.
-        unsafe { *end = 0 };
-    }
-    // SAFETY: the journal's directory and a C string.
-    let fd = unsafe {
-        openat(
-            u.dir_fd,
-            c"events".as_ptr(),
-            O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK,
-        )
+    mut consume: impl FnMut(&ConfigUpdateRecord) -> Result<(), c_int>,
+) -> Result<Replay, c_int> {
+    let mut replay = Replay {
+        last: ConfigUpdateRecord::zeroed(),
+        value: [0; 32],
+        end: 0,
     };
-    if fd < 0 {
-        return if errno() == ENOENT { 0 } else { -errno() };
-    }
-    let ret = regular_file(fd);
-    if ret != 0 {
-        // SAFETY: the file's fd, closed once.
-        unsafe { close(fd) };
-        return ret;
-    }
-    // SAFETY: the file's fd, which the stream takes over.
-    let file = unsafe { fdopen(fd, c"r".as_ptr()) };
-    if file.is_null() {
-        let ret = -errno();
-
-        // SAFETY: the file's fd, closed once.
-        unsafe { close(fd) };
-        return ret;
-    }
-    let mut ret;
+    let mut wire = [0u8; RECORD_MAX];
+    let file = match open_at(
+        dir,
+        c"events",
+        O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK,
+        0,
+    ) {
+        Ok(fd) => File::from(fd),
+        Err(err) if err == -ENOENT => return Ok(replay),
+        Err(err) => return Err(err),
+    };
+    regular_file(file.as_fd())?;
+    let mut bytes = BufReader::new(file).bytes();
     loop {
-        // SAFETY: the stream.
-        ret = unsafe { read_line(file, &mut wire, &mut length) };
-        if ret <= 0 {
-            break;
+        let line = match read_line(&mut bytes, &mut wire) {
+            Ok(Some(line)) => line,
+            Ok(None) => return Ok(replay),
+            Err(err) if err == -ENODATA && partial => return Ok(replay),
+            Err(err) => return Err(err),
+        };
+        let record = record_decode(line, false)?;
+        event_follows(&replay.last, &record)?;
+        if record.kind == EVENT_BOOT {
+            replay.value = record.initial_pcr;
         }
-        // SAFETY: the line read.
-        ret = unsafe { record_decode(wire.as_ptr(), length, false, &mut record) };
-        if ret == 0 {
-            ret = event_follows(&previous, &record);
-        }
-        if ret == 0 && record.kind == EVENT_BOOT {
-            running = record.initial_pcr;
-        }
-        if ret == 0 {
-            ret = match config_measure::event(record.kind, &record.target.root_hash) {
-                Ok(event) => {
-                    digest = event;
-                    0
-                }
-                Err(err) => err,
-            };
-        }
-        if ret == 0 {
-            // SAFETY: two digests.
-            ret = unsafe { chain_fold(running.as_mut_ptr(), digest.as_ptr()) };
-        }
-        if ret == 0 {
-            if let Some(cb) = consume {
-                // SAFETY: the caller's function and context, with the
-                // event.
-                ret = unsafe { cb(&record, ctx) };
-            }
-        }
+        let event = config_measure::event(record.kind, &record.target.root_hash)?;
+        let ret = fold(&mut replay.value, &event);
         if ret != 0 {
-            break;
+            return Err(ret);
         }
-        previous = record;
-        if !end.is_null() {
-            // SAFETY: the stream, and the caller's room.
-            unsafe {
-                *end = ftello(file);
-                if *end < 0 {
-                    ret = -errno();
-                    break;
-                }
-            }
-        }
+        consume(&record)?;
+        replay.last = record;
+        replay.end += line.len() as u64;
     }
-    if ret == -ENODATA && partial {
-        ret = 0;
-    }
-    if ret == 0 {
-        *last = previous;
-        if !value.is_null() {
-            // SAFETY: the caller's room for a digest.
-            unsafe { ptr::copy_nonoverlapping(running.as_ptr(), value, 32) };
-        }
-    }
-    // SAFETY: the stream, closed once with its fd.
-    unsafe { fclose(file) };
-    ret
 }
 
-/// `record` appended to the events file after the last whole line, once
-/// it follows the last event.
-fn event_append(u: &ConfigUpdate, record: &ConfigUpdateRecord) -> c_int {
-    let mut last = ConfigUpdateRecord::zeroed();
-    let mut wire = [0u8; RECORD_MAX];
-    let mut length = 0;
-    let mut end: i64 = 0;
+impl ConfigUpdate {
+    /// config_update_read(): the state file's record.
+    fn read_state(&self) -> Result<ConfigUpdateRecord, c_int> {
+        selection_read(self.dir(), c"state")
+    }
 
-    // SAFETY: room for the offset.
-    let mut ret = unsafe {
-        events_scan(
-            u,
-            &mut last,
-            ptr::null_mut(),
-            &mut end,
-            record.kind == EVENT_BOOT,
-            None,
-            ptr::null_mut(),
-        )
-    };
-    if ret == 0 {
-        ret = event_follows(&last, record);
+    /// config_update_stage_read(): the record staged for the next boot.
+    fn stage_read(&self) -> Result<ConfigUpdateRecord, c_int> {
+        selection_read(self.dir(), c"next-boot")
     }
-    if ret == 0 {
-        ret = record_encode(record, false, &mut wire, &mut length);
+
+    /// The selection file `name` replaced by `record`, through the sealed
+    /// temporary file `temporary` renamed over it; `inject` lets the
+    /// caller's checkpoints stop it.
+    fn selection_save(
+        &self,
+        record: &ConfigUpdateRecord,
+        name: &CStr,
+        temporary: &CStr,
+        inject: bool,
+    ) -> Result<(), c_int> {
+        let mut wire = [0u8; RECORD_MAX];
+        let line = record_encode(record, true, &mut wire)?;
+        let dir = self.dir();
+
+        if let Err(err) = unlink_at(dir, temporary)
+            && err != -ENOENT
+        {
+            return Err(err);
+        }
+        let file = File::from(open_at(
+            dir,
+            temporary,
+            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+            0o600,
+        )?);
+        let saved = closed_after(file, |file| {
+            self.seal(file.as_fd())?;
+            write_all(file, line)?;
+            if inject {
+                self.checkpoint(Checkpoint::StateWrite)?;
+            }
+            sync(file.as_fd())
+        })
+        .and_then(|()| {
+            rename_at(dir, temporary, name)?;
+            if inject {
+                self.checkpoint(Checkpoint::StateRename)?;
+            }
+            sync(dir)
+        });
+        if saved.is_err() {
+            // The next save unlinks a temporary file this leaves.
+            let _ = unlink_at(dir, temporary);
+        }
+        saved
     }
-    if ret != 0 {
-        return ret;
+
+    /// The state file replaced by `record`.
+    fn state_save(&self, record: &ConfigUpdateRecord, inject: bool) -> Result<(), c_int> {
+        self.selection_save(record, c"state", c".state.tmp", inject)
     }
-    // SAFETY: the journal's directory and a C string.
-    let fd = unsafe {
-        openat(
-            u.dir_fd,
-            c"events".as_ptr(),
+
+    /// `record` appended to the events file after the last whole line,
+    /// once it follows the last event.
+    fn event_append(&self, record: &ConfigUpdateRecord) -> Result<(), c_int> {
+        let mut wire = [0u8; RECORD_MAX];
+        let dir = self.dir();
+        let replay = events_scan(dir, record.kind == EVENT_BOOT, |_| Ok(()))?;
+        event_follows(&replay.last, record)?;
+        let line = record_encode(record, false, &mut wire)?;
+        let file = File::from(open_at(
+            dir,
+            c"events",
             O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK,
             0o600,
-        )
-    };
-    if fd < 0 {
-        return -errno();
+        )?);
+        closed_after(file, |file| {
+            regular_file(file.as_fd())?;
+            self.seal(file.as_fd())?;
+            truncate(file.as_fd(), replay.end)?;
+            write_all(file, line)?;
+            self.checkpoint(Checkpoint::EventWrite)?;
+            sync(file.as_fd())
+        })?;
+        sync(dir)
     }
-    let mut ret = regular_file(fd);
-    if ret == 0 {
-        ret = u.seal(fd);
-    }
-    // SAFETY: the file's fd.
-    if ret == 0 && unsafe { ftruncate(fd, end) } != 0 {
-        ret = -errno();
-    }
-    if ret == 0 {
-        // SAFETY: the file's fd and the event's bytes.
-        ret = unsafe { write_complete(fd, wire.as_ptr().cast(), length) };
-    }
-    if ret == 0 {
-        ret = u.checkpoint(CHECK_EVENT_WRITE);
-    }
-    // SAFETY: the file's fd.
-    if ret == 0 && unsafe { fsync(fd) } != 0 {
-        ret = -errno();
-    }
-    // SAFETY: the file's fd, closed once.
-    if unsafe { close(fd) } != 0 && ret == 0 {
-        ret = -errno();
-    }
-    // SAFETY: the journal's directory.
-    if ret == 0 && unsafe { fsync(u.dir_fd) } != 0 {
-        ret = -errno();
-    }
-    ret
-}
 
-/// The PCR's value between two readings of the TPM's boot, which must
-/// agree, or -ESTALE.
-fn live_read(
-    u: &ConfigUpdate,
-    pcr: u32,
-    reset: &mut u32,
-    restart: &mut u32,
-    value: &mut [u8; 32],
-) -> c_int {
-    let (mut reset_after, mut restart_after) = (0u32, 0u32);
+    /// The PCR's value between two readings of the TPM's boot, which
+    /// must agree, or -ESTALE.
+    fn live_read(&self, pcr: u32) -> Result<(BootIdentity, [u8; 32]), c_int> {
+        let boot = self.boot_identity()?;
+        let value = self.pcr_read(pcr)?;
 
-    let mut ret = u.boot_identity(reset, restart);
-    if ret == 0 {
-        ret = u.pcr_read(pcr, value);
+        if self.boot_identity()? != boot {
+            return Err(-ESTALE);
+        }
+        Ok((boot, value))
     }
-    if ret == 0 {
-        ret = u.boot_identity(&mut reset_after, &mut restart_after);
-    }
-    if ret == 0 && (*reset != reset_after || *restart != restart_after) {
-        ret = -ESTALE;
-    }
-    ret
-}
 
-/// Whether `record` is the last event, of this TPM boot, and the PCR
-/// holds what the events replay to.
-fn check_record(u: &ConfigUpdate, record: &ConfigUpdateRecord) -> c_int {
-    let mut last = ConfigUpdateRecord::zeroed();
-    let mut expected = [0u8; 32];
-    let mut value = [0u8; 32];
-    let (mut reset, mut restart) = (0u32, 0u32);
+    /// Whether `record` is the last event, of this TPM boot, and the PCR
+    /// holds what the events replay to.
+    fn check_record(&self, record: &ConfigUpdateRecord) -> Result<(), c_int> {
+        let replay = events_scan(self.dir(), false, |_| Ok(()))?;
+        if !same_event(record, &replay.last) {
+            return Err(-EUCLEAN);
+        }
+        let (boot, value) = self.live_read(record.pcr)?;
+        if boot.reset != record.reset_count {
+            return Err(-ESTALE);
+        }
+        if value != replay.value {
+            return Err(-EUCLEAN);
+        }
+        Ok(())
+    }
 
-    // SAFETY: room for the value.
-    let mut ret = unsafe {
-        events_scan(
-            u,
-            &mut last,
-            expected.as_mut_ptr(),
-            ptr::null_mut(),
-            false,
-            None,
-            ptr::null_mut(),
-        )
-    };
-    if ret == 0 && !same_event(record, &last) {
-        ret = -EUCLEAN;
+    /// config_update_check(): the active record, complete and checked.
+    fn check(&self) -> Result<ConfigUpdateRecord, c_int> {
+        let record = self.read_state()?;
+        if record.pending {
+            return Err(-EINPROGRESS);
+        }
+        self.check_record(&record)?;
+        Ok(record)
     }
-    if ret == 0 {
-        ret = live_read(u, record.pcr, &mut reset, &mut restart, &mut value);
-    }
-    if ret == 0 && reset != record.reset_count {
-        ret = -ESTALE;
-    }
-    if ret == 0 && value != expected {
-        ret = -EUCLEAN;
-    }
-    ret
-}
 
-/// config_update_check(): the active record into `out` unless NULL.
-fn check(u: &ConfigUpdate, out: Option<&mut ConfigUpdateRecord>) -> c_int {
-    let mut record = ConfigUpdateRecord::zeroed();
+    /// The pending selection marked done, or put back if that fails.
+    fn complete(&self) -> Result<(), c_int> {
+        let mut record = self.read_state()?;
+        self.check_record(&record)?;
+        record.pending = false;
+        let completed = self
+            .state_save(&record, true)
+            .and_then(|()| self.checkpoint(Checkpoint::CompleteSync));
+        if completed.is_err() {
+            record.pending = true;
+            if let Err(restore) = self.state_save(&record, false) {
+                crate::log::err(
+                    format!("image: cannot restore pending selection: {}", text(restore))
+                        .as_bytes(),
+                );
+            }
+        }
+        completed
+    }
 
-    let mut ret = read_state(u, &mut record);
-    if ret == 0 && record.pending {
-        ret = -EINPROGRESS;
+    /// The selection of `target` after `previous`: saved pending,
+    /// measured into the PCR, appended to the events and activated, for
+    /// the caller to complete.
+    fn begin_event(
+        &self,
+        target: &ConfigUpdateTarget,
+        previous: &ConfigUpdateRecord,
+        pcr: u32,
+        kind: c_int,
+    ) -> Result<(), c_int> {
+        if previous.sequence == i64::MAX as u64 {
+            return Err(-EOVERFLOW);
+        }
+        self.prepare(target)?;
+        let (boot, before) = self.live_read(pcr)?;
+        let mut record = ConfigUpdateRecord::zeroed();
+        record.target = *target;
+        record.sequence = previous.sequence + 1;
+        record.pcr = pcr;
+        record.kind = kind;
+        record.pending = true;
+        record.reset_count = boot.reset;
+        record.restart_count = boot.restart;
+        record.initial_pcr = if kind == EVENT_BOOT {
+            before
+        } else {
+            previous.initial_pcr
+        };
+        event_follows(previous, &record)?;
+        let event = config_measure::event(kind, &target.root_hash)?;
+        let mut expected = before;
+        let ret = fold(&mut expected, &event);
+        if ret != 0 {
+            return Err(ret);
+        }
+        self.state_save(&record, true)?;
+        self.checkpoint(Checkpoint::PendingSync)?;
+        self.pcr_extend(pcr, &event)?;
+        self.checkpoint(Checkpoint::Extend)?;
+        let (after, value) = self.live_read(pcr)?;
+        if after != boot || value != expected {
+            return Err(-EUCLEAN);
+        }
+        self.event_append(&record)?;
+        self.checkpoint(Checkpoint::EventSync)?;
+        self.activate(target)?;
+        self.checkpoint(Checkpoint::Activate)
     }
-    if ret == 0 {
-        ret = check_record(u, &record);
-    }
-    if ret == 0 {
-        if let Some(out) = out {
-            *out = record;
+
+    /// config_update_clear_staged(): no selection staged for the next
+    /// boot.
+    fn clear_staged(&self) -> Result<(), c_int> {
+        match unlink_at(self.dir(), c"next-boot") {
+            Ok(()) => sync(self.dir()),
+            Err(err) if err == -ENOENT => Ok(()),
+            Err(err) => Err(err),
         }
     }
-    ret
-}
 
-/// The pending selection marked done, or put back if that fails.
-fn complete(u: &ConfigUpdate) -> c_int {
-    let mut record = ConfigUpdateRecord::zeroed();
+    /// config_update_stage(): `target` staged for the next boot, in the
+    /// selection record format: its target the candidate, its sequence
+    /// and TPM counts those of the selection it was staged from.
+    fn stage(&self, target: &ConfigUpdateTarget) -> Result<(), c_int> {
+        if !target_valid(target) {
+            return Err(-EINVAL);
+        }
+        let mut record = self.check()?;
+        record.target = *target;
+        self.selection_save(&record, c"next-boot", c".next-boot.tmp", false)
+    }
 
-    let mut ret = read_state(u, &mut record);
-    if ret == 0 {
-        ret = check_record(u, &record);
+    /// config_update_staged(): the staged target when the boot `reset`
+    /// after `previous` takes it, None to keep the selection in force.
+    fn staged(
+        &self,
+        previous: &ConfigUpdateRecord,
+        reset: u32,
+    ) -> Result<Option<ConfigUpdateTarget>, c_int> {
+        let staged = match self.stage_read() {
+            Ok(staged) => staged,
+            Err(err) if err == -ENOENT => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        if staged.pending {
+            return Err(-EBADMSG);
+        }
+        if staged.reset_count == reset || same_target(&staged.target, &previous.target) {
+            return Ok(None);
+        }
+        if staged.sequence != previous.sequence || !same_boot(&staged, previous) {
+            crate::log::warn(b"image: ignoring staged config because the active selection changed");
+            return Ok(None);
+        }
+        Ok(Some(staged.target))
     }
-    if ret != 0 {
-        return ret;
-    }
-    record.pending = false;
-    ret = state_save(u, &record, true);
-    if ret == 0 {
-        ret = u.checkpoint(CHECK_COMPLETE_SYNC);
-    }
-    if ret != 0 {
-        record.pending = true;
-        let restore = state_save(u, &record, false);
 
-        if restore != 0 {
-            crate::log::err(
-                format!("image: cannot restore pending selection: {}", text(restore)).as_bytes(),
+    /// A staged selection the boot in force came from goes with it.
+    fn complete_staged(&self) -> Result<(), c_int> {
+        let staged = match self.stage_read() {
+            Ok(staged) => staged,
+            Err(err) if err == -ENOENT => return Ok(()),
+            Err(err) => return Err(err),
+        };
+        if same_boot(&self.read_state()?, &staged) {
+            return Ok(());
+        }
+        self.clear_staged()
+    }
+
+    /// config_update_begin(): `target` activated live on the config PCR
+    /// `pcr`, over a selection complete and checked.
+    fn begin(&self, target: &ConfigUpdateTarget, pcr: u32) -> Result<(), c_int> {
+        if !target_valid(target) || config_measure::pcr_valid(pcr) != 0 {
+            return Err(-EINVAL);
+        }
+        let previous = self.check()?;
+        if pcr != previous.pcr {
+            return Err(-EPERM);
+        }
+        if target.root_hash == previous.target.root_hash {
+            return Ok(());
+        }
+        self.begin_event(target, &previous, pcr, EVENT_UPDATE)?;
+        self.complete()?;
+        if let Err(err) = self.clear_staged() {
+            crate::log::warn(
+                format!("image: cannot remove obsolete staged config: {}", text(err)).as_bytes(),
             );
         }
+        Ok(())
     }
-    ret
-}
 
-/// The selection of `target` after `previous`: saved pending, measured
-/// into the PCR, appended to the events and activated; an update then
-/// completed, a boot left for config_update_complete_boot().
-///
-/// # Safety
-///
-/// `target` is a target.
-unsafe fn begin_event(
-    u: &mut ConfigUpdate,
-    target: *const ConfigUpdateTarget,
-    previous: &ConfigUpdateRecord,
-    pcr: u32,
-    kind: c_int,
-) -> c_int {
-    let mut record = ConfigUpdateRecord::zeroed();
-    let mut before = [0u8; 32];
-    let mut value = [0u8; 32];
-    let mut event = [0u8; 32];
-    let (mut reset, mut restart) = (0u32, 0u32);
-
-    if previous.sequence == i64::MAX as u64 {
-        return -EOVERFLOW;
-    }
-    let ret = u.prepare(target);
-    if ret != 0 {
-        return ret;
-    }
-    // SAFETY: the caller's target.
-    record.target = unsafe { *target };
-    record.sequence = previous.sequence + 1;
-    record.pcr = pcr;
-    record.kind = kind;
-    record.pending = true;
-    let ret = live_read(
-        u,
-        pcr,
-        &mut record.reset_count,
-        &mut record.restart_count,
-        &mut before,
-    );
-    if ret != 0 {
-        return ret;
-    }
-    record.initial_pcr = if kind == EVENT_BOOT {
-        before
-    } else {
-        previous.initial_pcr
-    };
-    let mut ret = event_follows(previous, &record);
-    if ret == 0 {
-        // SAFETY: the caller's target.
-        let root = unsafe { &(*target).root_hash };
-
-        ret = match config_measure::event(kind, root) {
-            Ok(digest) => {
-                event = digest;
-                0
-            }
-            Err(err) => err,
+    /// config_update_boot(): `target` selected by this TPM boot on the
+    /// config PCR `pcr`, left pending for complete_boot().
+    fn boot(&mut self, target: &ConfigUpdateTarget, pcr: u32) -> Result<(), c_int> {
+        if !target_valid(target) || config_measure::pcr_valid(pcr) != 0 {
+            return Err(-EINVAL);
+        }
+        self.boot_pending = false;
+        let previous = match self.read_state() {
+            Ok(previous) => previous,
+            Err(err) if err == -ENOENT => ConfigUpdateRecord::zeroed(),
+            Err(err) => return Err(err),
         };
+        let boot = self.boot_identity()?;
+        if previous.sequence != 0 && previous.reset_count == boot.reset {
+            if previous.pending {
+                return Err(-EINPROGRESS);
+            }
+            if previous.pcr != pcr || target.root_hash != previous.target.root_hash {
+                return Err(-EBUSY);
+            }
+            return self.check().map(|_| ());
+        }
+        if previous.sequence != 0 && !same_target(target, &previous.target) {
+            match self.staged(&previous, boot.reset)? {
+                Some(next) if same_target(target, &next) => {}
+                _ => return Err(-EUCLEAN),
+            }
+        }
+        let last = events_scan(self.dir(), previous.pending, |_| Ok(()))?.last;
+        if previous.sequence == 0 && last.sequence != 0 {
+            return Err(-EUCLEAN);
+        }
+        if previous.sequence != 0
+            && !(same_event(&previous, &last)
+                || (previous.pending && event_follows(&last, &previous).is_ok()))
+        {
+            return Err(-EUCLEAN);
+        }
+        self.begin_event(target, &last, pcr, EVENT_BOOT)?;
+        self.boot_pending = true;
+        Ok(())
     }
-    let mut expected = before;
-    if ret == 0 {
-        // SAFETY: two digests.
-        ret = unsafe { chain_fold(expected.as_mut_ptr(), event.as_ptr()) };
+
+    /// config_update_complete_boot(): the boot's selection completed, or
+    /// the selection in force checked, and a staged selection it came
+    /// from removed.
+    fn complete_boot(&mut self) -> Result<(), c_int> {
+        if self.boot_pending {
+            self.boot_pending = false;
+            self.complete()?;
+        } else {
+            self.check()?;
+        }
+        self.complete_staged()
     }
-    if ret == 0 {
-        ret = state_save(u, &record, true);
-    }
-    if ret == 0 {
-        ret = u.checkpoint(CHECK_PENDING_SYNC);
-    }
-    if ret == 0 {
-        ret = u.pcr_extend(pcr, &event);
-    }
-    if ret == 0 {
-        ret = u.checkpoint(CHECK_EXTEND);
-    }
-    if ret == 0 {
-        ret = live_read(u, pcr, &mut reset, &mut restart, &mut value);
-    }
-    if ret == 0
-        && (reset != record.reset_count || restart != record.restart_count || value != expected)
-    {
-        ret = -EUCLEAN;
-    }
-    if ret == 0 {
-        ret = event_append(u, &record);
-    }
-    if ret == 0 {
-        ret = u.checkpoint(CHECK_EVENT_SYNC);
-    }
-    if ret == 0 {
-        ret = u.activate(target);
-    }
-    if ret == 0 {
-        ret = u.checkpoint(CHECK_ACTIVATE);
-    }
-    if ret != 0 {
-        return ret;
-    }
-    if kind == EVENT_BOOT {
-        u.boot_pending = true;
-        return 0;
-    }
-    complete(u)
 }
 
 /// The journal of an open update, or None for NULL or one not open.
@@ -1170,209 +1091,6 @@ unsafe fn journal<'a>(update: *mut ConfigUpdate) -> Option<&'a mut ConfigUpdate>
     unsafe { update.as_mut() }.filter(|u| u.dir_fd >= 0)
 }
 
-/// config_update_stage_read(): the record staged for the next boot.
-fn stage_read(u: &ConfigUpdate, out: &mut ConfigUpdateRecord) -> c_int {
-    selection_read(u, c"next-boot", out)
-}
-
-/// config_update_clear_staged(): no selection staged for the next boot.
-fn clear_staged(u: &ConfigUpdate) -> c_int {
-    if u.dir_fd < 0 || u.lock_fd < 0 {
-        return -EINVAL;
-    }
-    // SAFETY: the journal's directory and a C string.
-    if unsafe { unlinkat(u.dir_fd, c"next-boot".as_ptr(), 0) } != 0 {
-        let err = errno();
-        return if err == ENOENT { 0 } else { -err };
-    }
-    // SAFETY: the journal's directory.
-    if unsafe { fsync(u.dir_fd) } != 0 {
-        -errno()
-    } else {
-        0
-    }
-}
-
-/// config_update_stage(): `target` staged for the next boot, in the
-/// selection record format: its target the candidate, its sequence and
-/// TPM counts those of the selection it was staged from.
-fn stage(u: &ConfigUpdate, target: Option<&ConfigUpdateTarget>) -> c_int {
-    let Some(target) = target.filter(|t| u.lock_fd >= 0 && target_valid(Some(t)) == 0) else {
-        return -EINVAL;
-    };
-    let mut record = ConfigUpdateRecord::zeroed();
-
-    let ret = check(u, Some(&mut record));
-    if ret != 0 {
-        return ret;
-    }
-    record.target = *target;
-    selection_save(u, &record, c"next-boot", c".next-boot.tmp", false)
-}
-
-/// config_update_staged(): 1 with the staged target in `target` when the
-/// boot after `previous` takes it, 0 to keep the selection in force.
-fn staged(
-    u: &ConfigUpdate,
-    previous: &ConfigUpdateRecord,
-    reset: u32,
-    target: &mut ConfigUpdateTarget,
-) -> c_int {
-    let mut staged = ConfigUpdateRecord::zeroed();
-
-    let ret = stage_read(u, &mut staged);
-    if ret != 0 {
-        return if ret == -ENOENT { 0 } else { ret };
-    }
-    if staged.pending {
-        return -EBADMSG;
-    }
-    if staged.reset_count == reset {
-        return 0;
-    }
-    if same_target(&staged.target, &previous.target) {
-        return 0;
-    }
-    if staged.sequence != previous.sequence || !same_boot(&staged, previous) {
-        crate::log::warn(b"image: ignoring staged config because the active selection changed");
-        return 0;
-    }
-    *target = staged.target;
-    1
-}
-
-/// A staged selection the boot in force came from goes with it.
-fn complete_staged(u: &ConfigUpdate) -> c_int {
-    let mut staged = ConfigUpdateRecord::zeroed();
-    let mut current = ConfigUpdateRecord::zeroed();
-
-    let ret = stage_read(u, &mut staged);
-    if ret != 0 {
-        return if ret == -ENOENT { 0 } else { ret };
-    }
-    let ret = read_state(u, &mut current);
-    if ret != 0 || same_boot(&current, &staged) {
-        return ret;
-    }
-    clear_staged(u)
-}
-
-/// config_update_begin().
-///
-/// # Safety
-///
-/// `update` is NULL or a journal, and `t` NULL or a target.
-unsafe fn begin(update: *mut ConfigUpdate, t: *const ConfigUpdateTarget, pcr: u32) -> c_int {
-    // SAFETY: the caller's journal and target, or NULL.
-    let (Some(u), target) = (unsafe { journal(update) }, unsafe { t.as_ref() }) else {
-        return -EINVAL;
-    };
-    if target_valid(target) != 0 || config_measure::pcr_valid(pcr) != 0 {
-        return -EINVAL;
-    }
-    let mut previous = ConfigUpdateRecord::zeroed();
-
-    let ret = check(u, Some(&mut previous));
-    if ret != 0 {
-        return ret;
-    }
-    if pcr != previous.pcr {
-        return -EPERM;
-    }
-    // SAFETY: the caller's target, valid above.
-    if unsafe { (*t).root_hash } == previous.target.root_hash {
-        return 0;
-    }
-    // SAFETY: as above.
-    let ret = unsafe { begin_event(u, t, &previous, pcr, EVENT_UPDATE) };
-    if ret == 0 {
-        let err = clear_staged(u);
-
-        if err != 0 {
-            crate::log::warn(
-                format!("image: cannot remove obsolete staged config: {}", text(err)).as_bytes(),
-            );
-        }
-    }
-    ret
-}
-
-/// config_update_boot().
-///
-/// # Safety
-///
-/// `update` is NULL or a journal, and `t` NULL or a target.
-unsafe fn boot(update: *mut ConfigUpdate, t: *const ConfigUpdateTarget, pcr: u32) -> c_int {
-    // SAFETY: the caller's journal and target, or NULL.
-    let (Some(u), target) = (unsafe { journal(update) }, unsafe { t.as_ref() }) else {
-        return -EINVAL;
-    };
-    if target_valid(target) != 0 || config_measure::pcr_valid(pcr) != 0 {
-        return -EINVAL;
-    }
-    // SAFETY: valid above.
-    let target = unsafe { &*t };
-    let mut previous = ConfigUpdateRecord::zeroed();
-    let mut last = ConfigUpdateRecord::zeroed();
-    let (mut reset, mut restart) = (0u32, 0u32);
-
-    u.boot_pending = false;
-    let ret = read_state(u, &mut previous);
-    if ret != 0 && ret != -ENOENT {
-        return ret;
-    }
-    let ret = u.boot_identity(&mut reset, &mut restart);
-    if ret != 0 {
-        return ret;
-    }
-    if previous.sequence != 0 && previous.reset_count == reset {
-        if previous.pending {
-            return -EINPROGRESS;
-        }
-        if previous.pcr != pcr || target.root_hash != previous.target.root_hash {
-            return -EBUSY;
-        }
-        return check(u, None);
-    }
-    if previous.sequence != 0 && !same_target(target, &previous.target) {
-        let mut next = ConfigUpdateTarget::zeroed();
-        let ret = staged(u, &previous, reset, &mut next);
-
-        if ret < 0 {
-            return ret;
-        }
-        if ret == 0 || !same_target(target, &next) {
-            return -EUCLEAN;
-        }
-    }
-    // SAFETY: NULL for what the scan need not give.
-    let ret = unsafe {
-        events_scan(
-            u,
-            &mut last,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            previous.pending,
-            None,
-            ptr::null_mut(),
-        )
-    };
-    if ret != 0 {
-        return ret;
-    }
-    if previous.sequence == 0 && last.sequence != 0 {
-        return -EUCLEAN;
-    }
-    if previous.sequence != 0
-        && !(same_event(&previous, &last)
-            || (previous.pending && event_follows(&last, &previous) == 0))
-    {
-        return -EUCLEAN;
-    }
-    // SAFETY: the caller's target.
-    unsafe { begin_event(u, t, &last, pcr, EVENT_BOOT) }
-}
-
 pub(crate) use capi::{
     config_update_begin, config_update_boot, config_update_check, config_update_clear_staged,
     config_update_close, config_update_complete_boot, config_update_events, config_update_open,
@@ -1383,9 +1101,23 @@ pub(crate) use capi::{
 mod fuzz;
 mod capi {
     use core::ffi::{c_char, c_int, c_void};
-    use core::ptr;
 
     use super::{ConfigCb, ConfigUpdate, ConfigUpdateOps, ConfigUpdateRecord, ConfigUpdateTarget};
+
+    /// `result`'s value into `out`: 0, or its error.
+    fn give<T>(result: Result<T, c_int>, out: &mut T) -> c_int {
+        match result {
+            Ok(value) => {
+                *out = value;
+                0
+            }
+            Err(err) => err,
+        }
+    }
+
+    fn status(result: Result<(), c_int>) -> c_int {
+        result.err().unwrap_or(0)
+    }
 
     /// # Safety
     ///
@@ -1421,7 +1153,7 @@ mod capi {
     ) -> c_int {
         // SAFETY: the caller's journal and room, or NULL.
         match unsafe { (super::journal(update), out.as_mut()) } {
-            (Some(u), Some(out)) => super::read_state(u, out),
+            (Some(u), Some(out)) => give(u.read_state(), out),
             _ => -super::EINVAL,
         }
     }
@@ -1435,7 +1167,10 @@ mod capi {
         pcr: u32,
     ) -> c_int {
         // SAFETY: the caller's journal and target, or NULL.
-        unsafe { super::begin(update, t, pcr) }
+        match unsafe { (super::journal(update), t.as_ref()) } {
+            (Some(u), Some(t)) => status(u.begin(t, pcr)),
+            _ => -super::EINVAL,
+        }
     }
 
     /// # Safety
@@ -1447,7 +1182,10 @@ mod capi {
         pcr: u32,
     ) -> c_int {
         // SAFETY: the caller's journal and target, or NULL.
-        unsafe { super::boot(update, t, pcr) }
+        match unsafe { (super::journal(update), t.as_ref()) } {
+            (Some(u), Some(t)) => status(u.boot(t, pcr)),
+            _ => -super::EINVAL,
+        }
     }
 
     /// # Safety
@@ -1457,12 +1195,11 @@ mod capi {
         update: *mut ConfigUpdate,
         target: *const ConfigUpdateTarget,
     ) -> c_int {
-        // SAFETY: the caller's journal or NULL.
-        let Some(u) = (unsafe { super::journal(update) }) else {
-            return -super::EINVAL;
-        };
-        // SAFETY: the caller's target or NULL.
-        super::stage(u, unsafe { target.as_ref() })
+        // SAFETY: the caller's journal and target, or NULL.
+        match unsafe { (super::journal(update), target.as_ref()) } {
+            (Some(u), Some(t)) => status(u.stage(t)),
+            _ => -super::EINVAL,
+        }
     }
 
     /// # Safety
@@ -1475,7 +1212,7 @@ mod capi {
     ) -> c_int {
         // SAFETY: the caller's journal and room, or NULL.
         match (unsafe { super::journal(update) }, unsafe { out.as_mut() }) {
-            (Some(u), Some(out)) => super::stage_read(u, out),
+            (Some(u), Some(out)) => give(u.stage_read(), out),
             _ => -super::EINVAL,
         }
     }
@@ -1498,7 +1235,14 @@ mod capi {
         ) else {
             return -super::EINVAL;
         };
-        super::staged(u, previous, reset, target)
+        match u.staged(previous, reset) {
+            Ok(Some(staged)) => {
+                *target = staged;
+                1
+            }
+            Ok(None) => 0,
+            Err(err) => err,
+        }
     }
 
     /// # Safety
@@ -1507,7 +1251,7 @@ mod capi {
     pub unsafe extern "C" fn config_update_clear_staged(update: *mut ConfigUpdate) -> c_int {
         // SAFETY: the caller's journal or NULL.
         match unsafe { super::journal(update) } {
-            Some(u) => super::clear_staged(u),
+            Some(u) => status(u.clear_staged()),
             None => -super::EINVAL,
         }
     }
@@ -1517,19 +1261,9 @@ mod capi {
     /// `update` is NULL or a journal.
     pub unsafe extern "C" fn config_update_complete_boot(update: *mut ConfigUpdate) -> c_int {
         // SAFETY: the caller's journal or NULL.
-        let Some(u) = (unsafe { super::journal(update) }) else {
-            return -super::EINVAL;
-        };
-        let ret = if u.boot_pending {
-            u.boot_pending = false;
-            super::complete(u)
-        } else {
-            super::check(u, None)
-        };
-        if ret != 0 {
-            ret
-        } else {
-            super::complete_staged(u)
+        match unsafe { super::journal(update) } {
+            Some(u) => status(u.complete_boot()),
+            None => -super::EINVAL,
         }
     }
 
@@ -1541,16 +1275,18 @@ mod capi {
         update: *mut ConfigUpdate,
         out: *mut ConfigUpdateRecord,
     ) -> c_int {
-        // SAFETY: the caller's journal or NULL; the C read through it
-        // first, which refuses NULL.
-        let Some(u) = (unsafe { update.as_mut() }) else {
+        // SAFETY: the caller's journal or NULL.
+        let Some(u) = (unsafe { super::journal(update) }) else {
             return -super::EINVAL;
         };
-        if u.dir_fd < 0 {
-            return -super::EINVAL;
-        }
         // SAFETY: the caller's room or NULL.
-        super::check(u, unsafe { out.as_mut() })
+        match (u.check(), unsafe { out.as_mut() }) {
+            (Ok(record), Some(out)) => {
+                *out = record;
+                0
+            }
+            (result, _) => status(result.map(|_| ())),
+        }
     }
 
     /// # Safety
@@ -1562,25 +1298,16 @@ mod capi {
         ctx: *mut c_void,
     ) -> c_int {
         // SAFETY: the caller's journal or NULL.
-        let Some(u) = (unsafe { super::journal(update) }) else {
+        let (Some(u), Some(consume)) = (unsafe { super::journal(update) }, consume) else {
             return -super::EINVAL;
         };
-        if consume.is_none() {
-            return -super::EINVAL;
-        }
-        let mut last = ConfigUpdateRecord::zeroed();
-
-        // SAFETY: the caller's function and context.
-        unsafe {
-            super::events_scan(
-                u,
-                &mut last,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                false,
-                consume,
-                ctx,
-            )
-        }
+        let replay = super::events_scan(u.dir(), false, |record| {
+            // SAFETY: the caller's function and context, with the event.
+            match unsafe { consume(record, ctx) } {
+                0 => Ok(()),
+                err => Err(err),
+            }
+        });
+        status(replay.map(|_| ()))
     }
 }

@@ -5,11 +5,11 @@
 //! event, and the journal's events scanned whole and partial.
 
 use std::ffi::{CString, OsStr};
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::sync::OnceLock;
 
-use super::{ConfigUpdate, ConfigUpdateRecord, events_scan, record_decode};
+use super::{events_scan, record_decode};
 use crate::fuzzing::fuzz_target;
 
 /// The journal directory the events are written to, removed at exit.
@@ -51,34 +51,14 @@ fuzz_target!(
         let Some((dir, dir_fd)) = DIR.get() else {
             return;
         };
-        let mut record = ConfigUpdateRecord::zeroed();
-        // SAFETY: the input's bytes and room for the record.
-        unsafe {
-            record_decode(data.as_ptr(), data.len(), true, &mut record);
-            record_decode(data.as_ptr(), data.len(), false, &mut record);
-        }
+        let _ = record_decode(data, true);
+        let _ = record_decode(data, false);
         let events = std::path::Path::new(OsStr::from_bytes(dir.to_bytes())).join("events");
         if std::fs::write(events, data).is_err() {
             return;
         }
-        let mut update = ConfigUpdate::closed();
-        update.dir_fd = dir_fd.as_raw_fd();
-        let mut last = ConfigUpdateRecord::zeroed();
-        let mut value = [0u8; 32];
-        // SAFETY: the journal over the directory, which it does not own,
-        // and rooms for the last record and the value.
-        unsafe {
-            for partial in [false, true] {
-                events_scan(
-                    &update,
-                    &mut last,
-                    value.as_mut_ptr(),
-                    core::ptr::null_mut(),
-                    partial,
-                    None,
-                    core::ptr::null_mut(),
-                );
-            }
+        for partial in [false, true] {
+            let _ = events_scan(dir_fd.as_fd(), partial, |_| Ok(()));
         }
     },
     init

@@ -11,8 +11,8 @@ use core::ffi::{CStr, c_char, c_int, c_long, c_ulong};
 pub use libc::explicit_bzero;
 pub use libc::{
     _exit, abort, access, calloc, close, closedir, execv, execvp, faccessat,
-    fchmod, fclose, fcntl, fdopen, fdopendir, ferror, fgetc, fgets, fgetxattr, fileno, flock,
-    fopen, fputc, fputs, free, fsetxattr, fstatfs, fstatvfs, fsync, ftello, ftruncate,
+    fchmod, fclose, fcntl, fdopen, fdopendir, ferror, fgets, fgetxattr, fileno, flock,
+    fopen, fputc, fputs, free, fsetxattr, fstatfs, fstatvfs, fsync, ftruncate,
     fwrite, getenv, geteuid, gethostname, getline, getrandom, getsockopt, getxattr, gmtime_r,
     if_indextoname, ioctl, lgetxattr, link, lseek, lsetxattr, memfd_create, mkdirat, mkdtemp,
     mknod, mkstemp, mkstemps, mlockall, mount, open, openat, opendir, openlog, personality,
@@ -36,14 +36,13 @@ pub unsafe fn explicit_bzero(s: *mut core::ffi::c_void, n: usize) {
     }
 }
 pub use libc::{
-    AF_INET, AF_NETLINK, AF_UNIX, AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, EOF,
-    F_DUPFD_CLOEXEC, F_GETFD, F_OK, F_SETFD, ITIMER_PROF, ITIMER_REAL, ITIMER_VIRTUAL, LOCK_EX,
-    LOCK_NB, LOCK_UN, MCL_CURRENT, MCL_FUTURE, MFD_CLOEXEC, MSG_CTRUNC, MSG_TRUNC, O_APPEND,
-    O_CLOEXEC, O_CREAT, O_DIRECT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_NONBLOCK, O_PATH, O_RDONLY,
-    O_RDWR, O_TRUNC, O_WRONLY, PR_SET_DUMPABLE, PR_SET_NO_NEW_PRIVS, PR_SET_PTRACER, R_OK,
-    RLIM_INFINITY, RLIMIT_CORE, RLIMIT_CPU, RLIMIT_FSIZE, SEEK_SET, SO_RCVTIMEO, SOCK_CLOEXEC,
-    SOCK_DGRAM, SOCK_RAW, SOL_SOCKET, STATX_BASIC_STATS, STATX_SIZE, STATX_TYPE, STDOUT_FILENO,
-    W_OK, X_OK,
+    AF_INET, AF_NETLINK, AF_UNIX, AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, F_DUPFD_CLOEXEC,
+    F_GETFD, F_OK, F_SETFD, ITIMER_PROF, ITIMER_REAL, ITIMER_VIRTUAL, LOCK_EX, LOCK_NB, LOCK_UN,
+    MCL_CURRENT, MCL_FUTURE, MFD_CLOEXEC, MSG_CTRUNC, MSG_TRUNC, O_APPEND, O_CLOEXEC, O_CREAT,
+    O_DIRECT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_NONBLOCK, O_PATH, O_RDONLY, O_RDWR, O_TRUNC,
+    O_WRONLY, PR_SET_DUMPABLE, PR_SET_NO_NEW_PRIVS, PR_SET_PTRACER, R_OK, RLIM_INFINITY,
+    RLIMIT_CORE, RLIMIT_CPU, RLIMIT_FSIZE, SEEK_SET, SO_RCVTIMEO, SOCK_CLOEXEC, SOCK_DGRAM,
+    SOCK_RAW, SOL_SOCKET, STATX_BASIC_STATS, STATX_SIZE, STATX_TYPE, STDOUT_FILENO, W_OK, X_OK,
 };
 
 pub type Dir = libc::DIR;
