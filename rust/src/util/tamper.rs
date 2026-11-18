@@ -3,7 +3,7 @@
 
 //! The tamper counters: what the guards refused this boot, read back
 //! from the map init pinned in the private bpffs, and what each point
-//! counts.
+//! counts; and the reader the integrity counters share.
 
 use core::ffi::{CStr, c_int};
 
@@ -13,21 +13,22 @@ use crate::util::bpf_info::{Info, MAP_INFO_SIZE, MAP_MAX_ENTRIES, MAP_VALUE_SIZE
 use crate::util::bpf_sys::{bpf_map_lookup_elem, bpf_obj_get};
 
 /// `TAMPER_MAX` of `bpf/lib/tamper.h`: the tamper points there are.
-pub(crate) const TAMPER_MAX: usize = 37;
+pub(crate) const TAMPER_MAX: usize = 42;
 /// TAMPER_PIN of util/paths.h.
 const TAMPER_PIN: &CStr = c"/run/shirudo/bpffs/tamper";
 
-/// `struct tamper_counts`: each point's refusals, and their sum.
-#[repr(C)]
-pub(crate) struct TamperCounts {
-    pub(crate) count: [u64; TAMPER_MAX],
+/// The counters of a guard map: each point's refusals, and their sum.
+pub(crate) struct Counters<const N: usize> {
+    pub(crate) count: [u64; N],
     pub(crate) total: u64,
 }
 
-/// A tamper point: its name, and what it counts.
-struct Point {
-    name: &'static str,
-    meaning: &'static str,
+pub(crate) type TamperCounts = Counters<TAMPER_MAX>;
+
+/// A counter: its name, and what it counts.
+pub(crate) struct Point {
+    pub(crate) name: &'static str,
+    pub(crate) meaning: &'static str,
 }
 
 /// Each point, in the order of `enum tamper_point` of bpf/lib/tamper.h,
@@ -218,54 +219,93 @@ const POINTS: [Point; TAMPER_MAX] = [
         name: "SealSignal",
         meaning: "signal to a shirudo task (let through)",
     },
+    // TAMPER_SEAL_CORE_DUMP
+    Point {
+        name: "SealCoreDump",
+        meaning: "core dump of a shirudo task, which acts without authority",
+    },
+    // TAMPER_SEAL_UPROBE
+    Point {
+        name: "SealUprobe",
+        meaning: "uprobe in a shirudo task, which acts without authority",
+    },
+    // TAMPER_EXEC_SHARED
+    Point {
+        name: "ExecShared",
+        meaning: "exec of the runtime binary by a task that shares its file system context",
+    },
+    // TAMPER_XATTR_HANDLE
+    Point {
+        name: "XattrHandle",
+        meaning: "XFS attribute change by file handle, which passes no xattr hook",
+    },
+    // TAMPER_SEAL_RLIMIT
+    Point {
+        name: "SealRlimit",
+        meaning: "resource limit of a shirudo task changed by another task",
+    },
 ];
 
 /// The name of tamper point `point`, "?" past the last.
 pub(crate) fn name(point: usize) -> &'static [u8] {
-    POINTS.get(point).map_or(b"?", |p| p.name.as_bytes())
+    point_name(&POINTS, point)
 }
 
 /// What tamper point `point` counts, "?" past the last.
 pub(crate) fn meaning(point: usize) -> &'static [u8] {
-    POINTS.get(point).map_or(b"?", |p| p.meaning.as_bytes())
+    point_meaning(&POINTS, point)
 }
 
-/// The counters into `out`: 0, -ENOENT before init, -EPROTO for a map
-/// of another shape, or another -errno.
-pub(crate) fn read(out: &mut TamperCounts) -> c_int {
-    out.count = [0; TAMPER_MAX];
-    out.total = 0;
+pub(crate) fn point_name(points: &[Point], point: usize) -> &'static [u8] {
+    points.get(point).map_or(b"?", |p| p.name.as_bytes())
+}
+
+pub(crate) fn point_meaning(points: &[Point], point: usize) -> &'static [u8] {
+    points.get(point).map_or(b"?", |p| p.meaning.as_bytes())
+}
+
+/// The tamper counters: -ENOENT before init, -EPROTO for a map of another
+/// shape, or another -errno.
+pub(crate) fn read() -> Result<TamperCounts, c_int> {
+    counters_read(TAMPER_PIN)
+}
+
+/// The N counters of the array map pinned at `pin`, as read() reads the
+/// tamper counters.
+pub(crate) fn counters_read<const N: usize>(pin: &CStr) -> Result<Counters<N>, c_int> {
     // SAFETY: a C string.
-    let fd = unsafe { bpf_obj_get(TAMPER_PIN.as_ptr()) };
+    let fd = unsafe { bpf_obj_get(pin.as_ptr()) };
     if fd < 0 {
-        return -errno();
+        return Err(-errno());
     }
-    let ret = read_map(fd, out);
+    let ret = read_map(fd);
     // SAFETY: the pin opened above.
     unsafe { close(fd) };
     ret
 }
 
-fn read_map(fd: c_int, out: &mut TamperCounts) -> c_int {
+fn read_map<const N: usize>(fd: c_int) -> Result<Counters<N>, c_int> {
     let mut info = Info::<MAP_INFO_SIZE>::new();
-    if let Err(err) = info.read(fd) {
-        return err;
-    }
-    if info.u32_at(MAP_MAX_ENTRIES) as usize != TAMPER_MAX
+    info.read(fd)?;
+    if info.u32_at(MAP_MAX_ENTRIES) as usize != N
         || info.u32_at(MAP_VALUE_SIZE) as usize != size_of::<u64>()
     {
-        return -EPROTO;
+        return Err(-EPROTO);
     }
-    for key in 0..TAMPER_MAX as u32 {
+    let mut out = Counters {
+        count: [0; N],
+        total: 0,
+    };
+    for key in 0..N as u32 {
         let value = &mut out.count[key as usize];
         // SAFETY: the map, a key of its size and room for a value of its size.
         if unsafe { bpf_map_lookup_elem(fd, (&raw const key).cast(), (&raw mut *value).cast()) }
             != 0
         {
-            return -errno();
+            return Err(-errno());
         }
         // The C's sum wraps; a counter is the kernel's to set.
         out.total = out.total.wrapping_add(*value);
     }
-    0
+    Ok(out)
 }

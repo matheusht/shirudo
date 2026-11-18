@@ -38,6 +38,7 @@ use crate::util::identity;
 use crate::util::image_bootstrap::{ImageBootstrap, image_bootstrap_read};
 use crate::util::image_runtime;
 use crate::util::initrd;
+use crate::util::integrity::{self, IntegrityCounts};
 use crate::util::io::{bpffs_mounted_at, read_file};
 use crate::util::json::{JsonEmit, JsonField, MAX_BYTES, parse_schema};
 use crate::util::kernel_btf;
@@ -52,7 +53,7 @@ use crate::util::measured::{
 };
 use crate::util::otel::{OtelOpts, otel_send_log_json, status_otel_severity};
 use crate::util::sysinfo::{Sysinfo, sysinfo_emit_json, sysinfo_gather};
-use crate::util::tamper::{self, TamperCounts};
+use crate::util::tamper::{self, Counters, TamperCounts};
 use crate::util::tpm::tpm_tcti;
 use crate::util::upatch::name_from_pin;
 use crate::util::upatch_resolve;
@@ -1095,6 +1096,7 @@ struct Report {
     unmeasured_names: [u8; UNMEASURED_NAMES],
     assets: Assets,
     tamper: Result<TamperCounts, c_int>,
+    integrity: Result<IntegrityCounts, c_int>,
     config_state: c_int,
     config_root: CString,
     tcti: Vec<u8>,
@@ -1169,14 +1171,8 @@ impl Report {
         let mut unmeasured_names = [0u8; UNMEASURED_NAMES];
         let unmeasured = unmeasured(&mut unmeasured_names);
         let assets = Assets::gather();
-        let mut counts = TamperCounts {
-            count: [0; tamper::TAMPER_MAX],
-            total: 0,
-        };
-        let tamper = match tamper::read(&mut counts) {
-            0 => Ok(counts),
-            err => Err(err),
-        };
+        let tamper = tamper::read();
+        let integrity = integrity::read();
         let mut root = [0u8; 32];
         let config_state = image_runtime::config_state(&mut root);
         let config_root = message(&[&if config_state != -ENODEV {
@@ -1228,6 +1224,7 @@ impl Report {
             unmeasured_names,
             assets,
             tamper,
+            integrity,
             config_state,
             config_root,
             tcti: cstr(&tcti).to_vec(),
@@ -1405,19 +1402,8 @@ impl Report {
         // What the guards counted this boot, every counter by name so a
         // collector's keys stay the same from one record to the next;
         // null until init has pinned the map.
-        match &self.tamper {
-            Ok(t) => {
-                e.obj_open_key(b"tamper_attempts");
-                e.kv_int(b"total", t.total as i64);
-                e.obj_open_key(b"counters");
-                for (i, &n) in t.count.iter().enumerate() {
-                    e.kv_int(tamper::name(i), n as i64);
-                }
-                e.obj_close();
-                e.obj_close();
-            }
-            Err(_) => e.kv_null(b"tamper_attempts"),
-        }
+        emit_counters(e, b"tamper_attempts", &self.tamper, tamper::name);
+        emit_counters(e, b"integrity_attempts", &self.integrity, integrity::name);
         if self.config_state != -ENODEV {
             e.obj_open_key(b"config");
             e.kv_string(b"root_hash", self.config_root.to_bytes());
@@ -1564,7 +1550,10 @@ impl Report {
         row(b"", b"Version ID:", version_id());
         print(b"\n");
         conditions::conditions_print(&conds[..nc]);
-        self.print_tamper();
+        print(b"\nTamper attempts (this boot):\n");
+        print_counters(&self.tamper, tamper::name, tamper::meaning);
+        print(b"\nIntegrity attempts (this boot):\n");
+        print_counters(&self.integrity, integrity::name, integrity::meaning);
         upatch_table::print(&rows);
         drop(rows);
         if keyrings_open {
@@ -1597,34 +1586,6 @@ impl Report {
                 ]
                 .concat(),
             );
-        }
-    }
-
-    fn print_tamper(&self) {
-        print(b"\nTamper attempts (this boot):\n");
-        match &self.tamper {
-            Err(err) if *err == -ENOENT => print(b"  none recorded before init\n"),
-            Err(err) => print(&[b"  unavailable: ", strerr(-err), b"\n"].concat()),
-            Ok(t) => {
-                if t.total == 0 {
-                    print(b"  none\n");
-                }
-                for (i, &n) in t.count.iter().enumerate().filter(|&(_, &n)| n != 0) {
-                    let count = format!("{n:>6}");
-                    print(
-                        &[
-                            &b"  "[..],
-                            &pad(tamper::name(i), 20),
-                            b" ",
-                            count.as_bytes(),
-                            b"  ",
-                            tamper::meaning(i),
-                            b"\n",
-                        ]
-                        .concat(),
-                    );
-                }
-            }
         }
     }
 
@@ -1793,6 +1754,62 @@ fn roles(is_target: bool, is_operator: bool) -> &'static [u8] {
 fn version_id() -> &'static [u8] {
     // SAFETY: the version ID, a static C string.
     unsafe { ffi::c_str(&raw const shirudo_version_id) }
+}
+
+/// A set of guard counters under `key`, every counter by name so that a
+/// collector's keys stay the same from one record to the next; null
+/// until init has pinned the map.
+fn emit_counters<const N: usize>(
+    e: &mut JsonEmit,
+    key: &[u8],
+    counts: &Result<Counters<N>, c_int>,
+    name: fn(usize) -> &'static [u8],
+) {
+    match counts {
+        Ok(c) => {
+            e.obj_open_key(key);
+            e.kv_int(b"total", c.total as i64);
+            e.obj_open_key(b"counters");
+            for (i, &n) in c.count.iter().enumerate() {
+                e.kv_int(name(i), n as i64);
+            }
+            e.obj_close();
+            e.obj_close();
+        }
+        Err(_) => e.kv_null(key),
+    }
+}
+
+/// The counters of a set that moved, each with what it counts.
+fn print_counters<const N: usize>(
+    counts: &Result<Counters<N>, c_int>,
+    name: fn(usize) -> &'static [u8],
+    meaning: fn(usize) -> &'static [u8],
+) {
+    match counts {
+        Err(err) if *err == -ENOENT => print(b"  none recorded before init\n"),
+        Err(err) => print(&[b"  unavailable: ", strerr(-err), b"\n"].concat()),
+        Ok(c) => {
+            if c.total == 0 {
+                print(b"  none\n");
+            }
+            for (i, &n) in c.count.iter().enumerate().filter(|&(_, &n)| n != 0) {
+                let count = format!("{n:>6}");
+                print(
+                    &[
+                        &b"  "[..],
+                        &pad(name(i), 20),
+                        b" ",
+                        count.as_bytes(),
+                        b"  ",
+                        meaning(i),
+                        b"\n",
+                    ]
+                    .concat(),
+                );
+            }
+        }
+    }
 }
 
 /// Sends the JSON report as an OTLP keepalive log.

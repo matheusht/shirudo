@@ -44,11 +44,13 @@ const BPFFS_DIR: &CStr = c"/run/shirudo/bpffs";
 const RUN_DIR: &CStr = c"/run/shirudo";
 const IDENTITY_PIN: &CStr = c"/run/shirudo/bpffs/identity";
 const TAMPER_PIN: &CStr = c"/run/shirudo/bpffs/tamper";
+const INTEGRITY_PIN: &CStr = c"/run/shirudo/bpffs/integrity";
 const TPM_COMMAND_LINK_PIN: &CStr = c"/run/shirudo/bpffs/bpf2_tpm_command_link";
 /// What a failed run removes besides its links: every map it pinned.
-const MAP_PINS: [&CStr; 7] = [
+const MAP_PINS: [&CStr; 8] = [
     IDENTITY_PIN,
     TAMPER_PIN,
+    INTEGRITY_PIN,
     c"/run/shirudo/bpffs/task_authority",
     c"/run/shirudo/bpffs/task_policy",
     c"/run/shirudo/bpffs/socket_policy",
@@ -582,7 +584,7 @@ pub(super) fn attach() -> c_int {
         return 0;
     }
     // A pin without the links behind it is what a failed attempt leaves.
-    for pin in [IDENTITY_PIN, TAMPER_PIN] {
+    for pin in [IDENTITY_PIN, TAMPER_PIN, INTEGRITY_PIN] {
         // SAFETY: a C string.
         if unsafe { unlink(pin.as_ptr()) } != 0 {
             let err = last_err();

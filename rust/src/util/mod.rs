@@ -41,6 +41,7 @@ pub(crate) mod image_keys;
 pub(crate) mod image_runtime;
 pub(crate) mod inflate;
 pub(crate) mod initrd;
+pub(crate) mod integrity;
 pub(crate) mod io;
 pub(crate) mod json;
 pub(crate) mod kernel_abi;

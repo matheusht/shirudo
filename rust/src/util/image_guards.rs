@@ -60,7 +60,7 @@ pub(crate) const GATE_HOOK_COUNT: usize = 8;
 /// `enum guard_map_index`.
 pub(crate) const GUARD_TASKS: usize = 1;
 pub(crate) const GUARD_ROOTS: usize = 3;
-pub(crate) const GUARD_MAP_COUNT: usize = 7;
+pub(crate) const GUARD_MAP_COUNT: usize = 8;
 
 const fn guard_map(def: MapDef, pin: &'static CStr) -> GuardMap {
     GuardMap {
@@ -322,6 +322,7 @@ pub(crate) static GUARD_MAPS: [GuardMap; GUARD_MAP_COUNT] = [
         def::SHIRUDO_SOCK_POLICY,
         c"/run/shirudo/bpffs/socket_policy",
     ),
+    guard_map(def::SHIRUDO_INTEGRITY, c"/run/shirudo/bpffs/integrity"),
 ];
 
 /// `struct config_root_guard`: what config_root_begin() holds open, -1
