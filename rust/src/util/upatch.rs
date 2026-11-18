@@ -178,6 +178,8 @@ const STAT_SIZE: usize = 128;
 pub struct ProgSpec {
     pub(crate) role: u32,
     pub(crate) kind: u32,
+    /// An XDP program's: the classes of device it attaches to.
+    pub(crate) device_classes: u32,
     pub(crate) offset: u64,
     pub(crate) target: [u8; ATTACH_TARGET_MAX],
     pub(crate) map: [u8; PROG_MAP_MAX],
@@ -191,8 +193,31 @@ pub struct ProgSpec {
     pub(crate) target_stat: [u64; STAT_SIZE / 8],
 }
 
-const _: () = assert!(core::mem::offset_of!(ProgSpec, target_stat) == 256);
-const _: () = assert!(size_of::<ProgSpec>() == 256 + STAT_SIZE);
+const _: () = assert!(core::mem::offset_of!(ProgSpec, target_stat) == 264);
+const _: () = assert!(size_of::<ProgSpec>() == 264 + STAT_SIZE);
+
+/// uprobe.multi and uretprobe.multi: a glob over a binary's functions.
+pub(crate) fn kind_is_uprobe_multi(kind: u32) -> bool {
+    kind == ATTACH_UPROBE_MULTI || kind == ATTACH_URETPROBE_MULTI
+}
+
+/// uprobe and uretprobe: one place in a binary.
+pub(crate) fn kind_is_uprobe_single(kind: u32) -> bool {
+    kind == ATTACH_UPROBE || kind == ATTACH_URETPROBE
+}
+
+/// The kinds that attach to a userspace binary named in the UPUT block.
+pub(crate) fn kind_has_uprobe_target(kind: u32) -> bool {
+    kind_is_uprobe_multi(kind) || kind_is_uprobe_single(kind)
+}
+
+/// Every device class an XDP program among the specs selects.
+pub(crate) fn specs_xdp_classes(specs: &[ProgSpec]) -> u32 {
+    specs
+        .iter()
+        .filter(|s| s.kind == ATTACH_XDP)
+        .fold(0, |classes, s| classes | s.device_classes)
+}
 
 fn le32(b: &[u8], off: usize) -> u32 {
     u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
@@ -843,20 +868,39 @@ pub(crate) unsafe fn specs_free(specs: *mut ProgSpec, nr_progs: u32) {
     }
 }
 
-/// The specs of `nr_progs` programs an attach role gave: each spec's
-/// kind, offset and target from its entry `e`. Ok(true) for a uprobe,
+/// The spec of a program an attach role gave: its kind, offset and
+/// target from its entry `e`, or an XDP program's device classes, each
+/// class one program's of the upatch, as `xdp_classes` gathers them: a
+/// device runs one native XDP program at a time. Ok(true) for a uprobe,
 /// whose binary comes after, Err(()) for an entry that breaks the rules.
-fn attach_spec(spec: &mut ProgSpec, e: &[u8]) -> Result<bool, ()> {
+fn attach_spec(spec: &mut ProgSpec, e: &[u8], xdp_classes: &mut u32) -> Result<bool, ()> {
     let kind = le32(e, 4);
     let raw_offset = le64(e, 8);
     let target = &e[16..16 + ATTACH_TARGET_MAX];
+    let map = &e[16 + ATTACH_TARGET_MAX..];
     let mut uprobe = false;
 
-    if e[16 + ATTACH_TARGET_MAX] != 0 {
+    if map[0] != 0 {
         return Err(());
     }
     spec.role = ROLE_ATTACH;
     match kind {
+        ATTACH_XDP => {
+            let classes = le32(e, 8);
+            if classes == 0
+                || classes & !XDP_ALL != 0
+                || classes & *xdp_classes != 0
+                || le32(e, 12) != 0
+                || target.iter().any(|&c| c != 0)
+                || map.iter().any(|&c| c != 0)
+            {
+                return Err(());
+            }
+            *xdp_classes |= classes;
+            spec.device_classes = classes;
+            spec.kind = kind;
+            return Ok(false);
+        }
         ATTACH_RAW_TRACEPOINT
         | ATTACH_CGROUP_SKB_INGRESS
         | ATTACH_CGROUP_SKB_EGRESS
@@ -870,12 +914,13 @@ fn attach_spec(spec: &mut ProgSpec, e: &[u8]) -> Result<bool, ()> {
             };
         }
         ATTACH_KPROBE | ATTACH_KRETPROBE => {}
-        ATTACH_UPROBE_MULTI => {
+        ATTACH_UPROBE_MULTI | ATTACH_URETPROBE_MULTI => {
             if raw_offset != 0 {
                 return Err(());
             }
             uprobe = true;
         }
+        ATTACH_UPROBE | ATTACH_URETPROBE => uprobe = true,
         _ => return Err(()),
     }
     if !has_nul(target) || target[0] == 0 {
@@ -885,14 +930,105 @@ fn attach_spec(spec: &mut ProgSpec, e: &[u8]) -> Result<bool, ()> {
     spec.offset = raw_offset;
     spec.target.copy_from_slice(target);
     spec.target[ATTACH_TARGET_MAX - 1] = 0;
-    if kind == ATTACH_KRETPROBE && spec.offset != 0 {
+    if (kind == ATTACH_KRETPROBE || kind == ATTACH_URETPROBE) && spec.offset != 0 {
         return Err(());
     }
     let len = spec.target.iter().position(|&c| c == 0).unwrap_or(0);
-    if kind == ATTACH_UPROBE_MULTI && spec.target[..len].iter().any(|&c| c == b',' || c == b'|') {
+    if kind_is_uprobe_multi(kind) && spec.target[..len].iter().any(|&c| c == b',' || c == b'|') {
         return Err(());
     }
     Ok(uprobe)
+}
+
+/// The UPUT block at `cursor` of `m`: a target for each of the
+/// `nr_uprobes` programs that attach to a binary, one offset for a single
+/// probe, onto their specs. The block's end, or -errno.
+fn uprobe_targets(
+    m: &[u8],
+    mut cursor: usize,
+    specs: &mut [ProgSpec],
+    nr_uprobes: u32,
+) -> Result<usize, c_int> {
+    let end = m.len();
+
+    if end - cursor < UPROBE_TARGETS {
+        return Err(-EINVAL);
+    }
+    let targets = &m[cursor..cursor + UPROBE_TARGETS];
+    cursor += UPROBE_TARGETS;
+    let nr_targets = le32(targets, 8);
+    if le32(targets, 0) != UPROBE_TARGET_MAGIC
+        || le32(targets, 4) != UPROBE_TARGET_VERSION
+        || le32(targets, 12) != 0
+        || nr_targets != nr_uprobes
+    {
+        return Err(-EINVAL);
+    }
+    for _ in 0..nr_targets {
+        if end - cursor < UPROBE_TARGET {
+            return Err(-EINVAL);
+        }
+        let record = &m[cursor..cursor + UPROBE_TARGET];
+        cursor += UPROBE_TARGET;
+        let prog_idx = le32(record, 0) as usize;
+        let path_len = le32(record, 4);
+        let build_id_len = le32(record, 8);
+        let nr_offsets = le32(record, 12);
+        let Some(spec) = specs.get_mut(prog_idx) else {
+            return Err(-EINVAL);
+        };
+        if !kind_has_uprobe_target(spec.kind)
+            || !spec.uprobe_path.is_null()
+            || path_len == 0
+            || path_len >= UPROBE_PATH_MAX
+            || build_id_len == 0
+            || build_id_len as usize > BUILD_ID_MAX
+            || nr_offsets == 0
+            || nr_offsets > UPROBE_OFFSETS_MAX
+            || (kind_is_uprobe_single(spec.kind) && nr_offsets != 1)
+        {
+            return Err(-EINVAL);
+        }
+        let (path_len, build_id_len) = (path_len as usize, build_id_len as usize);
+        let payload_len = path_len + build_id_len + nr_offsets as usize * size_of::<u64>();
+        if end - cursor < payload_len || m[cursor] != b'/' || has_nul(&m[cursor..][..path_len]) {
+            return Err(-EINVAL);
+        }
+        // SAFETY: path_len bytes of the metadata, none a NUL.
+        spec.uprobe_path = unsafe { xstrndup(m[cursor..].as_ptr().cast(), path_len) };
+        if spec.uprobe_path.is_null() {
+            return Err(-ENOMEM);
+        }
+        spec.uprobe_path_len = path_len as u32;
+        cursor += path_len;
+        spec.build_id[..build_id_len].copy_from_slice(&m[cursor..][..build_id_len]);
+        spec.build_id_len = build_id_len as u32;
+        cursor += build_id_len;
+        // SAFETY: a count of offsets.
+        spec.uprobe_offsets =
+            unsafe { xcalloc(nr_offsets as usize, size_of::<u64>()) }.cast::<u64>();
+        if spec.uprobe_offsets.is_null() {
+            return Err(-ENOMEM);
+        }
+        spec.nr_uprobe_offsets = nr_offsets;
+        // SAFETY: the nr_offsets offsets xcalloc() gave.
+        let offsets =
+            unsafe { core::slice::from_raw_parts_mut(spec.uprobe_offsets, nr_offsets as usize) };
+        for j in 0..offsets.len() {
+            offsets[j] = le64(m, cursor);
+            cursor += size_of::<u64>();
+            if j > 0 && offsets[j] <= offsets[j - 1] {
+                return Err(-EINVAL);
+            }
+        }
+    }
+    if specs
+        .iter()
+        .any(|s| kind_has_uprobe_target(s.kind) && s.uprobe_path.is_null())
+    {
+        return Err(-EINVAL);
+    }
+    Ok(cursor)
 }
 
 /// The programs' specs from the metadata `m` into `specs`, zeroed with
@@ -905,14 +1041,14 @@ unsafe fn specs_fill(specs: *mut ProgSpec, m: &[u8], nr_progs: u32, base_len: us
     // SAFETY: the caller's specs, zeroed but for their fds, which makes
     // each a valid spec.
     let specs = unsafe { core::slice::from_raw_parts_mut(specs, nr_progs as usize) };
-    let mut nr_uprobes = 0u32;
+    let (mut nr_uprobes, mut xdp_classes) = (0u32, 0u32);
 
     for (i, spec) in specs.iter_mut().enumerate() {
         let e = &m[PROG_METADATA + i * PROG_ENTRY..][..PROG_ENTRY];
         let map = &e[16 + ATTACH_TARGET_MAX..];
 
         match le32(e, 0) {
-            ROLE_ATTACH => match attach_spec(spec, e) {
+            ROLE_ATTACH => match attach_spec(spec, e, &mut xdp_classes) {
                 Ok(uprobe) => nr_uprobes += u32::from(uprobe),
                 Err(()) => return -EINVAL,
             },
@@ -936,89 +1072,15 @@ unsafe fn specs_fill(specs: *mut ProgSpec, m: &[u8], nr_progs: u32, base_len: us
             _ => return -EINVAL,
         }
     }
-
-    if nr_uprobes == 0 {
-        return if m.len() == base_len { 0 } else { -EINVAL };
-    }
-    let end = m.len();
-    let mut cursor = base_len;
-    if end - cursor < UPROBE_TARGETS {
-        return -EINVAL;
-    }
-    let targets = &m[cursor..cursor + UPROBE_TARGETS];
-    cursor += UPROBE_TARGETS;
-    let nr_targets = le32(targets, 8);
-    if le32(targets, 0) != UPROBE_TARGET_MAGIC
-        || le32(targets, 4) != UPROBE_TARGET_VERSION
-        || le32(targets, 12) != 0
-        || nr_targets != nr_uprobes
-    {
-        return -EINVAL;
-    }
-    for _ in 0..nr_targets {
-        if end - cursor < UPROBE_TARGET {
-            return -EINVAL;
+    let end = if nr_uprobes != 0 {
+        match uprobe_targets(m, base_len, specs, nr_uprobes) {
+            Ok(end) => end,
+            Err(err) => return err,
         }
-        let record = &m[cursor..cursor + UPROBE_TARGET];
-        cursor += UPROBE_TARGET;
-        let prog_idx = le32(record, 0);
-        let path_len = le32(record, 4);
-        let build_id_len = le32(record, 8);
-        let nr_offsets = le32(record, 12);
-        if prog_idx >= nr_progs
-            || specs[prog_idx as usize].kind != ATTACH_UPROBE_MULTI
-            || !specs[prog_idx as usize].uprobe_path.is_null()
-            || path_len == 0
-            || path_len >= UPROBE_PATH_MAX
-            || build_id_len == 0
-            || build_id_len as usize > BUILD_ID_MAX
-            || nr_offsets == 0
-            || nr_offsets > UPROBE_OFFSETS_MAX
-        {
-            return -EINVAL;
-        }
-        let (path_len, build_id_len) = (path_len as usize, build_id_len as usize);
-        let payload_len = path_len + build_id_len + nr_offsets as usize * size_of::<u64>();
-        if end - cursor < payload_len || m[cursor] != b'/' || has_nul(&m[cursor..][..path_len]) {
-            return -EINVAL;
-        }
-        let spec = &mut specs[prog_idx as usize];
-        // SAFETY: path_len bytes of the metadata, none a NUL.
-        spec.uprobe_path = unsafe { xstrndup(m[cursor..].as_ptr().cast(), path_len) };
-        if spec.uprobe_path.is_null() {
-            return -ENOMEM;
-        }
-        spec.uprobe_path_len = path_len as u32;
-        cursor += path_len;
-        spec.build_id[..build_id_len].copy_from_slice(&m[cursor..][..build_id_len]);
-        spec.build_id_len = build_id_len as u32;
-        cursor += build_id_len;
-        // SAFETY: a count of offsets.
-        spec.uprobe_offsets =
-            unsafe { xcalloc(nr_offsets as usize, size_of::<u64>()) }.cast::<u64>();
-        if spec.uprobe_offsets.is_null() {
-            return -ENOMEM;
-        }
-        spec.nr_uprobe_offsets = nr_offsets;
-        // SAFETY: the nr_offsets offsets xcalloc() gave.
-        let offsets =
-            unsafe { core::slice::from_raw_parts_mut(spec.uprobe_offsets, nr_offsets as usize) };
-        for j in 0..offsets.len() {
-            offsets[j] = le64(m, cursor);
-            cursor += size_of::<u64>();
-            if j > 0 && offsets[j] <= offsets[j - 1] {
-                return -EINVAL;
-            }
-        }
-    }
-    if cursor != end
-        || specs
-            .iter()
-            .any(|s| s.kind == ATTACH_UPROBE_MULTI && s.uprobe_path.is_null())
-    {
-        return -EINVAL;
-    }
-    0
+    } else {
+        base_len
+    };
+    if end != m.len() { -EINVAL } else { 0 }
 }
 
 /// The programs of the metadata, `nr_progs` of them for a loader of
@@ -1095,6 +1157,15 @@ mod capi {
     use crate::ffi;
     use crate::sys::libc::Dirent;
     use crate::text::capi::name_has_suffix;
+
+    /// # Safety
+    ///
+    /// `specs` holds `nr_progs` specs.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn prog_specs_xdp_classes(specs: *const ProgSpec, nr_progs: u32) -> u32 {
+        // SAFETY: the caller's specs.
+        super::specs_xdp_classes(unsafe { ffi::slice(specs, nr_progs as usize) })
+    }
 
     /// # Safety
     ///
