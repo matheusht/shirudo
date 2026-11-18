@@ -351,7 +351,7 @@ unsafe fn find(keyring: i32, der: *const u8, der_len: usize) -> Result<Option<i3
 /// # Safety
 ///
 /// Each of `certs` holds its `len` bytes at `der`.
-unsafe fn holds_exactly(keyring: i32, certs: &[KeyringCert]) -> c_int {
+pub(crate) unsafe fn holds_exactly(keyring: i32, certs: &[KeyringCert]) -> c_int {
     let n = certs.len();
     let mut want: *mut [u8; DESC_MAX] = core::ptr::null_mut();
     let mut matched: *mut bool = core::ptr::null_mut();

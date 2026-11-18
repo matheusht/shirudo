@@ -23,8 +23,10 @@ mod image_cli;
 mod image_config;
 mod image_keys;
 mod keepalive_quote;
+mod keyring_seal;
 mod keys;
 mod mode_objects;
+mod nv_writer;
 mod register_cli;
 mod seal;
 mod seal_output;
@@ -61,6 +63,21 @@ pub(crate) fn out(text: &str) {
 pub(crate) fn err(text: &str) {
     // SAFETY: as out().
     unsafe { fwrite(text.as_ptr().cast(), 1, text.len(), stderr) };
+}
+
+/// The C library's text for `errno`.
+pub(crate) fn strerror(errno: c_int) -> String {
+    // SAFETY: the C library's text for an errno, static.
+    unsafe { CStr::from_ptr(crate::sys::libc::strerror(errno)) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// `what`, and the text of the errno of the call that just failed, to
+/// standard error, as perror() writes them.
+pub(crate) fn perror(what: &str) {
+    let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    err(&format!("{what}: {}\n", strerror(errno)));
 }
 
 /// The helper `name`'s main(): `run` of its arguments.

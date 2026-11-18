@@ -10,7 +10,7 @@
 use core::ffi::{CStr, c_int};
 use std::os::fd::AsRawFd;
 
-use super::{err, helper_main, out};
+use super::{err, helper_main, out, strerror};
 use crate::errno::EINVAL;
 use crate::util::config_image::{
     ConfigImageOpen, config_image_close, config_image_open_root, read_header,
@@ -59,12 +59,8 @@ fn run(args: &[&CStr]) -> c_int {
         _ => -EINVAL,
     };
     if ret != 0 {
-        // SAFETY: the C library's text for an errno, static.
-        let text = unsafe { CStr::from_ptr(crate::sys::libc::strerror(-ret)) };
-        err(&format!(
-            "config image: {} ({ret})\n",
-            text.to_string_lossy()
-        ));
+        let text = strerror(-ret);
+        err(&format!("config image: {} ({ret})\n", text));
     }
     c_int::from(ret != 0)
 }

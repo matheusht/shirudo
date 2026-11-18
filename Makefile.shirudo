@@ -874,15 +874,14 @@ REGISTER_LIBS := $(LIBCRYPTO_LIBS) $(LIBSSL_LIBS) $(TSS2_LIBS) \
 
 TPM_CLIENT_SRCS := testing/helper/tpm-client.c testing/helper/tpm-session.h
 
-testing/helper/test-nv-writer: testing/helper/test-nv-writer.c $(REGISTER_OBJS)
-	@printf '  CC      $@\n'
+testing/helper/test-nv-writer: $(HELPER_MAIN_DIR)/test-nv-writer.o $(VERSION_OBJ) $(LIBBPF_A) $(RUST_HELPER_LIB)
+	@printf '  LD      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(REGISTER_LIBS)
 
-testing/helper/test-keyring-seal: testing/helper/test-keyring-seal.c \
-		 $(UTIL_OBJS) $(VERSION_OBJ) $(LIBBPF_A) $(RUST_LIB)
-	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< \
-		$(filter %.o %.a,$^) \
+testing/helper/test-keyring-seal: $(HELPER_MAIN_DIR)/test-keyring-seal.o \
+		$(VERSION_OBJ) $(LIBBPF_A) $(RUST_HELPER_LIB)
+	@printf '  LD      $@\n'
+	$(Q)$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ \
 		$(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
 testing/helper/test-tpm-preopened: testing/helper/test-tpm-preopened.c \

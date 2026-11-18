@@ -12,7 +12,7 @@ use core::ffi::{CStr, c_int};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 
-use super::{err, helper_main, out};
+use super::{err, helper_main, out, strerror};
 use crate::util::crypto_openssl::sha256;
 use crate::util::keepalive::BODY_MAX;
 use crate::util::keepalive_quote::quote;
@@ -27,13 +27,6 @@ fn quote_values(quote: &str) -> Option<[&str; 3]> {
         *value = fields.next()?.strip_prefix(key)?;
     }
     fields.next().is_none().then_some(values)
-}
-
-fn strerror(e: c_int) -> String {
-    // SAFETY: the C library's text for an errno, static.
-    unsafe { CStr::from_ptr(crate::sys::libc::strerror(e)) }
-        .to_string_lossy()
-        .into_owned()
 }
 
 fn print_row(path: &str, body: &[u8]) -> Result<(), c_int> {

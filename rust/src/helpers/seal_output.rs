@@ -17,7 +17,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-use super::{err, helper_main, out};
+use super::{err, helper_main, out, strerror};
 use crate::util::seal::{SealOutput, seal_output_commit, seal_output_create};
 
 helper_main!(shirudo_helper_test_seal_output, run);
@@ -89,12 +89,11 @@ fn run(args: &[&CStr]) -> c_int {
             _ => Ok(()),
         };
         if let Err(e) = moved.and_then(|()| fail_writes()) {
-            // SAFETY: the C library's text for an errno, static.
-            let text = unsafe { CStr::from_ptr(crate::sys::libc::strerror(-errno(e))) };
+            let text = strerror(-errno(e));
             err(&format!(
                 "test-seal-output: {}: {}\n",
                 String::from_utf8_lossy(how),
-                text.to_string_lossy()
+                text
             ));
         }
         // SAFETY: the output just created, its path still main()'s.
