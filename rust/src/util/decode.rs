@@ -15,8 +15,8 @@ use core::ffi::{CStr, c_char, c_int, c_void};
 use core::ptr;
 use std::ffi::CString;
 
-use crate::errno::{E2BIG, EINVAL, ENAMETOOLONG, ENODATA, ENOENT, ENOMEM, ERANGE};
-use crate::sys::libc::{close, explicit_bzero, fwrite, snprintf, stderr};
+use crate::errno::{E2BIG, EINVAL, ENAMETOOLONG, ENODATA, ENOENT, ENOMEM, ERANGE, ESTALE};
+use crate::sys::libc::{close, explicit_bzero, snprintf};
 use crate::sys::luajit::{
     LUA_MASKCOUNT, LUA_REGISTRYINDEX, LUA_TBOOLEAN, LUA_TFUNCTION, LUA_TNIL, LUA_TNUMBER,
     LUA_TSTRING, LUA_TTABLE, LUAJIT_MODE_ENGINE, LUAJIT_MODE_OFF, LuaAlloc, LuaDebug, LuaState,
@@ -32,11 +32,13 @@ use crate::sys::luajit::{
 };
 use crate::sys::upatch_maps::MapView;
 use crate::text::cstr;
+use crate::util::chain::memneq_explicit;
 use crate::util::json::JsonEmit;
 use crate::util::seal::seal_open_read;
 use crate::util::upatch::{
     self, DecoderView, Upatch, upatch_close, upatch_decoder_view, upatch_open, upatch_open_fd,
 };
+use crate::util::upatch_verify::payload_digest;
 
 const INSN_LIMIT: c_int = 1_000_000;
 const HOOK_COUNT: c_int = 10_000;
@@ -55,11 +57,6 @@ const LANG_LUA: u32 = 1;
 const INPUT_MAP_V1: u32 = 1;
 const EXPORT_LOG: u32 = 1;
 const EXPORT_METRIC: u32 = 2;
-
-fn eprint(text: &[u8]) {
-    // SAFETY: the bytes, to the C library's stderr.
-    unsafe { fwrite(text.as_ptr().cast(), 1, text.len(), stderr) };
-}
 
 /// isspace() of the C locale.
 fn is_c_space(c: u8) -> bool {
@@ -1029,25 +1026,60 @@ unsafe fn get_entrypoint(l: *mut LuaState, entrypoint: &CStr) -> bool {
     }
 }
 
-/// The closure the decoder runs in: its entrypoint, upvalue 2, called
-/// with the input of the view, upvalue 1.
-unsafe extern "C-unwind" fn call_decoder(l: *mut LuaState) -> c_int {
-    // SAFETY: the closure's state and upvalues.
-    unsafe {
-        let view = &*lua_touserdata(l, lua_upvalueindex(1)).cast::<MapView>();
-        lua_pushvalue(l, lua_upvalueindex(2));
-        push_map_input(l, view);
-        lua_call(l, 1, 1);
-    }
-    1
+/// What the closure a decoder runs in reads and writes.
+struct Call<'a> {
+    view: &'a MapView,
+    e: &'a mut JsonEmit,
+    otel: bool,
+    ret: c_int,
 }
 
-fn error_message(l: *mut LuaState) -> String {
-    // SAFETY: the state, with the error on top.
-    unsafe { to_bytes(l, -1) }.map_or_else(
-        || "unknown Lua error".into(),
-        |m| String::from_utf8_lossy(m).into_owned(),
+/// The closure the decoder runs in: its entrypoint, upvalue 2, called
+/// with the input of the view of the call, upvalue 1. The result is
+/// encoded under the same pcall, as that may run out of memory.
+unsafe extern "C-unwind" fn call_decoder(l: *mut LuaState) -> c_int {
+    // SAFETY: the closure's state and upvalues, the call live across the
+    // pcall that runs this.
+    unsafe {
+        let call = &mut *lua_touserdata(l, lua_upvalueindex(1)).cast::<Call<'_>>();
+        lua_pushvalue(l, lua_upvalueindex(2));
+        push_map_input(l, call.view);
+        lua_call(l, 1, 1);
+        call.ret = if call.otel {
+            otel_value(l, -1, call.e, 0)
+        } else {
+            json_value(l, -1, call.e, 0)
+        };
+    }
+    0
+}
+
+fn log_err(text: &[u8]) {
+    let text = CString::new(
+        text.iter()
+            .copied()
+            .filter(|&c| c != 0)
+            .collect::<Vec<u8>>(),
     )
+    .unwrap_or_default();
+    // SAFETY: a "%s" format with a C string.
+    unsafe { crate::log::log_c!(crate::log::err, c"%s".as_ptr(), text.as_ptr()) };
+}
+
+/// The error on top of the state, under `what`. The message is the
+/// decoder's and may carry what a map recorded, so it is cut to 255 bytes
+/// and its control characters replaced.
+fn report(l: *mut LuaState, what: &str) {
+    // SAFETY: the state, with the error on top; a number is not shown.
+    let message = unsafe {
+        (lua_type(l, -1) == LUA_TSTRING)
+            .then(|| to_bytes(l, -1))
+            .flatten()
+    };
+    let message = message.unwrap_or(b"unknown Lua error");
+    let mut shown = cstr(message)[..cstr(message).len().min(255)].to_vec();
+    crate::text::sanitize(&mut shown, false);
+    log_err(&[b"upatch map: ", what.as_bytes(), b": ", &shown].concat());
 }
 
 thread_local! {
@@ -1061,19 +1093,30 @@ unsafe extern "C-unwind" fn budget_hook(l: *mut LuaState, _ar: *mut LuaDebug) {
         b.get()
     });
     if left <= 0 {
+        // pcall() catches the error, so once the budget is spent every
+        // instruction raises it again: no protected call runs past it.
         // SAFETY: the hooked state; this raises.
-        unsafe { luaL_error(l, c"decoder instruction limit exceeded".as_ptr()) };
+        unsafe {
+            lua_sethook(l, Some(budget_hook), LUA_MASKCOUNT, 1);
+            luaL_error(l, c"decoder instruction limit exceeded".as_ptr());
+        }
     }
 }
 
 /// The host API: the slot methods and the `shirudo` table, with the
-/// globals that reach outside the sandbox removed.
+/// globals that reach outside the sandbox or past its budget removed.
+/// LuaJIT runs a finalizer with hooks off, so newproxy(), which makes a
+/// userdata that takes one, would run code past the budget, and so does
+/// the handler xpcall() calls for the error the budget hook raises, from
+/// inside the hook. A pattern match is one C call the count hook never
+/// interrupts, and backtracks for as long as the subject, a string a map
+/// recorded, makes it. print() writes where --json does.
 ///
 /// # Safety
 ///
 /// `l` is a state with its libraries open.
 unsafe fn install_host_api(l: *mut LuaState) {
-    const DENY: [&CStr; 13] = [
+    const DENY: [&CStr; 16] = [
         c"io",
         c"os",
         c"package",
@@ -1087,7 +1130,11 @@ unsafe fn install_host_api(l: *mut LuaState) {
         c"loadstring",
         c"module",
         c"collectgarbage",
+        c"newproxy",
+        c"xpcall",
+        c"print",
     ];
+    const PATTERNS: [&CStr; 4] = [c"find", c"match", c"gmatch", c"gsub"];
     type Fns<'a> = &'a [(&'a CStr, crate::sys::luajit::LuaCFunction)];
     // SAFETY: the caller's state.
     unsafe {
@@ -1095,6 +1142,12 @@ unsafe fn install_host_api(l: *mut LuaState) {
             lua_pushnil(l);
             lua_setglobal(l, name.as_ptr());
         }
+        lua_getglobal(l, c"string".as_ptr());
+        for name in PATTERNS {
+            lua_pushnil(l);
+            lua_setfield(l, -2, name.as_ptr());
+        }
+        lua_pop(l, 1);
         let set = |fns: Fns<'_>| {
             for (name, f) in fns {
                 lua_pushcfunction(l, *f);
@@ -1111,6 +1164,9 @@ unsafe fn install_host_api(l: *mut LuaState) {
             (c"cstring", slot_cstring),
         ]);
         lua_setfield(l, -2, c"__index".as_ptr());
+        // A __gc a decoder added to it would run with hooks off.
+        lua_pushstring(l, SLOT_MT.as_ptr());
+        lua_setfield(l, -2, c"__metatable".as_ptr());
         lua_pop(l, 1);
         lua_newtable(l);
         set(&[
@@ -1205,38 +1261,40 @@ pub(crate) fn run(d: &DecoderView, v: &MapView, otel: bool, max: usize) -> Resul
         ) != 0
             || lua_pcall(l, 0, 1, 0) != 0
         {
-            eprint(format!("upatch map: decoder load failed: {}\n", error_message(l)).as_bytes());
+            report(l, "decoder load failed");
             -EINVAL
         } else if !get_entrypoint(l, &entrypoint) {
-            eprint(
-                format!(
-                    "upatch map: decoder entrypoint '{}' not found\n",
-                    entrypoint.to_string_lossy()
-                )
-                .as_bytes(),
+            log_err(
+                &[
+                    &b"upatch map: decoder entrypoint "[..],
+                    entrypoint.to_bytes(),
+                    b" not found",
+                ]
+                .concat(),
             );
             -ENOENT
         } else {
-            lua_pushlightuserdata(l, ptr::from_ref(v).cast_mut().cast());
+            let mut call = Call {
+                view: v,
+                e: &mut e,
+                otel,
+                ret: 0,
+            };
+            lua_pushlightuserdata(l, (&raw mut call).cast());
             lua_pushvalue(l, -2);
             lua_pushcclosure(l, call_decoder, 2);
             lua_remove(l, -2);
-            if lua_pcall(l, 0, 1, 0) != 0 {
-                eprint(format!("upatch map: decoder failed: {}\n", error_message(l)).as_bytes());
+            if lua_pcall(l, 0, 0, 0) != 0 {
+                report(l, "decoder failed");
                 -EINVAL
             } else {
-                let ret = if otel {
-                    otel_value(l, -1, &mut e, 0)
-                } else {
-                    json_value(l, -1, &mut e, 0)
-                };
-                if ret != 0 {
-                    eprint(
-                        format!("upatch map: decoder encode failed: {}\n", strerror(ret))
+                if call.ret != 0 {
+                    log_err(
+                        format!("upatch map: decoder encode failed: {}", strerror(call.ret))
                             .as_bytes(),
                     );
                 }
-                ret
+                call.ret
             }
         }
     };
@@ -1278,8 +1336,9 @@ impl Drop for Opened {
 
 /// The artifact the decoders come from, opened as sealed state when it
 /// is the archive's: an entry there that is not shirudo's own is refused
-/// rather than run, signed or not.
-fn open_artifact(path: &CStr, archived: bool) -> Result<Opened, c_int> {
+/// rather than run, signed or not, and so is an archive whose bytes are
+/// not the payload the pin directory says was loaded.
+fn open_artifact(path: &CStr, archived: bool, v: &MapView) -> Result<Opened, c_int> {
     // SAFETY: an all-zero container is a closed one.
     let mut u = Opened(Box::new(unsafe { core::mem::zeroed() }));
     let ret = if !archived {
@@ -1300,6 +1359,24 @@ fn open_artifact(path: &CStr, archived: bool) -> Result<Opened, c_int> {
     if ret != 0 {
         core::mem::forget(u);
         return Err(ret);
+    }
+    if archived {
+        let loaded = payload_digest(&u.0).map(|digest| {
+            v.has_payload
+                && !memneq_explicit(&digest, &v.payload)
+                && !memneq_explicit(&u.0.hdr.payload_sha256, &v.payload)
+        })?;
+        if !loaded {
+            log_err(
+                &[
+                    &b"upatch map: the archive of "[..],
+                    cstr(&v.upatch),
+                    b" is not the upatch loaded; its decoders do not run",
+                ]
+                .concat(),
+            );
+            return Err(-ESTALE);
+        }
     }
     Ok(u)
 }
@@ -1325,7 +1402,7 @@ fn decode_open(
     if !upatch::name_valid(Some(cstr(&v.upatch))) {
         return Err(-EINVAL);
     }
-    let u = open_artifact(path, archived)?;
+    let u = open_artifact(path, archived, v)?;
     match decoders(&u).find(|d| matches(d, v)) {
         Some(d) => run(&d, v, otel, max),
         None => Err(-ENODATA),
@@ -1351,7 +1428,7 @@ pub(crate) fn signal(v: &MapView) -> Result<u32, c_int> {
         return Err(-EINVAL);
     }
     let path = archive_path(v)?;
-    let u = open_artifact(&path, true)?;
+    let u = open_artifact(&path, true, v)?;
     decoders(&u)
         .find(|d| matches(d, v))
         .map(|d| d.export_signal)

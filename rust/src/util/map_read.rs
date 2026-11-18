@@ -36,6 +36,7 @@ use crate::util::serializer::{
     SerialChunk, chunk_validate, new_invocation_id, serializer_lock_acquire,
 };
 use crate::util::upatch::name_from_pin;
+use crate::util::upatch_pins::pin_payload;
 use crate::util::upatch_resolve::{BPFFS_UPATCHES_DIR, pin_path, resolve_location};
 
 /// What bpf/lib/serializer.h fixes of the serializer protocol.
@@ -719,6 +720,11 @@ pub(crate) fn read(upatch: &[u8], map: &[u8], cap: u32, flags: u32, out: &mut Ma
                 .wrapping_mul(1_000_000_000)
                 .wrapping_add(st.ctime_nsec() as u64);
         }
+    }
+    // What a decoder export checks the archive against.
+    if let Ok(payload) = pin_payload(upatch) {
+        out.payload = payload;
+        out.has_payload = true;
     }
 
     match try_read_serialized(upatch, map, flags, out) {
