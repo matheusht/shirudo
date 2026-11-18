@@ -80,16 +80,7 @@ pub struct ChainStatus {
     pub(crate) init: EventlogInit,
 }
 
-/// The live register as reported directly by the TPM.
-#[repr(C)]
-pub struct ChainLive {
-    name: [u8; NAME_LEN],
-    reset_count: u32,
-    value: [u8; DIGEST_LEN],
-}
-
 const _: () = assert!(size_of::<ChainLive>() == 72);
-
 const _: () = assert!(size_of::<MeasuredUpatch>() == 322);
 const _: () = assert!(size_of::<ChainInitInfo>() == 696);
 const _: () = assert!(core::mem::offset_of!(ChainInitInfo, reset_count) == 388);
@@ -954,39 +945,53 @@ unsafe fn read(out: *mut u8) -> c_int {
     if ret != 0 { -ENODEV } else { 0 }
 }
 
-/// The live register name, reset count and value for the remaining C caller.
-fn live(out: &mut ChainLive) -> c_int {
-    // SAFETY: all-zero bytes form a valid output structure.
-    unsafe { ptr::from_mut(out).write_bytes(0, 1) };
+/// The register as the TPM reports it, over the session init pinned.
+#[repr(C)]
+pub(crate) struct ChainLive {
+    pub(crate) name: [u8; NAME_LEN],
+    pub(crate) reset_count: u32,
+    pub(crate) value: [u8; DIGEST_LEN],
+}
+
+/// The live register's name, value and TPM reset count: -ENODEV when no
+/// TPM answers or the index is not written this reset, -EIO when a read
+/// fails.
+pub(crate) fn live() -> Result<ChainLive, c_int> {
     let mut tpm: *mut Tpm = ptr::null_mut();
-    // SAFETY: room for a connection.
-    if unsafe { tpm_open(&mut tpm) } != 0 {
-        return -ENODEV;
-    }
+    let mut out = ChainLive {
+        name: [0; NAME_LEN],
+        reset_count: 0,
+        value: [0; DIGEST_LEN],
+    };
     let mut nv: TpmNvInfo = zeroed();
-    // SAFETY: the TPM connection and output rooms.
-    let mut ret = unsafe {
-        if tpm_reset_count(tpm, &mut out.reset_count) != 0
+
+    // SAFETY: where tpm_open() leaves the connection.
+    if unsafe { tpm_open(&mut tpm) } != 0 {
+        return Err(-ENODEV);
+    }
+    // SAFETY: the connection, rooms for what it reads, and the
+    // connection closed once.
+    let ret = unsafe {
+        let mut ret = if tpm_reset_count(tpm, &mut out.reset_count) != 0
             || tpm_nv_info(tpm, NV_INDEX, &mut nv) != 0
         {
             -EIO
         } else {
             0
+        };
+        if ret == 0 && (!nv.defined || !nv.written || nv.name_len != NAME_LEN) {
+            ret = -ENODEV;
         }
+        if ret == 0 {
+            out.name.copy_from_slice(&nv.name[..NAME_LEN]);
+            if tpm_nv_read(tpm, NV_INDEX, out.value.as_mut_ptr()) != 0 {
+                ret = -EIO;
+            }
+        }
+        tpm_close(tpm);
+        ret
     };
-    if ret == 0 && (!nv.defined || !nv.written || nv.name_len != NAME_LEN) {
-        ret = -ENODEV;
-    }
-    if ret == 0 {
-        out.name.copy_from_slice(&nv.name);
-        // SAFETY: the TPM connection and room for the value.
-        if unsafe { tpm_nv_read(tpm, NV_INDEX, out.value.as_mut_ptr()) } != 0 {
-            ret = -EIO;
-        }
-    }
-    // SAFETY: the connection opened above, closed once.
-    unsafe { tpm_close(tpm) };
-    ret
+    if ret != 0 { Err(ret) } else { Ok(out) }
 }
 
 /// Whether a TPM answers with the register written: chain_bound().
@@ -1240,8 +1245,19 @@ mod capi {
     /// `out` is room for the live register.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn chain_live(out: *mut ChainLive) -> c_int {
-        // SAFETY: the caller passes room for the structure.
-        super::live(unsafe { &mut *out })
+        // SAFETY: the caller provides room for the result.
+        unsafe {
+            match super::live() {
+                Ok(value) => {
+                    out.write(value);
+                    0
+                }
+                Err(err) => {
+                    out.write_bytes(0, 1);
+                    err
+                }
+            }
+        }
     }
 
     /// # Safety

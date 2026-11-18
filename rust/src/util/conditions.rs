@@ -7,7 +7,7 @@
 
 use core::ffi::{CStr, c_char, c_int};
 
-use crate::errno::{EINPROGRESS, EKEYREJECTED, ENOENT, ESTALE};
+use crate::errno::{EBADMSG, EINPROGRESS, EKEYREJECTED, ENOENT, ESTALE};
 use crate::sys::libc::{printf, snprintf, strerror};
 use crate::text::strscpy;
 
@@ -250,6 +250,12 @@ pub(crate) fn conditions(i: &ConditionsInput, out: &mut [Condition]) -> usize {
         c.kind = c"UpatchesMeasured".as_ptr();
         if i.pins_rc == -ENOENT {
             set_detail!(c, WARN, c"no record of this boot to check the pins against");
+        } else if i.pins_rc == -EBADMSG {
+            set_detail!(
+                c,
+                ALERT,
+                c"this boot's records do not fold to the measurement register"
+            );
         } else if i.pins_rc != 0 {
             // SAFETY: a call that takes no pointer.
             let reason = unsafe { strerror(-i.pins_rc) };
@@ -337,6 +343,7 @@ pub(crate) fn status_verdict(i: &ConditionsInput) -> &'static CStr {
         c"unparseable"
     } else if (i.cm_seen != 0 && i.chain_matches == 0)
         || i.pins_unmeasured != 0
+        || i.pins_rc == -EBADMSG
         || keyring_tampered(i)
         || config_untrusted(i)
     {
@@ -372,6 +379,8 @@ pub(crate) unsafe fn status_reason(i: &ConditionsInput, buf: &mut [u8]) {
             b"live register differs from the eventlog replay"
         } else if i.pins_unmeasured != 0 {
             b"a upatch is pinned or archived without a record of this boot"
+        } else if i.pins_rc == -EBADMSG {
+            b"this boot's records do not fold to the measurement register"
         } else if config_untrusted(i) {
             b"the selected config cannot be verified against its records"
         } else if i.ksp_seen != 0 && i.keyring_present == 0 {

@@ -25,7 +25,7 @@ use std::os::unix::fs::MetadataExt;
 use super::list::{BPFFS_UPATCHES_DIR, UPATCHES_DIR};
 use super::{Opt, help, hex, log_audit, log_err, log_info, log_warn, opt, strerr};
 use crate::errno::{
-    EACCES, EINVAL, ENAMETOOLONG, ENODEV, ENOENT, ENOSPC, EOPNOTSUPP, EPERM, ESTALE,
+    EACCES, EBADMSG, EINVAL, ENAMETOOLONG, ENODEV, ENOENT, ENOSPC, EOPNOTSUPP, EPERM, ESTALE,
 };
 use crate::heap::xfree;
 use crate::sys::libc::{close, errno, getxattr};
@@ -485,6 +485,27 @@ fn undo_unmeasured(rep: &mut OpReport, op: &[u8]) -> Result<(), ()> {
     let mut set: *mut MeasuredSet = core::ptr::null_mut();
     // SAFETY: room for the set.
     let ret = unsafe { measured_set_boot(&mut set) };
+    // The records count only as the register vouches for them: the
+    // eventlog and the boot ID are paths root can bind over in a
+    // namespace of its own.
+    if ret == -EBADMSG {
+        log_err(
+            &[
+                b"upatch ",
+                op,
+                b": this boot's eventlog records do not fold to the measurement register; refused, nothing changed",
+            ]
+            .concat(),
+        );
+        fail(
+            rep,
+            c"tpm_extend",
+            c"tampered",
+            ret,
+            b"this boot's records do not fold to the register",
+        );
+        return Err(());
+    }
     if ret != 0 {
         log_err(
             &[

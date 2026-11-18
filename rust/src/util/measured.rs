@@ -14,9 +14,7 @@ use crate::heap::{libc_free, xcalloc, xfree, xmalloc};
 use crate::sys::libc::{Dirent, PATH_MAX, alphasort, errno, getxattr, scandir, strcmp, strnlen};
 use crate::text::{at, strscpy, strsprintf};
 use crate::util::chain::MeasuredUpatch;
-use crate::util::eventlog::{
-    UPATCH_INIT, UPATCH_UNLOAD, eventlog_boot_upatches, eventlog_upatches,
-};
+use crate::util::eventlog::{UPATCH_INIT, UPATCH_UNLOAD, eventlog_upatches};
 use crate::util::hex::hex_encode;
 use crate::util::seal::seal_owns;
 use crate::util::upatch::{
@@ -164,7 +162,7 @@ unsafe fn fold(out: *mut *mut MeasuredSet, all: bool) -> c_int {
         if all {
             eventlog_upatches(Some(measured_event), s.cast())
         } else {
-            eventlog_boot_upatches(Some(measured_event), s.cast())
+            verified::upatches(measured_event, s.cast())
         }
     };
     if ret == -ENOENT && all {
@@ -618,5 +616,314 @@ mod capi {
     ) -> c_int {
         // SAFETY: the caller passes a set and its function.
         unsafe { super::unmeasured_archives(s, cb, ctx) }
+    }
+}
+
+/// This boot's records as the TPM vouches for them.
+mod verified {
+    use core::ffi::{c_int, c_void};
+    use std::ffi::CString;
+
+    use super::{MEASURED_MAX, set_add};
+    use crate::errno::{EBADMSG, EINVAL, ENOENT, ENOMEM};
+    use crate::text::cstr;
+    use crate::util::chain::{
+        self, ChainLive, MeasuredUpatch, chain_fold, chain_init_event, chain_key_event,
+        chain_tree_event, chain_upatch_event, memneq_explicit,
+    };
+    use crate::util::eventlog::{self, upatches_record};
+    use crate::util::hex;
+    use crate::util::json::{JsonArray, JsonField, parse_schema};
+    use crate::util::upatch::{NAME_MAX, PAYLOAD_HASH_LEN, member_valid};
+
+    const TPM_NAME_LEN: usize = 34;
+    type Callback = unsafe extern "C" fn(
+        c_int,
+        *const core::ffi::c_char,
+        *const core::ffi::c_char,
+        *mut c_void,
+    ) -> c_int;
+
+    /// Whether `line` is an init record of the register the TPM reports
+    /// now: its index's name and the TPM's reset count.
+    fn init_of_live(line: &[u8], live: &ChainLive) -> bool {
+        let mut ty = [0u8; 8];
+        let mut name_hex = [0u8; 2 * TPM_NAME_LEN + 1];
+        let mut reset: i64 = -1;
+        let mut f = [
+            JsonField::string(c"type", ty.as_mut_ptr(), ty.len()),
+            JsonField::string(c"nv_name", name_hex.as_mut_ptr(), name_hex.len()),
+            JsonField::int(c"tpm_reset_count", &raw mut reset),
+        ];
+        // SAFETY: the line, and fields over locals that outlive the parse.
+        if unsafe { parse_schema(line, f.as_mut_ptr(), f.len()) } != 0
+            || cstr(&ty) != b"init"
+            || !f[1].seen()
+            || !f[2].seen()
+            || reset != i64::from(live.reset_count)
+        {
+            return false;
+        }
+        let text = cstr(&name_hex);
+        let mut name = [0u8; TPM_NAME_LEN];
+        text.len() == 2 * TPM_NAME_LEN && hex::decode(text, &mut name).is_ok() && name == live.name
+    }
+
+    /// The fields of a record that give its event.
+    struct Record {
+        ty: [u8; 32],
+        digest_hex: [u8; 65],
+        cert_hex: [u8; 65],
+        tree_root_hex: [u8; 65],
+        key_hex: [u8; 65],
+        operation: [u8; 72],
+        name: [u8; NAME_MAX + 1],
+        payload_hex: [u8; 2 * PAYLOAD_HASH_LEN + 1],
+        seq: i64,
+        set: Vec<MeasuredUpatch>,
+        n: usize,
+        init: bool,
+        upatch: bool,
+        key: bool,
+        tree: bool,
+    }
+
+    unsafe extern "C" fn set_entry(ctx: *mut c_void) -> c_int {
+        // SAFETY: the record the parse is given.
+        let r = unsafe { &mut *ctx.cast::<Record>() };
+        // SAFETY: the record's set of MEASURED_MAX members, its count and
+        // two C strings.
+        let ret = unsafe {
+            set_add(
+                r.set.as_mut_ptr(),
+                &mut r.n,
+                MEASURED_MAX,
+                r.name.as_ptr().cast(),
+                r.payload_hex.as_ptr().cast(),
+            )
+        };
+        r.name[0] = 0;
+        r.payload_hex[0] = 0;
+        ret
+    }
+
+    fn parse(line: &[u8], r: &mut Record) -> c_int {
+        let ctx: *mut c_void = core::ptr::from_mut(r).cast();
+        let mut entry = [
+            JsonField::string(c"name", r.name.as_mut_ptr(), r.name.len()),
+            JsonField::string(
+                c"payload_sha256",
+                r.payload_hex.as_mut_ptr(),
+                r.payload_hex.len(),
+            ),
+        ];
+        let mut upatch = [
+            JsonField::string(c"name", r.name.as_mut_ptr(), r.name.len()),
+            JsonField::string(
+                c"payload_sha256",
+                r.payload_hex.as_mut_ptr(),
+                r.payload_hex.len(),
+            ),
+        ];
+        let mut key = [JsonField::string(
+            c"cert_sha256",
+            r.key_hex.as_mut_ptr(),
+            r.key_hex.len(),
+        )];
+        let mut tree = [
+            JsonField::int(c"seq", &raw mut r.seq),
+            JsonField::string(
+                c"operation_digest",
+                r.operation.as_mut_ptr(),
+                r.operation.len(),
+            ),
+        ];
+        let mut set = JsonArray::new(set_entry, ctx);
+        let mut f = [
+            JsonField::string(c"type", r.ty.as_mut_ptr(), r.ty.len()),
+            JsonField::string(c"digest", r.digest_hex.as_mut_ptr(), r.digest_hex.len()),
+            JsonField::string(c"cert_sha256", r.cert_hex.as_mut_ptr(), r.cert_hex.len()),
+            JsonField::string(
+                c"tree_root",
+                r.tree_root_hex.as_mut_ptr(),
+                r.tree_root_hex.len(),
+            ),
+            JsonField::array(c"set", &raw mut set, entry.as_mut_ptr(), entry.len()),
+            JsonField::object(c"upatch", upatch.as_mut_ptr(), upatch.len()),
+            JsonField::object(c"key", key.as_mut_ptr(), key.len()),
+            JsonField::object(c"tree", tree.as_mut_ptr(), tree.len()),
+        ];
+        // SAFETY: the line, and fields over the record and locals that
+        // outlive the parse.
+        if unsafe { parse_schema(line, f.as_mut_ptr(), f.len()) } != 0
+            || !f[0].seen()
+            || !f[1].seen()
+        {
+            return -EINVAL;
+        }
+        r.init = f[2].seen() && f[3].seen() && f[4].seen();
+        r.upatch = f[5].seen();
+        r.key = key[0].seen();
+        r.tree = tree[0].seen() && tree[1].seen() && r.seq > 0;
+        0
+    }
+
+    fn decode32(text: &[u8]) -> Result<[u8; 32], c_int> {
+        let mut out = [0u8; 32];
+        hex::decode(cstr(text), &mut out).map_err(|_| -EINVAL)?;
+        Ok(out)
+    }
+
+    /// The event the fields of `r` give, as the extend that wrote it made
+    /// it; a type no writer uses is refused.
+    fn event_of(r: &mut Record) -> Result<[u8; 32], c_int> {
+        let mut event = [0u8; 32];
+        let ty = cstr(&r.ty);
+        // SAFETY: digests and C strings of the record, and room for the
+        // event.
+        let ret = unsafe {
+            match ty {
+                b"init" => {
+                    if !r.init {
+                        return Err(-EINVAL);
+                    }
+                    let (cert, root) = (decode32(&r.cert_hex)?, decode32(&r.tree_root_hex)?);
+                    let mut set_digest = [0u8; 32];
+                    chain_init_event(
+                        cert.as_ptr(),
+                        r.set.as_mut_ptr(),
+                        r.n,
+                        root.as_ptr(),
+                        set_digest.as_mut_ptr(),
+                        event.as_mut_ptr(),
+                    )
+                }
+                b"upatch_load" | b"upatch_unload" => {
+                    if !r.upatch
+                        || !member_valid(r.name.as_ptr().cast(), r.payload_hex.as_ptr().cast())
+                    {
+                        return Err(-EINVAL);
+                    }
+                    let payload = decode32(&r.payload_hex)?;
+                    let tag = if ty == b"upatch_load" {
+                        c"shirudo-upatch"
+                    } else {
+                        c"shirudo-unload"
+                    };
+                    chain_upatch_event(
+                        tag.as_ptr(),
+                        r.name.as_ptr().cast(),
+                        payload.as_ptr(),
+                        event.as_mut_ptr(),
+                    )
+                }
+                b"key_revoke" => {
+                    if !r.key {
+                        return Err(-EINVAL);
+                    }
+                    let cert = decode32(&r.key_hex)?;
+                    chain_key_event(
+                        c"shirudo-key-revoke".as_ptr(),
+                        cert.as_ptr(),
+                        event.as_mut_ptr(),
+                    )
+                }
+                b"tree_op" => {
+                    let operation = crate::util::bpm_tree::digest_bytes(&r.operation);
+                    let (true, Some(operation)) = (r.tree, operation) else {
+                        return Err(-EINVAL);
+                    };
+                    chain_tree_event(r.seq, operation.as_ptr(), event.as_mut_ptr())
+                }
+                _ => return Err(-EINVAL),
+            }
+        };
+        if ret != 0 { Err(ret) } else { Ok(event) }
+    }
+
+    /// The event the fields of a record give and the digest the record
+    /// claims for it: a record counts for what it says only where the two
+    /// agree.
+    fn record_event(line: &[u8]) -> Result<([u8; 32], [u8; 32]), c_int> {
+        let mut set = Vec::new();
+        set.try_reserve_exact(MEASURED_MAX).map_err(|_| -ENOMEM)?;
+        // SAFETY: an all-zero member is an empty one.
+        set.resize_with(MEASURED_MAX, || unsafe { core::mem::zeroed() });
+        let mut r = Box::new(Record {
+            ty: [0; 32],
+            digest_hex: [0; 65],
+            cert_hex: [0; 65],
+            tree_root_hex: [0; 65],
+            key_hex: [0; 65],
+            operation: [0; 72],
+            name: [0; NAME_MAX + 1],
+            payload_hex: [0; 2 * PAYLOAD_HASH_LEN + 1],
+            seq: 0,
+            set,
+            n: 0,
+            init: false,
+            upatch: false,
+            key: false,
+            tree: false,
+        });
+        match parse(line, &mut r) {
+            0 => {}
+            err => return Err(err),
+        }
+        let digest = decode32(&r.digest_hex)?;
+        Ok((event_of(&mut r)?, digest))
+    }
+
+    /// eventlog_boot_upatches() for the records the TPM vouches for: the
+    /// boot starts at the last init record that names the live index and
+    /// the TPM's reset count, every record's digest is derived from its
+    /// fields, and the records fold to the value the TPM reports. `cb`
+    /// sees the events as the walk goes; only a return of 0 makes them
+    /// this boot's. -ENOENT without such an init record, -EBADMSG when a
+    /// record or the fold does not match, -ENODEV without a register this
+    /// reset.
+    pub(super) fn upatches(cb: Callback, ctx: *mut c_void) -> c_int {
+        let live = match chain::live() {
+            Ok(l) => l,
+            Err(err) => return err,
+        };
+        let log = match eventlog::read_records() {
+            Ok(l) => l,
+            Err(err) => return err,
+        };
+        let lines: Vec<&[u8]> = log
+            .split_inclusive(|&c| c == b'\n')
+            .filter_map(|l| l.strip_suffix(b"\n"))
+            .collect();
+        let Some(anchor) = lines.iter().rposition(|l| init_of_live(l, &live)) else {
+            return -ENOENT;
+        };
+        let mut register = [0u8; 32];
+        for (k, line) in lines[anchor..].iter().enumerate() {
+            let (event, digest) = match record_event(line) {
+                Ok(e) => e,
+                Err(err) => return err,
+            };
+            if memneq_explicit(&event, &digest) {
+                return -EBADMSG;
+            }
+            // SAFETY: the register and the event, digests both.
+            let ret = unsafe { chain_fold(register.as_mut_ptr(), event.as_ptr()) };
+            if ret != 0 {
+                return ret;
+            }
+            let Ok(line) = CString::new(*line) else {
+                return -EINVAL;
+            };
+            // SAFETY: the caller's callback and context.
+            let ret = unsafe { upatches_record(&line, k == 0, Some(cb), ctx) };
+            if ret != 0 {
+                return ret;
+            }
+        }
+        if memneq_explicit(&register, &live.value) {
+            return -EBADMSG;
+        }
+        0
     }
 }

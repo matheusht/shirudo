@@ -12,11 +12,11 @@ mod records;
 
 pub(crate) use capi::{
     eventlog_adopt_pending, eventlog_append, eventlog_append_to, eventlog_boot_id,
-    eventlog_boot_init, eventlog_boot_lines, eventlog_boot_upatches, eventlog_lock, eventlog_path,
-    eventlog_pending_path, eventlog_record_open, eventlog_replay, eventlog_timestamp,
-    eventlog_tree_op_measured, eventlog_unlock, eventlog_upatches, eventlog_would_exceed,
+    eventlog_boot_init, eventlog_boot_lines, eventlog_lock, eventlog_path, eventlog_pending_path,
+    eventlog_record_open, eventlog_replay, eventlog_timestamp, eventlog_tree_op_measured,
+    eventlog_unlock, eventlog_upatches, eventlog_would_exceed,
 };
-pub(crate) use records::{EventlogInit, UPATCH_INIT, UPATCH_UNLOAD};
+pub(crate) use records::{EventlogInit, UPATCH_INIT, UPATCH_UNLOAD, upatches_record};
 
 use core::ffi::{CStr, c_int};
 
@@ -126,6 +126,27 @@ impl FileBuf {
         Ok(FileBuf { ptr, len })
     }
 
+    /// The file open at `fd`, read whole, `label` naming it in a refusal.
+    fn read_fd(fd: std::os::fd::OwnedFd, label: &CStr) -> Result<FileBuf, c_int> {
+        let mut ptr: *mut u8 = core::ptr::null_mut();
+        let mut len = 0;
+        // SAFETY: the descriptor, a C string, and the two outputs
+        // read_fd() fills; the descriptor closes after.
+        let ret = unsafe {
+            crate::util::io::read_fd(
+                std::os::fd::AsRawFd::as_raw_fd(&fd),
+                label.as_ptr(),
+                MAX_BYTES,
+                (&raw mut ptr).cast(),
+                &mut len,
+            )
+        };
+        if ret != 0 {
+            return Err(ret);
+        }
+        Ok(FileBuf { ptr, len })
+    }
+
     /// The bytes and the NUL after them.
     fn bytes(&mut self) -> &mut [u8] {
         // SAFETY: read_file() gave len bytes and a NUL, which only this
@@ -185,12 +206,40 @@ impl Drop for Log {
     }
 }
 
+/// The record the initrd left in /run/shirudo, as sealed state where the
+/// log is: a /run of root's making, in a mount namespace of its own,
+/// would otherwise hand each reader records the register never saw, and
+/// have the next append adopt them into the sealed log. A host without
+/// the seal, as the register tests run on, labels neither.
+fn read_pending() -> Result<FileBuf, c_int> {
+    let pending = pending_path();
+
+    if pending != DEFAULT_PENDING_PATH {
+        return FileBuf::read(pending);
+    }
+    let fd = if crate::util::seal::parent_labeled(path().to_bytes()) {
+        crate::util::seal::open_sealed(pending.to_bytes())?
+    } else {
+        crate::util::seal::open_owned(pending.to_bytes())?
+    };
+    FileBuf::read_fd(fd, pending)
+}
+
+/// The sealed log and the pending record after it, for a reader that
+/// checks each record against the register: the bytes up to the last
+/// record's newline.
+pub(crate) fn read_records() -> Result<Vec<u8>, c_int> {
+    let mut log = read_log()?;
+
+    Ok(cstr(log.bytes()).to_vec())
+}
+
 fn read_log() -> Result<Log, c_int> {
     let base = match FileBuf::read(path()) {
         Err(e) if e != -ENOENT => return Err(e),
         r => r,
     };
-    let pending = match FileBuf::read(pending_path()) {
+    let pending = match read_pending() {
         Err(e) if e != -ENOENT => return Err(e),
         r => r,
     };
@@ -362,7 +411,7 @@ fn log_holds(line: &[u8]) -> c_int {
 /// the log does not hold yet, and the pending file gone.
 fn adopt_pending() -> c_int {
     let pending = pending_path();
-    let mut buf = match FileBuf::read(pending) {
+    let mut buf = match read_pending() {
         Ok(buf) => buf,
         Err(e) if e == -ENOENT => return 0,
         Err(e) => return e,

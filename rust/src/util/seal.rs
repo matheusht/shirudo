@@ -507,7 +507,41 @@ fn open(path: &[u8], flags: c_int, mode: u32) -> Result<Fd, c_int> {
 
 /// A file of shirudo's own, opened to be read.
 fn open_read(path: &[u8]) -> Result<Fd, c_int> {
+    open_file(path, false)
+}
+
+/// [`open_read`] of an entry whose directory must carry the label: one of
+/// root's making, which no task without authority can label, holds
+/// nothing shirudo takes for its own. -EPERM when it does not.
+pub(crate) fn open_sealed(path: &[u8]) -> Result<std::os::fd::OwnedFd, c_int> {
+    open_file(path, true).map(|fd| {
+        // SAFETY: the descriptor the open made, owned from here.
+        unsafe { std::os::fd::FromRawFd::from_raw_fd(fd.into_raw()) }
+    })
+}
+
+/// [`open_read`], the descriptor owned.
+pub(crate) fn open_owned(path: &[u8]) -> Result<std::os::fd::OwnedFd, c_int> {
+    open_read(path).map(|fd| {
+        // SAFETY: the descriptor the open made, owned from here.
+        unsafe { std::os::fd::FromRawFd::from_raw_fd(fd.into_raw()) }
+    })
+}
+
+/// Whether the directory `path` names an entry of carries the label.
+pub(crate) fn parent_labeled(path: &[u8]) -> bool {
+    open_parent(path).is_ok_and(|(dir, _)| fget(dir.0, &mut [0; LABEL_LEN]) == LABEL_LEN as isize)
+}
+
+fn open_file(path: &[u8], sealed: bool) -> Result<Fd, c_int> {
     let (dir, name) = open_parent(path)?;
+    if sealed && fget(dir.0, &mut [0; LABEL_LEN]) != LABEL_LEN as isize {
+        error(format!(
+            "{}: its directory is not sealed state; refusing to read it",
+            shown(path)
+        ));
+        return Err(-EPERM);
+    }
     let name = CString::new(name).map_err(|_| -EINVAL)?;
     let result = Fd::open_at(
         dir.0,
@@ -723,6 +757,27 @@ mod capi {
     pub unsafe extern "C" fn seal_open_read(path: *const c_char) -> c_int {
         // SAFETY: the caller's C string.
         fd_or_err(super::open_read(unsafe { CStr::from_ptr(path) }.to_bytes()))
+    }
+
+    /// # Safety
+    ///
+    /// `path` is a C string.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn seal_open_sealed(path: *const c_char) -> c_int {
+        // SAFETY: the caller's C string.
+        fd_or_err(super::open_file(
+            unsafe { CStr::from_ptr(path) }.to_bytes(),
+            true,
+        ))
+    }
+
+    /// # Safety
+    ///
+    /// `path` is a C string.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn seal_parent_labeled(path: *const c_char) -> bool {
+        // SAFETY: the caller's C string.
+        super::parent_labeled(unsafe { CStr::from_ptr(path) }.to_bytes())
     }
 
     /// # Safety

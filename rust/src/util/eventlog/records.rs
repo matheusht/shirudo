@@ -28,7 +28,7 @@ pub(crate) const UPATCH_UNLOAD: c_int = 2;
 pub(super) type LineFn =
     unsafe extern "C" fn(line: *const c_char, len: usize, ctx: *mut c_void) -> c_int;
 /// What the upatch walks call with each event.
-pub(super) type UpatchFn = unsafe extern "C" fn(
+pub(crate) type UpatchFn = unsafe extern "C" fn(
     event: c_int,
     name: *const c_char,
     payload_hex: *const c_char,
@@ -285,6 +285,28 @@ unsafe extern "C" fn on_set_entry(ud: *mut c_void) -> c_int {
         (*u).payload_hex[0] = 0;
         (*u).ret
     }
+}
+
+/// One record of the log to `cb`, as [`upatches`] would give it.
+///
+/// # Safety
+///
+/// `cb` takes `ctx`.
+pub(crate) unsafe fn upatches_record(
+    line: &CStr,
+    is_init: bool,
+    cb: Option<UpatchFn>,
+    ctx: *mut c_void,
+) -> c_int {
+    let mut sink = UpatchSink {
+        cb,
+        ctx,
+        name: [0; NAME_MAX + 1],
+        payload_hex: [0; 2 * PAYLOAD_HASH_LEN + 1],
+        ret: 0,
+    };
+    // SAFETY: the sink, which only this call reaches.
+    unsafe { upatches_line(&raw mut sink, line, is_init) }
 }
 
 /// The upatch events of this boot's records, or with `all` of every
