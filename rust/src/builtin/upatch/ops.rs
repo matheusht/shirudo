@@ -159,7 +159,7 @@ static UNLOAD_HELP: Help = Help::new(
 
 /// The options and the file of a load or an unload, or how the command
 /// exits without running: 0 after help.
-fn parse<'a>(args: &'a [*const c_char], unload: bool) -> Result<OpArgs<'a>, c_int> {
+fn parse<'a>(args: &'a [&'a CStr], unload: bool) -> Result<OpArgs<'a>, c_int> {
     let (command, help) = if unload {
         (c"upatch unload", &UNLOAD_HELP)
     } else {
@@ -1154,7 +1154,7 @@ fn load_steps(a: &OpArgs, file: &CStr, rep: &mut OpReport, name_out: &mut CStrin
 }
 
 /// `upatch load`, from `load` on.
-pub(super) fn run_load(args: &[*const c_char]) -> c_int {
+pub(super) fn run_load(args: &[&CStr]) -> c_int {
     match parse(args, false) {
         Ok(a) => load(&a),
         Err(code) => code,
@@ -1162,7 +1162,7 @@ pub(super) fn run_load(args: &[*const c_char]) -> c_int {
 }
 
 /// `upatch unload`, from `unload` on.
-pub(super) fn run_unload(args: &[*const c_char]) -> c_int {
+pub(super) fn run_unload(args: &[&CStr]) -> c_int {
     let a = match parse(args, true) {
         Ok(a) => a,
         Err(code) => return code,
@@ -1485,7 +1485,7 @@ pub(crate) fn install(path: &CStr) -> c_int {
 
 /// A removal from a package: the unload directive at `path`.
 pub(crate) fn remove(path: &CStr) -> c_int {
-    run_unload(&[c"unload".as_ptr(), c"--no-precheck".as_ptr(), path.as_ptr()])
+    run_unload(&[c"unload", c"--no-precheck", path])
 }
 
 /// Detaches, unpins and unarchives upatch `name` without a directive,

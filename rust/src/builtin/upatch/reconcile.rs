@@ -9,7 +9,7 @@
 //! Every upatch is checked before any is attached: a changed archive
 //! stops the pass, so nothing keeps acting on a host in that state.
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
 use std::ffi::{CString, OsStr};
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
@@ -570,7 +570,7 @@ fn pass(rep: &mut OpReport) -> Result<(), ()> {
 }
 
 /// `shirudo upatch reconcile`.
-pub(super) fn run(args: &[*const c_char]) -> c_int {
+pub(super) fn run(args: &[&CStr]) -> c_int {
     let mut p = OptParser::new(
         c"upatch reconcile",
         &RECONCILE_OPTS,

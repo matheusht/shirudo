@@ -465,7 +465,7 @@ pub unsafe extern "C" fn shirudo_helper_shirudo_policy_probe(
     argv: *const *const c_char,
 ) -> c_int {
     // SAFETY: main()'s arguments.
-    let args = unsafe { super::args(argc, argv) };
+    let args = unsafe { crate::ffi::args(argc, argv) };
     let n = args.len();
     let how = args.get(1).map_or(&b""[..], |a| a.to_bytes());
     let a = |i: usize| args[i];

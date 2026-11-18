@@ -15,7 +15,7 @@ mod sign;
 mod skeleton;
 mod vouch;
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
 use std::ffi::CString;
 
 use crate::errno::{EIO, ENAMETOOLONG, EPERM};
@@ -589,34 +589,25 @@ fn load(o: &Opts, input: &CStr, pkey: &CStr, cert: &CStr) -> c_int {
     if ret != 0 { 1 } else { 0 }
 }
 
-/// # Safety
-///
-/// `argv` holds `argc` C strings, writable as main()'s are.
-unsafe fn run(argc: c_int, argv: *mut *mut c_char) -> c_int {
-    let n = usize::try_from(argc).unwrap_or(0);
-    // SAFETY: the caller's words.
-    let words = unsafe { ffi::slice(argv.cast_const(), n) };
-    // SAFETY: each a C string.
-    let word = |i: usize| unsafe { CStr::from_ptr(words[i]) };
-
+/// `shirudo-build` on `args`, its command line whole.
+fn run(args: &[&CStr]) -> c_int {
     harden_stdio();
     // SAFETY: opens the log once, before anything logs.
     crate::log::init();
     if harden_self() != 0 {
         return 1;
     }
-    let all: Vec<&CStr> = (0..n).map(word).collect();
-    match all.get(1).map(|w| w.to_bytes()) {
-        Some(b"image") => return image::run(&all[1..]),
-        Some(b"upatch") => return package::upatch_cli(&all[1..]),
-        Some(b"bpm") => return bpm::run(&all[1..]),
-        Some(b"skeleton") => return skeleton::run(&all[1..]),
-        Some(b"keys") if n >= 3 && all[2].to_bytes() == b"vouch" => return vouch::run(&all[2..]),
+    let word = |i: usize| args.get(i).map(|w| w.to_bytes());
+    match word(1) {
+        Some(b"image") => return image::run(&args[1..]),
+        Some(b"upatch") => return package::upatch_cli(&args[1..]),
+        Some(b"bpm") => return bpm::run(&args[1..]),
+        Some(b"skeleton") => return skeleton::run(&args[1..]),
+        Some(b"keys") if word(2) == Some(b"vouch") => return vouch::run(&args[2..]),
         _ => {}
     }
 
-    let raw: Vec<*const c_char> = words.iter().map(|w| w.cast_const()).collect();
-    let mut p = OptParser::new(c"build", &BUILD_OPTS, Some(&BUILD_HELP), &raw, 1);
+    let mut p = OptParser::new(c"build", &BUILD_OPTS, Some(&BUILD_HELP), args, 1);
     let mut o = Opts::default();
     loop {
         let opt = p.next();
@@ -684,7 +675,7 @@ mod capi {
     /// `argv` holds `argc` C strings, as main() receives them.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn shirudo_build_main(argc: c_int, argv: *mut *mut c_char) -> c_int {
-        // SAFETY: the caller's command line.
-        unsafe { super::run(argc, argv) }
+        // SAFETY: main()'s arguments, which live as long as the process.
+        super::run(&unsafe { crate::ffi::args(argc, argv.cast_const().cast()) })
     }
 }

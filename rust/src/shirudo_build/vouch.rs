@@ -5,7 +5,7 @@
 //! another certificate, which `shirudo keys add --vouch` takes on the
 //! targets that enrol this key.
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
 use core::ptr;
 use std::ffi::CString;
 use std::io::Write;
@@ -262,8 +262,7 @@ static VOUCH_HELP: Help = Help::new(
 
 /// `shirudo-build keys vouch`, from `vouch` on.
 pub(super) fn run(args: &[&CStr]) -> c_int {
-    let raw: Vec<*const c_char> = args.iter().map(|a| a.as_ptr()).collect();
-    let mut p = OptParser::new(c"keys vouch", &VOUCH_OPTS, Some(&VOUCH_HELP), &raw, 1);
+    let mut p = OptParser::new(c"keys vouch", &VOUCH_OPTS, Some(&VOUCH_HELP), args, 1);
     let mut keys = KeyFiles::default();
     let (mut input, mut output): (Option<&CStr>, Option<&CStr>) = (None, None);
     let mut keys_dir = None;

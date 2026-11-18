@@ -4,7 +4,7 @@
 //! `shirudo genkey`: the operator's ML-DSA-87 signing key and the
 //! self-signed X.509 certificate of its public half.
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
 use core::ptr;
 use std::ffi::{CString, OsStr};
 use std::fs::{self, File, OpenOptions, Permissions};
@@ -446,11 +446,7 @@ fn write_pair(
 }
 
 /// The command on `args`, its name first.
-///
-/// # Safety
-///
-/// Each of `args` is a C string.
-unsafe fn genkey(args: &[*const c_char]) -> c_int {
+pub(super) fn cmd_genkey(args: &[&CStr]) -> c_int {
     let mut keys_dir_arg = None;
     let mut force = false;
     let mut p = OptParser::new(c"genkey", &OPTS, Some(&HELP), args, 1);
@@ -548,20 +544,4 @@ unsafe fn genkey(args: &[*const c_char]) -> c_int {
         .concat(),
     );
     0
-}
-
-pub(super) use capi::cmd_genkey;
-
-mod capi {
-    use core::ffi::{c_char, c_int};
-
-    use super::super::words;
-
-    /// # Safety
-    ///
-    /// `argv` holds `argc` C strings.
-    pub unsafe extern "C" fn cmd_genkey(argc: c_int, argv: *const *const c_char) -> c_int {
-        // SAFETY: the caller passes the command line.
-        unsafe { super::genkey(words(argc, argv)) }
-    }
 }

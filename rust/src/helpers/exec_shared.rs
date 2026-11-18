@@ -25,7 +25,7 @@ pub unsafe extern "C" fn shirudo_helper_test_exec_shared(
     argv: *const *const c_char,
 ) -> c_int {
     // SAFETY: main()'s arguments.
-    let args = unsafe { super::args(argc, argv) };
+    let args = unsafe { crate::ffi::args(argc, argv) };
     if args.len() < 2 {
         let me = args
             .first()

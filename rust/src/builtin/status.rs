@@ -15,7 +15,6 @@ use std::ffi::{CString, OsStr};
 use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
 
-use super::words;
 use crate::errno::{EINPROGRESS, ENODEV, ENOENT, ENOKEY};
 use crate::ffi;
 use crate::heap::xfree;
@@ -1894,7 +1893,8 @@ fn print_counters<const N: usize>(
     }
 }
 
-fn status(args: &[*const c_char]) -> c_int {
+/// `shirudo status`, on `args` from its name on.
+pub(crate) fn cmd_status(args: &[&CStr]) -> c_int {
     let (mut json_stdout, mut otel, mut keepalive) = (false, false, false);
     let (mut check, mut show_full) = (false, false);
     let (mut include_system, mut include_eventlog) = (false, false);
@@ -1973,20 +1973,4 @@ fn status(args: &[*const c_char]) -> c_int {
         ret = 1;
     }
     ret
-}
-
-pub(crate) use capi::cmd_status;
-
-mod capi {
-    use core::ffi::{c_char, c_int};
-
-    /// `shirudo status`.
-    ///
-    /// # Safety
-    ///
-    /// `argv` holds `argc` C strings.
-    pub unsafe extern "C" fn cmd_status(argc: c_int, argv: *const *const c_char) -> c_int {
-        // SAFETY: the caller's arguments.
-        super::status(unsafe { super::words(argc, argv) })
-    }
 }

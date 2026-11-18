@@ -3,7 +3,7 @@
 
 //! `shirudo version`: the release name and SHIRUDO_VERSION_ID.
 
-use core::ffi::{c_char, c_int};
+use core::ffi::{CStr, c_int};
 
 use crate::sys::libc::printf;
 use crate::sys::version::{
@@ -34,8 +34,8 @@ static HELP: Help = Help::new(
     None,
 );
 
-/// The command on `args`, its name first, C strings.
-fn version(args: &[*const c_char]) -> c_int {
+/// The command on `args`, its name first.
+pub(super) fn cmd_version(args: &[&CStr]) -> c_int {
     let mut p = OptParser::new(c"version", &OPTS, Some(&HELP), args, 1);
     let mut id_only = false;
 
@@ -66,20 +66,4 @@ fn version(args: &[*const c_char]) -> c_int {
         printf(c"version-id: %s\n".as_ptr(), &raw const shirudo_version_id);
     }
     0
-}
-
-pub(super) use capi::cmd_version;
-
-mod capi {
-    use core::ffi::{c_char, c_int};
-
-    use super::super::words;
-
-    /// # Safety
-    ///
-    /// `argv` holds `argc` C strings.
-    pub unsafe extern "C" fn cmd_version(argc: c_int, argv: *const *const c_char) -> c_int {
-        // SAFETY: the caller passes the command line.
-        super::version(unsafe { words(argc, argv) })
-    }
 }

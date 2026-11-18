@@ -4,7 +4,7 @@
 //! `shirudo config`: the effective shirudo.conf, or without one the
 //! defaults in the same syntax, as a template.
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
 
 use crate::errno::ENOENT;
 use crate::ffi::c_splice;
@@ -34,11 +34,7 @@ const FROM_CONF: &CStr = c_splice!("; from ", CONF);
 static HELP: Help = Help::new(USAGE, Some(SUMMARY), &[], Some(FOOTER));
 
 /// The command on `args`, its name first.
-///
-/// # Safety
-///
-/// Each of `args` is NULL or a C string.
-unsafe fn config(args: &[*const c_char]) -> c_int {
+pub(crate) fn cmd_config(args: &[&CStr]) -> c_int {
     let mut cfg = Scrubbed::new();
     let image_mode = image_config::active();
 
@@ -225,20 +221,4 @@ unsafe fn config(args: &[*const c_char]) -> c_int {
         );
     }
     c_int::from(!(c.map_export_valid && c.tls_classical_hosts_valid))
-}
-
-pub(crate) use capi::cmd_config;
-
-mod capi {
-    use core::ffi::{c_char, c_int};
-
-    use super::super::words;
-
-    /// # Safety
-    ///
-    /// `argv` holds `argc` C strings.
-    pub unsafe extern "C" fn cmd_config(argc: c_int, argv: *const *const c_char) -> c_int {
-        // SAFETY: the caller passes the command line.
-        unsafe { super::config(words(argc, argv)) }
-    }
 }

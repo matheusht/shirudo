@@ -9,7 +9,6 @@ use core::ffi::{CStr, c_char, c_int};
 use core::ptr;
 use std::ffi::CString;
 
-use super::words;
 use crate::errno::{EEXIST, EINVAL, EIO, EKEYREJECTED, ENODATA, ENODEV, ENXIO};
 use crate::ffi;
 use crate::heap::xfree;
@@ -764,7 +763,7 @@ fn pcr_expect(
     Ok(())
 }
 
-fn predict(args: &[*const c_char]) -> c_int {
+fn predict(args: &[&CStr]) -> c_int {
     let mut p = OptParser::new(c"attest predict", &PREDICT_OPTS, Some(&HELP), args, 2);
     let mut writer_public = [0u8; NV_RSA_BYTES];
     let mut tree_root = [0u8; 32];
@@ -1001,7 +1000,7 @@ fn read_evidence(path: &[u8]) -> Result<File, c_int> {
     })
 }
 
-fn verify(args: &[*const c_char]) -> c_int {
+fn verify(args: &[&CStr]) -> c_int {
     // SAFETY: an all-zero expectation expects nothing.
     let mut x: Box<AttestExpect> = Box::new(unsafe { core::mem::zeroed() });
     let ret = verify_against(args, &mut x).unwrap_or_else(|code| code);
@@ -1012,7 +1011,7 @@ fn verify(args: &[*const c_char]) -> c_int {
 }
 
 /// attest verify with the expectation `x` its options fill.
-fn verify_against(args: &[*const c_char], x: &mut AttestExpect) -> Result<c_int, c_int> {
+fn verify_against(args: &[&CStr], x: &mut AttestExpect) -> Result<c_int, c_int> {
     let mut p = OptParser::new(c"attest verify", &VERIFY_OPTS, Some(&HELP), args, 2);
     let mut nonce = [0u8; NONCE_MAX];
     let mut nonce_len = 0;
@@ -1174,7 +1173,7 @@ fn verify_against(args: &[*const c_char], x: &mut AttestExpect) -> Result<c_int,
     Ok(c_int::from(err != 0))
 }
 
-fn challenge(args: &[*const c_char]) -> c_int {
+fn challenge(args: &[&CStr]) -> c_int {
     let mut credential = [0u8; CREDENTIAL_LEN];
     let ret = challenge_into(args, &mut credential).unwrap_or_else(|code| code);
 
@@ -1184,10 +1183,7 @@ fn challenge(args: &[*const c_char]) -> c_int {
 }
 
 /// attest challenge, the credential it makes into `credential`.
-fn challenge_into(
-    args: &[*const c_char],
-    credential: &mut [u8; CREDENTIAL_LEN],
-) -> Result<c_int, c_int> {
+fn challenge_into(args: &[&CStr], credential: &mut [u8; CREDENTIAL_LEN]) -> Result<c_int, c_int> {
     let mut p = OptParser::new(c"attest challenge", &CHALLENGE_OPTS, Some(&HELP), args, 2);
     let (mut ak_name, mut ek_name) = ([0u8; NAME_LEN], [0u8; NAME_LEN]);
     let (mut have_ak, mut have_ek, mut trust_presented) = (false, false, false);
@@ -1300,7 +1296,7 @@ fn challenge_into(
     Ok(ret)
 }
 
-fn evidence(args: &[*const c_char]) -> c_int {
+fn evidence(args: &[&CStr]) -> c_int {
     let mut p = OptParser::new(c"attest", &EVIDENCE_OPTS, Some(&HELP), args, 1);
     let mut nonce = [0u8; NONCE_MAX];
     let mut nonce_len = 0;
@@ -1423,15 +1419,10 @@ fn evidence(args: &[*const c_char]) -> c_int {
     c_int::from(ret != 0)
 }
 
-/// `shirudo attest` on `args`, its name first, C strings.
-///
-/// # Safety
-///
-/// Each of `args` is a C string.
-unsafe fn attest(args: &[*const c_char]) -> c_int {
-    if let Some(&raw) = args.get(1) {
-        // SAFETY: the caller's C string.
-        let arg = unsafe { ffi::c_str(raw) };
+/// `shirudo attest` on `args`, its name first.
+pub(crate) fn cmd_attest(args: &[&CStr]) -> c_int {
+    if let Some(word) = args.get(1) {
+        let arg = word.to_bytes();
 
         if is_help(Some(arg)) {
             // SAFETY: the command's help, of C strings.
@@ -1445,7 +1436,7 @@ unsafe fn attest(args: &[*const c_char]) -> c_int {
         }
         if arg.first() != Some(&b'-') {
             // SAFETY: a label, the caller's word and items with names.
-            let sub = unsafe { resolve_subcommand(c"attest".as_ptr(), raw, &SUBCMDS) };
+            let sub = unsafe { resolve_subcommand(c"attest".as_ptr(), word.as_ptr(), &SUBCMDS) };
             if sub.is_null() {
                 return EXIT_USAGE;
             }
@@ -1458,18 +1449,4 @@ unsafe fn attest(args: &[*const c_char]) -> c_int {
         }
     }
     evidence(args)
-}
-
-pub(crate) use capi::cmd_attest;
-
-mod capi {
-    use core::ffi::{c_char, c_int};
-
-    /// # Safety
-    ///
-    /// `argv` holds `argc` C strings.
-    pub unsafe extern "C" fn cmd_attest(argc: c_int, argv: *const *const c_char) -> c_int {
-        // SAFETY: the caller's arguments, each a C string.
-        unsafe { super::attest(super::words(argc, argv)) }
-    }
 }

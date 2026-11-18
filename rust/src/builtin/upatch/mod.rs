@@ -13,7 +13,7 @@ mod map;
 mod ops;
 mod reconcile;
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
 use std::ffi::CString;
 
 use crate::sys::libc::{fwrite, stderr, stdout};
@@ -181,11 +181,8 @@ fn print_json(e: JsonEmit, cmd: &[u8]) -> c_int {
 }
 
 /// `shirudo upatch`, from `upatch` on.
-fn run(args: &[*const c_char]) -> c_int {
-    let word = |i: usize| -> Option<&[u8]> {
-        // SAFETY: the caller's C strings.
-        args.get(i).map(|&a| unsafe { crate::ffi::c_str(a) })
-    };
+pub(crate) fn cmd_upatch(args: &[&CStr]) -> c_int {
+    let word = |i: usize| args.get(i).map(|a| a.to_bytes());
     if args.len() < 2 || is_help(word(1)) {
         // SAFETY: help of C strings.
         unsafe { print_help(&UPATCH_HELP) };
@@ -197,7 +194,8 @@ fn run(args: &[*const c_char]) -> c_int {
         return 0;
     }
     // SAFETY: a C string, the caller's, and the subcommands.
-    let canonical = unsafe { resolve_subcommand(c"shirudo upatch".as_ptr(), args[1], &SUBCMDS) };
+    let canonical =
+        unsafe { resolve_subcommand(c"shirudo upatch".as_ptr(), args[1].as_ptr(), &SUBCMDS) };
     if canonical.is_null() {
         return 2;
     }
@@ -214,19 +212,3 @@ fn run(args: &[*const c_char]) -> c_int {
         _ => 2,
     }
 }
-
-mod capi {
-    use core::ffi::{c_char, c_int};
-
-    /// `shirudo upatch`.
-    ///
-    /// # Safety
-    ///
-    /// `argv` holds `argc` C strings.
-    pub unsafe extern "C" fn cmd_upatch(argc: c_int, argv: *const *const c_char) -> c_int {
-        // SAFETY: the caller's argc words.
-        super::run(unsafe { super::super::words(argc, argv) })
-    }
-}
-
-pub(crate) use capi::cmd_upatch;

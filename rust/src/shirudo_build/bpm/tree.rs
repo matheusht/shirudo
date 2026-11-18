@@ -10,7 +10,7 @@
 //! so that a target never meets an operation its own tree sync would
 //! reject or fail.
 
-use core::ffi::{CStr, c_char, c_int, c_void};
+use core::ffi::{CStr, c_int, c_void};
 use core::ptr;
 
 use super::beefile::{MAX_ENTRIES, MAX_FIXES, Spec, Upatch as BuildUpatch, fix_id_ok, parse};
@@ -730,7 +730,7 @@ struct Append<'a> {
 
 /// The options, or EXIT_USAGE for a usage error, reported, or OPT_DONE
 /// where help or the option list was printed.
-fn parse_options<'a>(args: &'a [*const c_char]) -> Result<Append<'a>, c_int> {
+fn parse_options<'a>(args: &'a [&'a CStr]) -> Result<Append<'a>, c_int> {
     let mut p = OptParser::new(
         c"bpm tree append",
         &APPEND_OPTS,
@@ -1387,7 +1387,7 @@ impl Append<'_> {
     }
 }
 
-fn append(args: &[*const c_char]) -> c_int {
+fn append(args: &[&CStr]) -> c_int {
     match parse_options(args) {
         Ok(mut a) => a.run(),
         Err(OPT_DONE) => 0,
@@ -1397,10 +1397,8 @@ fn append(args: &[*const c_char]) -> c_int {
 
 /// `bpm tree`, from `tree` on.
 pub(super) fn run(args: &[&CStr]) -> c_int {
-    let raw: Vec<*const c_char> = args.iter().map(|a| a.as_ptr()).collect();
-
     if args.get(1).map(|a| a.to_bytes()) == Some(b"show") {
-        return show::run(&raw[1..]);
+        return show::run(&args[1..]);
     }
     if args.get(1).map(|a| a.to_bytes()) != Some(b"append") {
         // SAFETY: the command's help, of C strings.
@@ -1415,7 +1413,7 @@ pub(super) fn run(args: &[&CStr]) -> c_int {
     if unsafe { curl_global_init(CURL_GLOBAL_DEFAULT) } != 0 {
         return fail("initialize curl", -EIO);
     }
-    let ret = append(&raw);
+    let ret = append(args);
     // SAFETY: after every transfer.
     unsafe { curl_global_cleanup() };
     if ret == EXIT_USAGE {

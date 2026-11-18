@@ -15,7 +15,7 @@
 mod decoders;
 mod meta;
 
-use core::ffi::{CStr, c_char, c_int, c_void};
+use core::ffi::{CStr, c_int, c_void};
 use std::ffi::CString;
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -522,8 +522,7 @@ pub(super) fn upatch_cli(args: &[&CStr]) -> c_int {
         unsafe { print_help(&SET_HELP) };
         return EXIT_USAGE;
     }
-    let raw: Vec<*const c_char> = args.iter().map(|a| a.as_ptr()).collect();
-    let mut p = OptParser::new(c"upatch set", &SET_OPTS, Some(&SET_HELP), &raw, 2);
+    let mut p = OptParser::new(c"upatch set", &SET_OPTS, Some(&SET_HELP), args, 2);
     loop {
         let opt = p.next();
         let value = p.value();

@@ -9,7 +9,7 @@
 //! carries. main() is tools/quote-check/quote-check.rs; the unit suite
 //! and the fuzzer drive the rows.
 
-use core::ffi::{c_char, c_int};
+use core::ffi::{CStr, c_int};
 use std::io::{BufRead, Write};
 
 use crate::errno::{EBADMSG, EINVAL, EIO, EKEYREJECTED};
@@ -314,7 +314,7 @@ fn check_rows() -> Result<(), c_int> {
     }
 }
 
-fn quote_check(args: &[*const c_char]) -> c_int {
+fn quote_check(args: &[&CStr]) -> c_int {
     let mut p = OptParser::new(c"shirudo-quote-check", &[], Some(&HELP), args, 1);
 
     match p.next() {
@@ -347,10 +347,10 @@ mod capi {
 
     /// # Safety
     ///
-    /// `argv` holds `argc` C strings.
+    /// `argv` holds `argc` C strings, as main() receives them.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn quote_check_main(argc: c_int, argv: *const *const c_char) -> c_int {
-        // SAFETY: the caller's arguments, each a C string.
-        super::quote_check(unsafe { crate::builtin::words(argc, argv) })
+        // SAFETY: main()'s arguments, which live as long as the process.
+        super::quote_check(&unsafe { crate::ffi::args(argc, argv) })
     }
 }

@@ -7,7 +7,7 @@
 //! image offline, its signature against a certificate and its tree with
 //! veritysetup, on the very files it authenticated.
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
 use std::ffi::OsStr;
 use std::io::{ErrorKind, Read, Write};
 use std::mem::ManuallyDrop;
@@ -326,12 +326,11 @@ static IMAGE_HELP: Help = Help::new(
 );
 
 fn verify_cmd(args: &[&CStr]) -> c_int {
-    let raw: Vec<*const c_char> = args.iter().map(|a| a.as_ptr()).collect();
     let mut p = OptParser::new(
         c"image verify",
         &IMAGE_VERIFY_OPTS,
         Some(&IMAGE_HELP),
-        &raw,
+        args,
         2,
     );
     let (mut prefix, mut cert) = (None, None);
@@ -366,8 +365,7 @@ fn verify_cmd(args: &[&CStr]) -> c_int {
 
 /// What shirudo-gen-verity calls back with for the root hash it made.
 fn sign_root_cmd(args: &[&CStr]) -> c_int {
-    let raw: Vec<*const c_char> = args.iter().map(|a| a.as_ptr()).collect();
-    let mut p = OptParser::new(c"image sign-root", &IMAGE_SIGN_OPTS, None, &raw, 2);
+    let mut p = OptParser::new(c"image sign-root", &IMAGE_SIGN_OPTS, None, args, 2);
     let mut keys = KeyFiles::default();
     let (mut input, mut signature, mut keys_dir) = (None, None, None);
 

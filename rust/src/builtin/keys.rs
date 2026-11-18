@@ -7,7 +7,7 @@
 //! to the set. Revoking goes through a signed config image, vouching
 //! through shirudo-build.
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
 use core::ptr;
 use std::ffi::CString;
 use std::fs::File;
@@ -20,7 +20,6 @@ use openssl::hash::MessageDigest;
 use openssl::pkey::{HasPublic, PKey, PKeyRef, Private};
 use openssl::x509::{X509, X509NameRef};
 
-use super::words;
 use crate::errno::{EACCES, EINVAL, EIO, EKEYREJECTED, ENODEV, ENOENT, ENOKEY, ESTALE};
 use crate::ffi;
 use crate::heap::{libc_free, xfree};
@@ -781,7 +780,7 @@ fn check_voucher_live(set: &TrustedSet, voucher: &[u8; 32]) -> c_int {
     if ret != 0 { 0 } else { -ENOKEY }
 }
 
-fn keys_add(args: &[*const c_char]) -> c_int {
+fn keys_add(args: &[&CStr]) -> c_int {
     let (mut keys_dir_arg, mut vouch_path, mut cert) = (None, None, None);
     let mut p = OptParser::new(c"keys add", &ADD_OPTS, Some(&ADD_HELP), args, 1);
 
@@ -1179,7 +1178,7 @@ pub(crate) fn revoke_image(der: &[u8], boot: bool) -> c_int {
     purge_signed_by(der).min(0)
 }
 
-fn keys_show(args: &[*const c_char]) -> c_int {
+fn keys_show(args: &[&CStr]) -> c_int {
     let mut keys_dir_arg = None;
     let mut json = false;
     let mut p = OptParser::new(c"keys", &OPTS, Some(&HELP), args, 1);
@@ -1375,40 +1374,33 @@ fn keys_show(args: &[*const c_char]) -> c_int {
     ret
 }
 
-/// `shirudo keys`.
-///
-/// # Safety
-///
-/// `argv` holds `argc` C strings.
-unsafe fn keys(argc: c_int, argv: *const *const c_char) -> c_int {
-    // SAFETY: the caller's arguments.
-    let raw = unsafe { words(argc, argv) };
-    // SAFETY: each a C string.
-    let args: Vec<&[u8]> = raw.iter().map(|&a| unsafe { ffi::c_str(a) }).collect();
+/// `shirudo keys`, on `args` from its name on.
+pub(crate) fn cmd_keys(args: &[&CStr]) -> c_int {
+    let word = |i: usize| args.get(i).map(|a| a.to_bytes());
 
-    if args.len() >= 2 && is_help(Some(args[1])) {
+    if is_help(word(1)) {
         // SAFETY: the command's help, of C strings.
         unsafe { print_help(&HELP) };
         return 0;
     }
-    if args.len() >= 2 && is_list_cmds(Some(args[1])) {
+    if is_list_cmds(word(1)) {
         // SAFETY: items whose names are C strings.
         unsafe { print_subcmd_list(&SUBCMDS) };
         return 0;
     }
-    if args.len() < 2 || args[1].first() == Some(&b'-') {
-        return keys_show(raw);
-    }
+    let Some(typed) = args.get(1).filter(|a| a.to_bytes().first() != Some(&b'-')) else {
+        return keys_show(args);
+    };
     // SAFETY: a label, the caller's word and items with names.
-    let sub = unsafe { resolve_subcommand(c"shirudo keys".as_ptr(), raw[1], &SUBCMDS) };
+    let sub = unsafe { resolve_subcommand(c"shirudo keys".as_ptr(), typed.as_ptr(), &SUBCMDS) };
     if sub.is_null() {
         return 2;
     }
     // SAFETY: the name of one of the items.
     match unsafe { CStr::from_ptr(sub) }.to_bytes() {
-        b"add" => keys_add(&raw[1..]),
+        b"add" => keys_add(&args[1..]),
         b"revoke" => {
-            if args.len() == 3 && is_help(Some(args[2])) {
+            if args.len() == 3 && is_help(word(2)) {
                 // SAFETY: the subcommand's help, of C strings.
                 unsafe { print_help(&REVOKE_HELP) };
                 return 0;
@@ -1416,32 +1408,6 @@ unsafe fn keys(argc: c_int, argv: *const *const c_char) -> c_int {
             error(&[b"keys revoke: put revocation records in a signed config image, then run `shirudo image update`"]);
             1
         }
-        _ => {
-            let words = [c"keys".as_ptr(), c"vouch".as_ptr(), ptr::null()];
-            // SAFETY: a label, the words up to their NULL, and the
-            // caller's arguments after the subcommand.
-            unsafe {
-                super::build::forward(
-                    c"keys vouch".as_ptr(),
-                    words.as_ptr(),
-                    argc - 2,
-                    argv.add(2),
-                )
-            }
-        }
-    }
-}
-
-pub(crate) use capi::cmd_keys;
-
-mod capi {
-    use core::ffi::{c_char, c_int};
-
-    /// # Safety
-    ///
-    /// `argv` holds `argc` C strings.
-    pub unsafe extern "C" fn cmd_keys(argc: c_int, argv: *const *const c_char) -> c_int {
-        // SAFETY: the caller's arguments.
-        unsafe { super::keys(argc, argv) }
+        _ => super::build::forward(c"keys vouch", &[c"keys", c"vouch"], &args[2..]),
     }
 }

@@ -291,14 +291,9 @@ impl Drop for DirStream {
     }
 }
 
-/// `shirudo bpm`.
-///
-/// # Safety
-///
-/// `argv` holds `argc` C strings.
-unsafe fn bpm(argc: c_int, argv: *const *const c_char) -> c_int {
-    // SAFETY: the caller's arguments.
-    cli::run(unsafe { super::words(argc, argv) })
+/// `shirudo bpm`, on `args` from its name on.
+pub(crate) fn cmd_bpm(args: &[&CStr]) -> c_int {
+    cli::run(args)
 }
 
 /// For the image CLI test: the key file registered source `name`
@@ -308,19 +303,5 @@ pub(crate) fn source_key_open(name: &[u8]) -> c_int {
     match source::load(name) {
         Ok(s) => s.key_open(),
         Err(err) => err,
-    }
-}
-
-pub(crate) use capi::cmd_bpm;
-
-mod capi {
-    use core::ffi::{c_char, c_int};
-
-    /// # Safety
-    ///
-    /// `argv` holds `argc` C strings.
-    pub unsafe extern "C" fn cmd_bpm(argc: c_int, argv: *const *const c_char) -> c_int {
-        // SAFETY: the caller's arguments.
-        unsafe { super::bpm(argc, argv) }
     }
 }

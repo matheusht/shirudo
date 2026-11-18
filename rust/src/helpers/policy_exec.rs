@@ -203,7 +203,7 @@ pub unsafe extern "C" fn shirudo_helper_policy_exec(
     argv: *const *const c_char,
 ) -> c_int {
     // SAFETY: main()'s arguments.
-    let args = unsafe { super::args(argc, argv) };
+    let args = unsafe { crate::ffi::args(argc, argv) };
     let me = args.first().map_or(&b""[..], |a| a.to_bytes());
     let name = me.rsplit(|&c| c == b'/').next().unwrap_or(me);
     let word = |i: usize| args.get(i).map(|a| a.to_bytes());

@@ -7,7 +7,7 @@
 //! verified against the operator's certificate, re-signed with the new
 //! .rodata, and their unload directives bound anew.
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
 use core::ptr;
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
@@ -276,12 +276,11 @@ fn digest_ok(digest: &[u8]) -> bool {
 
 /// `bpm config update`, from `update` on: 0, EXIT_USAGE, or -errno.
 pub(super) fn run(args: &[&CStr]) -> c_int {
-    let raw: Vec<*const c_char> = args.iter().map(|a| a.as_ptr()).collect();
     let mut p = OptParser::new(
         c"bpm config update",
         &CONFIG_UPDATE_OPTS,
         Some(&CONFIG_UPDATE_HELP),
-        &raw,
+        args,
         1,
     );
     let (mut file, mut base, mut base_digest) = (None, None, None);

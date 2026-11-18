@@ -7,7 +7,7 @@
 //! decoders, or exported over OTLP, from the command line or the
 //! map_export configuration.
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
 use std::fs::File;
 use std::io::Write;
 use std::os::fd::{FromRawFd, IntoRawFd};
@@ -433,7 +433,7 @@ fn summary(a: &Args, maps: &Summaries) -> c_int {
 }
 
 /// `upatch map`, from `map` on.
-pub(super) fn run(args: &[*const c_char]) -> c_int {
+pub(super) fn run(args: &[&CStr]) -> c_int {
     let mut cfg = Scrubbed::new();
     let mut p = OptParser::new(c"upatch map", &MAP_OPTS, Some(&MAP_HELP), args, 1);
     let mut a = match parse(&mut p) {

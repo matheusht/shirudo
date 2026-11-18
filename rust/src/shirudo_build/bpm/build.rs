@@ -7,7 +7,7 @@
 //! and the package archived. Also what `bpm config update` shares with
 //! it: the paths a Beefile may name, the converters, the stage.
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
 use std::ffi::{CString, OsStr};
 use std::os::unix::ffi::OsStrExt;
 use std::process::Command;
@@ -688,12 +688,11 @@ static BPM_BUILD_HELP: Help = Help::new(
 
 /// `bpm build`, from `build` on: 0, EXIT_USAGE, or -errno.
 pub(super) fn run(args: &[&CStr]) -> c_int {
-    let raw: Vec<*const c_char> = args.iter().map(|a| a.as_ptr()).collect();
     let mut p = OptParser::new(
         c"bpm build",
         &BPM_BUILD_OPTS,
         Some(&BPM_BUILD_HELP),
-        &raw,
+        args,
         1,
     );
     let mut context: &[u8] = b".";

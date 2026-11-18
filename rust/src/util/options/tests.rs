@@ -40,8 +40,7 @@ fn with_specs<T>(
     args: &[&CStr],
     check: impl FnOnce(&mut OptParser<'_>) -> T,
 ) -> T {
-    let argv: Vec<*const c_char> = args.iter().map(|a| a.as_ptr()).collect();
-    let mut p = OptParser::new(c"test", specs, None, &argv, 0);
+    let mut p = OptParser::new(c"test", specs, None, args, 0);
     check(&mut p)
 }
 

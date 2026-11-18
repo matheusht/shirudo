@@ -6,7 +6,7 @@
 //! hands the command line. A build of the library with the test-helpers
 //! feature holds them; the shipped one does not.
 
-use core::ffi::{CStr, c_char, c_int, c_long};
+use core::ffi::{CStr, c_int, c_long};
 use std::sync::OnceLock;
 
 use crate::sys::libc::{fwrite, stderr, stdout};
@@ -58,18 +58,6 @@ mod upatch_rodata;
 mod upatch_serializer_pages;
 mod xdp;
 mod xfs_attrmulti;
-
-/// The arguments the C runtime gave main(), as C strings.
-///
-/// # Safety
-///
-/// `argv` holds `argc` C strings that live as long as the process.
-pub(crate) unsafe fn args(argc: c_int, argv: *const *const c_char) -> Vec<&'static CStr> {
-    (0..argc.max(0) as usize)
-        // SAFETY: the C runtime's arguments.
-        .map(|i| unsafe { CStr::from_ptr(*argv.add(i)) })
-        .collect()
-}
 
 /// `bytes` to standard output through the C library's stream, which the
 /// crate's own output goes through and the C runtime flushes at exit;
@@ -165,7 +153,7 @@ macro_rules! helper_main {
             argv: *const *const core::ffi::c_char,
         ) -> core::ffi::c_int {
             // SAFETY: main()'s arguments, handed on.
-            $run(&unsafe { crate::helpers::args(argc, argv) })
+            $run(&unsafe { crate::ffi::args(argc, argv) })
         }
     };
 }

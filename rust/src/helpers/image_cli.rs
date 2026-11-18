@@ -68,17 +68,14 @@ pub unsafe extern "C" fn shirudo_helper_test_image_cli(
     argv: *const *const c_char,
 ) -> c_int {
     // SAFETY: main()'s arguments.
-    let args = unsafe { super::args(argc, argv) };
+    let args = unsafe { crate::ffi::args(argc, argv) };
     if args.len() < 3 {
         return 2;
     }
     if !use_image(args[1]) {
         return 1;
     }
-    // SAFETY: the arguments from the command's name on, handed on.
-    let command = |run: unsafe extern "C" fn(c_int, *const *const c_char) -> c_int| unsafe {
-        run(argc - 2, argv.add(2))
-    };
+    let command = |run: fn(&[&CStr]) -> c_int| run(&args[2..]);
     let ret = match (args[2].to_bytes(), args.len()) {
         (b"bpm", _) => command(cmd_bpm),
         (b"keys", _) => command(cmd_keys),

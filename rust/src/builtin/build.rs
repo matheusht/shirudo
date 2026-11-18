@@ -5,13 +5,11 @@
 //! the operator's halves of other commands, run by the operator-only
 //! helper, shirudo-build.
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
 use core::ptr;
 
-use super::word;
 use crate::errno::ENOMEM;
 use crate::ffi::c_splice;
-use crate::heap::{xcalloc, xfree};
 use crate::sys::libc::{PATH_MAX, X_OK, access, env, errno, execv, execvp, strerror};
 use crate::util::help::{Help, is_help, print_help};
 
@@ -89,120 +87,90 @@ pub(super) fn available() -> bool {
     }
 }
 
-/// Runs the helper with `argv`, whose first it points at the helper's
-/// path; returns only when it cannot, with 127.
-///
-/// # Safety
-///
-/// `label` is a C string, and `argv` an array of C strings after its
-/// first, up to a NULL.
-unsafe fn exec(label: *const c_char, argv: *mut *const c_char) -> c_int {
+/// The helper to run and whether to look it up on PATH, or 127 with why
+/// it cannot run reported.
+fn helper(label: &CStr) -> Result<(&'static CStr, bool), c_int> {
     let (path, use_path) = resolve_helper();
 
     if path.is_empty() {
-        // SAFETY: the C's format and the caller's label.
+        // SAFETY: the C's format and the label, a C string.
         unsafe {
             crate::log::log_c!(
                 crate::log::err,
                 c"'%s' cannot use empty SHIRUDO_BUILD".as_ptr(),
-                label
+                label.as_ptr()
             )
         };
-        return 127;
+        return Err(127);
     }
     // SAFETY: a path, and a mode.
     if !use_path && unsafe { access(path.as_ptr(), X_OK) } != 0 {
-        // SAFETY: the C's format, the caller's label and the path.
+        // SAFETY: the C's format, the label and the path, C strings.
         unsafe {
             crate::log::log_c!(
                 crate::log::err,
                 c"'%s' is an operator-only subcommand; shirudo-build helper '%s' is not \
                   executable. Set SHIRUDO_BUILD to a helper path or put shirudo-build on PATH."
                     .as_ptr(),
-                label,
+                label.as_ptr(),
                 path.as_ptr(),
             )
         };
-        return 127;
+        return Err(127);
     }
-    // SAFETY: the caller's array, its first now the path and the rest C
-    // strings up to a NULL.
-    unsafe {
-        *argv = path.as_ptr();
-        if use_path {
-            execvp(path.as_ptr(), argv.cast_const());
-        } else {
-            execv(path.as_ptr(), argv.cast_const());
-        }
-        crate::log::log_c!(
-            crate::log::err,
-            c"exec %s: %s".as_ptr(),
-            path.as_ptr(),
-            strerror(errno())
-        );
-    }
-    127
+    Ok((path, use_path))
 }
 
-/// Runs the helper with `words`, up to their NULL, and then the `argc`
-/// arguments at `argv`.
-///
-/// # Safety
-///
-/// `label` is a C string, `words` C strings up to a NULL, and `argv`
-/// holds `argc` C strings.
-pub(super) unsafe fn forward(
-    label: *const c_char,
-    words: *const *const c_char,
-    argc: c_int,
-    argv: *const *const c_char,
-) -> c_int {
-    let argc = usize::try_from(argc).unwrap_or(0);
-    let mut n = 0;
+/// Runs the helper with `words` and then `args`; returns only when it
+/// cannot, with 127, or with 1 where its command line finds no memory.
+pub(super) fn forward(label: &CStr, words: &[&CStr], args: &[&CStr]) -> c_int {
+    let mut argv = Vec::new();
 
-    // SAFETY: the caller's words, up to their NULL.
-    while !unsafe { *words.add(n) }.is_null() {
-        n += 1;
-    }
-    let count = n + argc + 2;
-    // SAFETY: a count of pointers.
-    let helper = unsafe { xcalloc(count, size_of::<*const c_char>()) }.cast::<*const c_char>();
-    if helper.is_null() {
-        // SAFETY: the C's format, the caller's label and the error's text.
+    if argv
+        .try_reserve_exact(words.len() + args.len() + 2)
+        .is_err()
+    {
+        // SAFETY: the C's format, the label and the error's text.
         unsafe {
             crate::log::log_c!(
                 crate::log::err,
                 c"'%s': %s".as_ptr(),
-                label,
+                label.as_ptr(),
                 strerror(ENOMEM)
             )
         };
         return 1;
     }
-    // SAFETY: room for count pointers, zeroed, so that the first and the
-    // last stay NULL, filled from the caller's words and arguments; then
-    // freed whole.
-    unsafe {
-        for i in 0..n {
-            *helper.add(1 + i) = *words.add(i);
-        }
-        for i in 0..argc {
-            *helper.add(1 + n + i) = *argv.add(i);
-        }
-        let ret = exec(label, helper);
-        xfree(helper.cast(), count * size_of::<*const c_char>());
-        ret
+    let (path, use_path) = match helper(label) {
+        Ok(found) => found,
+        Err(status) => return status,
+    };
+    argv.push(path.as_ptr());
+    argv.extend(words.iter().chain(args).map(|w| w.as_ptr()));
+    argv.push(ptr::null());
+    if use_path {
+        // SAFETY: the path, and C strings up to a NULL that outlive the
+        // call.
+        unsafe { execvp(path.as_ptr(), argv.as_ptr()) };
+    } else {
+        // SAFETY: as above.
+        unsafe { execv(path.as_ptr(), argv.as_ptr()) };
     }
+    // SAFETY: the C's format, the path and the error's text.
+    unsafe {
+        crate::log::log_c!(
+            crate::log::err,
+            c"exec %s: %s".as_ptr(),
+            path.as_ptr(),
+            strerror(errno())
+        )
+    };
+    127
 }
 
 /// `shirudo build`: the helper, run on the caller's arguments.
-///
-/// # Safety
-///
-/// `argv` holds `argc` C strings and a NULL after them.
-unsafe fn build(argc: c_int, argv: *mut *const c_char) -> c_int {
-    // SAFETY: the caller's second word, when there is one.
-    if argc >= 2 && is_help(unsafe { word(*argv.add(1)) }) {
+pub(super) fn cmd_build(args: &[&CStr]) -> c_int {
+    if is_help(args.get(1).map(|a| a.to_bytes())) {
         let help = Help {
             usage: USAGE.as_ptr(),
             summary: SUMMARY.as_ptr(),
@@ -215,51 +183,5 @@ unsafe fn build(argc: c_int, argv: *mut *const c_char) -> c_int {
         unsafe { print_help(&help) };
         return 0;
     }
-    // SAFETY: a label, and the caller's arguments.
-    unsafe { exec(c"build".as_ptr(), argv) }
-}
-
-pub(super) use capi::cmd_build;
-
-mod capi {
-    use core::ffi::{c_char, c_int};
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn build_available() -> bool {
-        super::available()
-    }
-
-    /// # Safety
-    ///
-    /// `label` is a C string, and `argv` an array of C strings after its
-    /// first, up to a NULL.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn build_exec(label: *const c_char, argv: *mut *const c_char) -> c_int {
-        // SAFETY: the caller passes the label and the arguments.
-        unsafe { super::exec(label, argv) }
-    }
-
-    /// # Safety
-    ///
-    /// `label` is a C string, `words` C strings up to a NULL, and `argv`
-    /// holds `argc` C strings.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn build_forward(
-        label: *const c_char,
-        words: *const *const c_char,
-        argc: c_int,
-        argv: *const *const c_char,
-    ) -> c_int {
-        // SAFETY: the caller passes the label, words and arguments.
-        unsafe { super::forward(label, words, argc, argv) }
-    }
-
-    /// # Safety
-    ///
-    /// `argv` holds `argc` C strings and a NULL after them.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn cmd_build(argc: c_int, argv: *mut *const c_char) -> c_int {
-        // SAFETY: the caller passes the command line.
-        unsafe { super::build(argc, argv) }
-    }
+    forward(c"build", &[], args.get(1..).unwrap_or_default())
 }

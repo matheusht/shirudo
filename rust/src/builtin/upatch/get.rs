@@ -6,7 +6,7 @@
 //! gives it, and every map it pins with their contents. It reads only
 //! what the LSM allows: bpf() info and lookups, xattrs and stat.
 
-use core::ffi::{CStr, c_char, c_int, c_long};
+use core::ffi::{CStr, c_int, c_long};
 use std::ffi::CString;
 
 use super::{JSON_MAX, Summaries, log_err, out, print_json, strerr, type_name};
@@ -314,7 +314,7 @@ static GET_HELP: Help = Help::new(
 );
 
 /// `upatch get`, from `get` on.
-pub(super) fn run(args: &[*const c_char]) -> c_int {
+pub(super) fn run(args: &[&CStr]) -> c_int {
     let mut p = OptParser::new(c"upatch get", &GET_OPTS, Some(&GET_HELP), args, 1);
     let (mut json_out, mut show_full) = (false, false);
     let mut want: Option<&[u8]> = None;

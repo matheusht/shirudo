@@ -234,7 +234,7 @@ pub unsafe extern "C" fn shirudo_helper_exec_paths(
     argv: *const *const c_char,
 ) -> c_int {
     // SAFETY: main()'s arguments.
-    let args = unsafe { super::args(argc, argv) };
+    let args = unsafe { crate::ffi::args(argc, argv) };
     let word = |i: usize| args.get(i).map(|a| a.to_bytes());
     let status = |r: Result<(), ()>| c_int::from(r.is_err());
     match (word(1), args.len()) {

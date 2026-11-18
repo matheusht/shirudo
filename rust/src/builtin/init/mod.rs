@@ -10,14 +10,13 @@
 mod lsm;
 mod restore;
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
 use core::{mem, ptr};
 use std::ffi::{CString, OsStr};
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 
-use super::words;
 use crate::errno::{EEXIST, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT, ENOKEY, ENOTBLK, EROFS};
 use crate::ffi;
 use crate::sys::identity::Identity;
@@ -629,8 +628,8 @@ static HELP: Help = Help::new(
     None,
 );
 
-/// The command on `args`, its name first, C strings.
-fn init(args: &[*const c_char]) -> c_int {
+/// The command on `args`, its name first.
+pub(super) fn cmd_init(args: &[&CStr]) -> c_int {
     let (mut check_only, mut json) = (false, false);
     let mut p = OptParser::new(c"init", &OPTS, Some(&HELP), args, 1);
 
@@ -694,20 +693,4 @@ fn init(args: &[*const c_char]) -> c_int {
         initrd_leave();
     }
     if ret != 0 { 1 } else { 0 }
-}
-
-pub(super) use capi::cmd_init;
-
-mod capi {
-    use core::ffi::{c_char, c_int};
-
-    /// `shirudo init`.
-    ///
-    /// # Safety
-    ///
-    /// `argv` holds `argc` C strings.
-    pub unsafe extern "C" fn cmd_init(argc: c_int, argv: *const *const c_char) -> c_int {
-        // SAFETY: the caller's arguments.
-        super::init(unsafe { super::words(argc, argv) })
-    }
 }

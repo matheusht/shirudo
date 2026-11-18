@@ -3,7 +3,7 @@
 
 //! Views of the memory C code hands across the boundary.
 
-use core::ffi::{CStr, c_char};
+use core::ffi::{CStr, c_char, c_int};
 
 /// The bytes of the C string at `s`, without its terminator.
 ///
@@ -14,6 +14,23 @@ use core::ffi::{CStr, c_char};
 pub unsafe fn c_str<'a>(s: *const c_char) -> &'a [u8] {
     // SAFETY: the caller passes a valid C string.
     unsafe { CStr::from_ptr(s) }.to_bytes()
+}
+
+/// The command line main() was given: its `argc` words at `argv`.
+///
+/// # Safety
+///
+/// `argv` holds `argc` C strings that stay valid and unchanged for the
+/// life of the process, as main()'s do.
+pub unsafe fn args(argc: c_int, argv: *const *const c_char) -> Vec<&'static CStr> {
+    // SAFETY: the caller passes argc words at argv.
+    let words = unsafe { slice(argv, usize::try_from(argc).unwrap_or(0)) };
+
+    words
+        .iter()
+        // SAFETY: each word a C string that lives as the process does.
+        .map(|&w| unsafe { CStr::from_ptr(w) })
+        .collect()
 }
 
 /// The length of `parts` spliced together, with the NUL after them.

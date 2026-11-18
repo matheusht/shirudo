@@ -342,7 +342,7 @@ unsafe extern "C" {
 pub unsafe extern "C" fn __wrap_main(argc: c_int, argv: *const *const c_char) -> c_int {
     set_syscall_hook(hook);
     // SAFETY: main()'s arguments.
-    let args = unsafe { super::args(argc, argv) };
+    let args = unsafe { crate::ffi::args(argc, argv) };
     let word = |i: usize| args.get(i).map(|a| a.to_bytes());
     if args.len() == 4 && word(1) == Some(b"config-root") {
         return config_root_test(args[2].to_bytes(), args[3]);

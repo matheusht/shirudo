@@ -6,7 +6,7 @@
 //! acts on them. The operator-only subcommands go to shirudo-build,
 //! which parses them itself.
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
 
 use super::{fail, fetch, finish, info, key, package, source, tree};
 use crate::errno::{E2BIG, EIO};
@@ -322,10 +322,9 @@ static UPGRADE_HELP: Help = Help::new(
     None,
 );
 
-/// The word at `i` of `argv`, a C string, if there is one.
-fn word(argv: &[*const c_char], i: usize) -> Option<&[u8]> {
-    // SAFETY: each argument a C string.
-    argv.get(i).map(|&a| unsafe { ffi::c_str(a) })
+/// The word at `i` of `argv`, if there is one.
+fn word<'a>(argv: &[&'a CStr], i: usize) -> Option<&'a [u8]> {
+    argv.get(i).map(|a| a.to_bytes())
 }
 
 fn help(h: &Help) {
@@ -379,24 +378,15 @@ fn words<'a>(
 
 /// Operator-only subcommands live in shirudo-build; the bpm argument
 /// vector goes over unchanged so the helper parses it itself.
-fn exec_operator(sub: &CStr, argv: &[*const c_char]) -> c_int {
+fn exec_operator(sub: &CStr, argv: &[&CStr]) -> c_int {
     let label = [b"bpm ", sub.to_bytes()].concat();
 
     if label.len() >= 64 {
         return fail(sub.to_bytes(), -E2BIG);
     }
     let label = super::message(&[&label]);
-    let helper_words = [c"bpm".as_ptr(), sub.as_ptr(), core::ptr::null()];
-    // SAFETY: a label, the words up to their NULL, and the arguments
-    // after the two the helper's words replace.
-    unsafe {
-        super::super::build::forward(
-            label.as_ptr(),
-            helper_words.as_ptr(),
-            argv.len() as c_int - 2,
-            argv.as_ptr().add(2),
-        )
-    }
+    let rest = argv.get(2..).unwrap_or_default();
+    super::super::build::forward(&label, &[c"bpm", sub], rest)
 }
 
 fn curl_failed() -> c_int {
@@ -404,7 +394,7 @@ fn curl_failed() -> c_int {
 }
 
 /// `bpm config`, `argv` from "config" on.
-fn config(argv: &[*const c_char]) -> c_int {
+fn config(argv: &[&CStr]) -> c_int {
     let action = word(argv, 2);
 
     if argv.len() < 2 || is_help(word(argv, 1)) {
@@ -452,7 +442,7 @@ fn image_mode_refuses() -> bool {
     false
 }
 
-fn register_list(argv: &[*const c_char]) -> c_int {
+fn register_list(argv: &[&CStr]) -> c_int {
     let mut p = OptParser::new(
         c"bpm config register list",
         &REGISTER_LIST_OPTS,
@@ -467,7 +457,7 @@ fn register_list(argv: &[*const c_char]) -> c_int {
     }
 }
 
-fn register_remove(argv: &[*const c_char], command: &CStr) -> c_int {
+fn register_remove(argv: &[&CStr], command: &CStr) -> c_int {
     let mut p = OptParser::new(command, &[], Some(&CONFIG_HELP), argv, 3);
 
     match words(&mut p, None, 1, 1, b"<source>") {
@@ -477,7 +467,7 @@ fn register_remove(argv: &[*const c_char], command: &CStr) -> c_int {
     }
 }
 
-fn register_add(argv: &[*const c_char]) -> c_int {
+fn register_add(argv: &[&CStr]) -> c_int {
     let mut p = OptParser::new(
         c"bpm config register add",
         &REGISTER_ADD_OPTS,
@@ -518,7 +508,7 @@ fn register_add(argv: &[*const c_char]) -> c_int {
 }
 
 /// `bpm key`, `argv` from "key" on.
-fn key(argv: &[*const c_char]) -> c_int {
+fn key(argv: &[&CStr]) -> c_int {
     if argv.len() < 2 || is_help(word(argv, 1)) {
         help(&KEY_HELP);
         return if argv.len() < 2 { EXIT_USAGE } else { 0 };
@@ -528,7 +518,7 @@ fn key(argv: &[*const c_char]) -> c_int {
         return 0;
     }
     // SAFETY: a label, an argument and items with names.
-    let sub = unsafe { resolve_subcommand(c"bpm key".as_ptr(), argv[1], &KEY_SUBCMDS) };
+    let sub = unsafe { resolve_subcommand(c"bpm key".as_ptr(), argv[1].as_ptr(), &KEY_SUBCMDS) };
     if sub.is_null() {
         return EXIT_USAGE;
     }
@@ -607,7 +597,7 @@ fn info_usage_ok(p: &OptParser<'_>, show: Show, args: &[&CStr]) -> bool {
     false
 }
 
-fn info_cmd(argv: &[*const c_char]) -> c_int {
+fn info_cmd(argv: &[&CStr]) -> c_int {
     let mut p = OptParser::new(c"bpm info", &INFO_OPTS, Some(&INFO_HELP), argv, 2);
     let args = match words(&mut p, None, 1, 3, b"a package") {
         Ok(args) => args,
@@ -633,7 +623,7 @@ fn info_cmd(argv: &[*const c_char]) -> c_int {
     finish(None, ret, b"info")
 }
 
-fn tree_cmd(argv: &[*const c_char]) -> c_int {
+fn tree_cmd(argv: &[&CStr]) -> c_int {
     if argv.len() < 3 || is_help(word(argv, 2)) {
         help(&TREE_HELP);
         return if argv.len() < 3 { EXIT_USAGE } else { 0 };
@@ -662,7 +652,7 @@ fn tree_cmd(argv: &[*const c_char]) -> c_int {
     )
 }
 
-fn pull(argv: &[*const c_char]) -> c_int {
+fn pull(argv: &[&CStr]) -> c_int {
     let mut p = OptParser::new(c"bpm pull", &[], Some(&PULL_HELP), argv, 2);
     let args = match words(
         &mut p,
@@ -681,7 +671,7 @@ fn pull(argv: &[*const c_char]) -> c_int {
     finish(None, fetch::download(args[0].to_bytes(), None), b"pull")
 }
 
-fn repo(argv: &[*const c_char]) -> c_int {
+fn repo(argv: &[&CStr]) -> c_int {
     if argv.len() < 3 || is_help(word(argv, 2)) {
         help(&REPO_HELP);
         return if argv.len() < 3 { EXIT_USAGE } else { 0 };
@@ -705,7 +695,7 @@ fn repo(argv: &[*const c_char]) -> c_int {
     }
 }
 
-fn install(argv: &[*const c_char]) -> c_int {
+fn install(argv: &[&CStr]) -> c_int {
     let mut p = OptParser::new(c"bpm install", &[], Some(&INSTALL_HELP), argv, 2);
     match words(&mut p, None, 1, 1, b"<package>") {
         Ok(args) => package::install(args[0].to_bytes()),
@@ -713,7 +703,7 @@ fn install(argv: &[*const c_char]) -> c_int {
     }
 }
 
-fn list(argv: &[*const c_char]) -> c_int {
+fn list(argv: &[&CStr]) -> c_int {
     let mut p = OptParser::new(c"bpm list", &LIST_OPTS, Some(&LIST_HELP), argv, 2);
     match words(&mut p, None, 0, 0, b"") {
         Ok(_) => package::list(p.given(LIST_JSON)),
@@ -721,7 +711,7 @@ fn list(argv: &[*const c_char]) -> c_int {
     }
 }
 
-fn uninstall(argv: &[*const c_char]) -> c_int {
+fn uninstall(argv: &[&CStr]) -> c_int {
     let mut p = OptParser::new(c"bpm uninstall", &[], Some(&UNINSTALL_HELP), argv, 2);
     match words(&mut p, None, 1, 1, b"<package>") {
         Ok(args) => package::uninstall(args[0].to_bytes()),
@@ -729,7 +719,7 @@ fn uninstall(argv: &[*const c_char]) -> c_int {
     }
 }
 
-fn upgrade(argv: &[*const c_char]) -> c_int {
+fn upgrade(argv: &[&CStr]) -> c_int {
     let mut p = OptParser::new(c"bpm upgrade", &[], Some(&UPGRADE_HELP), argv, 2);
     match words(&mut p, None, 0, 0, b"") {
         Ok(_) => package::upgrade(),
@@ -738,7 +728,7 @@ fn upgrade(argv: &[*const c_char]) -> c_int {
 }
 
 /// `shirudo bpm`, `argv` from "bpm" on.
-pub(super) fn run(argv: &[*const c_char]) -> c_int {
+pub(super) fn run(argv: &[&CStr]) -> c_int {
     let operator = super::super::build::available();
     let (h, items): (&Help, &[HelpItem]) = if operator {
         (&OPERATOR_HELP, &BPM_SUBCMDS)
@@ -755,7 +745,7 @@ pub(super) fn run(argv: &[*const c_char]) -> c_int {
         return 0;
     }
     // SAFETY: a label, an argument and items with names.
-    let sub = unsafe { resolve_subcommand(c"shirudo bpm".as_ptr(), argv[1], items) };
+    let sub = unsafe { resolve_subcommand(c"shirudo bpm".as_ptr(), argv[1].as_ptr(), items) };
     if sub.is_null() {
         return EXIT_USAGE;
     }

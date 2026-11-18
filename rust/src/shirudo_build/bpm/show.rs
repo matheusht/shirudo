@@ -6,7 +6,7 @@
 //! document's bytes verbatim. The publisher fetches the sealed segments
 //! of a tree through it too.
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
 use std::io::Write;
 
 use crate::errno::{EINVAL, EIO, EKEYREJECTED, ENOENT};
@@ -230,7 +230,7 @@ fn show_sealed(c: &mut Client, repository: &[u8], set: &TrustedSet, digest: &[u8
     }
 }
 
-fn show(args: &[*const c_char]) -> c_int {
+fn show(args: &[&CStr]) -> c_int {
     let mut p = OptParser::new(c"bpm tree show", &SHOW_OPTS, Some(&SHOW_HELP), args, 1);
     let (mut raw_repository, mut cert, mut walk) = (None, None, false);
     let mut reference: &[u8] = b"stable";
@@ -310,7 +310,7 @@ fn show(args: &[*const c_char]) -> c_int {
 }
 
 /// `bpm tree show`, from `show` on.
-pub(super) fn run(args: &[*const c_char]) -> c_int {
+pub(super) fn run(args: &[&CStr]) -> c_int {
     // SAFETY: once, before any transfer.
     if unsafe { curl_global_init(CURL_GLOBAL_DEFAULT) } != 0 {
         error(format!("bpm tree show: {}", strerr(EIO)));

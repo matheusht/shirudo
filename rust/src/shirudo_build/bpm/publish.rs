@@ -7,7 +7,7 @@
 //! entry in the signed index beside the repository's namespace. Also the
 //! OCI writing `bpm tree append` shares.
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
 use core::ptr;
 
 use super::build::cstring;
@@ -531,8 +531,7 @@ static PUSH_HELP: Help = Help::new(
 
 /// `bpm push`, from `push` on.
 pub(super) fn run(args: &[&CStr]) -> c_int {
-    let raw: Vec<*const c_char> = args.iter().map(|a| a.as_ptr()).collect();
-    let mut p = OptParser::new(c"bpm push", &PUSH_OPTS, Some(&PUSH_HELP), &raw, 1);
+    let mut p = OptParser::new(c"bpm push", &PUSH_OPTS, Some(&PUSH_HELP), args, 1);
     let (mut package, mut repo): (Option<&CStr>, Option<&CStr>) = (None, None);
     let (mut keys_dir, mut index_cert, mut index_key) = (None, None, None);
     let mut new_index = false;

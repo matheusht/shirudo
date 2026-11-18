@@ -107,15 +107,13 @@ impl OptName {
 /// `struct opt_parser`: the arguments from `next` on, against the
 /// `n_specs` options of `specs`, whose index is the command's enum of
 /// them. It borrows the command, its table, help and arguments for `'a`.
-#[repr(C)]
 pub struct OptParser<'a> {
     pub(crate) command: *const c_char,
     pub(crate) specs: *const OptSpec,
     pub(crate) n_specs: usize,
     pub(crate) help: *const Help,
-    pub(crate) argv: *const *const c_char,
-    pub(crate) argc: c_int,
-    pub(crate) next: c_int,
+    args: &'a [&'a CStr],
+    next: usize,
     pub(crate) checked: bool,
     /// After "--".
     pub(crate) args_only: bool,
@@ -126,16 +124,14 @@ pub struct OptParser<'a> {
     pub(crate) borrow: PhantomData<&'a ()>,
 }
 
-const _: () = assert!(size_of::<OptParser>() == 80);
-
 impl<'a> OptParser<'a> {
-    /// A parser of `args`, C strings, from `first` on, against `specs`.
-    /// Its errors start with `command`, and -h or --help prints `help`.
+    /// A parser of `args` from `first` on, against `specs`. Its errors
+    /// start with `command`, and -h or --help prints `help`.
     pub(crate) fn new(
         command: &'a CStr,
         specs: &'a [OptSpec],
         help: Option<&'a Help>,
-        args: &'a [*const c_char],
+        args: &'a [&'a CStr],
         first: usize,
     ) -> Self {
         OptParser {
@@ -143,9 +139,8 @@ impl<'a> OptParser<'a> {
             specs: specs.as_ptr(),
             n_specs: specs.len(),
             help: help.map_or(ptr::null(), ptr::from_ref),
-            argv: args.as_ptr(),
-            argc: args.len() as c_int,
-            next: first as c_int,
+            args,
+            next: first,
             checked: false,
             args_only: false,
             given: 0,
@@ -158,11 +153,6 @@ impl<'a> OptParser<'a> {
     fn specs(&self) -> &[OptSpec] {
         // SAFETY: the table the parser was made with, of n_specs specs.
         unsafe { ffi::slice(self.specs, self.n_specs) }
-    }
-
-    fn arg(&self, i: c_int) -> *const c_char {
-        // SAFETY: argv holds argc arguments, and i is below argc.
-        unsafe { *self.argv.add(i as usize) }
     }
 
     fn command(&self) -> &[u8] {
@@ -211,15 +201,13 @@ impl<'a> OptParser<'a> {
         self.value = ptr::null();
         self.opt = OPT_END;
         let arg = loop {
-            if self.next >= self.argc {
+            let Some(&arg) = self.args.get(self.next) else {
                 return OPT_END;
-            }
-            let arg = self.arg(self.next);
+            };
             self.next += 1;
-            // SAFETY: an argument, a C string.
-            let bytes = unsafe { ffi::c_str(arg) };
+            let bytes = arg.to_bytes();
             if self.args_only || bytes.first() != Some(&b'-') || bytes.len() == 1 {
-                self.value = arg;
+                self.value = arg.as_ptr();
                 return OPT_ARG;
             }
             if bytes != b"--" {
@@ -227,8 +215,7 @@ impl<'a> OptParser<'a> {
             }
             self.args_only = true;
         };
-        // SAFETY: as above.
-        let bytes = unsafe { ffi::c_str(arg) };
+        let bytes = arg.to_bytes();
         if bytes == b"-h" || bytes == b"--help" {
             // SAFETY: the help the command gave, or NULL.
             if let Some(h) = unsafe { self.help.as_ref() } {
@@ -244,7 +231,7 @@ impl<'a> OptParser<'a> {
         if is_list_cmds(Some(bytes)) {
             return OPT_DONE;
         }
-        let Some((opt, eq)) = self.find(arg) else {
+        let Some((opt, eq)) = self.find(arg.as_ptr()) else {
             return self.unknown(bytes);
         };
         let s = &self.specs()[opt];
@@ -365,8 +352,8 @@ impl<'a> OptParser<'a> {
             self.value = eq;
         } else if flags & OPT_OPTIONAL != 0 {
             return 0;
-        } else if self.next < self.argc {
-            self.value = self.arg(self.next);
+        } else if let Some(&arg) = self.args.get(self.next) {
+            self.value = arg.as_ptr();
             self.next += 1;
         } else {
             self.usage(&[name, b" takes a value"].concat());

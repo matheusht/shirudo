@@ -7,7 +7,7 @@
 //!
 //!   test-register-cli attest|status [options]
 
-use core::ffi::{c_char, c_int};
+use core::ffi::{CStr, c_char, c_int};
 
 use super::err;
 use crate::builtin::{cmd_attest, cmd_status};
@@ -28,12 +28,9 @@ pub unsafe extern "C" fn shirudo_helper_test_register_cli(
         return 1;
     }
     // SAFETY: main()'s arguments.
-    let args = unsafe { super::args(argc, argv) };
+    let args = unsafe { crate::ffi::args(argc, argv) };
     let word = |i: usize| args.get(i).map(|a| a.to_bytes());
-    // SAFETY: the arguments past the program's name, handed on.
-    let command = |run: unsafe extern "C" fn(c_int, *const *const c_char) -> c_int| unsafe {
-        run(argc - 1, argv.add(1))
-    };
+    let command = |run: fn(&[&CStr]) -> c_int| run(args.get(1..).unwrap_or_default());
 
     if word(1) == Some(b"attest") && word(2) == Some(b"predict") {
         return command(cmd_attest);

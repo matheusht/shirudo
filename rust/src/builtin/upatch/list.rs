@@ -6,7 +6,7 @@
 //! Drift either way is the point: an archived upatch not loaded, or a
 //! loaded one that will not survive a reboot.
 
-use core::ffi::{c_char, c_int};
+use core::ffi::{CStr, c_int};
 use std::ffi::CString;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
@@ -122,7 +122,7 @@ static LIST_HELP: Help = Help::new(
 );
 
 /// `upatch list`, from `list` on.
-pub(super) fn run(args: &[*const c_char]) -> c_int {
+pub(super) fn run(args: &[&CStr]) -> c_int {
     let mut p = OptParser::new(c"upatch list", &LIST_OPTS, Some(&LIST_HELP), args, 1);
     let mut json = false;
 

@@ -6,9 +6,7 @@
 //! shirudo-build.
 
 use core::ffi::{CStr, c_char, c_int};
-use core::ptr;
 
-use super::words;
 use crate::errno::{EINPROGRESS, ENODEV};
 use crate::ffi;
 use crate::sys::libc::strerror;
@@ -119,7 +117,7 @@ fn target<'a>(p: &mut OptParser<'a>, want: &[u8]) -> Result<Target<'a>, c_int> {
     }
 }
 
-fn update(args: &[*const c_char]) -> c_int {
+fn update(args: &[&CStr]) -> c_int {
     let mut p = OptParser::new(c"image update", &[], Some(&HELP), args, 1);
 
     match target(&mut p, b"<prefix>") {
@@ -130,7 +128,7 @@ fn update(args: &[*const c_char]) -> c_int {
     }
 }
 
-fn stage(args: &[*const c_char]) -> c_int {
+fn stage(args: &[&CStr]) -> c_int {
     let mut p = OptParser::new(c"image stage", &STAGE_OPTS, Some(&HELP), args, 1);
 
     match target(&mut p, b"<prefix> or --cancel") {
@@ -141,7 +139,7 @@ fn stage(args: &[*const c_char]) -> c_int {
     }
 }
 
-fn status(args: &[*const c_char]) -> c_int {
+fn status(args: &[&CStr]) -> c_int {
     let mut p = OptParser::new(c"image status", &STATUS_OPTS, Some(&HELP), args, 1);
     let mut json = false;
 
@@ -165,14 +163,9 @@ fn status(args: &[*const c_char]) -> c_int {
     done(b"status", ret)
 }
 
-/// `shirudo image` on `args`, its name first, C strings.
-///
-/// # Safety
-///
-/// Each of `args` is a C string.
-unsafe fn image(args: &[*const c_char]) -> c_int {
-    // SAFETY: the caller's C strings.
-    let arg = args.get(1).map(|&a| unsafe { ffi::c_str(a) });
+/// `shirudo image` on `args`, its name first.
+pub(super) fn cmd_image(args: &[&CStr]) -> c_int {
+    let arg = args.get(1).map(|a| a.to_bytes());
 
     if is_list_cmds(arg) {
         // SAFETY: the subcommands, of C strings.
@@ -191,17 +184,7 @@ unsafe fn image(args: &[*const c_char]) -> c_int {
             } else {
                 c"image verify"
             };
-            let words = [c"image".as_ptr(), ptr::null()];
-            // SAFETY: a label, the words up to their NULL, and the
-            // caller's arguments from the subcommand on.
-            unsafe {
-                super::build::forward(
-                    label.as_ptr(),
-                    words.as_ptr(),
-                    (args.len() - 1) as c_int,
-                    args[1..].as_ptr(),
-                )
-            }
+            super::build::forward(label, &[c"image"], &args[1..])
         }
         b"update" => update(&args[1..]),
         b"stage" => stage(&args[1..]),
@@ -210,22 +193,8 @@ unsafe fn image(args: &[*const c_char]) -> c_int {
             crate::log::err(&[b"image: '", sub, b"' is not a subcommand"].concat());
             let names: Vec<*const c_char> = SUBCMDS.iter().map(|s| s.name).collect();
             // SAFETY: the caller's C string and the subcommands' names.
-            unsafe { help_suggest(args[1], &names) };
+            unsafe { help_suggest(args[1].as_ptr(), &names) };
             EXIT_USAGE
         }
-    }
-}
-
-pub(super) use capi::cmd_image;
-
-mod capi {
-    use core::ffi::{c_char, c_int};
-
-    /// # Safety
-    ///
-    /// `argv` holds `argc` C strings.
-    pub unsafe extern "C" fn cmd_image(argc: c_int, argv: *const *const c_char) -> c_int {
-        // SAFETY: the caller's arguments, each a C string.
-        unsafe { super::image(super::words(argc, argv)) }
     }
 }

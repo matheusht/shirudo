@@ -6,7 +6,7 @@
 //! is checked, so the names it shows are as the file has them: made
 //! printable, and in JSON lossy UTF-8.
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
 use std::ffi::CString;
 
 use super::{JSON_MAX, hex, log_err, out, print_json, strerr};
@@ -276,7 +276,7 @@ static INFO_HELP: Help = Help::new(
 );
 
 /// `upatch info`, from `info` on.
-pub(super) fn run(args: &[*const c_char]) -> c_int {
+pub(super) fn run(args: &[&CStr]) -> c_int {
     let mut p = OptParser::new(c"upatch info", &INFO_OPTS, Some(&INFO_HELP), args, 1);
     let (mut json_out, mut path) = (false, None);
 
