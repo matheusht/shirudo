@@ -496,6 +496,9 @@ pub(crate) unsafe fn status_reason(i: &ConditionsInput, buf: &mut [u8]) {
     }
 }
 
+#[cfg(test)]
+mod tests;
+
 mod capi {
     use core::ffi::c_char;
 
