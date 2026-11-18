@@ -25,7 +25,7 @@ pub(super) const UPATCH_LOAD: c_int = 1;
 pub(crate) const UPATCH_UNLOAD: c_int = 2;
 
 /// What `eventlog_boot_lines()` calls with each line.
-pub(super) type LineFn =
+pub(crate) type LineFn =
     unsafe extern "C" fn(line: *const c_char, len: usize, ctx: *mut c_void) -> c_int;
 /// What the upatch walks call with each event.
 pub(crate) type UpatchFn = unsafe extern "C" fn(
@@ -99,7 +99,7 @@ fn replay_line(line: &CStr, is_init: bool, chain: &mut [u8; 32]) -> c_int {
 }
 
 /// This boot's last init record into `out`, which the caller zeroed.
-pub(super) fn boot_init(out: &mut EventlogInit) -> c_int {
+pub(crate) fn boot_init(out: &mut EventlogInit) -> c_int {
     walk_boot(&mut |line, is_init| init_line(line, is_init, out))
 }
 
@@ -176,7 +176,7 @@ fn init_line(line: &CStr, is_init: bool, out: &mut EventlogInit) -> c_int {
 
 /// Each of this boot's lines to `cb`, as a C string and its length; a
 /// NULL `cb` faults when called, as the C's call through it did.
-pub(super) fn boot_lines(cb: Option<LineFn>, ctx: *mut c_void) -> c_int {
+pub(crate) fn boot_lines(cb: Option<LineFn>, ctx: *mut c_void) -> c_int {
     walk_boot(&mut |line, _| {
         let Some(cb) = cb else {
             // SAFETY: a call that takes nothing.

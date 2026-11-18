@@ -27,8 +27,8 @@ const MAP_EXPORT_PATH_MAX: usize = 4096;
 const MAP_EXPORT_ENDPOINT_MAX: usize = 2048;
 const MAP_EXPORT_URI_MAX: usize = 2048;
 const TENANT_ID_MAX: usize = 128;
-const LOG_RECORD_MAX_DEFAULT: u32 = 1024 * 1024;
-const OTLP_MAX_DEFAULT: u32 = 4 * 1024 * 1024;
+pub(crate) const LOG_RECORD_MAX_DEFAULT: u32 = 1024 * 1024;
+pub(crate) const OTLP_MAX_DEFAULT: u32 = 4 * 1024 * 1024;
 pub(crate) const CONF_PATH: &CStr = c"/etc/shirudo/shirudo.conf";
 
 /// `struct config`.

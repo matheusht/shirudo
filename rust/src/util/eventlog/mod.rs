@@ -17,6 +17,8 @@ pub(crate) use capi::{
     eventlog_unlock, eventlog_upatches, eventlog_would_exceed,
 };
 pub(crate) use records::{EventlogInit, UPATCH_INIT, UPATCH_UNLOAD, upatches_record};
+#[cfg(feature = "test-helpers")]
+pub(crate) use records::{boot_init, boot_lines};
 
 use core::ffi::{CStr, c_int};
 
@@ -61,7 +63,7 @@ std::thread_local! {
         const { core::cell::Cell::new(None) };
 }
 
-fn path() -> &'static CStr {
+pub(crate) fn path() -> &'static CStr {
     #[cfg(test)]
     if let Some((log, _)) = TEST_PATHS.get() {
         return log;
@@ -69,7 +71,7 @@ fn path() -> &'static CStr {
     path_from(c"SHIRUDO_EVENTLOG_PATH", DEFAULT_PATH)
 }
 
-fn pending_path() -> &'static CStr {
+pub(crate) fn pending_path() -> &'static CStr {
     #[cfg(test)]
     if let Some((_, pending)) = TEST_PATHS.get() {
         return pending;
@@ -79,7 +81,7 @@ fn pending_path() -> &'static CStr {
 
 /// `line` appended to the log at `path` whole, or nothing of it: a line
 /// cut short would join the next record and fail every reader on it.
-fn append_to(path: &CStr, line: &CStr) -> c_int {
+pub(crate) fn append_to(path: &CStr, line: &CStr) -> c_int {
     // SAFETY: two C strings, and the line's length.
     let ret = unsafe { seal_append_line(path.as_ptr(), line.as_ptr(), line.to_bytes().len()) };
 
@@ -462,7 +464,7 @@ fn unlock(fd: c_int) {
 /// command may append, and both would find it missing and append it.
 /// Without a record there is nothing to adopt, nor yet a state directory
 /// for the lock on a first boot.
-fn adopt_pending_locked() -> c_int {
+pub(crate) fn adopt_pending_locked() -> c_int {
     // SAFETY: a C string.
     if unsafe { access(pending_path().as_ptr(), F_OK) } != 0 && errno() == ENOENT {
         return 0;
@@ -478,12 +480,12 @@ fn adopt_pending_locked() -> c_int {
 }
 
 /// The time now as ISO-8601 UTC into `out`.
-fn timestamp(out: &mut [u8]) {
+pub(crate) fn timestamp(out: &mut [u8]) {
     iso8601(crate::util::timefmt::now(), out);
 }
 
 /// This boot's ID from /proc, without its newline, or empty.
-fn read_boot_id(out: &mut [u8]) {
+pub(crate) fn read_boot_id(out: &mut [u8]) {
     out[0] = 0;
     // SAFETY: a C string and flags without a mode.
     let fd = unsafe {

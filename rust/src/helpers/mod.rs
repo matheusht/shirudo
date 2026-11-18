@@ -12,11 +12,14 @@ use crate::sys::libc::{fwrite, stderr, stdout};
 
 mod bpm_source;
 mod conditions;
+mod config;
 mod config_image;
+mod eventlog;
 mod harden;
 mod image_cleanup;
 mod image_cli;
 mod image_config;
+mod keepalive_quote;
 mod mode_objects;
 mod register_cli;
 mod seal;
