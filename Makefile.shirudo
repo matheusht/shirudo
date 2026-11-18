@@ -243,7 +243,7 @@ UTIL_SRCS := \
     util/java_agent.c \
      \
      \
-    util/integrity.c \
+     \
     util/paths.c \
      \
     util/kernel_prereq.c \

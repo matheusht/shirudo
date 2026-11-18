@@ -24,127 +24,154 @@ pub(crate) type IntegrityCounts = Counters<INTEGRITY_MAX>;
 const POINTS: [Point; INTEGRITY_MAX] = [
     // INTEGRITY_MODULE_SIGNATURE
     Point {
-        name: "ModuleSignature",
-        meaning: "module load without a valid signature",
+        name: c"ModuleSignature",
+        meaning: c"module load without a valid signature",
     },
     // INTEGRITY_DEV_MEM
     Point {
-        name: "DevMem",
-        meaning: "/dev/mem or /dev/port",
+        name: c"DevMem",
+        meaning: c"/dev/mem or /dev/port",
     },
     // INTEGRITY_EFI_TEST
     Point {
-        name: "EfiTest",
-        meaning: "EFI runtime services through efi_test",
+        name: c"EfiTest",
+        meaning: c"EFI runtime services through efi_test",
     },
     // INTEGRITY_KEXEC
     Point {
-        name: "KexecSignature",
-        meaning: "kexec of a kernel without a valid signature",
+        name: c"KexecSignature",
+        meaning: c"kexec of a kernel without a valid signature",
     },
     // INTEGRITY_PCI_ACCESS
     Point {
-        name: "PciAccess",
-        meaning: "PCI configuration write or BAR mapping",
+        name: c"PciAccess",
+        meaning: c"PCI configuration write or BAR mapping",
     },
     // INTEGRITY_IOPORT
     Point {
-        name: "IoPort",
-        meaning: "raw I/O port access",
+        name: c"IoPort",
+        meaning: c"raw I/O port access",
     },
     // INTEGRITY_MSR
     Point {
-        name: "Msr",
-        meaning: "model-specific register write",
+        name: c"Msr",
+        meaning: c"model-specific register write",
     },
     // INTEGRITY_ACPI_TABLES
     Point {
-        name: "AcpiTables",
-        meaning: "ACPI table override or custom method",
+        name: c"AcpiTables",
+        meaning: c"ACPI table override or custom method",
     },
     // INTEGRITY_DEVICE_TREE
     Point {
-        name: "DeviceTree",
-        meaning: "device tree overlay",
+        name: c"DeviceTree",
+        meaning: c"device tree overlay",
     },
     // INTEGRITY_PCMCIA_CIS
     Point {
-        name: "PcmciaCis",
-        meaning: "PCMCIA CIS override",
+        name: c"PcmciaCis",
+        meaning: c"PCMCIA CIS override",
     },
     // INTEGRITY_TIOCSSERIAL
     Point {
-        name: "Tiocsserial",
-        meaning: "serial port I/O or IRQ reconfiguration",
+        name: c"Tiocsserial",
+        meaning: c"serial port I/O or IRQ reconfiguration",
     },
     // INTEGRITY_MODULE_PARAMETERS
     Point {
-        name: "ModuleParameters",
-        meaning: "module parameter that sets hardware addresses",
+        name: c"ModuleParameters",
+        meaning: c"module parameter that sets hardware addresses",
     },
     // INTEGRITY_MMIOTRACE
     Point {
-        name: "Mmiotrace",
-        meaning: "MMIO tracing",
+        name: c"Mmiotrace",
+        meaning: c"MMIO tracing",
     },
     // INTEGRITY_DEBUGFS
     Point {
-        name: "Debugfs",
-        meaning: "debugfs file that writes or maps",
+        name: c"Debugfs",
+        meaning: c"debugfs file that writes or maps",
     },
     // INTEGRITY_XMON_WR
     Point {
-        name: "XmonWrite",
-        meaning: "xmon write access",
+        name: c"XmonWrite",
+        meaning: c"xmon write access",
     },
     // INTEGRITY_BPF_WRITE_USER
     Point {
-        name: "BpfWriteUser",
-        meaning: "BPF program that writes user memory",
+        name: c"BpfWriteUser",
+        meaning: c"BPF program that writes user memory",
     },
     // INTEGRITY_DBG_WRITE_KERNEL
     Point {
-        name: "DbgWriteKernel",
-        meaning: "kernel debugger write",
+        name: c"DbgWriteKernel",
+        meaning: c"kernel debugger write",
     },
     // INTEGRITY_RTAS_ERROR_INJECTION
     Point {
-        name: "RtasErrorInjection",
-        meaning: "RTAS error injection",
+        name: c"RtasErrorInjection",
+        meaning: c"RTAS error injection",
     },
     // INTEGRITY_XEN_USER_ACTIONS
     Point {
-        name: "XenUserActions",
-        meaning: "Xen user action that writes memory",
+        name: c"XenUserActions",
+        meaning: c"Xen user action that writes memory",
     },
     // INTEGRITY_KCORE
     Point {
-        name: "Kcore",
-        meaning: "/proc/kcore, the kernel's memory",
+        name: c"Kcore",
+        meaning: c"/proc/kcore, the kernel's memory",
     },
     // INTEGRITY_HIBERNATE_LOCATION
     Point {
-        name: "HibernateLocation",
-        meaning: "EFI variable naming a resume device",
+        name: c"HibernateLocation",
+        meaning: c"EFI variable naming a resume device",
     },
     // INTEGRITY_OTHER
     Point {
-        name: "Other",
-        meaning: "lockdown reason this build does not name",
+        name: c"Other",
+        meaning: c"lockdown reason this build does not name",
     },
 ];
 
 /// The name of integrity point `point`, "?" past the last.
 pub(crate) fn name(point: usize) -> &'static [u8] {
-    point_name(&POINTS, point)
+    point_name(&POINTS, point).to_bytes()
 }
 
 /// What integrity point `point` counts, "?" past the last.
 pub(crate) fn meaning(point: usize) -> &'static [u8] {
-    point_meaning(&POINTS, point)
+    point_meaning(&POINTS, point).to_bytes()
 }
 
 /// The integrity counters, as tamper::read() reads the tamper counters.
 pub(crate) fn read() -> Result<IntegrityCounts, c_int> {
     counters_read(INTEGRITY_PIN)
+}
+
+mod capi {
+    use core::ffi::{c_char, c_int};
+
+    use super::{IntegrityCounts, POINTS};
+    use crate::util::tamper::{point_meaning, point_name};
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn integrity_name(point: u32) -> *const c_char {
+        point_name(&POINTS, point as usize).as_ptr()
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn integrity_meaning(point: u32) -> *const c_char {
+        point_meaning(&POINTS, point as usize).as_ptr()
+    }
+
+    /// # Safety
+    ///
+    /// `out` is room for the counters.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn integrity_read(out: *mut IntegrityCounts) -> c_int {
+        let r = super::read();
+        // SAFETY: the caller's room.
+        unsafe { crate::util::tamper::put(out, r) }
+    }
 }
