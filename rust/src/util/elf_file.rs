@@ -53,6 +53,13 @@ pub(crate) struct Shdr {
     pub(crate) entsize: u64,
 }
 
+/// A version definition, of the fields read of it.
+pub(crate) struct Verdef {
+    pub(crate) ndx: u16,
+    pub(crate) aux: u32,
+    pub(crate) next: u32,
+}
+
 /// A symbol, of the fields read of it.
 pub(crate) struct Sym {
     pub(crate) name: u32,
@@ -327,6 +334,25 @@ impl<'f> ElfFile<'f> {
             return None;
         }
         Some(self.u(&data.bytes, i * 2, 2) as u16)
+    }
+
+    /// gelf_getverdef(): the version definition at `off` of `data`.
+    pub(crate) fn verdef(&self, data: &Data, off: usize) -> Option<Verdef> {
+        let b = data.bytes.get(off..off.checked_add(20)?)?;
+
+        Some(Verdef {
+            ndx: self.u(b, 4, 2) as u16,
+            aux: self.u(b, 12, 4) as u32,
+            next: self.u(b, 16, 4) as u32,
+        })
+    }
+
+    /// gelf_getverdaux(): the name of the auxiliary version entry at
+    /// `off` of `data`.
+    pub(crate) fn verdaux_name(&self, data: &Data, off: usize) -> Option<u32> {
+        let b = data.bytes.get(off..off.checked_add(8)?)?;
+
+        Some(self.u(b, 0, 4) as u32)
     }
 
     /// gelf_getnote(): the note at `off` of `data`, and the offset of

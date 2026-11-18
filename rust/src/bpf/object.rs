@@ -33,6 +33,9 @@ const SEC_NONE: u32 = 0;
 const SEC_ATTACHABLE_OPT: u32 = 3;
 const SEC_ATTACH_BTF: u32 = 4;
 const SEC_SLEEPABLE: u32 = 8;
+/// shirudo's own, for its `xdp/` handler: the program takes
+/// multi-buffer packets, which every XDP program shirudo builds does.
+const SEC_XDP_FRAGS: u32 = 16;
 
 const fn def(sec: &'static [u8], prog_type: u32, attach: u32, flags: u32) -> SecDef {
     SecDef {
@@ -148,6 +151,8 @@ static SEC_DEFS: &[SecDef] = &[
         SEC_ATTACHABLE_OPT,
     ),
     def(b"netfilter", PROG_NETFILTER, NETFILTER, SEC_NONE),
+    // The handler shirudo-build registers: xdp/<device class mask>.
+    def(b"xdp/", PROG_XDP, XDP, SEC_XDP_FRAGS),
 ];
 
 /// sec_def_matches()
@@ -1234,6 +1239,9 @@ impl Object {
                 p.attach = d.attach;
                 if d.flags & SEC_SLEEPABLE != 0 {
                     p.prog_flags |= F_SLEEPABLE;
+                }
+                if d.flags & SEC_XDP_FRAGS != 0 {
+                    p.prog_flags |= F_XDP_HAS_FRAGS;
                 }
             }
         }

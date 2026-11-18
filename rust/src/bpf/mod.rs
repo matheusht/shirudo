@@ -128,6 +128,7 @@ pub(crate) const PSEUDO_MAP_IDX_VALUE: u8 = 6;
 // Program types and the attach types they are loaded for.
 pub(crate) const PROG_KPROBE: u32 = 2;
 pub(crate) const PROG_TRACEPOINT: u32 = 5;
+pub(crate) const PROG_XDP: u32 = 6;
 pub(crate) const PROG_CGROUP_SKB: u32 = 8;
 pub(crate) const PROG_RAW_TRACEPOINT: u32 = 17;
 pub(crate) const PROG_TRACING: u32 = 26;
@@ -141,12 +142,14 @@ pub(crate) const TRACE_FENTRY: u32 = 24;
 pub(crate) const TRACE_FEXIT: u32 = 25;
 pub(crate) const MODIFY_RETURN: u32 = 26;
 pub(crate) const LSM_MAC: u32 = 27;
+pub(crate) const XDP: u32 = 37;
 pub(crate) const TRACE_KPROBE_MULTI: u32 = 42;
 pub(crate) const NETFILTER: u32 = 45;
 pub(crate) const TRACE_UPROBE_MULTI: u32 = 48;
 pub(crate) const TRACE_KPROBE_SESSION: u32 = 56;
 pub(crate) const TRACE_UPROBE_SESSION: u32 = 57;
 pub(crate) const F_SLEEPABLE: u32 = 1 << 4;
+pub(crate) const F_XDP_HAS_FRAGS: u32 = 1 << 5;
 
 // Map types and flags.
 pub(crate) const MAP_ARRAY: u32 = 2;

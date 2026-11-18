@@ -64,6 +64,19 @@ pub(crate) const ATTACH_CGROUP_SKB_EGRESS: u32 = 4;
 pub(crate) const ATTACH_FMOD_RET: u32 = 5;
 pub(crate) const ATTACH_NETFILTER_IPV6_PRE_ROUTING: u32 = 6;
 pub(crate) const ATTACH_UPROBE_MULTI: u32 = 7;
+pub(crate) const ATTACH_XDP: u32 = 8;
+pub(crate) const ATTACH_URETPROBE_MULTI: u32 = 9;
+pub(crate) const ATTACH_UPROBE: u32 = 10;
+pub(crate) const ATTACH_URETPROBE: u32 = 11;
+
+/// `enum upatch_xdp_device_class`: the classes of device an XDP program
+/// attaches to. Bit 4 is none: loopback has no native XDP, so nothing
+/// selects it.
+pub(crate) const XDP_NETWORK: u32 = 1;
+pub(crate) const XDP_VIRTUAL: u32 = 2;
+pub(crate) const XDP_VM: u32 = 8;
+pub(crate) const XDP_UNKNOWN: u32 = 16;
+pub(crate) const XDP_ALL: u32 = XDP_NETWORK | XDP_VIRTUAL | XDP_VM | XDP_UNKNOWN;
 
 pub(crate) const ROLE_ATTACH: u32 = 0;
 pub(crate) const ROLE_SERIALIZER: u32 = 1;
