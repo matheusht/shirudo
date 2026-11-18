@@ -38,7 +38,7 @@ use crate::util::json::JsonEmit;
 use crate::util::keyring;
 use crate::util::keys::{self, TrustedSet};
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
-use crate::util::preflight::{PreflightResult, preflight_run};
+use crate::util::preflight::{self, PreflightResult};
 use crate::util::seal::{mark_ancestors, seal_label, seal_label_tree, seal_mkdir_p};
 
 const VAR_LIB: &CStr = c"/var/lib/shirudo";
@@ -661,8 +661,7 @@ pub(super) fn cmd_init(args: &[&CStr]) -> c_int {
     }
     // SAFETY: an all-zero result is room for one.
     let mut res: Box<PreflightResult> = Box::new(unsafe { mem::zeroed() });
-    // SAFETY: the result to fill.
-    unsafe { preflight_run(&mut *res) };
+    preflight::run(&mut res);
     if json {
         if print_preflight_json(&res) != 0 {
             return 1;

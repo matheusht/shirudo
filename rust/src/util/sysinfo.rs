@@ -403,7 +403,15 @@ fn kernel_config(release: &[u8]) -> Option<Vec<(Vec<u8>, Vec<u8>)>> {
     Some(options)
 }
 
-fn gather(si: &mut Sysinfo) {
+/// The system's facts into `si`, zeroed whole first.
+pub(crate) fn gather(si: &mut Sysinfo) {
+    let room: *mut Sysinfo = si;
+    // SAFETY: the caller's sysinfo, all of whose bits zeroed are one.
+    unsafe { room.write_bytes(0, 1) };
+    fill(si);
+}
+
+fn fill(si: &mut Sysinfo) {
     let mut u = Utsname::zeroed();
 
     si.nproc = -1;
@@ -447,7 +455,7 @@ fn gather(si: &mut Sysinfo) {
     si.uptime_sec = read_uptime_sec();
 }
 
-fn emit_json(e: &mut JsonEmit, si: &Sysinfo) {
+pub(crate) fn emit_json(e: &mut JsonEmit, si: &Sysinfo) {
     e.obj_open_key(b"system");
     e.kv_string(b"hostname", cstr(&si.hostname));
     e.kv_string(b"os", cstr(&si.os_pretty));
@@ -471,33 +479,5 @@ fn emit_json(e: &mut JsonEmit, si: &Sysinfo) {
     e.obj_close();
 }
 
-pub(crate) use capi::{sysinfo_emit_json, sysinfo_gather};
-
 #[cfg(test)]
 mod tests;
-
-mod capi {
-
-    use super::Sysinfo;
-    use crate::util::json::JsonEmit;
-
-    /// # Safety
-    ///
-    /// `si` points to room for a `struct sysinfo`.
-    pub unsafe extern "C" fn sysinfo_gather(si: *mut Sysinfo) {
-        // SAFETY: the caller passes the room, zeroed whole, padding too,
-        // before anything reads it.
-        unsafe {
-            si.write_bytes(0, 1);
-            super::gather(&mut *si);
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `e` points to an emitter, and `si` to a `struct sysinfo`.
-    pub unsafe extern "C" fn sysinfo_emit_json(e: *mut JsonEmit, si: *const Sysinfo) {
-        // SAFETY: the caller passes an emitter and a sysinfo.
-        unsafe { super::emit_json(&mut *e, &*si) }
-    }
-}

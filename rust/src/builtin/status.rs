@@ -52,7 +52,7 @@ use crate::util::measured::{
 };
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::otel::OtelOpts;
-use crate::util::sysinfo::{Sysinfo, sysinfo_emit_json, sysinfo_gather};
+use crate::util::sysinfo::{self, Sysinfo};
 use crate::util::tamper::{self, Counters, TamperCounts};
 use crate::util::tpm::tpm_tcti;
 use crate::util::upatch::name_from_pin;
@@ -1196,8 +1196,7 @@ impl Report {
         let sysinfo = include_system.then(|| {
             // SAFETY: an all-zero sysinfo is an empty one.
             let mut si: Box<Sysinfo> = Box::new(unsafe { mem::zeroed() });
-            // SAFETY: the sysinfo to fill.
-            unsafe { sysinfo_gather(&mut *si) };
+            sysinfo::gather(&mut si);
             si
         });
         let mut host = [0u8; 256];
@@ -1507,8 +1506,7 @@ impl Report {
             e.kv_null(b"config");
         }
         if let Some(si) = &self.sysinfo {
-            // SAFETY: the emitter and the sysinfo gathered.
-            unsafe { sysinfo_emit_json(e, &**si) };
+            sysinfo::emit_json(e, si);
         }
         self.emit_tpm(e, include_eventlog);
         // SAFETY: the emitter.

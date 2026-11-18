@@ -33,9 +33,7 @@ use crate::util::bpf_sys::{
 use crate::util::kernel_btf;
 use crate::util::map_format::{is_percpu, type_def, type_name, value_stride};
 use crate::util::serializer::{SERIAL_CHUNK_PAYLOAD, SERIAL_MAGIC, SERIAL_VERSION};
-use crate::util::serializer::{
-    SerialChunk, chunk_validate, new_invocation_id, serializer_lock_acquire,
-};
+use crate::util::serializer::{SerialChunk, chunk_validate, new_invocation_id};
 use crate::util::upatch::name_from_pin;
 use crate::util::upatch_pins::pin_payload;
 use crate::util::upatch_resolve::{BPFFS_UPATCHES_DIR, pin_path, resolve_location};
@@ -430,7 +428,7 @@ fn read_serialized(upatch: &[u8], map: &[u8], flags: u32, out: &mut MapView) -> 
     // Clearing, running and reading are one transaction, under a lock
     // keyed by the output map's kernel ID: every process sharing the map
     // contends, and unrelated upatches stay independent.
-    let lock = serializer_lock_acquire(info.u32_at(MAP_ID));
+    let lock = crate::util::serializer::lock_acquire(info.u32_at(MAP_ID));
     if lock < 0 {
         return lock;
     }

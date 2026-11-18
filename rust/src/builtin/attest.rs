@@ -24,7 +24,7 @@ use crate::util::chain::{
     ANCHOR_MAX, MeasuredUpatch, PCR, PCR_MASK as CHAIN_PCR_MASK, PHASE_PCR, chain_anchor,
     chain_fold, chain_init_event, chain_key_event, chain_tree_event, chain_upatch_event,
 };
-use crate::util::config_measure::config_measure_pcr_valid;
+use crate::util::config_measure::pcr_valid;
 use crate::util::crypto_openssl::sha256_into;
 use crate::util::eventlog::NV_INDEX;
 use crate::util::help::{
@@ -1043,7 +1043,7 @@ fn verify_against(args: &[&CStr], x: &mut AttestExpect) -> Result<c_int, c_int> 
             }
             VERIFY_EXPECT_CONFIG_PCR => {
                 let pcr = p.number(0, 15).map_err(|_| EXIT_USAGE)? as u32;
-                if config_measure_pcr_valid(pcr) != 0 {
+                if pcr_valid(pcr) != 0 {
                     return Err(usage(&p, "--expect-config-pcr cannot be 9 or 11"));
                 }
                 x.config_pcr = pcr;

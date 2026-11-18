@@ -203,12 +203,7 @@ pub(crate) fn chunk_validate(
     0
 }
 
-pub(crate) use capi::serializer_lock_acquire;
-
-mod capi {
-    use core::ffi::c_int;
-
-    pub extern "C" fn serializer_lock_acquire(map_id: u32) -> c_int {
-        super::lock_acquire_at(super::LOCKS_DIR, map_id)
-    }
+/// The lock of the serializer of the map `map_id`: its fd, or -errno.
+pub(crate) fn lock_acquire(map_id: u32) -> c_int {
+    lock_acquire_at(LOCKS_DIR, map_id)
 }

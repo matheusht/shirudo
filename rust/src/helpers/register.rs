@@ -42,7 +42,7 @@ use crate::util::eventlog::{
 use crate::util::hex::{decode, encode};
 use crate::util::identity::IDENTITY_PIN;
 use crate::util::json::JsonEmit;
-use crate::util::nv_writer::{self, nv_writer_create};
+use crate::util::nv_writer;
 use crate::util::tpm::{
     Tpm, TpmAttestation, TpmKey, TpmNvInfo, tpm_ak_create, tpm_close, tpm_ek_create, tpm_key_flush,
     tpm_nv_certify, tpm_nv_define, tpm_nv_extend_first, tpm_nv_info, tpm_nv_read,
@@ -92,13 +92,7 @@ fn atoi(text: &CStr) -> i64 {
 fn writer_create() -> c_int {
     let mut id = Identity::zeroed();
     let ret = (|| {
-        // SAFETY: room for the seed and the public key.
-        let ret = unsafe {
-            nv_writer_create(
-                id.nv_writer_seed.as_mut_ptr(),
-                id.nv_writer_public.as_mut_ptr(),
-            )
-        };
+        let ret = nv_writer::create(&mut id.nv_writer_seed, &mut id.nv_writer_public);
         if ret != 0 {
             return ret;
         }

@@ -36,7 +36,7 @@ use crate::util::image_runtime;
 use crate::util::io::kernel_dev;
 use crate::util::keyring;
 use crate::util::lskel::{Failed, Prog, Skeleton, pin};
-use crate::util::nv_writer::nv_writer_create;
+use crate::util::nv_writer;
 use crate::util::tpm::{Tpm, tpm_close, tpm_ek_name, tpm_open};
 
 const BPFFS_DIR: &CStr = c"/run/shirudo/bpffs";
@@ -398,13 +398,7 @@ impl Attached {
         if err != 0 {
             return err;
         }
-        // SAFETY: room for the seed and the public modulus.
-        let err = unsafe {
-            nv_writer_create(
-                id.nv_writer_seed.as_mut_ptr(),
-                id.nv_writer_public.as_mut_ptr(),
-            )
-        };
+        let err = nv_writer::create(&mut id.nv_writer_seed, &mut id.nv_writer_public);
         if err != 0 {
             error(&cat!("init: create TPM RSA-3072 NV writer: ", strerr(-err)));
             return err;

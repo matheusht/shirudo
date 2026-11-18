@@ -16,7 +16,7 @@ use crate::util::tpm_wire::{DIGEST_LEN, NV_RSA_BYTES};
 
 /// A fresh seed into `seed`, and the writer key the TPM creates from it,
 /// its modulus into `public`; on failure both are zeroed.
-fn create(seed: &mut [u8; DIGEST_LEN], public: &mut [u8; NV_RSA_BYTES]) -> c_int {
+pub(crate) fn create(seed: &mut [u8; DIGEST_LEN], public: &mut [u8; NV_RSA_BYTES]) -> c_int {
     let mut off = 0;
 
     while off < seed.len() {
@@ -71,26 +71,4 @@ pub(crate) fn read(seed: &mut [u8; DIGEST_LEN], public: &mut [u8; NV_RSA_BYTES])
     seed.copy_from_slice(&id.nv_writer_seed);
     public.copy_from_slice(&id.nv_writer_public);
     0
-}
-
-pub(crate) use capi::nv_writer_create;
-
-mod capi {
-    use core::ffi::c_int;
-
-    use crate::util::tpm_wire::{DIGEST_LEN, NV_RSA_BYTES};
-
-    /// # Safety
-    ///
-    /// `seed` has room for 32 bytes and `public` for 384, apart.
-    pub unsafe extern "C" fn nv_writer_create(seed: *mut u8, public: *mut u8) -> c_int {
-        // SAFETY: the caller passes the room for both; nothing reads
-        // either before writing it.
-        unsafe {
-            super::create(
-                &mut *seed.cast::<[u8; DIGEST_LEN]>(),
-                &mut *public.cast::<[u8; NV_RSA_BYTES]>(),
-            )
-        }
-    }
 }

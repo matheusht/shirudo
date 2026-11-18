@@ -516,16 +516,11 @@ fn check_tpm(r: &mut PreflightResult) {
 }
 
 /// Every check, in order, into `out`.
-///
-/// # Safety
-///
-/// `out` is room for a result.
-unsafe fn run(out: *mut PreflightResult) {
-    // SAFETY: the caller's room, all of whose bits zeroed are a result.
-    let r = unsafe {
-        out.write_bytes(0, 1);
-        &mut *out
-    };
+pub(crate) fn run(r: &mut PreflightResult) {
+    let out: *mut PreflightResult = r;
+    // SAFETY: the caller's result, all of whose bits zeroed are one,
+    // zeroed whole first as the C's memset() left it.
+    unsafe { out.write_bytes(0, 1) };
 
     check_root(r);
     check_bpf_lsm(r);
@@ -538,18 +533,4 @@ unsafe fn run(out: *mut PreflightResult) {
     check_keyring(r);
     check_embedded_loader(r);
     check_tpm(r);
-}
-
-pub(crate) use capi::preflight_run;
-
-mod capi {
-    use super::PreflightResult;
-
-    /// # Safety
-    ///
-    /// `out` is room for a result.
-    pub unsafe extern "C" fn preflight_run(out: *mut PreflightResult) {
-        // SAFETY: the caller passes room for a result.
-        unsafe { super::run(out) }
-    }
 }

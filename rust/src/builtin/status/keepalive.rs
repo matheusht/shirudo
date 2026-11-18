@@ -24,7 +24,7 @@ use crate::util::keepalive::{
 use crate::util::keepalive_quote;
 use crate::util::measured::name_from_bpffs;
 use crate::util::otel::{OtelOpts, otel_send_log_string, status_otel_severity};
-use crate::util::sysinfo::{self, Sysinfo, sysinfo_gather};
+use crate::util::sysinfo::{self, Sysinfo};
 use crate::util::upatch_resolve::{BPFFS_UPATCHES_DIR, payload_sha256};
 
 /// The body reports the last this many operations up to the head of the
@@ -209,8 +209,7 @@ fn body(r: &Report, cin: &ConditionsInput, config_root: Option<&[u8]>) -> Result
     }
     // SAFETY: an all-zero sysinfo is an empty one.
     let mut si: Box<Sysinfo> = Box::new(unsafe { core::mem::zeroed() });
-    // SAFETY: the sysinfo to fill.
-    unsafe { sysinfo_gather(&mut *si) };
+    sysinfo::gather(&mut si);
     let img = sysinfo::image_read();
     // SAFETY: plain data, whose NULL strings nothing reads before
     // conditions() sets them.
