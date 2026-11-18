@@ -28,8 +28,8 @@ test_expect_success 'every point has a name and a meaning' '
 test_expect_success 'every integrity point has a name and a meaning' '
 	sed -n "s/^\tINTEGRITY_\([A-Z_]*\),$/\1/p" \
 		../bpf/lib/integrity.h >"$W/integrity-points" &&
-	sed -n "s/^\t\[INTEGRITY_\([A-Z_]*\)\] = { \"[A-Za-z]*\",$/\1/p" \
-		../util/integrity.c >"$W/integrity-table" &&
+	sed -n "s/^ *\/\/ INTEGRITY_\([A-Z_]*\)$/\1/p" \
+		../rust/src/util/integrity.rs >"$W/integrity-table" &&
 	[ -s "$W/integrity-points" ] &&
 	cmp "$W/integrity-points" "$W/integrity-table"
 '
