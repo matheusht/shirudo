@@ -13,8 +13,13 @@
 static int lock_error;
 static int lock_flags;
 
-/* Supply deterministic outcomes without locking the test process. */
-int mlockall(int flags)
+/*
+ * Supply deterministic outcomes without locking the test process: the
+ * link wraps the library's call of mlockall().
+ */
+int __wrap_mlockall(int flags);
+
+int __wrap_mlockall(int flags)
 {
 	lock_flags = flags;
 	if (lock_error) {

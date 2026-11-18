@@ -28,18 +28,23 @@ put() {
 }
 
 # A tree the check passes: one fact box whose fields continue on a second
-# line, two harnesses, one of which reads its file through a header.
+# line, two harnesses, one of which reads its file through a header. The
+# command lines and the counters are the Rust's, the files a harness reads
+# C.
 good() {
 	rm -rf "$R" && mkdir -p "$R" && git init -q "$R" &&
-	put shirudo.c 'int main(void) { return 0; }' &&
-	put builtin-upatch.c 'int upatch;' &&
-	put tools/shirudo-build/build.c 'int build;' &&
+	put shirudo.rs 'fn main() {}' &&
+	put rust/src/builtin/upatch.rs 'fn upatch() {}' &&
+	put rust/src/builtin/init/mod.rs 'fn init() {}' &&
+	put tools/shirudo-build/shirudo-build.rs 'fn main() {}' &&
+	put rust/src/shirudo_build/mod.rs 'fn build() {}' &&
+	put rust/src/shirudo_build/bpm/mod.rs 'fn bpm() {}' &&
 	put tools/gen-image/gen '#!/bin/sh' &&
 	put tools/gen-initrd/gen '#!/bin/sh' &&
-	put util/tamper.c 'static const struct point points[] = {' \
-		'	[0] = { "Good", 1 },' '};' &&
-	put util/integrity.c 'static const struct point points[] = {' \
-		'	[0] = { "Kept", 1 },' '};' &&
+	put rust/src/util/tamper.rs 'const POINTS: [Point; 1] = [' \
+		'    Point { name: c"Good", meaning: c"" },' '];' &&
+	put rust/src/util/integrity.rs 'const POINTS: [Point; 1] = [' \
+		'    Point { name: c"Kept", meaning: c"" },' '];' &&
 	put util/read.c 'int read_one;' &&
 	put util/chained.c 'int chained;' &&
 	put util/unread.c 'int unread;' &&
@@ -64,10 +69,7 @@ good() {
 	put "$COV" '   * - ``first``' '   * - ``second``' \
 		'   * - ``Shirudo.Model``' '' \
 		'Files without a proof' '---------------------' '' \
-		'   * - :src:`shirudo.c`, :src:`builtin-upatch.c`,' \
-		'       :src:`tools/shirudo-build/build.c`,' \
-		'       :src:`util/integrity.c`, :src:`util/tamper.c`,' \
-		'       :src:`util/unread.c`' '' \
+		'   * - :src:`util/unread.c`' '' \
 		'Not covered yet' '---------------'
 }
 
@@ -109,8 +111,9 @@ test_expect_success 'every program and every counter stands in a fact box' '
 	good && put bpf/guard.c "SEC(\"lsm/file_open\")" \
 		"SEC(\"lsm.s/inode_setattr\")" "SEC(\"lsm/task_kill\")" &&
 	refuses "no threat names the program lsm/task_kill" &&
-	good && put util/tamper.c "static const struct point points[] = {" \
-		"	[0] = { \"Good\", 1 }," "	[1] = { \"Other\", 1 }," "};" &&
+	good && put rust/src/util/tamper.rs "const POINTS: [Point; 2] = [" \
+		"    Point { name: c\"Good\", meaning: c\"\" }," \
+		"    Point { name: c\"Other\", meaning: c\"\" }," "];" &&
 	put Documentation/security/tamper-counters.rst "\`\`Good\`\`" "\`\`Other\`\`" &&
 	refuses "no threat names the counter Other"
 '

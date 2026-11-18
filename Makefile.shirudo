@@ -856,7 +856,8 @@ testing/helper/test-conditions: testing/helper/test-conditions.c util/log.o \
 testing/helper/test-harden: testing/helper/test-harden.c util/log.o \
 		util/string.o util/malloc.o $(RUST_LIB)
 	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(LIBCRYPTO_LIBS) $(ZLIB_LIBS) $(RUST_TEST_LDLIBS)
+	$(Q)$(CC) $(CFLAGS) -o $@ $^ -Wl,--wrap=mlockall \
+		$(LIBCRYPTO_LIBS) $(ZLIB_LIBS) $(RUST_TEST_LDLIBS)
 
 # The measurement register and TPM client live in Rust. Their symbols
 # must resolve even for a helper that never extends.
