@@ -32,7 +32,7 @@ use crate::sys::upatch::UPATCH_INSTALL_TARGET_MISSING;
 use crate::sys::version::shirudo_version_id;
 use crate::text::cstr;
 use crate::util::bpf_sys::bpf_obj_get;
-use crate::util::chain::{chain_extend, chain_read, chain_upatch_event, memneq_explicit};
+use crate::util::chain::{self, memneq_explicit};
 use crate::util::config::{self, Scrubbed};
 use crate::util::crypto_openssl::{Cert, cms_signed_by};
 use crate::util::eventlog::{
@@ -663,8 +663,7 @@ fn preflight(expect_chain: Option<&CStr>, rep: &mut OpReport) -> Result<(), ()> 
         return Err(());
     };
     let mut have = [0u8; DIGEST_LEN];
-    // SAFETY: room for the register.
-    match unsafe { chain_read(have.as_mut_ptr()) } {
+    match chain::read(&mut have) {
         0 => {}
         r if r == -ENODEV => {
             log_err(b"upatch load: pre-flight refused (category: tampered, message: chain_drift): register unreadable, cannot confirm --expect-chain");
@@ -838,17 +837,8 @@ fn measure(
     reason: Option<&[u8]>,
     out_chain: Option<&mut [c_char; 65]>,
 ) -> (c_int, bool) {
-    let c_name = CString::new(name).unwrap_or_default();
     let (mut event, mut chain) = ([0u8; DIGEST_LEN], [0u8; DIGEST_LEN]);
-    // SAFETY: two C strings, the payload and room for the event.
-    let ret = unsafe {
-        chain_upatch_event(
-            tag.as_ptr(),
-            c_name.as_ptr(),
-            payload.as_ptr(),
-            event.as_mut_ptr(),
-        )
-    };
+    let ret = chain::upatch_event(tag, name, payload, &mut event);
     if ret != 0 {
         log_err(
             &[
@@ -860,8 +850,7 @@ fn measure(
         );
         return (ret, false);
     }
-    // SAFETY: the event and room for the register.
-    let ret = unsafe { chain_extend(event.as_ptr(), chain.as_mut_ptr()) };
+    let ret = chain::extend(&event, Some(&mut chain));
     if ret != 0 {
         let why: &[u8] = match ret {
             r if r == -ENODEV => b": TPM register unavailable (category: tpm_error): not measured; shirudo needs the register init bound this boot",

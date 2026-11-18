@@ -15,7 +15,7 @@ use crate::util::bpm_tree::{TreeState, build_limit};
 use crate::util::bpm_tree_state::{
     eventlog_matches, tree_outcomes_read, tree_pending_exists, tree_state_read, tree_status_path,
 };
-use crate::util::chain::{MeasuredUpatch, chain_init_event};
+use crate::util::chain::{self, MeasuredUpatch};
 use crate::util::conditions::{self, CONDITIONS_MAX, Condition, ConditionsInput};
 use crate::util::keepalive::{
     self, BOUND_LATE, INTEGRITY_UNAVAILABLE, Input, MASK_B64_MAX, MASK_OPS, REGISTER_REBOUND,
@@ -126,17 +126,7 @@ impl View {
         }
         let none = [0u8; 32];
         let (mut digest, mut event) = ([0u8; 32], [0u8; 32]);
-        // SAFETY: the members, two digests and room for two.
-        let ret = unsafe {
-            chain_init_event(
-                none.as_ptr(),
-                set.as_mut_ptr(),
-                set.len(),
-                none.as_ptr(),
-                digest.as_mut_ptr(),
-                event.as_mut_ptr(),
-            )
-        };
+        let ret = chain::init_event(&none, &mut set, &none, &mut digest, &mut event);
         if ret == 0 {
             self.set_sha256 = hex(&digest);
             self.count = set.len() as u64;

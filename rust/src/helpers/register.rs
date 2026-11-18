@@ -31,10 +31,7 @@ use crate::util::attest::{
 use crate::util::bpf_sys::{
     Attr, BPF_ANY, BPF_MAP_CREATE, bpf_map_freeze, bpf_map_update_elem, bpf_obj_pin,
 };
-use crate::util::chain::{
-    self, ANCHOR_MAX, ChainInitInfo, ChainStatus, PCR, PCR_MASK, PHASE_PCR, chain_anchor,
-    chain_extend, chain_read, chain_tree_event, chain_upatch_event,
-};
+use crate::util::chain::{self, ANCHOR_MAX, ChainInitInfo, ChainStatus, PCR, PCR_MASK, PHASE_PCR};
 use crate::util::crypto_openssl::sha256;
 use crate::util::eventlog::{
     EventlogInit, NV_INDEX, boot_init, eventlog_append, read_boot_id, timestamp,
@@ -212,8 +209,7 @@ type Record<'a> = &'a dyn Fn(&mut JsonEmit, &[u8; 32]);
 
 fn extend(event: &[u8; 32], record: Option<Record<'_>>) -> c_int {
     let mut chain = [0u8; 32];
-    // SAFETY: the event and room for the register's value.
-    let ret = unsafe { chain_extend(event.as_ptr(), chain.as_mut_ptr()) };
+    let ret = chain::extend(event, Some(&mut chain));
     out(&format!("rc={ret}\n"));
     if ret != 0 {
         return 1;
@@ -231,16 +227,7 @@ fn load(name: &CStr, payload_hex: &CStr) -> c_int {
         return 2;
     };
     let mut event = [0u8; 32];
-    // SAFETY: C strings, the payload's digest and room for the event.
-    if unsafe {
-        chain_upatch_event(
-            c"shirudo-upatch".as_ptr(),
-            name.as_ptr(),
-            payload.as_ptr(),
-            event.as_mut_ptr(),
-        )
-    } != 0
-    {
+    if chain::upatch_event(c"shirudo-upatch", name.to_bytes(), &payload, &mut event) != 0 {
         return 1;
     }
     extend(
@@ -269,8 +256,7 @@ fn tree(args: &[&CStr]) -> c_int {
     if decode(hex_part, &mut operation).is_err() {
         return 2;
     }
-    // SAFETY: the operation's digest and room for the event.
-    if unsafe { chain_tree_event(seq, operation.as_ptr(), event.as_mut_ptr()) } != 0 {
+    if chain::tree_event(seq, &operation, &mut event) != 0 {
         return 2;
     }
     extend(
@@ -508,11 +494,7 @@ fn forge_on_tpm(
             ret = tpm_nv_info(t, index, &mut f.nv);
         }
         if ret == 0 {
-            ret = chain_anchor(
-                f.nv.name.as_ptr(),
-                f.anchor.as_mut_ptr().cast::<c_char>(),
-                f.anchor.len(),
-            );
+            ret = chain::anchor(&f.nv.name, &mut f.anchor);
         }
         if ret == 0 {
             match sha256(crate::text::cstr(&f.anchor)) {
@@ -789,8 +771,7 @@ fn run(args: &[&CStr]) -> c_int {
             None => 2,
         },
         (b"read", _) => {
-            // SAFETY: room for the register's value.
-            let ret = unsafe { chain_read(chain.as_mut_ptr()) };
+            let ret = chain::read(&mut chain);
             out(&format!("rc={ret}\n"));
             if ret != 0 {
                 return 1;

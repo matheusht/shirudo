@@ -5,14 +5,12 @@
 //! bound to this boot and anchored in a PCR, after systemd's NvPCR, and
 //! the digests every measuring path shares.
 
-use core::ffi::{c_int, c_void};
+use core::ffi::{CStr, c_int, c_void};
 use core::ptr;
 
 use crate::errno::{
-    E2BIG, EACCES, EEXIST, EIO, EKEYREJECTED, ENODEV, ENOENT, ENOMEM, EPROTO, text,
+    E2BIG, EACCES, EEXIST, EINVAL, EIO, EKEYREJECTED, ENODEV, ENOENT, EPROTO, text,
 };
-use crate::heap::{xfree, xmalloc};
-use crate::sys::libc::{strlen, strnlen};
 use crate::sys::tss2::NV_WRITTEN;
 use crate::text::{cstr, strsprintf};
 use crate::util::config::{self, Scrubbed};
@@ -20,7 +18,6 @@ use crate::util::crypto_openssl::{
     Sha256Ctx, sha256_buffer, sha256_final, sha256_free, sha256_init, sha256_update,
 };
 use crate::util::eventlog::{EventlogInit, NV_INDEX, eventlog_boot_init};
-use crate::util::hex::hex_encode;
 use crate::util::initrd::in_initrd;
 use crate::util::nv_writer;
 use crate::util::tpm::{
@@ -157,22 +154,18 @@ pub(crate) unsafe fn sha256_2(
     ret
 }
 
-/// A member's payload digest in hex and its name, each up to the NUL
-/// strlen() finds, as the C's "%s" took them.
-///
-/// # Safety
-///
-/// `m` is a member whose strings end in a NUL, in their fields or past.
-unsafe fn member_strings<'a>(m: *const MeasuredUpatch) -> (&'a [u8], &'a [u8]) {
-    // SAFETY: the caller's member, and the C strings at its fields.
-    unsafe {
-        let hex = (&raw const (*m).payload_hex).cast::<u8>();
-        let name = (&raw const (*m).name).cast::<u8>();
-
-        (
-            core::slice::from_raw_parts(hex, strlen(hex.cast())),
-            core::slice::from_raw_parts(name, strlen(name.cast())),
-        )
+/// The digest of `parts` one after the other into `out`, or zeros and
+/// the error.
+fn digest_into(parts: &[&[u8]], out: &mut [u8; DIGEST_LEN]) -> c_int {
+    match crate::util::crypto_openssl::sha256(&parts.concat()) {
+        Ok(digest) => {
+            *out = digest;
+            0
+        }
+        Err(err) => {
+            *out = [0; DIGEST_LEN];
+            err
+        }
     }
 }
 
@@ -180,159 +173,73 @@ unsafe fn member_strings<'a>(m: *const MeasuredUpatch) -> (&'a [u8], &'a [u8]) {
 /// "<payload hex> <name>\n" line a member, whose digest goes into
 /// `set_digest`, and the digest of the tag, `cert_sha`, the listing's
 /// and `tree_root` into `event`. Both are zeros when it fails.
-///
-/// # Safety
-///
-/// `set` holds `n` members, `cert_sha` and `tree_root` digests, and
-/// `set_digest` and `event` have room for one.
-unsafe fn init_event(
-    cert_sha: *const u8,
-    set: *mut MeasuredUpatch,
-    n: usize,
-    tree_root: *const u8,
-    set_digest: *mut u8,
-    event: *mut u8,
+pub(crate) fn init_event(
+    cert_sha: &[u8; DIGEST_LEN],
+    set: &mut [MeasuredUpatch],
+    tree_root: &[u8; DIGEST_LEN],
+    set_digest: &mut [u8; DIGEST_LEN],
+    event: &mut [u8; DIGEST_LEN],
 ) -> c_int {
-    const TAG: &[u8] = b"shirudo-init\0";
-    let mut tag = [0u8; TAG.len() + 3 * DIGEST_LEN];
-    let mut listing_len = 0usize;
-    let mut off = 0;
-
-    if n > 1 {
-        // SAFETY: the caller's n members.
-        let members = unsafe { core::slice::from_raw_parts_mut(set, n) };
-        // In the order strcmp() gives their names, which no two share.
-        members.sort_unstable_by(|a, b| cstr(&a.name).cmp(cstr(&b.name)));
-    }
-    for i in 0..n {
-        // SAFETY: a member of the caller's set.
-        let (hex, name) = unsafe { member_strings(set.add(i)) };
-
-        listing_len += hex.len() + 1 + name.len() + 1;
-    }
-    // SAFETY: the caller's room for the two digests.
-    unsafe {
-        set_digest.write_bytes(0, DIGEST_LEN);
-        event.write_bytes(0, DIGEST_LEN);
-    }
-    // SAFETY: an allocation, freed below by its size.
-    let listing = unsafe { xmalloc(listing_len + 1) }.cast::<u8>();
-
-    if listing.is_null() {
-        return -ENOMEM;
-    }
-    for i in 0..n {
-        // SAFETY: a member of the caller's set, and the room the
-        // allocation has left.
-        let (hex, name, room) = unsafe {
-            let (hex, name) = member_strings(set.add(i));
-
-            (
-                hex,
-                name,
-                core::slice::from_raw_parts_mut(listing.add(off), listing_len + 1 - off),
-            )
-        };
-
-        match strsprintf(room, &[hex, b" ", name, b"\n"]) {
-            Ok(w) => off += w,
-            Err(e) => {
-                // SAFETY: the allocation, by its size.
-                unsafe { xfree(listing.cast(), listing_len + 1) };
-                return e;
-            }
-        }
-    }
-    // SAFETY: the listing, freed once by its size, and the caller's room.
-    let ret = unsafe {
-        let ret = sha256_buffer(listing.cast(), listing_len, set_digest);
-
-        xfree(listing.cast(), listing_len + 1);
-        ret
-    };
+    // In the order strcmp() gives their names, which no two share.
+    set.sort_unstable_by(|a, b| cstr(&a.name).cmp(cstr(&b.name)));
+    *event = [0; DIGEST_LEN];
+    let listing: Vec<u8> = set
+        .iter()
+        .flat_map(|m| [cstr(&m.payload_hex), b" ", cstr(&m.name), b"\n"].concat())
+        .collect();
+    let ret = digest_into(&[&listing], set_digest);
     if ret != 0 {
         return ret;
     }
-    tag[..TAG.len()].copy_from_slice(TAG);
-    // SAFETY: the caller's digests, its room for one, and the tag here.
-    unsafe {
-        let fields = tag[TAG.len()..].as_mut_ptr();
+    digest_into(
+        &[b"shirudo-init\0", cert_sha, &set_digest[..], tree_root],
+        event,
+    )
+}
 
-        ptr::copy_nonoverlapping(cert_sha, fields, DIGEST_LEN);
-        ptr::copy_nonoverlapping(set_digest, fields.add(DIGEST_LEN), DIGEST_LEN);
-        ptr::copy_nonoverlapping(tree_root, fields.add(2 * DIGEST_LEN), DIGEST_LEN);
-        sha256_buffer(tag.as_ptr().cast(), tag.len(), event)
-    }
+/// The event of the key `cert_sha` under `tag`: the digest of the tag,
+/// its NUL and the key's digest, or zeros and the error.
+pub(crate) fn key_event(
+    tag: &CStr,
+    cert_sha: &[u8; DIGEST_LEN],
+    event: &mut [u8; DIGEST_LEN],
+) -> c_int {
+    digest_into(&[tag.to_bytes_with_nul(), cert_sha], event)
 }
 
 /// The event of a upatch loaded or unloaded: the digest of `tag` and its
-/// NUL, the payload digest and the name cut at NAME_MAX bytes.
-///
-/// # Safety
-///
-/// `tag` and `name` are C strings, `payload` a digest and `event` room
-/// for one.
-unsafe fn upatch_event(
-    tag: *const u8,
-    name: *const u8,
-    payload: *const u8,
-    event: *mut u8,
+/// NUL, the payload digest and the name, up to its NUL and cut at
+/// NAME_MAX bytes.
+pub(crate) fn upatch_event(
+    tag: &CStr,
+    name: &[u8],
+    payload: &[u8; DIGEST_LEN],
+    event: &mut [u8; DIGEST_LEN],
 ) -> c_int {
-    let mut buf = [0u8; b"shirudo-unload\0".len() + DIGEST_LEN + NAME_MAX];
-    // SAFETY: the caller's C strings.
-    let (taglen, namelen) = unsafe { (strlen(tag.cast()) + 1, strnlen(name.cast(), NAME_MAX)) };
-    let mut off = 0;
-
-    // SAFETY: the caller's tag and its NUL, digest and name, each of the
-    // length measured; a tag longer than the room overran the C's.
-    unsafe {
-        buf[off..off + taglen].copy_from_slice(core::slice::from_raw_parts(tag, taglen));
-        off += taglen;
-        buf[off..off + DIGEST_LEN]
-            .copy_from_slice(core::slice::from_raw_parts(payload, DIGEST_LEN));
-        off += DIGEST_LEN;
-        buf[off..off + namelen].copy_from_slice(core::slice::from_raw_parts(name, namelen));
-        off += namelen;
-        sha256_buffer(buf.as_ptr().cast(), off, event)
-    }
+    let name = cstr(name);
+    let name = &name[..name.len().min(NAME_MAX)];
+    digest_into(&[tag.to_bytes_with_nul(), payload, name], event)
 }
 
 /// The event of a tree operation: the digest of the tag and its NUL,
 /// `seq` as a u64 most significant byte first, and the operation's
 /// digest.
-///
-/// # Safety
-///
-/// `operation` is a digest and `event` room for one.
-unsafe fn tree_event(seq: i64, operation: *const u8, event: *mut u8) -> c_int {
-    const TAG: &[u8] = b"shirudo-tree\0";
-    let mut buf = [0u8; TAG.len() + 8 + DIGEST_LEN];
-
-    buf[..TAG.len()].copy_from_slice(TAG);
-    buf[TAG.len()..TAG.len() + 8].copy_from_slice(&(seq as u64).to_be_bytes());
-    // SAFETY: the caller's digest and room.
-    unsafe {
-        ptr::copy_nonoverlapping(operation, buf[TAG.len() + 8..].as_mut_ptr(), DIGEST_LEN);
-        sha256_buffer(buf.as_ptr().cast(), buf.len(), event)
-    }
+pub(crate) fn tree_event(
+    seq: i64,
+    operation: &[u8; DIGEST_LEN],
+    event: &mut [u8; DIGEST_LEN],
+) -> c_int {
+    digest_into(
+        &[b"shirudo-tree\0", &(seq as u64).to_be_bytes(), operation],
+        event,
+    )
 }
 
-/// The register at `chain` extended by `event`, as the TPM extends it,
-/// or zeros and the error.
-///
-/// # Safety
-///
-/// `chain` and `event` are digests, which may be the same.
-pub(crate) unsafe fn fold(chain: *mut u8, event: *const u8) -> c_int {
-    let mut cat = [0u8; 2 * DIGEST_LEN];
-
-    // SAFETY: the caller's two digests, copied before the result
-    // overwrites the register.
-    unsafe {
-        ptr::copy_nonoverlapping(chain, cat.as_mut_ptr(), DIGEST_LEN);
-        ptr::copy_nonoverlapping(event, cat[DIGEST_LEN..].as_mut_ptr(), DIGEST_LEN);
-        sha256_buffer(cat.as_ptr().cast(), cat.len(), chain)
-    }
+/// The register `chain` extended by `event`, as the TPM extends it, or
+/// zeros and the error.
+pub(crate) fn fold(chain: &mut [u8; DIGEST_LEN], event: &[u8; DIGEST_LEN]) -> c_int {
+    let both = [&chain[..], event].concat();
+    digest_into(&[&both], chain)
 }
 
 /// `v` as "%x" prints it.
@@ -345,31 +252,26 @@ fn lower_hex(v: u32, buf: &mut [u8; 8]) -> &[u8] {
     &buf[skip..]
 }
 
-/// The PCR record anchoring the register named `name` into `out`:
-/// "nvpcr-init:shirudo:0x<index>:<name in hex>", or -E2BIG and, for room
-/// of a byte or more, an empty string.
-///
-/// # Safety
-///
-/// `name` is a name and `out` has room for `cap` bytes.
-unsafe fn anchor(name: *const u8, out: *mut u8, cap: usize) -> c_int {
-    let mut hex = [0u8; 2 * NAME_LEN + 1];
+/// The PCR record anchoring the register named `name`, its first
+/// NAME_LEN bytes, into `out`: "nvpcr-init:shirudo:0x<index>:<name in
+/// hex>", or -E2BIG and, for room of a byte or more, an empty string.
+pub(crate) fn anchor(name: &[u8], out: &mut [u8]) -> c_int {
     let mut index = [0u8; 8];
+    let Some(name) = name.get(..NAME_LEN) else {
+        return -EINVAL;
+    };
+    let hex = crate::util::hex::encode(name);
 
-    // SAFETY: the caller's name, and room for its hex and NUL.
-    unsafe { hex_encode(name, NAME_LEN, hex.as_mut_ptr().cast()) };
-    if cap == 0 {
+    if out.is_empty() {
         return -E2BIG;
     }
-    // SAFETY: the caller's room.
-    let out = unsafe { core::slice::from_raw_parts_mut(out, cap) };
     let parts: [&[u8]; 6] = [
         b"nvpcr-init:",
         CHAIN_NAME,
         b":0x",
         lower_hex(NV_INDEX, &mut index),
         b":",
-        &hex[..2 * NAME_LEN],
+        &hex,
     ];
 
     match strsprintf(out, &parts) {
@@ -597,8 +499,7 @@ fn bind(tpm: *mut Tpm, event: &[u8; DIGEST_LEN], info: &mut ChainInitInfo) -> c_
         &mut e,
     );
     if ret == 0 {
-        // SAFETY: the written name and the anchor's room.
-        ret = unsafe { anchor(e.written.as_ptr(), info.anchor.as_mut_ptr(), ANCHOR_MAX) };
+        ret = anchor(&e.written, &mut info.anchor[..ANCHOR_MAX]);
     }
     if ret != 0 {
         return ret;
@@ -699,8 +600,7 @@ fn rebind(
         info.pcr_before = rec.pcr_before;
         info.phase_before = rec.phase_before;
         info.anchor_digest = rec.anchor_digest;
-        // SAFETY: the name and the anchor's room.
-        let ret = unsafe { anchor(info.name.as_ptr(), info.anchor.as_mut_ptr(), ANCHOR_MAX) };
+        let ret = anchor(&info.name, &mut info.anchor[..ANCHOR_MAX]);
         if ret != 0 {
             return ret;
         }
@@ -729,12 +629,8 @@ fn rebind(
 }
 
 /// Extend this boot's register by `event` through the written branch,
-/// its value then into `out_chain` unless NULL: chain_extend().
-///
-/// # Safety
-///
-/// `out_chain` is NULL or room for a digest.
-unsafe fn extend(event: &[u8; DIGEST_LEN], out_chain: *mut u8) -> c_int {
+/// its value then into `out_chain` when given.
+pub(crate) fn extend(event: &[u8; DIGEST_LEN], out_chain: Option<&mut [u8; DIGEST_LEN]>) -> c_int {
     let mut e = Expectation::new();
     let mut values = [0u8; 2 * DIGEST_LEN];
     let mut rec: EventlogInit = zeroed();
@@ -766,7 +662,7 @@ unsafe fn extend(event: &[u8; DIGEST_LEN], out_chain: *mut u8) -> c_int {
     if unsafe { tpm_open(&mut tpm) } != 0 {
         return -ENODEV;
     }
-    // SAFETY: the connection, and the caller's NULL or room.
+    // SAFETY: the connection.
     let ret = unsafe { extend_on(tpm, &rec, &e, event, out_chain) };
 
     // SAFETY: the connection, closed once.
@@ -779,13 +675,13 @@ unsafe fn extend(event: &[u8; DIGEST_LEN], out_chain: *mut u8) -> c_int {
 ///
 /// # Safety
 ///
-/// `out_chain` is NULL or room for a digest.
+/// `tpm` is an open connection.
 unsafe fn extend_on(
     tpm: *mut Tpm,
     rec: &EventlogInit,
     e: &Expectation,
     event: &[u8; DIGEST_LEN],
-    out_chain: *mut u8,
+    out_chain: Option<&mut [u8; DIGEST_LEN]>,
 ) -> c_int {
     let mut writer_public = [0u8; NV_RSA_BYTES];
     let mut nv: TpmNvInfo = zeroed();
@@ -840,23 +736,19 @@ unsafe fn extend_on(
     if ret != 0 {
         return -EIO;
     }
-    if out_chain.is_null() {
+    let Some(out_chain) = out_chain else {
         return 0;
-    }
-    // SAFETY: the connection and the caller's room.
-    if unsafe { tpm_nv_read(tpm, NV_INDEX, out_chain) } != 0 {
+    };
+    // SAFETY: the connection and the room for the value.
+    if unsafe { tpm_nv_read(tpm, NV_INDEX, out_chain.as_mut_ptr()) } != 0 {
         -EIO
     } else {
         0
     }
 }
 
-/// The register's value this boot into `out`: chain_read().
-///
-/// # Safety
-///
-/// `out` has room for a digest.
-unsafe fn read(out: *mut u8) -> c_int {
+/// The register's value this boot into `out`.
+pub(crate) fn read(out: &mut [u8; DIGEST_LEN]) -> c_int {
     let mut tpm: *mut Tpm = ptr::null_mut();
 
     // SAFETY: where tpm_open() leaves the connection.
@@ -866,7 +758,7 @@ unsafe fn read(out: *mut u8) -> c_int {
     // SAFETY: the connection, the caller's room, and the connection
     // closed once.
     let ret = unsafe {
-        let ret = tpm_nv_read(tpm, NV_INDEX, out);
+        let ret = tpm_nv_read(tpm, NV_INDEX, out.as_mut_ptr());
 
         tpm_close(tpm);
         ret
@@ -1030,8 +922,8 @@ fn status_on(tpm: &mut Tpm, st: &mut ChainStatus) -> c_int {
 }
 
 pub(crate) use capi::{
-    chain_anchor, chain_bound, chain_extend, chain_fold, chain_key_event, chain_read,
-    chain_tree_event, chain_upatch_event,
+    chain_anchor, chain_bound, chain_extend, chain_fold, chain_key_event, chain_tree_event,
+    chain_upatch_event,
 };
 
 pub(crate) use capi::chain_init_event;
@@ -1040,9 +932,25 @@ pub(crate) use capi::chain_init_event;
 mod tests;
 
 mod capi {
-    use core::ffi::{c_char, c_int};
+    use core::ffi::{CStr, c_char, c_int};
 
     use super::{DIGEST_LEN, MeasuredUpatch};
+
+    /// # Safety
+    ///
+    /// `p` points to a digest.
+    unsafe fn digest<'a>(p: *const u8) -> &'a [u8; DIGEST_LEN] {
+        // SAFETY: the caller's digest.
+        unsafe { &*p.cast() }
+    }
+
+    /// # Safety
+    ///
+    /// `p` is room for a digest nothing else touches meanwhile.
+    unsafe fn room<'a>(p: *mut u8) -> &'a mut [u8; DIGEST_LEN] {
+        // SAFETY: the caller's room.
+        unsafe { &mut *p.cast() }
+    }
 
     /// # Safety
     ///
@@ -1056,8 +964,22 @@ mod capi {
         set_digest: *mut u8,
         event: *mut u8,
     ) -> c_int {
-        // SAFETY: the caller passes the set, the digests and the rooms.
-        unsafe { super::init_event(cert_sha, set, n, tree_root, set_digest, event) }
+        let set: &mut [MeasuredUpatch] = if n == 0 {
+            &mut []
+        } else {
+            // SAFETY: the caller's n members.
+            unsafe { core::slice::from_raw_parts_mut(set, n) }
+        };
+        // SAFETY: the caller's digests and rooms.
+        unsafe {
+            super::init_event(
+                digest(cert_sha),
+                set,
+                digest(tree_root),
+                room(set_digest),
+                room(event),
+            )
+        }
     }
 
     /// # Safety
@@ -1069,15 +991,7 @@ mod capi {
         event: *mut u8,
     ) -> c_int {
         // SAFETY: the caller passes a C string, a digest and the room.
-        unsafe {
-            super::sha256_2(
-                tag.cast(),
-                crate::sys::libc::strlen(tag) + 1,
-                cert_sha.cast(),
-                DIGEST_LEN,
-                event,
-            )
-        }
+        unsafe { super::key_event(CStr::from_ptr(tag), digest(cert_sha), room(event)) }
     }
 
     /// # Safety
@@ -1091,7 +1005,14 @@ mod capi {
         event: *mut u8,
     ) -> c_int {
         // SAFETY: the caller passes two C strings, a digest and the room.
-        unsafe { super::upatch_event(tag.cast(), name.cast(), payload, event) }
+        unsafe {
+            super::upatch_event(
+                CStr::from_ptr(tag),
+                CStr::from_ptr(name).to_bytes(),
+                digest(payload),
+                room(event),
+            )
+        }
     }
 
     /// # Safety
@@ -1103,7 +1024,7 @@ mod capi {
         event: *mut u8,
     ) -> c_int {
         // SAFETY: the caller passes a digest and the room.
-        unsafe { super::tree_event(seq, operation_digest, event) }
+        unsafe { super::tree_event(seq, digest(operation_digest), room(event)) }
     }
 
     /// # Safety
@@ -1131,16 +1052,10 @@ mod capi {
     ///
     /// `chain` and `event` are digests, which may be the same.
     pub unsafe extern "C" fn chain_fold(chain: *mut u8, event: *const u8) -> c_int {
-        // SAFETY: the caller passes two digests.
-        unsafe { super::fold(chain, event) }
-    }
-
-    /// # Safety
-    ///
-    /// `name` is a name and `out` has room for `cap` bytes.
-    pub unsafe extern "C" fn chain_anchor(name: *const u8, out: *mut c_char, cap: usize) -> c_int {
-        // SAFETY: the caller passes a name and the room.
-        unsafe { super::anchor(name, out.cast(), cap) }
+        // SAFETY: the caller's event, copied before the register is lent.
+        let event = unsafe { *digest(event) };
+        // SAFETY: the caller's register.
+        super::fold(unsafe { room(chain) }, &event)
     }
 
     /// # Safety
@@ -1148,15 +1063,22 @@ mod capi {
     /// `event` is a digest and `out_chain` NULL or room for one.
     pub unsafe extern "C" fn chain_extend(event: *const u8, out_chain: *mut u8) -> c_int {
         // SAFETY: the caller passes a digest and NULL or the room.
-        unsafe { super::extend(&*event.cast(), out_chain) }
+        unsafe { super::extend(digest(event), out_chain.cast::<[u8; DIGEST_LEN]>().as_mut()) }
     }
 
     /// # Safety
     ///
-    /// `out` has room for a digest.
-    pub unsafe extern "C" fn chain_read(out: *mut u8) -> c_int {
-        // SAFETY: the caller passes the room.
-        unsafe { super::read(out) }
+    /// `name` holds a register name and `out` room for `cap` bytes.
+    pub unsafe extern "C" fn chain_anchor(name: *const u8, out: *mut c_char, cap: usize) -> c_int {
+        // SAFETY: the caller's name.
+        let name = unsafe { core::slice::from_raw_parts(name, super::NAME_LEN) };
+        let out: &mut [u8] = if cap == 0 {
+            &mut []
+        } else {
+            // SAFETY: the caller's room.
+            unsafe { core::slice::from_raw_parts_mut(out.cast(), cap) }
+        };
+        super::anchor(name, out)
     }
 
     pub extern "C" fn chain_bound() -> bool {

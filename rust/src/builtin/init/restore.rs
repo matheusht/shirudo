@@ -16,7 +16,7 @@ use crate::sys::libc::explicit_bzero;
 use crate::text::{cstr, name_has_suffix};
 use crate::util::bpm_tree::TreeState;
 use crate::util::bpm_tree_state::tree_state_read;
-use crate::util::chain::{self, ChainInitInfo, MeasuredUpatch, chain_init_event};
+use crate::util::chain::{self, ChainInitInfo, MeasuredUpatch};
 use crate::util::config::{self, Config};
 use crate::util::eventlog::{
     eventlog_append_to, eventlog_lock, eventlog_path, eventlog_pending_path, eventlog_record_open,
@@ -420,17 +420,13 @@ pub(super) fn bind_register(init: &Init, set: &mut [MeasuredUpatch]) -> c_int {
         ));
         return ret;
     }
-    // SAFETY: the digests, the set and the rooms.
-    let ret = unsafe {
-        chain_init_event(
-            d.cert.as_ptr(),
-            set.as_mut_ptr(),
-            n,
-            d.tree_root.as_ptr(),
-            d.set.as_mut_ptr(),
-            d.init.as_mut_ptr(),
-        )
-    };
+    let ret = chain::init_event(
+        &d.cert,
+        &mut set[..n],
+        &d.tree_root,
+        &mut d.set,
+        &mut d.init,
+    );
     if ret != 0 {
         error(&cat!("chain: cannot hash the init event: ", strerr(-ret)));
         return ret;

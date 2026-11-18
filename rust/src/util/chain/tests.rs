@@ -74,7 +74,7 @@ fn chain_fold_extends_like_the_register() {
     let input = [[0u8; 32], event].concat();
 
     // SAFETY: two digests, the first written.
-    assert_eq!(unsafe { fold(chain.as_mut_ptr(), event.as_ptr()) }, 0);
+    assert_eq!(fold(&mut chain, &event), 0);
     assert_eq!(chain, sha256(&input));
 }
 

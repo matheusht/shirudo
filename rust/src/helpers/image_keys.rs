@@ -76,7 +76,7 @@ unsafe extern "C" fn pcr_extend(opaque: *mut c_void, _: u32, event: *const u8) -
     unsafe {
         let c = ctx(opaque);
         c.extends += 1;
-        fold(c.pcr.as_mut_ptr(), event)
+        fold(&mut c.pcr, &*event.cast::<[u8; 32]>())
     }
 }
 

@@ -203,7 +203,7 @@ unsafe extern "C" fn pcr_extend(opaque: *mut c_void, pcr: u32, event: *const u8)
     // bytes.
     ret = unsafe {
         if c.tpm.is_null() {
-            fold(c.sim.value.as_mut_ptr(), event)
+            fold(&mut c.sim.value, &*event.cast::<[u8; 32]>())
         } else {
             tpm_pcr_extend(c.tpm, pcr, event)
         }
