@@ -11,7 +11,6 @@ use super::{
     strsprintf,
 };
 use crate::errno::{E2BIG, EINVAL, ENAMETOOLONG, ENOENT, ENOSPC};
-use crate::heap as malloc;
 use crate::sys::libc;
 use crate::util::io;
 
@@ -173,26 +172,15 @@ pub(super) fn load_registry_auth(registry: &[u8], c: &mut OciClient) -> c_int {
     if strsprintf(&mut needle, &[b"\"", registry, b"\""]).is_err() {
         return -ENAMETOOLONG;
     }
-    let mut body: *mut u8 = core::ptr::null_mut();
-    let mut body_len = 0usize;
-    // SAFETY: a C string path, and out-parameters read_file() fills.
-    let ret = unsafe {
-        io::read_file(
-            authfile.as_ptr().cast(),
-            4 * 1024 * 1024,
-            (&raw mut body).cast(),
-            &mut body_len,
-        )
+    let Ok(authfile) = CStr::from_bytes_until_nul(authfile) else {
+        return -EINVAL;
     };
-    if ret != 0 {
-        return if ret == -ENOENT { 0 } else { ret };
-    }
-    // SAFETY: read_file() gave body_len bytes and a NUL at body.
-    let text = cstr(unsafe { core::slice::from_raw_parts(body, body_len + 1) });
-    let ret = auth_entry(text, cstr(&needle), c);
-    // SAFETY: the allocation read_file() made, released as it says.
-    unsafe { malloc::xfree(body.cast(), body_len + 1) };
-    ret
+    let body = match io::read(authfile, 4 * 1024 * 1024) {
+        Ok(body) => body,
+        Err(err) => return if err == -ENOENT { 0 } else { err },
+    };
+    // As a C string: up to the first NUL.
+    auth_entry(cstr(&body), cstr(&needle), c)
 }
 
 /// The auth file is local input; the registry key and its auth member

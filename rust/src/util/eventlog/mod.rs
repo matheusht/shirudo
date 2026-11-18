@@ -24,8 +24,7 @@ pub(crate) use records::{boot_init, boot_lines};
 
 use core::ffi::{CStr, c_int};
 
-use crate::errno::{EFBIG, EINVAL, ENAMETOOLONG, ENOENT, ENOMEM, text};
-use crate::heap::{xfree, xmalloc};
+use crate::errno::{EFBIG, EINVAL, ENAMETOOLONG, ENOENT, text};
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     AT_FDCWD, F_OK, O_CLOEXEC, O_RDONLY, PATH_MAX, STATX_SIZE, Statx, access, close, env, errno,
@@ -35,7 +34,6 @@ use crate::text::{cstr, strsprintf};
 use crate::util::crypto_openssl::sha256_into;
 use crate::util::hex::hex_encode;
 use crate::util::image_config;
-use crate::util::io::read_file;
 use crate::util::json::{JsonEmit, JsonField, MAX_BYTES, parse_schema};
 use crate::util::seal::{seal_append_line, seal_lock};
 use crate::util::timefmt::iso8601;
@@ -128,58 +126,46 @@ fn would_exceed(max: u64) -> c_int {
     c_int::from(cur.wrapping_add(LINE_MAX) > max)
 }
 
-/// A file read_file() gave: `len` bytes and a NUL, freed on drop.
+/// A file read whole, and a NUL after its bytes.
 struct FileBuf {
-    ptr: *mut u8,
-    len: usize,
+    buf: Vec<u8>,
 }
 
 impl FileBuf {
-    fn read(path: &CStr) -> Result<FileBuf, c_int> {
-        let mut ptr: *mut u8 = core::ptr::null_mut();
-        let mut len = 0;
-        // SAFETY: a C string, and the two outputs read_file() fills.
-        let ret = unsafe { read_file(path.as_ptr(), MAX_BYTES, (&raw mut ptr).cast(), &mut len) };
+    fn of(read: Result<Vec<u8>, c_int>) -> Result<FileBuf, c_int> {
+        let mut buf = read?;
+        buf.push(0);
+        Ok(FileBuf { buf })
+    }
 
-        if ret != 0 {
-            return Err(ret);
-        }
-        Ok(FileBuf { ptr, len })
+    fn read(path: &CStr) -> Result<FileBuf, c_int> {
+        Self::of(crate::util::io::read(path, MAX_BYTES))
     }
 
     /// The file open at `fd`, read whole, `label` naming it in a refusal.
     fn read_fd(fd: std::os::fd::OwnedFd, label: &CStr) -> Result<FileBuf, c_int> {
-        let mut ptr: *mut u8 = core::ptr::null_mut();
-        let mut len = 0;
-        // SAFETY: the descriptor, a C string, and the two outputs
-        // read_fd() fills; the descriptor closes after.
-        let ret = unsafe {
-            crate::util::io::read_fd(
-                std::os::fd::AsRawFd::as_raw_fd(&fd),
-                label.as_ptr(),
-                MAX_BYTES,
-                (&raw mut ptr).cast(),
-                &mut len,
-            )
-        };
-        if ret != 0 {
-            return Err(ret);
-        }
-        Ok(FileBuf { ptr, len })
+        Self::of(crate::util::io::read_whole(
+            std::os::fd::AsRawFd::as_raw_fd(&fd),
+            label,
+            MAX_BYTES,
+        ))
     }
 
     /// The bytes and the NUL after them.
     fn bytes(&mut self) -> &mut [u8] {
-        // SAFETY: read_file() gave len bytes and a NUL, which only this
-        // buffer holds.
-        unsafe { core::slice::from_raw_parts_mut(self.ptr, self.len + 1) }
+        &mut self.buf
+    }
+
+    /// How many bytes the file had.
+    fn len(&self) -> usize {
+        self.buf.len() - 1
     }
 
     /// The records of the file: a NUL would end every walk there and hide
     /// the records after it, and a last line without its newline is no
     /// record yet, so the string ends after the last newline.
     fn records(&mut self) -> c_int {
-        let len = self.len;
+        let len = self.len();
         let buf = self.bytes();
 
         if buf[..len].contains(&0) {
@@ -194,35 +180,17 @@ impl FileBuf {
     }
 }
 
-impl Drop for FileBuf {
-    fn drop(&mut self) {
-        // SAFETY: the allocation read_file() made, freed once, here.
-        unsafe { xfree(self.ptr.cast(), self.len + 1) };
-    }
-}
-
 /// The log and the pending record together, as one C string.
 enum Log {
     File(FileBuf),
-    Joined { ptr: *mut u8, alloc: usize },
+    Joined(Vec<u8>),
 }
 
 impl Log {
     fn bytes(&mut self) -> &mut [u8] {
         match self {
             Log::File(f) => f.bytes(),
-            // SAFETY: the alloc bytes xmalloc() gave, which only this
-            // log holds.
-            Log::Joined { ptr, alloc } => unsafe { core::slice::from_raw_parts_mut(*ptr, *alloc) },
-        }
-    }
-}
-
-impl Drop for Log {
-    fn drop(&mut self) {
-        if let Log::Joined { ptr, alloc } = *self {
-            // SAFETY: the allocation xmalloc() gave, freed once, here.
-            unsafe { xfree(ptr.cast(), alloc) };
+            Log::Joined(buf) => buf,
         }
     }
 }
@@ -283,23 +251,15 @@ fn read_log() -> Result<Log, c_int> {
     if base.records() != 0 || pending.records() != 0 {
         return Err(-EINVAL);
     }
-    if base.len + pending.len > MAX_BYTES {
+    if base.len() + pending.len() > MAX_BYTES {
         return Err(-EFBIG);
     }
-    let alloc = base.len + pending.len + 1;
-    // SAFETY: xmalloc() returns NULL or alloc zeroed bytes.
-    let ptr = unsafe { xmalloc(alloc) }.cast::<u8>();
-    if ptr.is_null() {
-        return Err(-ENOMEM);
-    }
-    let mut log = Log::Joined { ptr, alloc };
+    let mut out = vec![0u8; base.len() + pending.len() + 1];
     let (a, b) = (cstr(base.bytes()).len(), cstr(pending.bytes()).len());
-    let out = log.bytes();
 
     out[..a].copy_from_slice(&base.bytes()[..a]);
     out[a..a + b].copy_from_slice(&pending.bytes()[..b]);
-    out[a + b] = 0;
-    Ok(log)
+    Ok(Log::Joined(out))
 }
 
 /// `f` on each line of the C string in `buf`, terminated in place as

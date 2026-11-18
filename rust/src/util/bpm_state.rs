@@ -4,14 +4,12 @@
 //! The packages bpm installed, as /var/lib/shirudo/bpm/state.json records
 //! them.
 
-use core::ffi::{CStr, c_char, c_int, c_void};
+use core::ffi::{CStr, c_int, c_void};
 
 use crate::errno::{E2BIG, EINVAL, ENOENT};
-use crate::heap::xfree;
 use crate::sys::libc::PATH_MAX;
 use crate::text::{cstr, strsprintf};
 use crate::util::bpm_oci::{MAX_NAME, name_ok, version_ok};
-use crate::util::io::read_file;
 use crate::util::json::{JsonArray, JsonEmit, JsonField, parse_schema};
 use crate::util::seal::{seal_mkdir_p, seal_write_file};
 
@@ -162,31 +160,16 @@ fn emit(st: &[BpmStateEntry], buf: &mut [u8], len: &mut usize) -> c_int {
 ///
 /// `st` has room for `BPM_MAX_STATE` entries.
 unsafe fn read(st: *mut BpmStateEntry, n: &mut c_int) -> c_int {
-    let mut body: *mut c_char = core::ptr::null_mut();
-    let mut len = 0usize;
-    // SAFETY: a C string, a bound, and where read_file() leaves the body
-    // and its length.
-    let ret = unsafe {
-        read_file(
-            STATE_PATH.as_ptr(),
-            STATE_FILE_MAX,
-            (&raw mut body).cast(),
-            &mut len,
-        )
+    let body = match crate::util::io::read(STATE_PATH, STATE_FILE_MAX) {
+        Ok(body) => body,
+        Err(err) if err == -ENOENT => {
+            *n = 0;
+            return 0;
+        }
+        Err(err) => return err,
     };
-
-    if ret == -ENOENT {
-        *n = 0;
-        return 0;
-    }
-    if ret != 0 {
-        return ret;
-    }
-    // SAFETY: the len bytes read_file() gave, and the caller's room.
-    let ret = unsafe { parse(core::slice::from_raw_parts(body.cast::<u8>(), len), st, n) };
-    // SAFETY: what read_file() allocated, len bytes and a NUL.
-    unsafe { xfree(body.cast(), len + 1) };
-    ret
+    // SAFETY: the caller's room.
+    unsafe { parse(&body, st, n) }
 }
 
 /// The packages the state records.

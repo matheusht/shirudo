@@ -41,11 +41,10 @@ use openssl_sys as ffi;
 
 use crate::errno::{EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOMEM, ENOPKG, EPROTONOSUPPORT};
 use crate::ffi::slice;
-use crate::heap::xfree;
 use crate::sys::libc::{O_CLOEXEC, O_RDONLY, errno, open};
 use crate::sys::openssl as more;
 use crate::text::strscpy;
-use crate::util::io::{check_trusted, read_fd};
+use crate::util::io::{check_trusted, read_whole};
 
 pub(crate) const SHA256_LEN: usize = 32;
 
@@ -442,33 +441,15 @@ pub(crate) unsafe fn cert_read_file(path: *const c_char, cert: *mut Cert) -> c_i
 ///
 /// `cert` is NULL or points to a cert.
 pub(crate) unsafe fn cert_read_fd(fd: c_int, cert: *mut Cert) -> c_int {
-    let mut der: *mut u8 = ptr::null_mut();
-    let mut len = 0usize;
-
     if fd < 0 || cert.is_null() {
         return -EINVAL;
     }
-    // SAFETY: the caller's fd, a label, a bound, and where read_fd()
-    // leaves the bytes and their count.
-    let ret = unsafe {
-        read_fd(
-            fd,
-            c"certificate".as_ptr(),
-            KEYS_DER_MAX,
-            (&raw mut der).cast(),
-            &mut len,
-        )
+    let der = match read_whole(fd, c"certificate", KEYS_DER_MAX) {
+        Ok(der) => der,
+        Err(err) => return err,
     };
-    if ret != 0 {
-        return ret;
-    }
-    // SAFETY: the len bytes read_fd() gave, freed once with their NUL.
-    unsafe {
-        let ret = cert_read_der(der, len, cert);
-
-        xfree(der.cast(), len + 1);
-        ret
-    }
+    // SAFETY: the certificate's bytes, and the caller's room.
+    unsafe { cert_read_der(der.as_ptr(), der.len(), cert) }
 }
 
 /// # Safety

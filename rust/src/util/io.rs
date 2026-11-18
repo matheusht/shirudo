@@ -9,7 +9,7 @@ use core::ffi::{CStr, c_char, c_int, c_void};
 
 use crate::errno::{E2BIG, EFBIG, EINTR, EINVAL, EIO, ENOENT, ENOMEM, EPERM};
 use crate::ffi;
-use crate::heap::{xfree, xmalloc};
+use crate::heap::xmalloc;
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW, File, LOCK_EX, O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW, O_PATH,
@@ -18,6 +18,7 @@ use crate::sys::libc::{
     getline, open, pread, set_errno, statx, syscall, write,
 };
 use crate::util::seal::seal_open_read;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 /// `ETC_DIR` of util/paths.h.
 const ETC_DIR: &CStr = c"/etc/shirudo";
@@ -219,8 +220,77 @@ pub(crate) unsafe fn open_beneath(dirfd: c_int, rel: *const c_char, flags: c_int
 }
 
 /// The whole regular file behind `fd`, from its start, of at most `max`
-/// bytes, which may steer trust as `label` says, into `*out`, xmalloc'd
-/// to `*len + 1` bytes and NUL-terminated.
+/// bytes, which may steer trust as `label` says.
+pub(crate) fn read_whole(fd: c_int, label: &CStr, max: usize) -> Result<Vec<u8>, c_int> {
+    let mut st = Statx::zeroed();
+
+    let ret = stat_fd(fd, &mut st);
+    if ret != 0 {
+        return Err(ret);
+    }
+    if st.stx_mode & S_IFMT != S_IFREG {
+        return Err(-EINVAL);
+    }
+    // SAFETY: the label, a C string.
+    let ret = unsafe { check_trusted(fd, label.as_ptr(), false) };
+    if ret != 0 {
+        return Err(ret);
+    }
+    let size = usize::try_from(st.stx_size)
+        .ok()
+        .filter(|&size| size <= max)
+        .ok_or(-EFBIG)?;
+    let mut buf = vec![0u8; size];
+    let mut done = 0usize;
+    while done < size {
+        // SAFETY: the caller's fd, and the room left in buf.
+        let n = unsafe {
+            pread(
+                fd,
+                buf[done..].as_mut_ptr().cast(),
+                size - done,
+                done as i64,
+            )
+        };
+
+        if n < 0 && errno() == EINTR {
+            continue;
+        }
+        if n <= 0 {
+            return Err(if n < 0 { -errno() } else { -EIO });
+        }
+        done += n as usize;
+    }
+    Ok(buf)
+}
+
+/// What a read gave, into `*out`, xmalloc'd to `*len + 1` bytes and
+/// NUL-terminated, for the callers that still free it so.
+///
+/// # Safety
+///
+/// `out` is room for a pointer and `len` for a length.
+unsafe fn hand_over(read: Result<Vec<u8>, c_int>, out: *mut c_void, len: *mut usize) -> c_int {
+    let body = match read {
+        Ok(body) => body,
+        Err(err) => return err,
+    };
+    // SAFETY: an allocation of the body and a NUL, zeroed.
+    let buf = unsafe { xmalloc(body.len() + 1) }.cast::<u8>();
+    if buf.is_null() {
+        return -ENOMEM;
+    }
+    // SAFETY: the allocation's room for the body, and the caller's rooms.
+    unsafe {
+        core::ptr::copy_nonoverlapping(body.as_ptr(), buf, body.len());
+        *out.cast::<*mut u8>() = buf;
+        *len = body.len();
+    }
+    0
+}
+
+/// As [`read_whole`], into `*out`, xmalloc'd to `*len + 1` bytes and
+/// NUL-terminated.
 ///
 /// # Safety
 ///
@@ -233,54 +303,8 @@ pub(crate) unsafe fn read_fd(
     out: *mut c_void,
     len: *mut usize,
 ) -> c_int {
-    let mut st = Statx::zeroed();
-
-    let ret = stat_fd(fd, &mut st);
-    if ret != 0 {
-        return ret;
-    }
-    if st.stx_mode & S_IFMT != S_IFREG {
-        return -EINVAL;
-    }
-    // SAFETY: the caller's C string.
-    let ret = unsafe { check_trusted(fd, label, false) };
-    if ret != 0 {
-        return ret;
-    }
-    if st.stx_size > max as u64 {
-        return -EFBIG;
-    }
-    let size = st.stx_size as usize;
-    // SAFETY: an allocation of size + 1 zeroed bytes, which the caller
-    // frees by that size.
-    let buf = unsafe { xmalloc(size + 1) }.cast::<u8>();
-    if buf.is_null() {
-        return -ENOMEM;
-    }
-    let (mut done, mut off) = (0usize, 0i64);
-    while done < size {
-        // SAFETY: the caller's fd, and the room left in the allocation.
-        let n = unsafe { pread(fd, buf.add(done).cast(), size - done, off) };
-
-        if n < 0 && errno() == EINTR {
-            continue;
-        }
-        if n <= 0 {
-            let ret = if n < 0 { -errno() } else { -EIO };
-
-            // SAFETY: the allocation, by its size.
-            unsafe { xfree(buf.cast(), size + 1) };
-            return ret;
-        }
-        done += n as usize;
-        off += n as i64;
-    }
-    // SAFETY: the caller's rooms.
-    unsafe {
-        *out.cast::<*mut u8>() = buf;
-        *len = size;
-    }
-    0
+    // SAFETY: the caller's C string and rooms.
+    unsafe { hand_over(read_whole(fd, CStr::from_ptr(label), max), out, len) }
 }
 
 /// One line of text of at most `max` bytes before its newline, in
@@ -324,15 +348,43 @@ pub(crate) unsafe fn read_text_line(
 /// `path` is a C string.
 unsafe fn under(path: *const c_char, dir: &CStr) -> bool {
     // SAFETY: the caller's C string.
-    let p = unsafe { CStr::from_ptr(path) }.to_bytes();
+    under_dir(unsafe { CStr::from_ptr(path) }.to_bytes(), dir)
+}
+
+/// Whether `p` names something beneath the directory `dir`.
+fn under_dir(p: &[u8], dir: &CStr) -> bool {
     let d = dir.to_bytes();
 
     p.starts_with(d) && p.get(d.len()) == Some(&b'/')
 }
 
-/// The regular file at `path`, of at most `max` bytes, into `*out`,
-/// xmalloc'd to `*len + 1` bytes and NUL-terminated; one under
+/// The regular file at `path`, of at most `max` bytes; one under
 /// /var/lib/shirudo opened through its seal.
+pub(crate) fn read(path: &CStr, max: usize) -> Result<Vec<u8>, c_int> {
+    let fd = if under_dir(path.to_bytes(), VAR_LIB) {
+        // SAFETY: a C string.
+        let fd = unsafe { seal_open_read(path.as_ptr()) };
+
+        if fd < 0 {
+            return Err(fd);
+        }
+        fd
+    } else {
+        // SAFETY: a C string and flags.
+        let fd = unsafe { open(path.as_ptr(), O_RDONLY | O_CLOEXEC) };
+
+        if fd < 0 {
+            return Err(-errno());
+        }
+        fd
+    };
+    // SAFETY: the fd just opened, owned from here and closed when it goes.
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    read_whole(fd.as_raw_fd(), path, max)
+}
+
+/// As [`read`], into `*out`, xmalloc'd to `*len + 1` bytes and
+/// NUL-terminated.
 ///
 /// # Safety
 ///
@@ -344,31 +396,8 @@ pub(crate) unsafe fn read_file(
     out: *mut c_void,
     len: *mut usize,
 ) -> c_int {
-    // SAFETY: the caller's C string.
-    let fd = if unsafe { under(path, VAR_LIB) } {
-        // SAFETY: as above.
-        let fd = unsafe { seal_open_read(path) };
-
-        if fd < 0 {
-            return fd;
-        }
-        fd
-    } else {
-        // SAFETY: as above.
-        let fd = unsafe { open(path, O_RDONLY | O_CLOEXEC) };
-
-        if fd < 0 {
-            return -errno();
-        }
-        fd
-    };
-    // SAFETY: the file's fd and the caller's rooms; the fd closed once.
-    unsafe {
-        let ret = read_fd(fd, path, max, out, len);
-
-        close(fd);
-        ret
-    }
+    // SAFETY: the caller's C string and rooms.
+    unsafe { hand_over(read(CStr::from_ptr(path), max), out, len) }
 }
 
 fn trusted_owner(uid: u32) -> bool {

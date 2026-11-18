@@ -60,7 +60,7 @@ use crate::util::image_cache::{SEAL_LABEL, XATTR_SEAL, fetch_verified};
 use crate::util::image_config::{image_config_clear, image_config_set};
 use crate::util::image_guards::image_guards_ready;
 use crate::util::image_keys::{self, RUNTIME_CERT_PATH};
-use crate::util::io::{kernel_dev, read_fd};
+use crate::util::io::{kernel_dev, read_whole};
 use crate::util::json::JsonEmit;
 use crate::util::keyring;
 use crate::util::keys::{KEYS_MAX, TrustedCert, TrustedSet, keys_read_der_fd, members};
@@ -324,34 +324,23 @@ fn verify_config_root(s: &State, opened: &ConfigImageOpen) -> c_int {
     if s.bootstrap.n_certificates == 0 || opened.signature_fd < 0 {
         return -ENOKEY;
     }
-    let (mut signature, mut size): (*mut u8, usize) = (ptr::null_mut(), 0);
-    // SAFETY: the signature's fd, a label, a bound and rooms for the
-    // bytes read_fd() allocates.
-    let ret = unsafe {
-        read_fd(
-            opened.signature_fd,
-            c"config root signature".as_ptr(),
-            CONFIG_IMAGE_SIG_MAX,
-            (&raw mut signature).cast(),
-            &mut size,
-        )
+    let sig = match read_whole(
+        opened.signature_fd,
+        c"config root signature",
+        CONFIG_IMAGE_SIG_MAX,
+    ) {
+        Ok(sig) => sig,
+        Err(err) => return err,
     };
-    if ret != 0 {
-        return ret;
-    }
     let root: String = opened
         .image
         .root_hash
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    // SAFETY: the size bytes read_fd() allocated.
-    let sig = unsafe { crate::ffi::slice(signature, size) };
     let signed = s.certificates[..s.bootstrap.n_certificates.min(s.certificates.len())]
         .iter()
-        .any(|c| verify_detached_x509(root.as_bytes(), sig, &c.x509) == 0);
-    // SAFETY: read_fd()'s allocation, freed once with its NUL.
-    unsafe { xfree(signature.cast(), size + 1) };
+        .any(|c| verify_detached_x509(root.as_bytes(), &sig, &c.x509) == 0);
     if signed { 0 } else { -EKEYREJECTED }
 }
 

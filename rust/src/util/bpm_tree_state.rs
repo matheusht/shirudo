@@ -30,7 +30,7 @@ use crate::util::crypto_openssl::sha256_into;
 use crate::util::hex::{self, hex_decode, hex_encode, sha256_digest_decode};
 use crate::util::image_config;
 use crate::util::io::lock_exclusive;
-use crate::util::io::{read_file, read_text_line};
+use crate::util::io::{read, read_text_line};
 use crate::util::json::{JsonEmit, JsonField, MAX_BYTES, parse_schema};
 use crate::util::kernel_build_id::read_build_id;
 use crate::util::kernel_release::prefix_matches;
@@ -402,34 +402,30 @@ unsafe fn read_selector_config_file(
     kv: &mut KconfigValues<'_>,
     gz: bool,
 ) -> c_int {
-    let mut raw: *mut u8 = ptr::null_mut();
-    let mut len = 0usize;
-    // SAFETY: the caller's C string, and room for the allocation and its
-    // length.
-    let ret = unsafe { read_file(path, KCONFIG_MAX, (&raw mut raw).cast(), &mut len) };
-
+    // SAFETY: the caller's C string.
+    let mut raw = match read(unsafe { CStr::from_ptr(path) }, KCONFIG_MAX) {
+        Ok(raw) => raw,
+        Err(err) => return err,
+    };
+    if !gz {
+        return config_text(&raw, kv);
+    }
+    let mut text: *mut u8 = ptr::null_mut();
+    let mut text_len = 0usize;
+    let mut cap = 0usize;
+    // SAFETY: the file's bytes, and rooms for what they inflate to.
+    let ret = unsafe {
+        gunzip(
+            raw.as_mut_ptr(),
+            raw.len(),
+            &mut text,
+            &mut text_len,
+            &mut cap,
+        )
+    };
     if ret != 0 {
         return ret;
     }
-    let (text, text_len, cap) = if gz {
-        let mut text: *mut u8 = ptr::null_mut();
-        let mut text_len = 0usize;
-        let mut cap = 0usize;
-        // SAFETY: the len bytes read_file() gave, and then that
-        // allocation, of len + 1 bytes, freed once.
-        let ret = unsafe {
-            let ret = gunzip(raw, len, &mut text, &mut text_len, &mut cap);
-
-            xfree(raw.cast(), len + 1);
-            ret
-        };
-        if ret != 0 {
-            return ret;
-        }
-        (text, text_len, cap)
-    } else {
-        (raw, len, len + 1)
-    };
     // SAFETY: the text_len bytes of the text.
     let ret = config_text(unsafe { ffi::slice(text, text_len) }, kv);
 
@@ -709,29 +705,12 @@ unsafe fn pending_parse(body: *const c_char, len: usize, out: *mut TreePending) 
 ///
 /// `out` is room for a record.
 unsafe fn pending_read(out: *mut TreePending) -> c_int {
-    let mut body: *mut u8 = ptr::null_mut();
-    let mut len = 0usize;
-    // SAFETY: a C string, and room for the allocation and its length.
-    let ret = unsafe {
-        read_file(
-            tree_path(PENDING).as_ptr(),
-            64 * 1024,
-            (&raw mut body).cast(),
-            &mut len,
-        )
+    let body = match read(&tree_path(PENDING), 64 * 1024) {
+        Ok(body) => body,
+        Err(err) => return err,
     };
-
-    if ret != 0 {
-        return ret;
-    }
-    // SAFETY: the len bytes read_file() gave, the caller's room, and then
-    // that allocation, of len + 1 bytes, freed once.
-    unsafe {
-        let ret = pending_parse(body.cast(), len, out);
-
-        xfree(body.cast(), len + 1);
-        ret
-    }
+    // SAFETY: the record's bytes, and the caller's room.
+    unsafe { pending_parse(body.as_ptr().cast(), body.len(), out) }
 }
 
 /// The operation a sync starts recorded as pending: 0 or -errno.
@@ -777,16 +756,12 @@ unsafe fn state_read(path: *const c_char, out: *mut TreeState) -> c_int {
         out.write_bytes(0, 1);
         &mut *out
     };
-    let mut body: *mut u8 = ptr::null_mut();
-    let mut len = 0usize;
     let mut schema = 0i64;
-    // SAFETY: the caller's C string, and room for the allocation and its
-    // length.
-    let ret = unsafe { read_file(path, MAX_BYTES, (&raw mut body).cast(), &mut len) };
-
-    if ret != 0 {
-        return ret;
-    }
+    // SAFETY: the caller's C string.
+    let body = match read(unsafe { CStr::from_ptr(path) }, MAX_BYTES) {
+        Ok(body) => body,
+        Err(err) => return err,
+    };
     let mut f = [
         JsonField::int(c"schema", &mut schema),
         JsonField::string(c"tree_id", out.tree_id.as_mut_ptr(), out.tree_id.len()),
@@ -810,9 +785,8 @@ unsafe fn state_read(path: *const c_char, out: *mut TreeState) -> c_int {
         JsonField::int(c"head_seq", &mut out.head_seq),
         JsonField::int(c"segment_base_seq", &mut out.segment_base_seq),
     ];
-    // SAFETY: the len bytes read_file() gave, and a schema of the
-    // state's fields.
-    let mut ret = unsafe { json_parse(body, len, &mut f) };
+    // SAFETY: the file's bytes, and a schema of the state's fields.
+    let mut ret = unsafe { json_parse(body.as_ptr(), body.len(), &mut f) };
     // tree_id, last_seq, both projection roots, head and segment base.
     let required = [1, 3, 4, 5, 7, 8];
 
@@ -833,8 +807,6 @@ unsafe fn state_read(path: *const c_char, out: *mut TreeState) -> c_int {
         }
     }
     out.schema = schema as c_int;
-    // SAFETY: read_file()'s allocation, of len + 1 bytes, freed once.
-    unsafe { xfree(body.cast(), len + 1) };
     ret
 }
 
@@ -944,24 +916,18 @@ unsafe fn event_append(
 ///
 /// `path` is a C string, and `out` room for 32 bytes.
 unsafe fn event_replay(path: *const c_char, out: *mut u8) -> c_int {
-    let mut body: *mut u8 = ptr::null_mut();
-    let mut len = 0usize;
-    // SAFETY: the caller's C string, and room for the allocation and its
-    // length.
-    let mut ret = unsafe { read_file(path, MAX_BYTES, (&raw mut body).cast(), &mut len) };
-
-    if ret != 0 {
-        return ret;
-    }
-    // SAFETY: the len bytes read_file() gave.
-    let text = unsafe { ffi::slice(body, len) };
+    // SAFETY: the caller's C string.
+    let body = match read(unsafe { CStr::from_ptr(path) }, MAX_BYTES) {
+        Ok(body) => body,
+        Err(err) => return err,
+    };
+    let mut ret = 0;
+    let text = &body[..];
     let mut chain = [0u8; 32];
     let mut previous_seq = 0i64;
 
     // A NUL would end the walk early and replay a shorter chain.
     if text.contains(&0) {
-        // SAFETY: read_file()'s allocation, of len + 1 bytes, freed once.
-        unsafe { xfree(body.cast(), len + 1) };
         return -EINVAL;
     }
     // Whole lines only: a record cut short at the end is not one yet.
@@ -1025,8 +991,6 @@ unsafe fn event_replay(path: *const c_char, out: *mut u8) -> c_int {
         // SAFETY: the caller's room for 32 bytes.
         unsafe { ptr::copy_nonoverlapping(chain.as_ptr(), out, 32) };
     }
-    // SAFETY: read_file()'s allocation, of len + 1 bytes, freed once.
-    unsafe { xfree(body.cast(), len + 1) };
     ret
 }
 

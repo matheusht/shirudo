@@ -8,7 +8,6 @@
 //! it did.
 
 use core::ffi::{CStr, c_char, c_int, c_long, c_void};
-use core::ptr;
 
 use crate::errno::ENOENT;
 use crate::heap::{xfree, xreallocarray, xstrdup, xstrfree};
@@ -18,7 +17,6 @@ use crate::sys::libc::{
     sysconf, uname,
 };
 use crate::text::{cstr, digits, parse_u64, strscpy, strsprintf};
-use crate::util::io::read_file;
 use crate::util::json::JsonEmit;
 use crate::util::kernel_build_id::read_build_id;
 
@@ -158,18 +156,7 @@ fn os_release_value(text: &[u8], key: &[u8]) -> Option<Vec<u8>> {
 
 /// The file at `path`, of at most `max` bytes.
 fn read_text(path: &CStr, max: usize) -> Result<Vec<u8>, c_int> {
-    let (mut buf, mut len): (*mut u8, usize) = (ptr::null_mut(), 0);
-    // SAFETY: a C string and room for the buffer and its length.
-    let ret = unsafe { read_file(path.as_ptr(), max, (&raw mut buf).cast(), &mut len) };
-    if ret != 0 {
-        return Err(ret);
-    }
-    // SAFETY: the len bytes read_file() gave, freed once with its NUL.
-    unsafe {
-        let text = core::slice::from_raw_parts(buf, len).to_vec();
-        xfree(buf.cast(), len + 1);
-        Ok(text)
-    }
+    crate::util::io::read(path, max)
 }
 
 /// os-release(5): /usr/lib/os-release stands in only where /etc has none.

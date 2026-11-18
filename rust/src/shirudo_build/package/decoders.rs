@@ -7,15 +7,12 @@
 //! built.
 
 use core::ffi::c_int;
-use core::ptr;
 use std::ffi::CString;
 
 use super::{error, strerr};
 use crate::bpf::object::Object;
 use crate::errno::{EEXIST, EINVAL, EOPNOTSUPP, EOVERFLOW};
-use crate::heap::xfree;
 use crate::text::cstr;
-use crate::util::io::read_file;
 use crate::util::upatch::{DECODER_BLOB, DECODER_ENTRY, DECODER_MAGIC, DECODER_VERSION};
 
 /// DECODER_MANIFEST_MAGIC: "DECD", little-endian.
@@ -107,17 +104,9 @@ fn read_source(m: &Manifest, src_path: Option<&[u8]>) -> Result<Vec<u8>, c_int> 
         .and_then(|s| s.iter().rposition(|&c| c == b'/').map(|slash| &s[..=slash]))
         .unwrap_or_default();
     let path = CString::new([dir, &m.source].concat()).map_err(|_| -EINVAL)?;
-    let (mut buf, mut len): (*mut u8, usize) = (ptr::null_mut(), 0);
-    // SAFETY: a C string and room for the buffer and its length.
-    let mut err = unsafe { read_file(path.as_ptr(), SOURCE_MAX, (&raw mut buf).cast(), &mut len) };
-    let source = if err == 0 {
-        // SAFETY: the len bytes read.
-        let s = unsafe { crate::ffi::slice(buf, len) }.to_vec();
-        // SAFETY: read_file()'s buffer of len + 1 bytes.
-        unsafe { xfree(buf.cast(), len + 1) };
-        s
-    } else {
-        Vec::new()
+    let (source, mut err) = match crate::util::io::read(&path, SOURCE_MAX) {
+        Ok(source) => (source, 0),
+        Err(err) => (Vec::new(), err),
     };
     if err == 0 && source.is_empty() {
         err = -EINVAL;
