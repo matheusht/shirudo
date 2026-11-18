@@ -5,7 +5,7 @@
 # .github/scripts/gen-sbom.sh -- write an SPDX 2.3 software bill of
 # materials next to each package, listing what it carries that a package
 # manager cannot see: the target binary links OpenSSL, libcurl, TPM2-TSS
-# and the distribution's libelf, zlib, zstd and LuaJIT archives
+# and the distribution's zlib and LuaJIT archives
 # statically, including the C and compiler runtimes, and both roles link
 # the vendored libbpf.
 #

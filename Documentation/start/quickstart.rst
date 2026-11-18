@@ -51,7 +51,7 @@ Before you begin
   ``cloud-image-utils``, ``libguestfs-tools``, ``dracut-core``,
   ``cryptsetup-bin``, ``e2fsprogs``, ``openssh-client``, ``iproute2``,
   ``isc-dhcp-client``, ``curl``, ``kmod`` and ``file``, and the static
-  archives the target binary links: libelf, zlib, zstd, LuaJIT and a static
+  archives the target binary links: zlib, LuaJIT and a static
   glibc. The VM scripts stop at the first missing command and print the
   command that installs it.
 - ``jq`` and the ``openssl`` command, for the attestation step.

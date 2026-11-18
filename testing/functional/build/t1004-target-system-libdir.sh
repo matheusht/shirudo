@@ -19,29 +19,29 @@ libdir() {
 
 test_expect_success 'the system archives are found in the Debian multiarch directory' '
 	mkdir -p "$WORK/deb/lib/aarch64-linux-gnu" &&
-	: >"$WORK/deb/lib/aarch64-linux-gnu/libelf.a" &&
+	: >"$WORK/deb/lib/aarch64-linux-gnu/libz.a" &&
 	test "$(libdir aarch64-linux-gnu "$WORK/deb")" = \
 		"$WORK/deb/lib/aarch64-linux-gnu"
 '
 
 test_expect_success 'the system archives are found in lib64 where gcc has no multiarch name' '
 	mkdir -p "$WORK/rpm/lib64" &&
-	: >"$WORK/rpm/lib64/libelf.a" &&
+	: >"$WORK/rpm/lib64/libz.a" &&
 	test "$(libdir "" "$WORK/rpm")" = "$WORK/rpm/lib64"
 '
 
 test_expect_success 'the multiarch directory wins over lib64 and lib' '
 	mkdir -p "$WORK/all/lib/x86_64-linux-gnu" "$WORK/all/lib64" &&
-	: >"$WORK/all/lib/x86_64-linux-gnu/libelf.a" &&
-	: >"$WORK/all/lib64/libelf.a" &&
-	: >"$WORK/all/lib/libelf.a" &&
+	: >"$WORK/all/lib/x86_64-linux-gnu/libz.a" &&
+	: >"$WORK/all/lib64/libz.a" &&
+	: >"$WORK/all/lib/libz.a" &&
 	test "$(libdir x86_64-linux-gnu "$WORK/all")" = \
 		"$WORK/all/lib/x86_64-linux-gnu"
 '
 
 test_expect_success 'a plain lib directory is found' '
 	mkdir -p "$WORK/plain/lib" &&
-	: >"$WORK/plain/lib/libelf.a" &&
+	: >"$WORK/plain/lib/libz.a" &&
 	test "$(libdir "" "$WORK/plain")" = "$WORK/plain/lib"
 '
 

@@ -507,10 +507,11 @@ target-deps`` first.
        to use prebuilt ones.
    * - autoconf, automake, libtool and autoconf-archive
      - tpm2-tss's ``bootstrap`` script.
-   * - Static ``libelf.a``, ``libz.a``, ``libzstd.a`` and
-       ``libluajit-5.1.a`` with GC64
+   * - Static ``libz.a`` and ``libluajit-5.1.a`` with GC64, and for the
+       VM tests' fault helper ``libelf.a`` and ``libzstd.a``
      - Taken from the first of ``/usr/lib/<multiarch>``, ``/usr/lib64``
-       and ``/usr/lib`` that holds ``libelf.a``.
+       and ``/usr/lib`` that holds ``libz.a``; the helper's from the
+       linker's own search path.
        ``TARGET_SYSTEM_LIBDIR=`` names another directory.
    * - Static glibc, ``libm``, startup objects and compiler runtime with
        static PIE support (``libc6-dev`` on Debian, ``glibc-static`` on

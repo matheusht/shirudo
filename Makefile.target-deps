@@ -41,13 +41,13 @@ TSS_VERSION ?= 4.2.0
 TARGET_MULTIARCH ?= $(shell dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || gcc -print-multiarch)
 
 # The multiarch directory on Debian, /usr/lib64 on Fedora and RHEL: the
-# first that holds libelf.a, else the first candidate.
+# first that holds libz.a, else the first candidate.
 TARGET_SYSTEM_ROOT ?= /usr
 TARGET_SYSTEM_LIBDIRS := \
 	$(if $(TARGET_MULTIARCH),$(TARGET_SYSTEM_ROOT)/lib/$(TARGET_MULTIARCH)) \
 	$(TARGET_SYSTEM_ROOT)/lib64 $(TARGET_SYSTEM_ROOT)/lib
 TARGET_SYSTEM_LIBDIR ?= $(firstword \
-	$(foreach d,$(TARGET_SYSTEM_LIBDIRS),$(if $(wildcard $(d)/libelf.a),$(d))) \
+	$(foreach d,$(TARGET_SYSTEM_LIBDIRS),$(if $(wildcard $(d)/libz.a),$(d))) \
 	$(TARGET_SYSTEM_LIBDIRS))
 
 OPENSSL_PKG_CONFIG_PATH := $(TARGET_OPENSSL_PREFIX)/lib/pkgconfig
@@ -78,11 +78,8 @@ TSS_STAMP := $(TARGET_STATIC_LIBDIR)/.tpm2-tss-built
 STATIC_ARCHIVES_STAMP := $(TARGET_STATIC_LIBDIR)/.system-archives-staged
 ENV_FILE := $(TARGET_DEPS_DIR)/target.env
 
-# libzstd is libelf's compression dependency on current distributions.
 SYSTEM_ARCHIVES := \
-	$(TARGET_SYSTEM_LIBDIR)/libelf.a \
 	$(TARGET_SYSTEM_LIBDIR)/libz.a \
-	$(TARGET_SYSTEM_LIBDIR)/libzstd.a \
 	$(TARGET_SYSTEM_LIBDIR)/libluajit-5.1.a
 
 OPENSSL_ARCHIVES := \

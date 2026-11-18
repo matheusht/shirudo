@@ -257,8 +257,7 @@ Build the target binary
 
 The target binary is a fully static PIE. It links static archives of
 OpenSSL, libcurl and tpm2-tss that ``make target-deps`` builds from
-source, and the distribution's static ``libelf``, ``zlib``, ``zstd``
-and LuaJIT archives.
+source, and the distribution's static ``zlib`` and LuaJIT archives.
 
 1. Install the static archives and the tools the tpm2-tss build needs.
    CI installs ``autoconf``, ``autoconf-archive``, ``automake``,
