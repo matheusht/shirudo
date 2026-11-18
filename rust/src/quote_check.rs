@@ -174,13 +174,11 @@ fn row_check(row: &[u8], res: &mut QuoteResult) -> Result<(), c_int> {
     res.ak_public[..ak.len()].copy_from_slice(&ak);
     res.ak_public_len = ak.len();
 
-    // SAFETY: all of a public area's bits zeroed are a valid one.
-    let mut public: TpmPublic = unsafe { core::mem::zeroed() };
+    let mut public = TpmPublic::zeroed();
     if public_parse(&ak, &mut public) != 0 || !ak_is_p256_ecdsa(&public) {
         return Ok(());
     }
-    // SAFETY: as above, for an attestation.
-    let mut quote: TpmAttest = unsafe { core::mem::zeroed() };
+    let mut quote = TpmAttest::zeroed();
     if attest_parse(&attest, &mut quote) != 0 || !is_keepalive_quote(&quote) {
         return Ok(());
     }
@@ -203,9 +201,7 @@ fn row_check(row: &[u8], res: &mut QuoteResult) -> Result<(), c_int> {
         err => return Err(err),
     }
 
-    // SAFETY: the extra data, extra_len bytes of the attestation.
-    let extra = unsafe { ffi::slice(quote.extra, quote.extra_len) };
-    if extra != body {
+    if quote.extra_in(&attest) != Some(&body[..]) {
         res.verdict = QUOTE_BODY_MISMATCH;
         return Ok(());
     }

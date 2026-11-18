@@ -131,19 +131,12 @@ fn public(args: &[&CStr]) -> Result<(), Fail> {
 
 fn attest(args: &[&CStr]) -> Result<(), Fail> {
     let buf = bytes(args[2], 2048)?;
-    // SAFETY: a structure of numbers, arrays and pointers into the
-    // buffer, for which zeros are the value before the parse.
-    let mut at: TpmAttest = unsafe { core::mem::zeroed() };
+    let mut at = TpmAttest::zeroed();
     let ret = attest_parse(&buf, &mut at);
     out(&format!("rc={ret}\n"));
     if ret != 0 {
         return Ok(());
     }
-    let view = |p: *const u8, n: usize| {
-        // SAFETY: what the parse pointed into the buffer, which lives
-        // here, or nothing.
-        unsafe { crate::ffi::slice(p, n) }
-    };
     out(&format!(
         "type=0x{:04x} reset={} restart={} safe={}\n",
         at.ty,
@@ -154,7 +147,7 @@ fn attest(args: &[&CStr]) -> Result<(), Fail> {
     out("signer=");
     puthex(&at.signer[..at.signer_len.min(NAME_LEN)]);
     out("extra=");
-    puthex(view(at.extra, at.extra_len));
+    puthex(at.extra_in(&buf).unwrap_or_default());
     if at.ty == ST_ATTEST_QUOTE {
         out(&format!("mask=0x{:06x}\npcr_digest=", at.pcr_mask));
         puthex(&at.pcr_digest);
@@ -162,7 +155,7 @@ fn attest(args: &[&CStr]) -> Result<(), Fail> {
         out("index_name=");
         puthex(&at.index_name[..at.index_name_len.min(NAME_LEN)]);
         out(&format!("offset={}\nnv=", at.offset));
-        puthex(view(at.nv_data, at.nv_len));
+        puthex(at.nv_data_in(&buf).unwrap_or_default());
     }
     Ok(())
 }
@@ -228,14 +221,7 @@ fn run_case(args: &[&CStr]) -> Result<(), Fail> {
                 branch_init: &mut i,
                 policy: &mut p,
             };
-            if register_policy(
-                number(a(2)) as u32,
-                values.as_ptr(),
-                values.len(),
-                &modulus,
-                out,
-            ) != 0
-            {
+            if register_policy(number(a(2)) as u32, &values, &modulus, out) != 0 {
                 return Err(Fail::Compute);
             }
             puthex(&w);
@@ -270,8 +256,7 @@ fn run_case(args: &[&CStr]) -> Result<(), Fail> {
         }
         (b"ecc-public", 3) => {
             let buf = bytes(a(2), 2048)?;
-            // SAFETY: numbers and arrays, for which zeros are a value.
-            let mut p: TpmEccPublic = unsafe { core::mem::zeroed() };
+            let mut p = TpmEccPublic::zeroed();
             let ret = ecc_public_parse(&buf, &mut p);
             out(&format!("rc={ret}\n"));
             if ret == 0 {

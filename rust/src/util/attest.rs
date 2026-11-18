@@ -48,10 +48,9 @@ use crate::util::tpm::{
 };
 use crate::util::tpm_wire::{
     ALG_ECC, ALG_RSA, CREDENTIAL_LEN, EK_POLICY, ID_OBJECT_LEN, NAME_LEN, NV_RSA_BYTES,
-    ST_ATTEST_NV, ST_ATTEST_QUOTE, TpmAttest, TpmEccPublic, TpmPublic, attest_signer,
-    attest_verify as signature_verify, tpm_attest_parse, tpm_credential_protect,
-    tpm_ecc_public_parse, tpm_kdfe, tpm_nv_name, tpm_object_name, tpm_public_parse,
-    tpm_register_policy,
+    RegisterPolicy, ST_ATTEST_NV, ST_ATTEST_QUOTE, TpmAttest, TpmEccPublic, TpmPublic,
+    attest_parse, attest_signer, attest_verify as signature_verify, credential_protect,
+    ecc_public_parse, kdfe, nv_name, object_name, public_parse, register_policy,
 };
 use crate::util::upatch::{NAME_MAX as UPATCH_NAME_MAX, upatch_name_valid};
 
@@ -344,10 +343,12 @@ fn pcr_values_digest(mask: u32, values: &[[u8; 32]; 24]) -> Option<[u8; 32]> {
 /// Whether the quote covers the PCR values read beside it, which alone
 /// makes it acceptable.
 fn quote_covers(quote: &TpmAttestation, mask: u32, values: &[[u8; 32]; 24]) -> bool {
-    let mut a: TpmAttest = zeroed();
+    let mut a = TpmAttest::zeroed();
 
-    // SAFETY: the quote's bytes, and room for what they hold.
-    if unsafe { tpm_attest_parse(quote.attest.as_ptr(), quote.attest_len, &mut a) } != 0
+    if quote
+        .attest
+        .get(..quote.attest_len)
+        .is_none_or(|bytes| attest_parse(bytes, &mut a) != 0)
         || a.ty != ST_ATTEST_QUOTE
         || a.pcr_mask != mask
     {
@@ -539,10 +540,12 @@ unsafe fn evidence(
         return -EAGAIN;
     }
     if config.present {
-        let mut quoted: TpmAttest = zeroed();
+        let mut quoted = TpmAttest::zeroed();
 
-        // SAFETY: the quote's bytes, and room for what they hold.
-        if unsafe { tpm_attest_parse(quote.attest.as_ptr(), quote.attest_len, &mut quoted) } != 0
+        if quote
+            .attest
+            .get(..quote.attest_len)
+            .is_none_or(|bytes| attest_parse(bytes, &mut quoted) != 0)
             || quoted.reset_count != config.reset_count
             || quoted.restart_count != config.restart_count
             || values[config.pcr as usize] != config.value
@@ -1088,12 +1091,12 @@ fn check_signed(
     } {
         return -EINVAL;
     }
-    // SAFETY: the attestation's bytes, and room for what they hold.
-    if unsafe { tpm_attest_parse(attest.as_ptr(), *attest_len, parsed) } != 0 {
+    let attest = &attest[..*attest_len];
+    if attest_parse(attest, parsed) != 0 {
         say!(rep, false, c"%s: attestation structure unparseable", what);
         return -EKEYREJECTED;
     }
-    let ret = signature_verify(&attest[..*attest_len], &sig[..sig_len], &ak.x, &ak.y);
+    let ret = signature_verify(attest, &sig[..sig_len], &ak.x, &ak.y);
     if ret == -EBADMSG {
         say!(rep, false, c"%s: signature structure unparseable", what);
         return -EKEYREJECTED;
@@ -1110,10 +1113,9 @@ fn check_signed(
         c"%s: signed by the key as an endorsement primary",
         what
     );
-    let carried = parsed.extra_len == nonce.len()
-        && (nonce.is_empty()
-            // SAFETY: the extra data, extra_len bytes of the attestation.
-            || !memneq_explicit(unsafe { ffi::slice(parsed.extra, parsed.extra_len) }, nonce));
+    let carried = parsed.extra_in(attest).is_some_and(|extra| {
+        extra.len() == nonce.len() && (nonce.is_empty() || !memneq_explicit(extra, nonce))
+    });
     say!(rep, carried, c"%s: carries the nonce", what);
     0
 }
@@ -1261,9 +1263,9 @@ unsafe fn verify_parsed(
     doc: &[u8],
     expect: &AttestExpect,
 ) -> c_int {
-    let mut quote: TpmAttest = zeroed();
-    let mut certify: TpmAttest = zeroed();
-    let mut ak_pub: TpmEccPublic = zeroed();
+    let mut quote = TpmAttest::zeroed();
+    let mut certify = TpmAttest::zeroed();
+    let mut ak_pub = TpmEccPublic::zeroed();
     let mut ak_public = [0u8; PUBLIC_MAX];
     let mut ak_name = [0u8; NAME_LEN];
     let mut reg_name = [0u8; NAME_LEN];
@@ -1345,8 +1347,8 @@ unsafe fn verify_parsed(
     {
         return -EINVAL;
     }
-    // SAFETY: the key's public area, and room for what it holds.
-    if unsafe { tpm_ecc_public_parse(ak_public.as_ptr(), ak_public_len, &mut ak_pub) } != 0 {
+    let ak_public = &ak_public[..ak_public_len];
+    if ecc_public_parse(ak_public, &mut ak_pub) != 0 {
         say!(
             rep,
             false,
@@ -1361,10 +1363,7 @@ unsafe fn verify_parsed(
     );
     {
         let mut computed = [0u8; NAME_LEN];
-        // SAFETY: the public area, and room for its name.
-        let named =
-            unsafe { tpm_object_name(ak_public.as_ptr(), ak_public_len, computed.as_mut_ptr()) }
-                == 0;
+        let named = object_name(ak_public, &mut computed) == 0;
 
         say!(
             rep,
@@ -1406,13 +1405,10 @@ unsafe fn verify_parsed(
         {
             return -EINVAL;
         }
-        // SAFETY: the public area, and room for what it holds.
-        let parsed =
-            unsafe { tpm_public_parse(ek_public.as_ptr(), ek_public_len, &mut ek_pub) } == 0;
+        let ek_public = &ek_public[..ek_public_len];
+        let parsed = public_parse(ek_public, &mut ek_pub) == 0;
         let named = parsed
-            // SAFETY: the public area, and room for its name.
-            && unsafe { tpm_object_name(ek_public.as_ptr(), ek_public_len, computed.as_mut_ptr()) }
-                == 0
+            && object_name(ek_public, &mut computed) == 0
             && !memneq_explicit(&computed, &ek_name);
         say!(rep, named, c"endorsement key: name matches its public area");
         say!(
@@ -1536,9 +1532,9 @@ unsafe fn verify_parsed(
         let contents = certify.ty == ST_ATTEST_NV
             && certify.offset == 0
             && certify.nv_len == 32
-            // SAFETY: the certified contents, nv_len bytes of the
-            // attestation.
-            && !memneq_explicit(unsafe { ffi::slice(certify.nv_data, 32) }, &reg_value);
+            && certify
+                .nv_data_in(&attest[..attest_len])
+                .is_some_and(|data| !memneq_explicit(data, &reg_value));
         say!(
             rep,
             contents,
@@ -1610,19 +1606,16 @@ unsafe fn verify_parsed(
     );
     bind[..32].copy_from_slice(&p.init.pcr_before);
     bind[32..].copy_from_slice(&p.init.phase_before);
-    // SAFETY: two values, the writer's modulus, and rooms for three
-    // digests.
-    let ret = unsafe {
-        tpm_register_policy(
-            CHAIN_PCR_MASK,
-            bind.as_ptr(),
-            2,
-            p.init.writer_public.as_ptr(),
-            branch_written.as_mut_ptr(),
-            branch_init.as_mut_ptr(),
-            policy.as_mut_ptr(),
-        )
-    };
+    let ret = register_policy(
+        CHAIN_PCR_MASK,
+        &bind,
+        &p.init.writer_public,
+        RegisterPolicy {
+            branch_written: &mut branch_written,
+            branch_init: &mut branch_init,
+            policy: &mut policy,
+        },
+    );
     if ret != 0 {
         say!(
             rep,
@@ -1633,16 +1626,13 @@ unsafe fn verify_parsed(
         // parse error.
         return if ret == -EINVAL { -EKEYREJECTED } else { ret };
     }
-    // SAFETY: the policy, and room for the name.
-    let ret = unsafe {
-        tpm_nv_name(
-            NV_INDEX,
-            REGISTER_ATTRS | NV_WRITTEN,
-            policy.as_ptr(),
-            32,
-            expected_name.as_mut_ptr(),
-        )
-    };
+    let ret = nv_name(
+        NV_INDEX,
+        REGISTER_ATTRS | NV_WRITTEN,
+        &policy,
+        32,
+        &mut expected_name,
+    );
     if ret != 0 {
         say!(rep, false, c"register: cannot compute the index name");
         return ret;
@@ -2135,9 +2125,8 @@ unsafe fn make(
         b"ecc" => false,
         _ => return -EINVAL,
     };
-    // SAFETY: the public area, and room for what it holds.
-    if unsafe { tpm_public_parse(ek_public.as_ptr(), ek_public_len, &mut public) } != 0
-        || public.ty != if rsa { ALG_RSA } else { ALG_ECC }
+    let ek_public = &ek_public[..ek_public_len];
+    if public_parse(ek_public, &mut public) != 0 || public.ty != if rsa { ALG_RSA } else { ALG_ECC }
     {
         return -EINVAL;
     }
@@ -2166,9 +2155,7 @@ unsafe fn make(
     }
 
     // The key must be an endorsement key, not any decryption key.
-    // SAFETY: the public area, and room for its name.
-    let named =
-        unsafe { tpm_object_name(ek_public.as_ptr(), ek_public_len, computed.as_mut_ptr()) } == 0;
+    let named = object_name(ek_public, &mut computed) == 0;
     say!(
         rep,
         named && !memneq_explicit(&computed, &ek_name),
@@ -2298,19 +2285,7 @@ unsafe fn make(
         }
     } else {
         if ecdh_p256_ephemeral(&public.x, &public.y, &mut eph_x, &mut eph_y, &mut s.z) != 0
-            // SAFETY: the shared secret, the label, the two parties' x,
-            // and room for the seed.
-            || unsafe {
-                tpm_kdfe(
-                    s.z.as_ptr(),
-                    IDENTITY.as_ptr(),
-                    eph_x.as_ptr(),
-                    32,
-                    public.x.as_ptr(),
-                    32,
-                    s.seed.as_mut_ptr(),
-                )
-            } != 0
+            || kdfe(&s.z, IDENTITY.to_bytes(), &eph_x, &public.x, &mut s.seed) != 0
         {
             return -EIO;
         }
@@ -2322,17 +2297,9 @@ unsafe fn make(
         secret[36..68].copy_from_slice(&eph_y);
         secret_len = 68;
     }
-    // SAFETY: the seed, the key's name, the caller's credential, and room
-    // for the blob.
-    if unsafe {
-        tpm_credential_protect(
-            s.seed.as_ptr(),
-            ak_name.as_ptr(),
-            credential,
-            blob.as_mut_ptr(),
-        )
-    } != 0
-    {
+    // SAFETY: the caller's room, which getrandom() filled above.
+    let credential = unsafe { &*credential.cast::<[u8; CREDENTIAL_LEN]>() };
+    if credential_protect(&s.seed, &ak_name, credential, &mut blob) != 0 {
         return -EIO;
     }
 

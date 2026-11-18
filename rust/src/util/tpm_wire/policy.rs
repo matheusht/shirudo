@@ -187,11 +187,10 @@ pub(crate) struct RegisterPolicy<'a> {
 }
 
 /// The register's write policy from the `pcr_values` the binding PCRs of
-/// `mask` held, which `pcr_values_len` bytes of SHA-256 cover.
+/// `mask` held, the SHA-256 values one after another.
 pub(crate) fn register_policy(
     mask: u32,
-    pcr_values: *const u8,
-    pcr_values_len: usize,
+    pcr_values: &[u8],
     modulus: &[u8; NV_RSA_BYTES],
     out: RegisterPolicy<'_>,
 ) -> c_int {
@@ -204,9 +203,7 @@ pub(crate) fn register_policy(
         ret = policy_nv_written(&zero, false, &mut unwritten);
     }
     if ret == 0 {
-        // SAFETY: the caller's pcr_values_len bytes, as sha256_buffer()
-        // reads them, and room for the digest.
-        ret = unsafe { sha256_buffer(pcr_values.cast(), pcr_values_len, pcr_digest.as_mut_ptr()) };
+        ret = sha256(pcr_values, &mut pcr_digest);
     }
     if ret == 0 {
         ret = policy_pcr(&unwritten, mask, &pcr_digest, out.branch_init);

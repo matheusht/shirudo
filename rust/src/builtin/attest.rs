@@ -42,7 +42,7 @@ use crate::util::options::{
 use crate::util::seal::{SealOutput, seal_output_commit, seal_output_create};
 use crate::util::tpm::REGISTER_ATTRS;
 use crate::util::tpm_wire::{
-    CREDENTIAL_LEN, NAME_LEN, NV_RSA_BYTES, tpm_nv_name, tpm_register_policy,
+    CREDENTIAL_LEN, NAME_LEN, NV_RSA_BYTES, RegisterPolicy, nv_name, register_policy,
 };
 use crate::util::upatch::{self, Upatch, upatch_close, upatch_open};
 
@@ -824,32 +824,27 @@ fn predict(args: &[&CStr]) -> c_int {
             error(&[b"attest predict: --bind-pcr requires --writer-public"]);
             return EXIT_USAGE;
         }
-        // SAFETY: the two PCR values, the modulus and three rooms.
-        let ret = unsafe {
-            tpm_register_policy(
-                CHAIN_PCR_MASK,
-                bind.as_ptr().cast(),
-                2,
-                writer_public.as_ptr(),
-                written.as_mut_ptr(),
-                initial.as_mut_ptr(),
-                policy.as_mut_ptr(),
-            )
-        };
+        let ret = register_policy(
+            CHAIN_PCR_MASK,
+            bind.as_flattened(),
+            &writer_public,
+            RegisterPolicy {
+                branch_written: &mut written,
+                branch_init: &mut initial,
+                policy: &mut policy,
+            },
+        );
         if ret != 0 {
             error(&[b"attest predict: cannot compute the signed write policy"]);
             return 1;
         }
-        // SAFETY: the policy and room for the name.
-        if unsafe {
-            tpm_nv_name(
-                NV_INDEX,
-                REGISTER_ATTRS | NV_WRITTEN,
-                policy.as_ptr(),
-                32,
-                name.as_mut_ptr(),
-            )
-        } != 0
+        if nv_name(
+            NV_INDEX,
+            REGISTER_ATTRS | NV_WRITTEN,
+            &policy,
+            32,
+            &mut name,
+        ) != 0
         {
             error(&[b"attest predict: cannot compute the register name"]);
             return 1;

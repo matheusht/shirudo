@@ -13,23 +13,19 @@ mod kdf;
 mod parse;
 mod policy;
 
-pub(crate) use capi::{
-    EK_POLICY, tpm_attest_parse, tpm_credential_protect, tpm_ecc_public_parse, tpm_kdfe,
-    tpm_nv_name, tpm_object_name, tpm_public_parse, tpm_register_policy,
-};
-pub(crate) use parse::{attest_parse, public_marshal, public_parse};
+pub(crate) use capi::{EK_POLICY, tpm_nv_name, tpm_register_policy};
+pub(crate) use kdf::{credential_protect, kdfe};
+pub(crate) use parse::{attest_parse, ecc_public_parse, public_marshal, public_parse};
 pub(crate) use policy::{
-    nv_extend_cphash, object_name, register_policy_final, writer_auth_hash, writer_public,
+    RegisterPolicy, nv_extend_cphash, nv_name, object_name, register_policy, register_policy_final,
+    writer_auth_hash, writer_public,
 };
 /// The rest of what test-tpm-wire drives.
 #[cfg(feature = "test-helpers")]
 pub(crate) use {
-    kdf::{HmacKey, credential_protect, kdfa, kdfe},
-    parse::{ecc_public_parse, ecdsa_signature_parse},
-    policy::{
-        RegisterPolicy, nv_name, policy_command_code, policy_nv_written, policy_or, policy_pcr,
-        policy_signed, register_policy,
-    },
+    kdf::{HmacKey, kdfa},
+    parse::ecdsa_signature_parse,
+    policy::{policy_command_code, policy_nv_written, policy_or, policy_pcr, policy_signed},
 };
 
 use core::ffi::c_int;
@@ -126,6 +122,63 @@ pub struct TpmAttest {
 const _: () = assert!(size_of::<TpmPublic>() == 400);
 const _: () = assert!(size_of::<TpmEccPublic>() == 76);
 const _: () = assert!(size_of::<TpmAttest>() == 200);
+
+impl TpmEccPublic {
+    pub(crate) const fn zeroed() -> Self {
+        TpmEccPublic {
+            attrs: 0,
+            scheme: 0,
+            hash: 0,
+            curve: 0,
+            x: [0; 32],
+            y: [0; 32],
+        }
+    }
+}
+
+impl TpmAttest {
+    /// One parsed from nothing yet, its pointers null.
+    pub(crate) const fn zeroed() -> Self {
+        TpmAttest {
+            ty: 0,
+            signer: [0; NAME_LEN],
+            signer_len: 0,
+            extra: core::ptr::null(),
+            extra_len: 0,
+            clock: 0,
+            reset_count: 0,
+            restart_count: 0,
+            safe: false,
+            firmware_version: 0,
+            pcr_mask: 0,
+            pcr_digest: [0; DIGEST_LEN],
+            index_name: [0; NAME_LEN],
+            index_name_len: 0,
+            offset: 0,
+            nv_data: core::ptr::null(),
+            nv_len: 0,
+        }
+    }
+
+    /// The extra data, read from `buf`, the bytes attest_parse() parsed
+    /// this from; none for other bytes.
+    pub(crate) fn extra_in<'a>(&self, buf: &'a [u8]) -> Option<&'a [u8]> {
+        span_in(buf, self.extra, self.extra_len)
+    }
+
+    /// The certified NV contents, read from `buf` likewise.
+    pub(crate) fn nv_data_in<'a>(&self, buf: &'a [u8]) -> Option<&'a [u8]> {
+        span_in(buf, self.nv_data, self.nv_len)
+    }
+}
+
+/// The `len` bytes at `p` as the part of `buf` they are, where `buf`
+/// holds them all.
+fn span_in(buf: &[u8], p: *const u8, len: usize) -> Option<&[u8]> {
+    let start = p.addr().checked_sub(buf.as_ptr().addr())?;
+
+    buf.get(start..start.checked_add(len)?)
+}
 
 impl TpmPublic {
     pub(crate) const fn zeroed() -> Self {

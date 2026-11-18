@@ -12,13 +12,6 @@ use super::{
 };
 use crate::fuzzing::fuzz_target;
 
-/// Whether `n` bytes at `p` lie within `data`.
-fn within(p: *const u8, n: usize, data: &[u8]) -> bool {
-    let start = data.as_ptr() as usize;
-    let p = p as usize;
-    p >= start && n <= data.len() && p - start <= data.len() - n
-}
-
 fuzz_target!(shirudo_fuzz_tpm_wire, shirudo_fuzz_tpm_wire_init, |data| {
     let mut public = TpmPublic::zeroed();
     let mut name = [0u8; NAME_LEN];
@@ -37,8 +30,7 @@ fuzz_target!(shirudo_fuzz_tpm_wire, shirudo_fuzz_tpm_wire_init, |data| {
             std::process::abort();
         }
     }
-    // SAFETY: numbers and arrays, for which zeros are a value.
-    let mut ecc: TpmEccPublic = unsafe { core::mem::zeroed() };
+    let mut ecc = TpmEccPublic::zeroed();
     if ecc_public_parse(data, &mut ecc) == 0 && (!parsed || public.ty != ALG_ECC) {
         std::process::abort();
     }
@@ -46,14 +38,12 @@ fuzz_target!(shirudo_fuzz_tpm_wire, shirudo_fuzz_tpm_wire_init, |data| {
     if ecdsa_signature_parse(data, &mut r, &mut s) == 0 && data.len() != 72 {
         std::process::abort();
     }
-    // SAFETY: numbers, arrays and pointers into the input, for which
-    // zeros are a value before the parse.
-    let mut at: TpmAttest = unsafe { core::mem::zeroed() };
+    let mut at = TpmAttest::zeroed();
     if attest_parse(data, &mut at) == 0
         && (at.signer_len > NAME_LEN
-            || !within(at.extra, at.extra_len, data)
+            || at.extra_in(data).is_none()
             || (at.ty == ST_ATTEST_NV
-                && (at.index_name_len > NAME_LEN || !within(at.nv_data, at.nv_len, data))))
+                && (at.index_name_len > NAME_LEN || at.nv_data_in(data).is_none())))
     {
         std::process::abort();
     }
