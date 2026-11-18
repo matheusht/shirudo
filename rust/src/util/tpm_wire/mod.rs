@@ -7,6 +7,8 @@
 //! structures a verifier parses from evidence.
 
 mod capi;
+#[cfg(shirudo_fuzz)]
+mod fuzz;
 mod kdf;
 mod parse;
 mod policy;

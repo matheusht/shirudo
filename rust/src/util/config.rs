@@ -516,6 +516,8 @@ pub(crate) unsafe fn load_fd(cfg: *mut Config, fd: c_int, label: *const c_char) 
 
 pub(crate) use capi::{config_load_fd, config_load_path};
 
+#[cfg(shirudo_fuzz)]
+mod fuzz;
 mod capi {
     use core::ffi::{c_char, c_int};
 

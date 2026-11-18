@@ -221,5 +221,7 @@ fn c_ptr(buf: &[u8]) -> *const c_char {
     buf.as_ptr().cast()
 }
 
+#[cfg(shirudo_fuzz)]
+mod fuzz;
 #[cfg(test)]
 mod tests;
