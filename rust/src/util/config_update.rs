@@ -753,7 +753,12 @@ unsafe fn events_scan(
     let mut wire = [0u8; RECORD_MAX];
     let mut length = 0;
 
+    // A journal found absent leaves each of them empty.
     *last = ConfigUpdateRecord::zeroed();
+    if !value.is_null() {
+        // SAFETY: the caller's room for a digest.
+        unsafe { value.write_bytes(0, 32) };
+    }
     if !end.is_null() {
         // SAFETY: the caller's room.
         unsafe { *end = 0 };
