@@ -338,6 +338,9 @@ fn quote_check(args: &[*const c_char]) -> c_int {
     }
 }
 
+#[cfg(test)]
+mod tests;
+
 mod capi {
     use core::ffi::{c_char, c_int};
 

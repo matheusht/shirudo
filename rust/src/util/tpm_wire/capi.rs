@@ -268,23 +268,6 @@ pub unsafe extern "C" fn tpm_object_name(public: *const u8, len: usize, name: *m
 
 /// # Safety
 ///
-/// `name` holds a name and `out` has room for one.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tpm_qualified_name(
-    hierarchy: u32,
-    name: *const u8,
-    out: *mut u8,
-) -> c_int {
-    // SAFETY: the caller passes a name and the room.
-    unsafe {
-        let name = copy::<NAME_LEN>(name);
-
-        policy::qualified_name(hierarchy, &name, room(out))
-    }
-}
-
-/// # Safety
-///
 /// `buf` holds `len` bytes and `out` is a public area to fill.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tpm_public_parse(
