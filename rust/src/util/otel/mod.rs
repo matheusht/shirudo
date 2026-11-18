@@ -705,4 +705,4 @@ mod capi {
     }
 }
 
-pub(crate) use capi::{otel_send_log_json, status_otel_severity};
+pub(crate) use capi::{otel_send_log_string, status_otel_severity};

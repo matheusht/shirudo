@@ -67,7 +67,7 @@ pub struct TpmKey {
 }
 
 impl TpmKey {
-    const fn zeroed() -> Self {
+    pub(crate) const fn zeroed() -> Self {
         TpmKey {
             handle: 0,
             public: [0; PUBLIC_MAX],
@@ -110,6 +110,17 @@ pub struct TpmAttestation {
     pub(crate) attest_len: usize,
     pub(crate) signature: [u8; SIGNATURE_MAX],
     pub(crate) signature_len: usize,
+}
+
+impl TpmAttestation {
+    pub(crate) const fn zeroed() -> Self {
+        TpmAttestation {
+            attest: [0; ATTEST_MAX],
+            attest_len: 0,
+            signature: [0; SIGNATURE_MAX],
+            signature_len: 0,
+        }
+    }
 }
 
 /// `struct tpm_writer_authorization`: what the NV writer signs to

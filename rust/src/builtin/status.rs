@@ -7,6 +7,8 @@
 //! register, the assets, the system and the eventlog. As JSON it is also
 //! the keepalive a target sends its collector.
 
+mod keepalive;
+
 use core::ffi::{CStr, c_char, c_int, c_void};
 use core::{mem, ptr};
 use std::ffi::{CString, OsStr};
@@ -33,7 +35,7 @@ use crate::util::crypto_openssl::{
 };
 use crate::util::eventlog::{eventlog_lock, eventlog_path, eventlog_replay, eventlog_unlock};
 use crate::util::format::{fputs_sanitized, human_size};
-use crate::util::help::{Help, HelpItem, HelpSection, is_help, print_help};
+use crate::util::help::{Help, HelpSection};
 use crate::util::identity;
 use crate::util::image_bootstrap::{ImageBootstrap, image_bootstrap_read};
 use crate::util::image_runtime;
@@ -49,21 +51,22 @@ use crate::util::keys::{self, TrustedSet, keys_digest_der, keys_read_der};
 use crate::util::map_read;
 use crate::util::measured::{
     MeasuredSet, measured_set_boot, measured_set_free, measured_unmeasured_archives,
-    measured_unmeasured_pins,
+    measured_unmeasured_pins, unpinned,
 };
-use crate::util::otel::{OtelOpts, otel_send_log_json, status_otel_severity};
+use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
+use crate::util::otel::OtelOpts;
 use crate::util::sysinfo::{Sysinfo, sysinfo_emit_json, sysinfo_gather};
 use crate::util::tamper::{self, Counters, TamperCounts};
 use crate::util::tpm::tpm_tcti;
 use crate::util::upatch::name_from_pin;
 use crate::util::upatch_resolve;
 use crate::util::upatch_table::{self, UpatchTableRow};
+use crate::util::upatch_verify::{Checks, checks_run};
 
 const VAR_LIB: &[u8] = b"/var/lib/shirudo";
 const KEYS_DIR: &CStr = c"/var/lib/shirudo/keys";
 const SIGNING_KEY_PATH: &CStr = c"/var/lib/shirudo/keys/signing_key.pem";
 const UPATCHES_DIR: &str = "/var/lib/shirudo/upatches";
-const INCOMING_DIR: &str = "/var/lib/shirudo/incoming";
 const BPFFS_DIR: &CStr = c"/run/shirudo/bpffs";
 const BPFFS_UPATCHES_DIR: &str = "/run/shirudo/bpffs/upatches";
 const LSM_LINK_PIN: &CStr = c"/run/shirudo/bpffs/lsm_link";
@@ -399,54 +402,78 @@ fn print_system(si: &Sysinfo) {
     }
 }
 
-const fn item(name: &'static CStr, summary: &'static CStr) -> HelpItem {
-    HelpItem {
-        name: name.as_ptr(),
-        summary: summary.as_ptr(),
-    }
-}
+const STATUS_JSON: c_int = 0;
+const STATUS_OTEL: c_int = 1;
+const STATUS_KEEPALIVE: c_int = 2;
+const STATUS_CHECK: c_int = 3;
+const STATUS_SHOW_FULL: c_int = 4;
+const STATUS_INCLUDE_SYSTEM: c_int = 5;
+const STATUS_INCLUDE_EVENTLOG: c_int = 6;
 
-const OPTIONS: [HelpItem; 6] = [
-    item(c"--json", c"print the report as one JSON document"),
-    item(c"--otel", c"send the JSON report as an OTLP keepalive log"),
-    item(c"--check", c"exit 1 when the verdict is tampered"),
-    item(
+static OPTS: [OptSpec; 7] = [
+    OptSpec::new(
+        c"--json",
+        0,
+        0,
+        None,
+        c"print the report as one JSON document",
+    ),
+    OptSpec::new(
+        c"--otel",
+        0,
+        0,
+        None,
+        c"quote the keepalive body with the TPM and send it as an OTLP log",
+    ),
+    OptSpec::new(
+        c"--keepalive",
+        0,
+        0,
+        None,
+        c"print the keepalive body, unquoted and unsent",
+    ),
+    OptSpec::new(
+        c"--check",
+        0,
+        0,
+        None,
+        c"exit 1 when the verdict is tampered",
+    ),
+    OptSpec::new(
         c"--show-full",
+        0,
+        0,
+        None,
         c"print every section, folded or not, and the system and eventlog sections",
     ),
-    item(
+    OptSpec::new(
         c"--include-system",
+        0,
+        0,
+        None,
         c"add the system section: OS, kernel, machine, memory, disk, uptime",
     ),
-    item(
+    OptSpec::new(
         c"--include-eventlog",
+        0,
+        0,
+        None,
         c"add the eventlog records, all boots",
     ),
 ];
-const USAGE: &CStr = c"shirudo status [--json | --otel] [--check] [--show-full]\n                       [--include-system] [--include-eventlog]";
 
-fn help() {
-    let sections = [HelpSection {
-        header: c"options:".as_ptr(),
-        items: OPTIONS.as_ptr(),
-        n_items: OPTIONS.len(),
-        options: core::ptr::null(),
-        n_options: 0,
-    }];
-    let help = Help {
-        usage: USAGE.as_ptr(),
-        summary: c"Report the state of this host: the verdict, the conditions behind it, the\n\
-tamper counters and the loaded upatches. A section whose condition is not OK\n\
-unfolds below them. Safe to run before init, on a target or an operator host."
-            .as_ptr(),
-        sections: sections.as_ptr(),
-        n_sections: sections.len(),
-        footer: ptr::null(),
-    };
+static SECTIONS: [HelpSection; 1] = [HelpSection::options(c"options:", &OPTS)];
 
-    // SAFETY: the help, its constant strings and its section live.
-    unsafe { print_help(&help) };
-}
+static HELP: Help = Help::new(
+    c"shirudo status [--json | --otel | --keepalive] [--check]\n                       [--show-full] [--include-system] [--include-eventlog]",
+    Some(
+        c"Report the state of this host: the verdict, the conditions behind it, the\n\
+          tamper counters and the loaded upatches. A section whose condition is not OK\n\
+          unfolds below them. Safe to run before init, on a target or an operator host.",
+    ),
+    &SECTIONS,
+    None,
+);
 
 /// A loaded upatch's row: its location, when it loaded, its payload and
 /// its maps.
@@ -950,33 +977,119 @@ unsafe extern "C" fn note_archive(
     unsafe { note_pin(name, ctx) }
 }
 
-/// The pins and archives this boot's eventlog did not measure: how many,
-/// or -errno, and their names.
-fn unmeasured(names: &mut [u8; UNMEASURED_NAMES]) -> c_int {
+/// What the checks of the pins against this boot's records found: each
+/// count or -errno, and the names behind it.
+struct Checked {
+    unmeasured: c_int,
+    unmeasured_names: [u8; UNMEASURED_NAMES],
+    xdp_tampered: c_int,
+    xdp_tampered_names: [u8; UNMEASURED_NAMES],
+    links_lost: c_int,
+    links_lost_names: [u8; UNMEASURED_NAMES],
+    xdp_uncovered: c_int,
+    xdp_uncovered_names: [u8; UNMEASURED_NAMES],
+    checks_rc: c_int,
+    coverage_rc: c_int,
+}
+
+/// `name on dev (why)` fits the C's entry, else `name` alone.
+const UNCOVERED_MAX: usize = 64 + 16 + 64;
+
+/// The pins and archives this boot's records do not hold, the loaded XDP
+/// upatches whose archive changed, the upatches missing a link or their
+/// archive, and the devices an XDP upatch selects that do not run it,
+/// all under the register lock.
+fn check_pins() -> Checked {
+    let mut c = Checked {
+        unmeasured: 0,
+        unmeasured_names: [0; UNMEASURED_NAMES],
+        xdp_tampered: 0,
+        xdp_tampered_names: [0; UNMEASURED_NAMES],
+        links_lost: 0,
+        links_lost_names: [0; UNMEASURED_NAMES],
+        xdp_uncovered: 0,
+        xdp_uncovered_names: [0; UNMEASURED_NAMES],
+        checks_rc: 0,
+        coverage_rc: 0,
+    };
     let lock = eventlog_lock();
     let mut set: *mut MeasuredSet = ptr::null_mut();
-    let ctx: *mut c_void = names.as_mut_ptr().cast();
-    let mut n = if lock < 0 {
+    c.unmeasured = if lock < 0 {
         lock
     } else {
         // SAFETY: room for the set.
         unsafe { measured_set_boot(&mut set) }
     };
-
-    if n == 0 {
-        // SAFETY: the set read above, a callback and the names it fills;
-        // then the set is freed.
+    if c.unmeasured == 0 {
+        let ctx: *mut c_void = c.unmeasured_names.as_mut_ptr().cast();
+        // SAFETY: the set read above, a callback and the names it fills.
         unsafe {
-            n = measured_unmeasured_pins(set, Some(note_pin), ctx);
-            if n >= 0 {
+            c.unmeasured = measured_unmeasured_pins(set, Some(note_pin), ctx);
+            if c.unmeasured >= 0 {
                 let archived = measured_unmeasured_archives(set, Some(note_archive), ctx);
-                n = if archived < 0 { archived } else { n + archived };
+                c.unmeasured = if archived < 0 {
+                    archived
+                } else {
+                    c.unmeasured + archived
+                };
             }
-            measured_set_free(set);
         }
+        let (tampered, lost, uncovered) = (
+            &mut c.xdp_tampered_names,
+            &mut c.links_lost_names,
+            &mut c.xdp_uncovered_names,
+        );
+        let mut on_changed = |name: &[u8]| {
+            note(tampered, name);
+            0
+        };
+        let mut on_lost = |name: &[u8]| {
+            note(lost, name);
+            0
+        };
+        let mut on_uncovered = |name: &[u8], dev: &[u8], why: &[u8]| {
+            let entry = [name, b" on ", dev, b" (", why, b")"].concat();
+            note(
+                uncovered,
+                if entry.len() < UNCOVERED_MAX {
+                    &entry
+                } else {
+                    name
+                },
+            );
+            0
+        };
+        let mut checks = Checks {
+            changed: Some(&mut on_changed),
+            lost: Some(&mut on_lost),
+            uncovered: Some(&mut on_uncovered),
+            ..Checks::default()
+        };
+        checks_run(set, &mut checks);
+        let (nr_changed, nr_lost, nr_uncovered) =
+            (checks.nr_changed, checks.nr_lost, checks.nr_uncovered);
+        let (check_err, coverage_err) = (checks.check_err, checks.coverage_err);
+        // SAFETY: the set read above.
+        let unpinned = unsafe {
+            unpinned(set, &mut |name| {
+                note(&mut c.links_lost_names, name);
+                0
+            })
+        };
+        c.xdp_tampered = nr_changed;
+        c.links_lost = if unpinned < 0 {
+            unpinned
+        } else {
+            unpinned + nr_lost
+        };
+        c.xdp_uncovered = nr_uncovered;
+        c.checks_rc = check_err;
+        c.coverage_rc = coverage_err;
+        // SAFETY: the set, freed once.
+        unsafe { measured_set_free(set) };
     }
     eventlog_unlock(lock);
-    n
+    c
 }
 
 struct Assets {
@@ -984,7 +1097,6 @@ struct Assets {
     signing_key: bool,
     eventlog_bytes: Option<i64>,
     upatches: Option<usize>,
-    incoming: Option<usize>,
     bpffs_mounted: bool,
 }
 
@@ -997,7 +1109,6 @@ impl Assets {
                 .ok()
                 .map(|m| m.len() as i64),
             upatches: count_dir(UPATCHES_DIR, true),
-            incoming: count_dir(INCOMING_DIR, false),
             // SAFETY: a C string.
             bpffs_mounted: unsafe { bpffs_mounted_at(BPFFS_DIR.as_ptr()) } > 0,
         }
@@ -1091,8 +1202,7 @@ struct Report {
     cert_present: bool,
     is_target: bool,
     pins: Vec<Vec<u8>>,
-    unmeasured: c_int,
-    unmeasured_names: [u8; UNMEASURED_NAMES],
+    checked: Box<Checked>,
     assets: Assets,
     tamper: Result<TamperCounts, c_int>,
     integrity: Result<IntegrityCounts, c_int>,
@@ -1167,8 +1277,7 @@ impl Report {
         let lsm_attached = fd >= 0;
 
         let pins = list_dir(BPFFS_UPATCHES_DIR).unwrap_or_default();
-        let mut unmeasured_names = [0u8; UNMEASURED_NAMES];
-        let unmeasured = unmeasured(&mut unmeasured_names);
+        let checked = Box::new(check_pins());
         let assets = Assets::gather();
         let tamper = tamper::read();
         let integrity = integrity::read();
@@ -1219,8 +1328,7 @@ impl Report {
             cert_present,
             is_target: cert_present || lsm_attached || serial >= 0,
             pins,
-            unmeasured,
-            unmeasured_names,
+            checked,
             assets,
             tamper,
             integrity,
@@ -1243,6 +1351,7 @@ impl Report {
     fn input(&self) -> ConditionsInput {
         let (present, pinned) = (self.keyring_present(), self.keyring_pinned >= 1);
         let (dmv_present, dmvp_seen) = (self.dmv.serial >= 0, self.dmv.pinned >= 1);
+        let c = &self.checked;
 
         ConditionsInput {
             reachable: true,
@@ -1282,18 +1391,17 @@ impl Report {
             config_seen: (self.config_state != -ENODEV).into(),
             config_state: self.config_state,
             config_root: self.config_root.as_ptr(),
-            pins_rc: self.unmeasured.min(0),
-            pins_unmeasured: self.unmeasured.max(0),
-            pins_detail: self.unmeasured_names.as_ptr().cast(),
-            // The status port brings the XDP and link checks.
-            xdp_tampered: 0,
-            xdp_tampered_detail: ptr::null(),
-            links_lost: 0,
-            links_lost_detail: ptr::null(),
-            checks_rc: 0,
-            xdp_uncovered: 0,
-            xdp_uncovered_detail: ptr::null(),
-            xdp_coverage_rc: 0,
+            pins_rc: c.unmeasured.min(0),
+            pins_unmeasured: c.unmeasured.max(0),
+            pins_detail: c.unmeasured_names.as_ptr().cast(),
+            xdp_tampered: c.xdp_tampered.max(0),
+            xdp_tampered_detail: c.xdp_tampered_names.as_ptr().cast(),
+            links_lost: c.links_lost.max(0),
+            links_lost_detail: c.links_lost_names.as_ptr().cast(),
+            checks_rc: c.checks_rc,
+            xdp_uncovered: c.xdp_uncovered.max(0),
+            xdp_uncovered_detail: c.xdp_uncovered_names.as_ptr().cast(),
+            xdp_coverage_rc: c.coverage_rc,
         }
     }
 
@@ -1354,7 +1462,6 @@ impl Report {
         }
         e.arr_close();
         e.kv_bool(b"lsm_attached", self.lsm_attached);
-        e.kv_string(b"mode", self.mode());
         e.kv_string(b"keyring_mode", self.keyring_mode.to_bytes());
         e.kv_bool(b"keyring_present", present);
         if present {
@@ -1449,7 +1556,6 @@ impl Report {
         e.kv_bool(b"eventlog", a.eventlog_bytes.is_some());
         e.kv_int(b"eventlog_bytes", a.eventlog_bytes.unwrap_or(0));
         count(e, b"upatches", a.upatches);
-        count(e, b"incoming", a.incoming);
         e.kv_bool(b"bpffs_mounted", a.bpffs_mounted);
         e.obj_close();
     }
@@ -1504,14 +1610,6 @@ impl Report {
         e.obj_close();
     }
 
-    fn mode(&self) -> &'static [u8] {
-        if self.lsm_attached {
-            b"production"
-        } else {
-            b"inactive"
-        }
-    }
-
     fn trusted(&self) -> &[keys::TrustedCert] {
         if self.certs_rc == 0 {
             keys::members(&self.certs)
@@ -1550,7 +1648,6 @@ impl Report {
         }
         row(b"", b"Host:", &self.hostname);
         row(b"", b"Roles:", roles(self.is_target, self.is_operator));
-        row(b"", b"Mode:", self.mode());
         match cstr(&reason) {
             [] => row(b"", b"Status:", verdict),
             r => row(b"", b"Status:", &[verdict, b"  (", r, b")"].concat()),
@@ -1727,11 +1824,6 @@ impl Report {
             None => field(b"upatches/", b"absent"),
             Some(n) => field(b"upatches/", format!("{n} archived").as_bytes()),
         }
-        match a.incoming {
-            None => field(b"incoming/", b"absent"),
-            Some(0) => field(b"incoming/", b"empty"),
-            Some(n) => field(b"incoming/", format!("{n} staged").as_bytes()),
-        }
         field(
             b"bpffs/",
             if a.bpffs_mounted {
@@ -1820,71 +1912,68 @@ fn print_counters<const N: usize>(
     }
 }
 
-/// Sends the JSON report as an OTLP keepalive log.
-fn send_keepalive(otel: &Otel, r: &Report, status: &CStr, body: &[u8]) -> c_int {
-    let opts = otel.opts();
-    let refused = match &r.tamper {
-        Ok(t) => t.total as i64,
-        Err(_) => -1,
-    };
-    let mut text: *const c_char = ptr::null();
-    // SAFETY: the status, a C string, and room for the severity's text.
-    let number = unsafe { status_otel_severity(status.as_ptr(), &mut text) };
-    let version = message(&[version_id()]);
-
-    // SAFETY: the options, C strings and the body's bytes.
-    unsafe {
-        otel_send_log_json(
-            &opts,
-            c"shirudo.keepalive".as_ptr(),
-            c"shirudo.keepalive".as_ptr(),
-            number,
-            text,
-            status.as_ptr(),
-            version.as_ptr(),
-            refused,
-            body.as_ptr().cast(),
-            body.len(),
-        )
-    }
-}
-
-fn status(args: &[&[u8]]) -> c_int {
-    let (mut json_stdout, mut otel, mut check, mut show_full) = (false, false, false, false);
+fn status(args: &[*const c_char]) -> c_int {
+    let (mut json_stdout, mut otel, mut keepalive) = (false, false, false);
+    let (mut check, mut show_full) = (false, false);
     let (mut include_system, mut include_eventlog) = (false, false);
+    let mut p = OptParser::new(c"status", &OPTS, Some(&HELP), args, 1);
 
-    for &a in &args[1..] {
-        match a {
-            b"--json" => json_stdout = true,
-            b"--otel" => otel = true,
-            b"--include-system" => include_system = true,
-            b"--include-eventlog" => include_eventlog = true,
-            b"--check" => check = true,
-            b"--show-full" => show_full = true,
-            _ if is_help(Some(a)) => {
-                help();
-                return 0;
+    loop {
+        match p.next() {
+            OPT_END => break,
+            STATUS_JSON => json_stdout = true,
+            STATUS_OTEL => otel = true,
+            STATUS_KEEPALIVE => keepalive = true,
+            STATUS_CHECK => check = true,
+            STATUS_SHOW_FULL => show_full = true,
+            STATUS_INCLUDE_SYSTEM => include_system = true,
+            STATUS_INCLUDE_EVENTLOG => include_eventlog = true,
+            OPT_ARG => {
+                p.usage_arg(b"unexpected argument ");
+                return EXIT_USAGE;
             }
-            _ => {
-                eprint(&[b"status: unknown option '", a, b"'\n"].concat());
-                eprint(&[b"usage: ", USAGE.to_bytes(), b"\n"].concat());
-                return 2;
-            }
+            OPT_DONE => return 0,
+            _ => return EXIT_USAGE,
         }
+    }
+    if keepalive && (json_stdout || otel) {
+        p.usage(b"--keepalive goes without --json and --otel");
+        return EXIT_USAGE;
+    }
+    if show_full {
+        include_system = true;
+        include_eventlog = true;
     }
     let exporter = match otel.then(Otel::load).transpose() {
         Ok(o) => o,
         Err(ret) => return ret,
     };
-    if show_full {
-        include_system = true;
-        include_eventlog = true;
-    }
+    let configured = exporter.as_ref().is_some_and(Otel::endpoint_configured);
     let r = Report::gather(include_system);
     let cin = r.input();
     let mut ret = 0;
 
-    if json_stdout || otel {
+    if keepalive || configured {
+        let root = (r.config_state == 0).then(|| r.config_root.to_bytes());
+        let opts = exporter.as_ref().map(Otel::opts);
+        ret = keepalive::run(&r, &cin, root, opts.as_ref());
+    }
+    let state = r.config_state;
+    if otel && !configured && state != 0 && state != -ENODEV {
+        let why: &[u8] = if state == -EINPROGRESS {
+            b"pending"
+        } else {
+            b"unverifiable"
+        };
+        let msg = message(&[
+            b"status: no keepalive is sent: with the config activation ",
+            why,
+            b", no export endpoint is known, since a config image is used only when its activation record vouches for it; OTEL_EXPORTER_OTLP_ENDPOINT in /etc/shirudo/map-export.env still names one",
+        ]);
+        // SAFETY: a "%s" format with a C string.
+        unsafe { crate::log::log_c!(crate::log::warn, c"%s".as_ptr(), msg.as_ptr()) };
+    }
+    if json_stdout {
         let mut buf = vec![0u8; r.json_cap(include_eventlog)];
         let mut e = JsonEmit::fixed(buf.as_mut_ptr().cast(), buf.len());
 
@@ -1893,39 +1982,9 @@ fn status(args: &[&[u8]]) -> c_int {
             eprint(&[b"status: json encode failed: ", strerr(-e.err()), b"\n"].concat());
             ret = 1;
         } else {
-            let body = &buf[..e.written()];
-            let verdict = conditions::status_verdict(&cin);
-            let configured = exporter.as_ref().is_some_and(Otel::endpoint_configured);
-
-            if let Some(o) = exporter.as_ref().filter(|_| configured) {
-                let err = send_keepalive(o, &r, verdict, body);
-                if err != 0 {
-                    let msg = message(&[b"status: OTEL export failed: ", strerr(-err)]);
-                    // SAFETY: a "%s" format with a C string.
-                    unsafe { crate::log::log_c!(crate::log::err, c"%s".as_ptr(), msg.as_ptr()) };
-                    ret = 1;
-                }
-            }
-            let state = r.config_state;
-            if otel && !configured && state != 0 && state != -ENODEV {
-                let why: &[u8] = if state == -EINPROGRESS {
-                    b"pending"
-                } else {
-                    b"unverifiable"
-                };
-                let msg = message(&[
-                    b"status: no keepalive is sent: with the config activation ",
-                    why,
-                    b", no export endpoint is known, since a config image is used only when its activation record vouches for it; OTEL_EXPORTER_OTLP_ENDPOINT in /etc/shirudo/map-export.env still names one",
-                ]);
-                // SAFETY: a "%s" format with a C string.
-                unsafe { crate::log::log_c!(crate::log::warn, c"%s".as_ptr(), msg.as_ptr()) };
-            }
-            if json_stdout {
-                print(&[body, b"\n"].concat());
-            }
+            print(&[&buf[..e.written()], b"\n"].concat());
         }
-    } else {
+    } else if !keepalive && !otel {
         r.print_human(&cin, show_full, include_eventlog);
     }
     if check && ret == 0 && conditions::status_verdict(&cin) == c"tampered" {
@@ -1947,13 +2006,6 @@ mod capi {
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn cmd_status(argc: c_int, argv: *const *const c_char) -> c_int {
         // SAFETY: the caller's arguments.
-        let raw = unsafe { super::words(argc, argv) };
-        // SAFETY: each a C string.
-        let args: Vec<&[u8]> = raw
-            .iter()
-            .map(|&a| unsafe { crate::ffi::c_str(a) })
-            .collect();
-
-        super::status(&args)
+        super::status(unsafe { super::words(argc, argv) })
     }
 }

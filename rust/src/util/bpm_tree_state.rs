@@ -1419,9 +1419,23 @@ unsafe fn kconfig_read(
 }
 
 pub(crate) use capi::{
-    tree_configured, tree_emit_status, tree_event_append, tree_event_replay, tree_pending_read,
-    tree_pending_write, tree_selector_matches, tree_state_read, tree_state_write,
+    tree_configured, tree_emit_status, tree_event_append, tree_event_replay, tree_outcomes_read,
+    tree_pending_read, tree_pending_write, tree_selector_matches, tree_state_read,
+    tree_state_write,
 };
+
+/// Whether an operation is pending: pending.json exists.
+pub(crate) fn tree_pending_exists() -> bool {
+    use std::os::unix::ffi::OsStrExt;
+
+    std::fs::metadata(std::ffi::OsStr::from_bytes(tree_path(PENDING).to_bytes())).is_ok()
+}
+
+/// The status file in which the tree says why it left upatch `name`
+/// not loaded.
+pub(crate) fn tree_status_path(name: &[u8]) -> CString {
+    tree_path(&[&b"status/"[..], name].concat())
+}
 
 mod capi {
     use core::ffi::{c_char, c_int};

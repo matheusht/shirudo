@@ -923,7 +923,7 @@ testing/helper/test-register-cli: testing/helper/test-register-cli.c \
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
 testing/helper/test-keepalive-quote: testing/helper/test-keepalive-quote.c \
-		util/keepalive_quote.o $(REGISTER_OBJS)
+		$(REGISTER_OBJS)
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(REGISTER_LIBS)
 

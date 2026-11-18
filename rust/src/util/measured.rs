@@ -502,6 +502,39 @@ unsafe fn unmeasured_archives(
     if ret != 0 { ret } else { unmeasured }
 }
 
+/// The members of set `s` whose pin directory is gone, each handed to
+/// `cb` until it returns nonzero: how many, that return, or -errno. A
+/// load the records hold keeps its pin directory until its unload.
+///
+/// # Safety
+///
+/// `s` is a set.
+pub(crate) unsafe fn unpinned(s: *const MeasuredSet, cb: &mut dyn FnMut(&[u8]) -> c_int) -> c_int {
+    use std::os::unix::ffi::OsStrExt;
+
+    // SAFETY: the caller's set.
+    let s = unsafe { &*s };
+    let mut n = 0;
+    for i in 0..s.n {
+        // SAFETY: a member of the set.
+        let name = crate::text::cstr(unsafe { &(*s.entries.add(i)).name });
+        let Ok(dir) = crate::util::upatch_resolve::pin_path(name, &[]) else {
+            return -ENAMETOOLONG;
+        };
+        match std::fs::symlink_metadata(std::ffi::OsStr::from_bytes(dir.as_bytes())) {
+            Ok(_) => continue,
+            Err(e) if e.raw_os_error() == Some(ENOENT) => {}
+            Err(e) => return -e.raw_os_error().unwrap_or(EINVAL),
+        }
+        n += 1;
+        let ret = cb(name);
+        if ret != 0 {
+            return ret;
+        }
+    }
+    n
+}
+
 pub(crate) use capi::{
     measured_holds, measured_set_add, measured_set_boot, measured_set_free, measured_set_log,
     measured_unmeasured_archives, measured_unmeasured_pins, measured_upatch_of,
