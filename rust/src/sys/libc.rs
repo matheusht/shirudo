@@ -18,7 +18,7 @@ pub use libc::{
     mknod, mkstemp, mkstemps, mlockall, mount, open, openat, opendir, openlog, personality,
     posix_memalign, prctl, pread, printf, putchar, read, readdir, recvmsg, renameat, rmdir,
     sendto, setenv, setitimer, setrlimit, setsockopt, setxattr, snprintf, socket, sscanf,
-    statfs, statvfs, statx, strcasecmp, strcmp, strerror, strftime, strlen, strnlen,
+    statfs, statvfs, statx, strcasecmp, strerror, strftime, strlen, strnlen,
     strptime, syscall, sysconf, syslog, timegm, umount2, uname, unlink, unlinkat, unsetenv, write,
 };
 

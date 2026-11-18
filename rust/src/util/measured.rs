@@ -9,7 +9,7 @@ use core::ffi::{CStr, c_char, c_int};
 use core::mem::MaybeUninit;
 
 use crate::errno::{E2BIG, EEXIST, EINVAL, ENAMETOOLONG, ENOENT, ENOSPC};
-use crate::sys::libc::{PATH_MAX, getxattr, strcmp, strnlen};
+use crate::sys::libc::{PATH_MAX, getxattr};
 use crate::text::{at, cstr, strscpy, strsprintf};
 use crate::util::chain::MeasuredUpatch;
 use crate::util::eventlog::{self, UPATCH_INIT, UPATCH_UNLOAD};
@@ -49,8 +49,14 @@ pub(crate) struct MeasuredSet {
 ///
 /// `src` is a C string, or holds at least `dst.len()` bytes.
 unsafe fn strscpy_c(dst: &mut [u8], src: *const c_char) -> Result<usize, c_int> {
-    // SAFETY: the caller's string, measured within the room.
-    let src = unsafe { core::slice::from_raw_parts(src.cast::<u8>(), strnlen(src, dst.len())) };
+    let src = src.cast::<u8>();
+    // SAFETY: the caller's string, read up to its NUL or the room's
+    // length, whichever comes first, as strnlen() read it.
+    let n = (0..dst.len())
+        .take_while(|&i| unsafe { *src.add(i) } != 0)
+        .count();
+    // SAFETY: the n bytes just read.
+    let src = unsafe { core::slice::from_raw_parts(src, n) };
 
     strscpy(dst, src)
 }
@@ -159,9 +165,12 @@ unsafe fn set_add(
     }
     // SAFETY: the caller's count.
     let count = unsafe { *n };
+    // SAFETY: the caller's C string.
+    let name_c = unsafe { CStr::from_ptr(name) };
     for i in 0..count {
-        // SAFETY: a member held and the caller's name.
-        if unsafe { strcmp((&raw const (*set.add(i)).name).cast(), name) } == 0 {
+        // SAFETY: a member held, its name terminated within its room.
+        let held = unsafe { &(*set.add(i)).name };
+        if crate::text::cstr(held) == name_c.to_bytes() {
             return -EEXIST;
         }
     }
