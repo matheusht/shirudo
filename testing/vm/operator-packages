@@ -1,4 +1,5 @@
 build-essential
+cargo
 cryptsetup-bin
 curl
 default-jdk-headless
@@ -18,4 +19,5 @@ openssl
 pkg-config
 python3
 rsync
+rustc
 zlib1g-dev
