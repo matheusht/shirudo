@@ -1,9 +1,5 @@
 # Each harness of this directory and the CBMC options it runs with.
 # --unwind must exceed the longest loop the harness's bound allows.
-string-span		--unwind 9
-string-prefix		--unwind 8
-string-tokens		--unwind 8 LEN=0-4
-string-search		--unwind 8 LEN=0-5
 paths-bpffs-name	--unwind 18
 bpm-tree-signers	--unwind 8
 tpm-signer		--unwind 35
@@ -64,4 +60,3 @@ bpm-tree-state-options	--unwind 4
 keepalive-pack		--unwind 9 --unwindset strcmp.0:18,keepalive_mask.0:514,mask.0:514,mask.1:514 LEN=0-9,512,513
 sysinfo-image		--unwind 8 --unwindset strcmp.0:8,memcmp.0:10,os_release_unquote.0:258,cmdline_image_root.0:8,cmdline_image_root.1:76,cmdline_image_root.2:5,strlen.0:11,all_hex.0:66,image_root_normalise.0:65,command_line.0:66,command_line.1:65 LEN=0-6
 xdp-attrs		--unwind 12 --unwindset memchr.0:129 LEN=0-12,16,20,24,28,32,40
-kconfig-line		--unwind 26 LEN=0-2,10,21-23

@@ -1008,13 +1008,13 @@ The unit tests beside the Rust modules cover 32 modules in
 :src:`rust/src/text.rs` and the quote checks in
 :src:`rust/src/quote_check.rs`.
 
-C suites remain in :src:`testing/unit/` for behavior added on main
-that the Rust tests do not yet cover, including TPM counter checks,
-Java agent events and malformed input. The ``overflow`` suite tests
-:src:`include/shirudo/overflow.h`; ``string`` also tests the C inline
-helpers and formatters. ``jar`` covers stored and deflated Java agent
-manifests, missing or empty ``Premain-Class``, a value outside the main
-section, and truncations and byte flips of a jar. The quote checks
+C suites remain in :src:`testing/unit/` for C implementations that
+have not moved to Rust: ``jar``, ``java_agent``, ``kconfig``,
+``kernel_prereq``, ``log``, ``overflow`` and ``string``. The cases that
+main added to the removed C suites still need Rust tests. ``jar`` covers
+stored and deflated Java agent manifests, missing or empty
+``Premain-Class``, a value outside the main section, and truncations
+and byte flips of a jar. The quote checks
 cover rows of
 ``shirudo-quote-check`` in :src:`rust/src/quote_check.rs`, on quotes a
 software P-256 key signs: every reject reason, the signer's qualified

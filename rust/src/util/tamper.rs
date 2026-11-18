@@ -321,17 +321,5 @@ fn counters_read_into(pin: &CStr, count: &mut [u64]) -> Result<u64, c_int> {
     ret
 }
 
-mod capi {
-    use core::ffi::c_char;
-
-    use super::{POINTS, point_name};
-
-    /// Any point is answered, "?" past the last.
-    #[unsafe(no_mangle)]
-    pub extern "C" fn tamper_name(point: u32) -> *const c_char {
-        point_name(&POINTS, point as usize).as_ptr()
-    }
-}
-
 #[cfg(test)]
 mod tests;

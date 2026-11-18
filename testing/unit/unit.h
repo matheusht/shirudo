@@ -35,7 +35,6 @@ extern const struct unit_suite unit_suite;
 void unit_fail(const char *file, int line, const char *fmt, ...)
 	__printf(3, 4);
 __noreturn void unit_abort(void);
-__noreturn void unit_skip(const char *reason);
 void unit_fail_mem(const char *file, int line, const char *what,
 		   const void *a, const void *b, size_t len);
 

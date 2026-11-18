@@ -69,17 +69,6 @@ void unit_abort(void)
 	unit_exit(1);
 }
 
-void unit_skip(const char *reason)
-{
-	size_t n = strlen(reason);
-
-	if (n >= UNIT_REASON_MAX)
-		n = UNIT_REASON_MAX - 1;
-	memcpy(unit_reason, reason, n);
-	unit_reason[n] = '\0';
-	unit_exit(UNIT_SKIPPED);
-}
-
 /* A failing case's stderr comes back as TAP diagnostics. */
 static void replay(int fd)
 {

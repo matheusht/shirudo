@@ -2,8 +2,8 @@
 /*
  * Copyright (c) 2026 Authors of shirudo
  *
- * What the CBMC harnesses share: memory of any contents, which the
- * allocators of util/malloc.h cannot give as they zero what they hand out.
+ * What the CBMC harnesses share: buffers with arbitrary bytes, including
+ * contents the runtime's zeroing allocator cannot return.
  */
 
 #ifndef SHIRUDO_PROOF_H

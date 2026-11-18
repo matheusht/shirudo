@@ -149,22 +149,5 @@ pub(crate) fn read() -> Result<IntegrityCounts, c_int> {
     counters_read(INTEGRITY_PIN)
 }
 
-mod capi {
-    use core::ffi::c_char;
-
-    use super::POINTS;
-    use crate::util::tamper::{point_meaning, point_name};
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn integrity_name(point: u32) -> *const c_char {
-        point_name(&POINTS, point as usize).as_ptr()
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn integrity_meaning(point: u32) -> *const c_char {
-        point_meaning(&POINTS, point as usize).as_ptr()
-    }
-}
-
 #[cfg(test)]
 mod tests;
