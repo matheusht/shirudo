@@ -152,6 +152,9 @@ signed config image.
      - A message goes to standard error and to syslog, and to syslog
        alone where standard error is the journal stream
        ``JOURNAL_STREAM`` names
+   * - ``t1013-libbpf-parity``
+     - Compare the Rust BTF dumper and light skeleton loader with the
+       vendored libbpf on the test kernel and BPF objects
 
 ``signing`` (2)
 ~~~~~~~~~~~~~~~

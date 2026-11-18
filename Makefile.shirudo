@@ -310,7 +310,7 @@ DEPS     := $(DEP_OBJS:.o=.d)
 
 .PHONY: all install install-common install-target install-operator clean distclean \
 		test-helpers verity-test-helpers unit-tests quote-check \
-        bpf libbpf rust
+		parity-oracles bpf libbpf rust
 
 all: shirudo
 
@@ -1087,6 +1087,19 @@ testing/helper/test-seal-output: $(HELPER_MAIN_DIR)/test-seal-output.o \
 
 test-helpers: $(TEST_HELPERS)
 
+# ----- libbpf parity ----------------------------------------------
+
+# Compare the Rust BTF dumper and loader with vendored libbpf. The
+# current C code also links this archive.
+PARITY_ORACLES := testing/parity/gen-vmlinux-h testing/parity/gen-loader
+
+$(PARITY_ORACLES): testing/parity/%: testing/parity/%.c $(LIBBPF_A)
+	@printf '  CC      $@\n'
+	$(Q)$(CC) $(CFLAGS_BASE) $(INCLUDES) $(LDFLAGS) -o $@ $< $(LIBBPF_A) \
+	    $(LIBELF_LIBS) $(ZLIB_LIBS)
+
+parity-oracles: $(PARITY_ORACLES)
+
 # ----- unit tests -------------------------------------------------
 
 # The Rust is tested by the tests in a tests.rs beside each module, which
@@ -1341,7 +1354,8 @@ fuzz-targets: $(FUZZ_TARGETS) $(FUZZ_RUST_TARGETS)
 
 clean:
 	$(Q)rm -f shirudo shirudo-target tools/shirudo-build/shirudo-build \
-	          tools/quote-check/shirudo-quote-check $(TEST_HELPERS)
+	          tools/quote-check/shirudo-quote-check $(TEST_HELPERS) \
+	          $(PARITY_ORACLES)
 	$(Q)rm -f $(MAIN_OBJ) $(UTIL_OBJS) $(BUILD_MAIN_OBJ) \
 	          $(BUILD_OBJS) $(QUOTE_CHECK_MAIN_OBJ) $(VERSION_OBJ) $(VERSION_RS)
 	$(Q)rm -rf build/target build/unit build/fuzz-afl \

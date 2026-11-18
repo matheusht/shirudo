@@ -344,10 +344,12 @@ a change needs a newer libbpf or UAPI:
 :src:`tools/bpf-deps/bpf-deps.sh` makes a shallow clone of bpf-next.
 
 The source revision is recorded in ``vendor/libbpf/COMMIT``. The build
-still links libbpf for its C code, while :src:`tools/gen-vmlinux-h` now
-dumps BTF using Rust. The BPF programs use the vendored headers. After
-refreshing, reapply the local changes :src:`vendor/libbpf/README.md`
-lists and check the Rust BTF reader against the new libbpf.
+still links libbpf for its C code. :src:`tools/gen-vmlinux-h` dumps BTF
+using Rust, and the BPF programs use the vendored headers. The parity
+test :src:`testing/functional/build/t1013-libbpf-parity.sh` compares
+the Rust BTF and loader output with vendored libbpf. After refreshing,
+reapply the local changes :src:`vendor/libbpf/README.md` lists and run
+the parity test.
 
 Other make targets
 ------------------

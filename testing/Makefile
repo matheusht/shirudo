@@ -400,6 +400,7 @@ build-operator: build-host
 	+$(Q)flock $(BUILD_LOCK) $(MAKE) -C $(ROOT) shirudo-build
 	+$(Q)flock $(BUILD_LOCK) $(MAKE) -C $(ROOT) quote-check
 	+$(Q)flock $(BUILD_LOCK) $(MAKE) -C $(ROOT) -f Makefile.shirudo test-helpers
+	+$(Q)flock $(BUILD_LOCK) $(MAKE) -C $(ROOT) -f Makefile.shirudo parity-oracles
 
 # The BPF objects are compiled against the BTF of the test kernel, which
 # has the signed-loader types a host's own kernel seldom has. Without one
