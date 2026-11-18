@@ -23,7 +23,7 @@ use crate::util::hex::hex_decode;
 use crate::util::json::JsonEmit;
 use crate::util::keys;
 use crate::util::measured::{MeasuredSet, measured_upatch_of};
-use crate::util::seal::seal_owns;
+use crate::util::seal;
 use crate::util::upatch::{Upatch, upatch_close, upatch_open};
 use crate::util::upatch_pins::loaded_pins;
 use crate::util::upatch_resolve;
@@ -79,8 +79,7 @@ fn restore_one(
         return Err(-ENAMETOOLONG);
     }
     let file = CString::new(file).unwrap_or_default();
-    // SAFETY: a C string.
-    if !unsafe { seal_owns(file.as_ptr()) } {
+    if !seal::owns(file.to_bytes()) {
         warn(&cat!(
             "boot-restore: ",
             name,

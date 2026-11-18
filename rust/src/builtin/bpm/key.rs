@@ -8,7 +8,7 @@ use core::ffi::CStr;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Write;
-use std::os::fd::{AsFd, FromRawFd, IntoRawFd, OwnedFd};
+use std::os::fd::{AsFd, IntoRawFd};
 use std::os::unix::ffi::OsStrExt;
 
 use super::{CERT_PATH, KEYS_DIR, Result, last_err, message, os_err, path, print, remove, status};
@@ -21,7 +21,7 @@ use crate::util::crypto_openssl::{
 };
 use crate::util::json::JsonEmit;
 use crate::util::keys::{DER_MAX, read_der};
-use crate::util::seal::{seal_inherit_path, seal_mkdir_p, seal_open};
+use crate::util::seal;
 
 fn os(path: &CStr) -> &OsStr {
     OsStr::from_bytes(path.to_bytes())
@@ -90,13 +90,11 @@ fn file_fingerprint(path: &CStr) -> Result<[u8; 64]> {
 
 /// A new key file of `der`: created, never one replaced, and synced.
 fn write_key(dst: &CStr, der: &[u8]) -> Result {
-    // SAFETY: a C string, flags and a mode.
-    let fd = unsafe { seal_open(dst.as_ptr(), O_WRONLY | O_CREAT | O_EXCL, 0o644) };
-    if fd < 0 {
-        return Err(fd);
-    }
-    // SAFETY: the fd seal_open() opened, owned from here.
-    let mut file = fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+    let mut file = fs::File::from(seal::open(
+        dst.to_bytes(),
+        O_WRONLY | O_CREAT | O_EXCL,
+        0o644,
+    )?);
     let mut ret = file
         .write_all(der)
         .and_then(|()| file.sync_all())
@@ -116,10 +114,8 @@ fn write_key(dst: &CStr, der: &[u8]) -> Result {
 /// than an active certificate's is refused.
 fn install(der: &[u8]) -> Result {
     let hex = fingerprint(der)?;
-    let keys_dir = message(&[KEYS_DIR.as_bytes()]);
 
-    // SAFETY: a C string.
-    status(unsafe { seal_mkdir_p(keys_dir.as_ptr(), 0o700) })?;
+    seal::mkdir_p(KEYS_DIR.as_bytes(), 0o700)?;
     let active = match fs::symlink_metadata(os(CERT_PATH)) {
         Ok(_) => true,
         Err(e) if e.raw_os_error() == Some(ENOENT) => false,
@@ -146,8 +142,7 @@ fn install(der: &[u8]) -> Result {
         return Ok(());
     }
     let ret = match std::os::unix::fs::symlink(os(&dst), os(CERT_PATH)) {
-        // SAFETY: a C string.
-        Ok(()) => status(unsafe { seal_inherit_path(CERT_PATH.as_ptr()) }),
+        Ok(()) => seal::inherit_path(CERT_PATH),
         Err(e) if e.raw_os_error() != Some(EEXIST) => Err(os_err(e)),
         Err(_) if matches_active(der) => Ok(()),
         Err(_) => Err(-EPERM),

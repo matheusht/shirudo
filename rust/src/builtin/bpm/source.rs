@@ -22,7 +22,7 @@ use crate::util::crypto_openssl::{Cert, cert_free, cert_read_file};
 use crate::util::image_config::{self, REGISTRIES, TREE_CONF};
 use crate::util::io::check_trusted;
 use crate::util::json::JsonEmit;
-use crate::util::seal::{seal_mkdir_p, seal_write_file};
+use crate::util::seal;
 
 /// `BPM_MAX_KEY`: the longest key file path, its NUL included.
 const MAX_KEY: usize = 256;
@@ -222,8 +222,7 @@ fn save(s: &Source) -> Result {
     if data.len() >= 2 * PATH_MAX {
         return Err(-E2BIG);
     }
-    // SAFETY: a C string and the data's bytes.
-    status(unsafe { seal_write_file(file.as_ptr(), data.as_ptr().cast(), data.len(), 0o644) })
+    seal::write_file(file.to_bytes(), &data, 0o644)
 }
 
 /// `bpm config register list`.
@@ -338,8 +337,7 @@ pub(super) fn register(
         return 2;
     }
     for dir in [REGISTRIES_DIR, BPM_KEYS_DIR] {
-        // SAFETY: a C string.
-        if unsafe { seal_mkdir_p(message_path(dir).as_ptr(), 0o700) } != 0 {
+        if seal::mkdir_p(dir.as_bytes(), 0o700).is_err() {
             return 1;
         }
     }

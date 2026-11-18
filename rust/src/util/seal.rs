@@ -782,57 +782,28 @@ pub(crate) fn write_file(path: &[u8], data: &[u8], mode: u32) -> Result<(), c_in
     placed
 }
 
-/// The C-shaped entry points the callers not yet on the functions above
-/// still take, over those functions.
+/// The C-shaped entry points that util/decode.rs and builtin/attest.rs
+/// still call, over the functions above.
 mod capi {
     use core::ffi::{CStr, c_char, c_int, c_void};
-    use std::os::fd::{IntoRawFd, OwnedFd};
+    use std::os::fd::IntoRawFd;
 
     use super::Output;
     use crate::errno::EBADF;
 
     /// An output being written, which seal_output_create() opens and
     /// seal_output_commit() writes and closes.
-    pub struct SealOutput(Option<Output>);
+    pub(crate) struct SealOutput(Option<Output>);
 
     impl SealOutput {
         /// One not open, for seal_output_create() to fill.
-        pub const fn closed() -> Self {
+        pub(crate) const fn closed() -> Self {
             SealOutput(None)
         }
     }
 
-    fn fd_or_err(r: Result<OwnedFd, c_int>) -> c_int {
-        r.map_or_else(|err| err, IntoRawFd::into_raw_fd)
-    }
-
-    fn status(r: Result<(), c_int>) -> c_int {
-        r.err().unwrap_or(0)
-    }
-
-    /// # Safety
+    /// [`super::open_read`]: the fd, the caller's to close, or -errno.
     ///
-    /// `path` is a C string.
-    pub unsafe extern "C" fn seal_label(path: *const c_char) -> c_int {
-        // SAFETY: the caller's C string.
-        status(super::label(unsafe { CStr::from_ptr(path) }))
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn seal_label_tree(allow_first: bool) -> c_int {
-        status(super::label_tree(allow_first))
-    }
-
-    /// # Safety
-    ///
-    /// `path` is a C string.
-    pub unsafe extern "C" fn seal_open(path: *const c_char, flags: c_int, mode: u32) -> c_int {
-        // SAFETY: the caller's C string.
-        let path = unsafe { CStr::from_ptr(path) };
-
-        fd_or_err(super::open(path.to_bytes(), flags, mode))
-    }
-
     /// # Safety
     ///
     /// `path` is a C string.
@@ -841,21 +812,11 @@ mod capi {
         // SAFETY: the caller's C string.
         let path = unsafe { CStr::from_ptr(path) };
 
-        fd_or_err(super::open_read(path.to_bytes()))
+        super::open_read(path.to_bytes()).map_or_else(|err| err, IntoRawFd::into_raw_fd)
     }
 
-    /// # Safety
+    /// Return whether this path is under a labeled directory.
     ///
-    /// `path` is a C string.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn seal_open_sealed(path: *const c_char) -> c_int {
-        // SAFETY: the caller's C string.
-        fd_or_err(super::open_file(
-            unsafe { CStr::from_ptr(path) }.to_bytes(),
-            true,
-        ))
-    }
-
     /// # Safety
     ///
     /// `path` is a C string.
@@ -865,74 +826,26 @@ mod capi {
         super::parent_labeled(unsafe { CStr::from_ptr(path) }.to_bytes())
     }
 
+    /// Label a path for the remaining C Java agent.
+    ///
     /// # Safety
     ///
     /// `path` is a C string.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn seal_owns(path: *const c_char) -> bool {
+    pub unsafe extern "C" fn seal_label(path: *const c_char) -> c_int {
         // SAFETY: the caller's C string.
-        super::owns(unsafe { CStr::from_ptr(path) }.to_bytes())
-    }
-
-    /// # Safety
-    ///
-    /// `path` is a C string.
-    pub unsafe extern "C" fn seal_mkdir_p(path: *const c_char, mode: u32) -> c_int {
-        // SAFETY: the caller's C string.
-        status(super::mkdir_p(
-            unsafe { CStr::from_ptr(path) }.to_bytes(),
-            mode,
-        ))
-    }
-
-    /// # Safety
-    ///
-    /// `path` is a C string and `data` holds `len` bytes.
-    pub unsafe extern "C" fn seal_write_file(
-        path: *const c_char,
-        data: *const c_void,
-        len: usize,
-        mode: u32,
-    ) -> c_int {
-        // SAFETY: the caller's C string.
-        let path = unsafe { CStr::from_ptr(path) };
-        // SAFETY: the caller's len bytes at data.
-        let data = unsafe { crate::ffi::slice(data.cast::<u8>(), len) };
-
-        status(super::write_file(path.to_bytes(), data, mode))
-    }
-
-    /// # Safety
-    ///
-    /// `path` is a C string.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn seal_lock(path: *const c_char) -> c_int {
-        // SAFETY: the caller's C string.
-        fd_or_err(super::lock(unsafe { CStr::from_ptr(path) }.to_bytes()))
-    }
-
-    /// # Safety
-    ///
-    /// `path` is a C string.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn seal_output_open(
-        path: *const c_char,
-        flags: c_int,
-        mode: u32,
-    ) -> c_int {
-        // SAFETY: the caller's C string.
-        let path = unsafe { CStr::from_ptr(path) };
-
-        fd_or_err(super::output_open(path.to_bytes(), flags, mode))
+        super::label(unsafe { CStr::from_ptr(path) })
+            .err()
+            .unwrap_or(0)
     }
 
     /// [`Output::create`] into `out`: 0 or -errno.
     ///
     /// # Safety
     ///
-    /// `out` is an output no other reference reaches, and `path` a C
-    /// string.
-    pub unsafe extern "C" fn seal_output_create(
+    /// `out` points at a SealOutput no reference reaches during the call,
+    /// and `path` is a C string.
+    pub(crate) unsafe fn seal_output_create(
         out: *mut SealOutput,
         path: *const c_char,
         mode: u32,
@@ -942,7 +855,7 @@ mod capi {
 
         match Output::create(path.to_bytes(), mode) {
             Ok(output) => {
-                // SAFETY: the caller's output, which nothing else reaches.
+                // SAFETY: the caller's SealOutput, which nothing else reaches.
                 unsafe { (*out).0 = Some(output) };
                 0
             }
@@ -955,34 +868,22 @@ mod capi {
     ///
     /// # Safety
     ///
-    /// `out` is an output no other reference reaches, and `buf` holds
-    /// `len` bytes.
-    pub unsafe extern "C" fn seal_output_commit(
+    /// `out` points at a SealOutput no reference reaches during the call,
+    /// and `buf` holds `len` bytes.
+    pub(crate) unsafe fn seal_output_commit(
         out: *mut SealOutput,
         buf: *const c_void,
         len: usize,
     ) -> c_int {
-        // SAFETY: the caller's output, which nothing else reaches.
+        // SAFETY: the caller's SealOutput, which nothing else reaches.
         let Some(output) = (unsafe { (*out).0.take() }) else {
             return -EBADF;
         };
         // SAFETY: the caller's len bytes at buf.
         let doc = unsafe { crate::ffi::slice(buf.cast::<u8>(), len) };
 
-        status(output.commit(doc))
-    }
-
-    /// # Safety
-    ///
-    /// `path` is a C string.
-    pub unsafe extern "C" fn seal_inherit_path(path: *const c_char) -> c_int {
-        // SAFETY: the caller's C string.
-        status(super::inherit_path(unsafe { CStr::from_ptr(path) }))
+        output.commit(doc).err().unwrap_or(0)
     }
 }
 
-pub(crate) use capi::{
-    SealOutput, seal_inherit_path, seal_label, seal_label_tree, seal_lock, seal_mkdir_p, seal_open,
-    seal_open_read, seal_output_commit, seal_output_create, seal_output_open, seal_owns,
-    seal_write_file,
-};
+pub(crate) use capi::{SealOutput, seal_open_read, seal_output_commit, seal_output_create};

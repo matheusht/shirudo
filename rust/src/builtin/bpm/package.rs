@@ -9,7 +9,7 @@ use core::ffi::{CStr, c_int};
 use std::ffi::{CString, OsStr};
 use std::fs;
 use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 
@@ -17,7 +17,7 @@ use super::fetch::{self, sha256_file};
 use super::source::{self, Source};
 use super::{
     PACKAGE_MEDIA, PACKAGES_DIR, Result, STAGING_DIR, curl_ready, error, fail, finish, lock,
-    message, os_err, path, print, remove, status, warn,
+    os_err, path, print, remove, status, warn,
 };
 use crate::errno::{E2BIG, EEXIST, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT};
 use crate::sys::libc::{F_OK, O_CREAT, O_EXCL, O_NOFOLLOW, O_TRUNC, O_WRONLY, access};
@@ -30,7 +30,7 @@ use crate::util::bpm_package::{
 };
 use crate::util::bpm_state::{self, BpmStateEntry};
 use crate::util::json::JsonEmit;
-use crate::util::seal::{seal_mkdir_p, seal_open};
+use crate::util::seal;
 
 /// The most upatches of one kind a package loads or unloads.
 const PATHS_MAX: usize = 128;
@@ -56,13 +56,7 @@ pub(super) fn copy_file(src: &CStr, dst: &CStr, mode: u32, exclusive: bool) -> R
         return if exclusive { Err(-EEXIST) } else { Ok(()) };
     }
     let flags = O_WRONLY | O_CREAT | if exclusive { O_EXCL } else { O_TRUNC };
-    // SAFETY: a C string.
-    let fd = unsafe { seal_open(dst.as_ptr(), flags, mode) };
-    if fd < 0 {
-        return Err(fd);
-    }
-    // SAFETY: the fd seal_open() opened.
-    let mut output = fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+    let mut output = fs::File::from(seal::open(dst.to_bytes(), flags, mode)?);
     let mut buf = vec![0u8; 65536];
     let mut ret = Ok(());
     loop {
@@ -260,27 +254,17 @@ fn stage_and_load(
     }
     let url = c.url(repository, b"blobs", layer.digest())?;
     let dir = path(&[PACKAGES_DIR.as_bytes(), b"/", name])?;
-    // SAFETY: a C string.
-    status(unsafe { seal_mkdir_p(dir.as_ptr(), 0o700) })?;
+    seal::mkdir_p(dir.to_bytes(), 0o700)?;
     let package_dir = path(&[dir.to_bytes(), b"/", version])?;
-    // SAFETY: a C string.
-    status(unsafe { seal_mkdir_p(message(&[STAGING_DIR.as_bytes()]).as_ptr(), 0o700) })?;
+    seal::mkdir_p(STAGING_DIR.as_bytes(), 0o700)?;
     let archive = path(&[STAGING_DIR.as_bytes(), b"/", name, b"-", version, b".bee"])?;
     staging.archive = Some(archive.clone());
     staging.package_dir = Some(package_dir.clone());
-    // SAFETY: a C string.
-    let fd = unsafe {
-        seal_open(
-            archive.as_ptr(),
-            O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW,
-            0o600,
-        )
-    };
-    if fd < 0 {
-        return Err(fd);
-    }
-    // SAFETY: the fd seal_open() opened.
-    let file = unsafe { OwnedFd::from_raw_fd(fd) };
+    let file = seal::open(
+        archive.to_bytes(),
+        O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW,
+        0o600,
+    )?;
     let got = c.get_file(&url, PACKAGE_MEDIA, file.as_raw_fd(), layer.size());
     drop(file);
     got?;

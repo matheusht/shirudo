@@ -19,6 +19,7 @@ use core::ffi::{CStr, c_char, c_int};
 use std::ffi::CString;
 use std::ffi::OsStr;
 use std::fs;
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 
 use super::list::{BPFFS_UPATCHES_DIR, UPATCHES_DIR};
@@ -44,7 +45,7 @@ use crate::util::kernel_abi;
 use crate::util::measured::MeasuredSet;
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::report::{OpReport, report_emit};
-use crate::util::seal::{seal_mkdir_p, seal_open_read, seal_write_file};
+use crate::util::seal;
 use crate::util::upatch::{
     self, NAME_MAX, Opened, Upatch, name_valid, pin_name, upatch_open_memory, upatch_signature,
 };
@@ -287,29 +288,19 @@ fn read(path: &CStr) -> Result<Vec<u8>, c_int> {
     Ok(data)
 }
 
-/// Writes `data` to `path` through the seal: 0 or -errno.
-fn write(path: &CStr, data: &[u8], mode: u32) -> c_int {
-    // SAFETY: a C string and the bytes.
-    unsafe { seal_write_file(path.as_ptr(), data.as_ptr().cast(), data.len(), mode) }
-}
-
-fn mkdir(path: &CStr) -> c_int {
-    // SAFETY: a C string.
-    unsafe { seal_mkdir_p(path.as_ptr(), 0o700) }
-}
-
 fn archive_path(name: &[u8]) -> CString {
     CString::new([UPATCHES_DIR.as_bytes(), b"/", name, b".upatch"].concat()).unwrap_or_default()
 }
 
 /// Archives the bytes a load read for boot restore: 0 or -errno.
 fn persist(data: &[u8], name: &[u8]) -> c_int {
-    let ret = mkdir(UPATCHES_DIR_C);
-    if ret != 0 {
+    if let Err(ret) = seal::mkdir_p(UPATCHES_DIR_C.to_bytes(), 0o700) {
         log_err(&[b"mkdir ", UPATCHES_DIR.as_bytes(), b": ", strerr(-ret)].concat());
         return ret;
     }
-    write(&archive_path(name), data, 0o644)
+    seal::write_file(archive_path(name).to_bytes(), data, 0o644)
+        .err()
+        .unwrap_or(0)
 }
 
 fn os(b: &[u8]) -> &OsStr {
@@ -1457,14 +1448,12 @@ fn purge_locked(name: &[u8], signer: *const Cert, reason: &[u8]) -> c_int {
     if archived.as_bytes().len() >= 4096 {
         return -ENAMETOOLONG;
     }
-    // SAFETY: a C string.
-    let fd = unsafe { seal_open_read(archived.as_ptr()) };
-    if fd < 0 {
-        return fd;
-    }
-    let u = Opened::open_fd(fd);
-    // SAFETY: the descriptor, closed once.
-    unsafe { close(fd) };
+    let fd = match seal::open_read(archived.as_bytes()) {
+        Ok(fd) => fd,
+        Err(err) => return err,
+    };
+    let u = Opened::open_fd(fd.as_raw_fd());
+    drop(fd);
     let u = match u {
         Ok(u) => u,
         Err(err) => return err,

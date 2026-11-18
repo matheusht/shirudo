@@ -7,7 +7,7 @@
 use core::ffi::{CStr, c_int};
 use std::ffi::{CString, OsStr};
 use std::fs;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 
 use super::source::{self, Source};
@@ -28,7 +28,7 @@ use crate::util::crypto_openssl::{
     Sha256Ctx, sha256_final, sha256_free, sha256_init, sha256_update,
 };
 use crate::util::io::{memfd, read_file};
-use crate::util::seal::{seal_mkdir_p, seal_output_open, seal_write_file};
+use crate::util::seal;
 use crate::util::upatch::{self, Upatch, is_unload, upatch_close, upatch_open};
 
 /// The most layers a package manifest names that bpm reads.
@@ -181,14 +181,8 @@ pub(super) fn download(raw: &[u8], into: Option<BorrowedFd<'_>>) -> Result {
         Some(_) => None,
         None => {
             let filename = pull_filename(&repository, &tag, package_name, cstr(&title))?;
-            // SAFETY: a C string.
-            let fd =
-                unsafe { seal_output_open(filename.as_ptr(), O_RDWR | O_CREAT | O_EXCL, 0o644) };
-            if fd < 0 {
-                return Err(fd);
-            }
-            // SAFETY: the fd seal_output_open() opened.
-            Some((filename, unsafe { OwnedFd::from_raw_fd(fd) }))
+            let fd = seal::output_open(filename.to_bytes(), O_RDWR | O_CREAT | O_EXCL, 0o644)?;
+            Some((filename, fd))
         }
     };
     let fd = into.unwrap_or_else(|| made.as_ref().map(|(_, f)| f.as_fd()).expect("made"));
@@ -315,11 +309,9 @@ fn update_one(name: &[u8]) -> Result {
     }
     index_parse(index).map_err(|_| -EINVAL)?;
     let dir = path(&[super::REPOS_DIR.as_bytes(), b"/", name])?;
-    // SAFETY: a C string.
-    status(unsafe { seal_mkdir_p(dir.as_ptr(), 0o700) })?;
+    seal::mkdir_p(dir.to_bytes(), 0o700)?;
     let cache = cache_path(name)?;
-    // SAFETY: a C string and the index's bytes.
-    status(unsafe { seal_write_file(cache.as_ptr(), index.as_ptr().cast(), index.len(), 0o600) })
+    seal::write_file(cache.to_bytes(), index, 0o600)
 }
 
 /// `shirudo bpm repo update [<source>]`.
@@ -468,17 +460,8 @@ pub(super) fn tree_artifact(op: &TreeOperation) -> Result<CString> {
     {
         return Err(-EKEYREJECTED);
     }
-    let dir = super::message(&[TREE_ARTIFACTS_DIR.as_bytes()]);
-    // SAFETY: C strings and the blob's bytes.
-    unsafe {
-        status(seal_mkdir_p(dir.as_ptr(), 0o700))?;
-        status(seal_write_file(
-            cache.as_ptr(),
-            data.as_ptr().cast(),
-            data.len(),
-            0o600,
-        ))?;
-    }
+    seal::mkdir_p(TREE_ARTIFACTS_DIR.as_bytes(), 0o700)?;
+    seal::write_file(cache.to_bytes(), data, 0o600)?;
     verify_upatch(&cache, expected, id, unload)?;
     Ok(cache)
 }

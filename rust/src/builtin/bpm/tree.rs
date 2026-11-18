@@ -36,9 +36,7 @@ use crate::util::eventlog;
 use crate::util::hex::sha256_digest_encode;
 use crate::util::json::JsonEmit;
 use crate::util::keys::{TrustedSet, load_image_root};
-use crate::util::seal::{
-    SealOutput, seal_mkdir_p, seal_output_commit, seal_output_create, seal_write_file,
-};
+use crate::util::seal::{self, Output};
 use crate::util::{image_config, image_keys, initrd, upatch, upatch_pins};
 
 /// The lowercase hex of `bytes` into `out`, NUL-terminated.
@@ -181,11 +179,9 @@ fn status_write(id: &[u8], text: &[u8]) -> Result {
     if !upatch::name_valid(Some(id)) || text.is_empty() {
         return Err(-EINVAL);
     }
-    // SAFETY: a C string.
-    status(unsafe { seal_mkdir_p(message(&[TREE_STATUS_DIR.as_bytes()]).as_ptr(), 0o700) })?;
+    seal::mkdir_p(TREE_STATUS_DIR.as_bytes(), 0o700)?;
     let p = path(&[TREE_STATUS_DIR.as_bytes(), b"/", id])?;
-    // SAFETY: a C string and the status's bytes.
-    status(unsafe { seal_write_file(p.as_ptr(), text.as_ptr().cast(), text.len(), 0o600) })
+    seal::write_file(p.to_bytes(), text, 0o600)
 }
 
 fn status_clear(id: &[u8]) {
@@ -819,17 +815,7 @@ fn write_report(path: Option<&[u8]>, sync: &Sync, tpm: bool) -> Result {
         print(&[body, b"\n"].concat());
         return Ok(());
     };
-    let path = message(&[path]);
-    let mut out = SealOutput::closed();
-    // SAFETY: the output to create, a C string and the report's bytes.
-    unsafe {
-        status(seal_output_create(&mut out, path.as_ptr(), 0o600))?;
-        status(seal_output_commit(
-            &mut out,
-            body.as_ptr().cast(),
-            body.len(),
-        ))
-    }
+    Output::create(message(&[path]).to_bytes(), 0o600)?.commit(body)
 }
 
 /// The sync, a dry run that changes nothing or one that applies, and

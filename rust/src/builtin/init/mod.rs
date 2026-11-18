@@ -37,7 +37,7 @@ use crate::util::keyring;
 use crate::util::keys::{self, TrustedSet};
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::preflight::{self, PreflightResult};
-use crate::util::seal::{mark_ancestors, seal_label, seal_label_tree, seal_mkdir_p};
+use crate::util::seal;
 
 const VAR_LIB: &CStr = c"/var/lib/shirudo";
 const RUN_DIR: &CStr = c"/run/shirudo";
@@ -255,17 +255,15 @@ fn init_keyring(init: &mut Init) -> c_int {
 }
 
 fn mkdir_sealed(dir: &CStr, label: &[u8]) -> c_int {
-    // SAFETY: a C string.
-    let ret = unsafe { seal_mkdir_p(dir.as_ptr(), 0o700) };
-    if ret != 0 {
-        error(&cat!(label, "mkdir ", dir, ": ", strerr(-ret)));
-    }
+    let Err(ret) = seal::mkdir_p(dir.to_bytes(), 0o700) else {
+        return 0;
+    };
+    error(&cat!(label, "mkdir ", dir, ": ", strerr(-ret)));
     ret
 }
 
 fn label(dir: &CStr) -> c_int {
-    // SAFETY: a C string.
-    unsafe { seal_label(dir.as_ptr()) }
+    seal::label(dir).err().unwrap_or(0)
 }
 
 fn mounted_bpffs() -> c_int {
@@ -510,8 +508,7 @@ fn run(init: &mut Init) -> c_int {
     }
     // Seal writable state before the hooks attach, then adopt the
     // initrd's log.
-    let ret = seal_label_tree(bootstrap);
-    if ret != 0 {
+    if let Err(ret) = seal::label_tree(bootstrap) {
         return phase(ret, "sealing persistent state");
     }
     if bootstrap {
@@ -519,7 +516,7 @@ fn run(init: &mut Init) -> c_int {
         let ret = if src.len() >= PATH_MAX {
             -ENAMETOOLONG
         } else {
-            mark_ancestors(&src).err().unwrap_or(0)
+            seal::mark_ancestors(&src).err().unwrap_or(0)
         };
         if ret != 0 {
             return phase(ret, "marking the directories above the state root");
@@ -533,8 +530,7 @@ fn run(init: &mut Init) -> c_int {
     if ret != 0 {
         return phase(ret, "loading enforcement");
     }
-    let ret = seal_label_tree(bootstrap);
-    if ret != 0 {
+    if let Err(ret) = seal::label_tree(bootstrap) {
         return phase(ret, "sealing initialized state");
     }
     let ret = image_runtime::runtime_mount();

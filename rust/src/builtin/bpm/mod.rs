@@ -28,7 +28,7 @@ use crate::sys::libc::{
     opendir, readdir, stdout, strerror, unlink,
 };
 use crate::util::io::read_text_line;
-use crate::util::seal::{seal_lock, seal_mkdir_p};
+use crate::util::seal;
 
 /// A negative errno, or a command's own non-zero status.
 type Result<T = ()> = core::result::Result<T, c_int>;
@@ -134,15 +134,8 @@ impl Drop for Lock {
 }
 
 fn lock() -> Result<Lock> {
-    // SAFETY: C strings.
-    status(unsafe { seal_mkdir_p(LOCKS_DIR.as_ptr(), 0o700) })?;
-    // SAFETY: a C string.
-    let fd = unsafe { seal_lock(LOCK_PATH.as_ptr()) };
-    if fd < 0 {
-        return Err(fd);
-    }
-    // SAFETY: seal_lock() hands over the fd it opened.
-    Ok(Lock(unsafe { OwnedFd::from_raw_fd(fd) }))
+    seal::mkdir_p(LOCKS_DIR.to_bytes(), 0o700)?;
+    seal::lock(LOCK_PATH.to_bytes()).map(Lock)
 }
 
 /// The end of a command that set curl up: the lock released, curl torn

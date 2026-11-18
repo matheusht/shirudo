@@ -10,7 +10,7 @@
 use core::ffi::{CStr, c_int};
 use std::fs::File;
 use std::io::Write;
-use std::os::fd::{FromRawFd, IntoRawFd};
+use std::os::fd::{AsRawFd, IntoRawFd};
 use std::os::unix::fs::FileExt;
 
 use super::{JSON_MAX, Summaries, log_err, log_warn, strerr, type_name};
@@ -31,7 +31,7 @@ use crate::util::options::{
     EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OPT_OPTIONAL, OptParser, OptSpec,
 };
 use crate::util::otel::{self, OtelOpts};
-use crate::util::seal::seal_output_open;
+use crate::util::seal;
 use crate::util::upatch::name_valid;
 
 const MAP_ALL: c_int = 0;
@@ -281,18 +281,15 @@ fn append_locked(mut file: &File, path: &CStr, json: &[u8]) -> c_int {
 /// Appends the record `json` to the file at `path`, under its lock: 0 or
 /// -errno.
 fn append_record(path: &CStr, json: &[u8]) -> c_int {
-    // SAFETY: a C string.
-    let fd = unsafe { seal_output_open(path.as_ptr(), O_RDWR | O_CREAT | O_APPEND, 0o644) };
-    if fd < 0 {
-        return fd;
-    }
-    // SAFETY: the descriptor just opened, which the file owns.
-    let file = unsafe { File::from_raw_fd(fd) };
-    let mut ret = lock_exclusive(fd);
+    let file = match seal::output_open(path.to_bytes(), O_RDWR | O_CREAT | O_APPEND, 0o644) {
+        Ok(fd) => File::from(fd),
+        Err(err) => return err,
+    };
+    let mut ret = lock_exclusive(file.as_raw_fd());
     if ret == 0 {
         ret = append_locked(&file, path, json);
         // SAFETY: the descriptor locked above.
-        unsafe { flock(fd, LOCK_UN) };
+        unsafe { flock(file.as_raw_fd(), LOCK_UN) };
     }
     // SAFETY: the descriptor, closed once, its error kept.
     if unsafe { close(file.into_raw_fd()) } != 0 && ret == 0 {
