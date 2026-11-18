@@ -996,28 +996,30 @@ OCI registry. The macOS workflow checks the Lima template with
 Unit suites and fuzz targets
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The unit suites in :src:`testing/unit/` cover 42 of the modules in
-:src:`util/`: ``attest``, ``bpm_oci``, ``bpm_package``, ``bpm_state``,
-``bpm_tree``, ``bpm_tree_overlap``, ``bpm_tree_state``, ``chain``,
-``chain_history``, ``conditions``, ``config_update``, ``crypto_openssl``,
-``curl``, ``eventlog``, ``format``, ``hex``, ``identity``, ``io``,
-``java_agent``, ``json``, ``kconfig``, ``kernel_abi``,
-``keepalive``, ``keepalive_quote``, ``kernel_build_id``,
-``kernel_prereq``, ``kernel_release``, ``keys``, ``log``, ``measured``,
-``options``,
-``paths``, ``report``, ``string``, ``sysinfo``, ``timefmt``, ``upatch``,
-``upatch_decode``, ``upatch_pins``, ``upatch_resolve``, ``upatch_verify``
-and ``xdp``, and
-``overflow`` the arithmetic of
-:src:`include/shirudo/overflow.h`. ``jar`` covers the
-``shirudo-build`` checks of a Java agent's jar in
-:src:`tools/shirudo-build/jar.c`: stored and deflated manifests, a
-missing or empty ``Premain-Class``, one outside the main section, and
-every truncation and byte flip of a jar. ``quote_check`` covers the rows of
+The unit tests beside the Rust modules cover 32 modules in
+:src:`rust/src/util/`: ``attest``, ``bpm_oci``, ``bpm_package``,
+``bpm_state``, ``bpm_tree``, ``bpm_tree_overlap``, ``bpm_tree_state``,
+``chain``, ``conditions``, ``crypto_openssl``, ``curl``, ``decode``,
+``eventlog``, ``format``, ``hex``, ``integrity``, ``io``, ``json``,
+``keepalive``, ``keepalive_quote``, ``kernel_abi``,
+``kernel_build_id``, ``kernel_release``, ``measured``, ``options``,
+``sysinfo``, ``tamper``, ``upatch``, ``upatch_pins``,
+``upatch_resolve``, ``upatch_verify`` and ``xdp``. Tests also cover
+:src:`rust/src/text.rs` and the quote checks in
+:src:`rust/src/quote_check.rs`.
+
+C suites remain in :src:`testing/unit/` for behavior added on main
+that the Rust tests do not yet cover, including TPM counter checks,
+Java agent events and malformed input. The ``overflow`` suite tests
+:src:`include/shirudo/overflow.h`; ``string`` also tests the C inline
+helpers and formatters. ``jar`` covers stored and deflated Java agent
+manifests, missing or empty ``Premain-Class``, a value outside the main
+section, and truncations and byte flips of a jar. The quote checks
+cover rows of
 ``shirudo-quote-check`` in :src:`rust/src/quote_check.rs`, on quotes a
 software P-256 key signs: every reject reason, the signer's qualified
-name, the empty PCR selection and the base64 of each field. The other
-modules are reached through the test helpers, the fuzz targets and the binaries
+name, the empty PCR selection and the base64 of each field. Other
+modules are reached through the test helpers, fuzz targets and binaries
 the functional tests run.
 
 .. list-table::
@@ -1489,8 +1491,8 @@ Parsers and units
 - The dm-verity superblock check in
   :src:`rust/src/util/config_image.rs` has no fuzz target. ``t5001``
   covers truncation and unsupported fields.
-- Some of the remaining C modules in :src:`util/` have no unit suite
-  of their own.
+- Some remaining C modules in :src:`util/` and Rust modules in
+  :src:`rust/src/util/` have no unit suite of their own.
 
 Related
 -------
