@@ -18,6 +18,9 @@ use crate::util::io::read_text_line;
 use crate::util::keys::KEYS_MAX;
 
 const RUNTIME_DIR_PREFIX: &[u8] = b"/run/shirudo/runtime/";
+/// `TPM_CONFIG_NVPCR_INDEX` and `_NAME` in include/shirudo/tpm.h.
+const CONFIG_NVPCR_INDEX: u32 = 0x0181_8e04;
+const CONFIG_NVPCR_NAME: &[u8] = b"shirudo-config";
 
 /// `struct image_bootstrap`.
 #[repr(C)]
@@ -109,6 +112,15 @@ fn apply(boot: &mut ImageBootstrap, key: &[u8], value: &CStr, initial: bool) -> 
             }
             _ => -EINVAL,
         },
+        b"config.nvpcr" => {
+            if v != CONFIG_NVPCR_NAME {
+                -EINVAL
+            } else {
+                boot.pcr = CONFIG_NVPCR_INDEX;
+                boot.have_pcr = true;
+                0
+            }
+        }
         _ if key.starts_with(b"config.") || key.starts_with(b"runtime.") => -EINVAL,
         _ => 0,
     }

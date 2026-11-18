@@ -105,6 +105,7 @@ fn decoded(source: &str) -> Result<Vec<u8>, c_int> {
 }
 
 #[test]
+
 fn decoder_initializes_and_returns_json() {
     assert_eq!(
         decoded("function decode(input) return {value = 42} end"),

@@ -16,9 +16,12 @@ mod config_image;
 mod harden;
 mod image_cleanup;
 mod image_cli;
+mod image_config;
 mod mode_objects;
 mod register_cli;
 mod seal;
+mod seal_output;
+mod upatch_decode;
 mod upatch_map_types;
 
 /// The arguments the C runtime gave main(), as C strings.
@@ -33,11 +36,17 @@ pub(crate) unsafe fn args(argc: c_int, argv: *const *const c_char) -> Vec<&'stat
         .collect()
 }
 
-/// `text` to standard output through the C library's stream, which the
-/// crate's own output goes through and the C runtime flushes at exit.
+/// `bytes` to standard output through the C library's stream, which the
+/// crate's own output goes through and the C runtime flushes at exit;
+/// whether they all went.
+pub(crate) fn out_bytes(bytes: &[u8]) -> bool {
+    // SAFETY: the bytes and the C library's stream.
+    unsafe { fwrite(bytes.as_ptr().cast(), 1, bytes.len(), stdout) == bytes.len() }
+}
+
+/// `text` to standard output, as out_bytes() writes.
 pub(crate) fn out(text: &str) {
-    // SAFETY: the bytes of text and the C library's stream.
-    unsafe { fwrite(text.as_ptr().cast(), 1, text.len(), stdout) };
+    out_bytes(text.as_bytes());
 }
 
 /// `text` to standard error, as out() writes standard output.
