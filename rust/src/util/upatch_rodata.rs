@@ -6,7 +6,7 @@
 //! that fills the section, then printed as text as libbpf's dumper
 //! prints it, or as JSON from the BTF.
 
-use core::ffi::{c_char, c_int};
+use core::ffi::{CStr, c_int};
 use core::ptr;
 
 use crate::bpf::btf::{
@@ -423,7 +423,9 @@ fn btf_rodata_btf(u: &Upatch, view: &mut View) -> c_int {
     ret
 }
 
-fn data_offset(u: &Upatch, offset: &mut u32) -> c_int {
+/// Where the .rodata of the container `u` starts in its data, into
+/// `offset`: 0 or -errno.
+pub(crate) fn data_offset(u: &Upatch, offset: &mut u32) -> c_int {
     let mut view = View::new();
     let ret = btf_rodata_btf(u, &mut view);
 
@@ -443,7 +445,13 @@ fn secinfo(btf: &Btf, sec: u32) -> Vec<[u32; 3]> {
         .collect()
 }
 
-fn symbol_range(u: &Upatch, symbol: &[u8], range: &mut RodataRange) -> c_int {
+/// Where the variable `symbol` lies in the .rodata of the container
+/// `u`, into `range`: 0 or -errno.
+pub(crate) fn symbol_range(u: &Upatch, symbol: &CStr, range: &mut RodataRange) -> c_int {
+    let symbol = symbol.to_bytes();
+    if symbol.is_empty() {
+        return -EINVAL;
+    }
     let mut view = View::new();
     let mut found = false;
 
@@ -1032,8 +1040,8 @@ fn var_bytes(view: &View, offset: u32, size: u32) -> &[u8] {
 
 /// # Safety
 ///
-/// `path` is a C string, and `view` holds a BTF with its DATASEC.
-unsafe fn print_rodata_text(u: &Upatch, path: *const c_char, view: &View) -> c_int {
+/// `view` holds a BTF with its DATASEC.
+unsafe fn print_rodata_text(u: &Upatch, path: &CStr, view: &View) -> c_int {
     let Some(btf) = view.btf.as_ref() else {
         return -EINVAL;
     };
@@ -1051,7 +1059,7 @@ unsafe fn print_rodata_text(u: &Upatch, path: *const c_char, view: &View) -> c_i
         printf(
             c"upatch %s (%s) .rodata: %u bytes at data+%u, file+%u\n".as_ptr(),
             name.as_ptr(),
-            path,
+            path.as_ptr(),
             view.size,
             view.data_offset,
             u.hdr.data_off.wrapping_add(view.data_offset),
@@ -1130,8 +1138,8 @@ unsafe fn print_rodata_text(u: &Upatch, path: *const c_char, view: &View) -> c_i
 
 /// # Safety
 ///
-/// `path` is a C string, and `view` holds a BTF with its DATASEC.
-unsafe fn print_rodata_json(u: &Upatch, path: *const c_char, view: &View) -> c_int {
+/// `view` holds a BTF with its DATASEC.
+unsafe fn print_rodata_json(u: &Upatch, path: &CStr, view: &View) -> c_int {
     let mut e = JsonEmit::growing(MAX_BYTES);
     let mut name = [0u8; NAME_MAX + 1];
     let mut ret = 0;
@@ -1147,8 +1155,7 @@ unsafe fn print_rodata_json(u: &Upatch, path: *const c_char, view: &View) -> c_i
     e.key(b"upatch");
     e.str_lossy(name);
     e.key(b"path");
-    // SAFETY: the caller's C string.
-    e.str_lossy(unsafe { ffi::c_str(path) });
+    e.str_lossy(path.to_bytes());
     e.kv_string(b"section", b".rodata");
     e.kv_int(b"size", i64::from(view.size));
     e.kv_int(b"data_offset", i64::from(view.data_offset));
@@ -1208,10 +1215,9 @@ unsafe fn print_rodata_json(u: &Upatch, path: *const c_char, view: &View) -> c_i
     ret
 }
 
-/// # Safety
-///
-/// `path` is a C string.
-unsafe fn print(u: &Upatch, path: *const c_char, json: bool) -> c_int {
+/// The .rodata of the container `u`, read from `path`, as text or JSON
+/// on stdout: 0 or -errno.
+pub(crate) fn print(u: &Upatch, path: &CStr, json: bool) -> c_int {
     let mut view = View::new();
 
     if is_unload(u) {
@@ -1221,7 +1227,7 @@ unsafe fn print(u: &Upatch, path: *const c_char, json: bool) -> c_int {
     if ret != 0 {
         return ret;
     }
-    // SAFETY: the caller's C string, and the view btf_rodata_btf() filled.
+    // SAFETY: the view btf_rodata_btf() filled, with its DATASEC.
     unsafe {
         if json {
             print_rodata_json(u, path, &view)
@@ -1231,60 +1237,5 @@ unsafe fn print(u: &Upatch, path: *const c_char, json: bool) -> c_int {
     }
 }
 
-pub(crate) use capi::{upatch_rodata_data_offset, upatch_rodata_print, upatch_rodata_symbol_range};
-
 #[cfg(shirudo_fuzz)]
 mod fuzz;
-mod capi {
-    use core::ffi::{c_char, c_int};
-
-    use super::RodataRange;
-
-    use crate::errno::EINVAL;
-    use crate::ffi;
-    use crate::util::upatch::Upatch;
-
-    /// # Safety
-    ///
-    /// `u` is an open container, and `path` a C string.
-    pub unsafe extern "C" fn upatch_rodata_print(
-        u: *const Upatch,
-        path: *const c_char,
-        json: bool,
-    ) -> c_int {
-        // SAFETY: the caller passes a container and a path.
-        unsafe { super::print(&*u, path, json) }
-    }
-
-    /// # Safety
-    ///
-    /// `u` is NULL or an open container, `symbol` NULL or a C string and
-    /// `range` NULL or room for a range.
-    pub unsafe extern "C" fn upatch_rodata_symbol_range(
-        u: *const Upatch,
-        symbol: *const c_char,
-        range: *mut RodataRange,
-    ) -> c_int {
-        // SAFETY: NULL or the caller's C string.
-        if u.is_null() || symbol.is_null() || unsafe { *symbol } == 0 || range.is_null() {
-            return -EINVAL;
-        }
-        // SAFETY: the caller's container, symbol and room.
-        unsafe { super::symbol_range(&*u, ffi::c_str(symbol), &mut *range) }
-    }
-
-    /// # Safety
-    ///
-    /// `u` is NULL or an open container, and `offset` NULL or room for
-    /// one.
-    pub unsafe extern "C" fn upatch_rodata_data_offset(
-        u: *const Upatch,
-        offset: *mut u32,
-    ) -> c_int {
-        if u.is_null() || offset.is_null() {
-            return -EINVAL;
-        }
-        // SAFETY: the caller's container and room.
-        unsafe { super::data_offset(&*u, &mut *offset) }
-    }
-}

@@ -35,9 +35,7 @@ use crate::util::upatch::{
     TYPE_BPF, Upatch, VERSION, upatch_close, upatch_data, upatch_loader, upatch_metadata,
     upatch_open, upatch_signature,
 };
-use crate::util::upatch_rodata::{
-    RodataRange, upatch_rodata_data_offset, upatch_rodata_symbol_range,
-};
+use crate::util::upatch_rodata::{self, RodataRange};
 
 /// A detached CMS over an ML-DSA-87 signature is about 5 KiB (a
 /// 4627-byte signature and its SignerInfo); the kernel caps
@@ -217,8 +215,7 @@ impl Opened {
     fn symbol_range(&self, symbol: &CStr) -> Result<RodataRange, c_int> {
         // SAFETY: an all-zero range is room for one.
         let mut range: RodataRange = unsafe { core::mem::zeroed() };
-        // SAFETY: the open container, a C string and the room.
-        match unsafe { upatch_rodata_symbol_range(&*self.0, symbol.as_ptr(), &mut range) } {
+        match upatch_rodata::symbol_range(&self.0, symbol, &mut range) {
             0 => Ok(range),
             err => Err(err),
         }
@@ -724,8 +721,7 @@ fn finalize(mut obj: Object, out: &CStr, c: &Contents, keys: (&CStr, &CStr)) -> 
     view.hdr.data_off = insns.len() as u32;
     view.hdr.data_len = signed.len() as u32;
     let mut rodata_data_off = 0;
-    // SAFETY: the view of the loader and data, and room for the offset.
-    match unsafe { upatch_rodata_data_offset(&view, &mut rodata_data_off) } {
+    match upatch_rodata::data_offset(&view, &mut rodata_data_off) {
         0 => {}
         err if err == -ENOENT => rodata_data_off = 0,
         err => return err,

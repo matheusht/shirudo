@@ -6,7 +6,7 @@
 //! stdout that the setup sends to /dev/null.
 
 use super::RodataRange;
-use super::capi::{upatch_rodata_data_offset, upatch_rodata_print, upatch_rodata_symbol_range};
+use super::{data_offset, print, symbol_range};
 use crate::fuzzing::fuzz_target;
 use crate::util::upatch::{Upatch, upatch_close, upatch_open_memory};
 
@@ -33,17 +33,17 @@ fuzz_target!(
                 return;
             }
             let mut offset = 0u32;
-            if upatch_rodata_data_offset(&*u, &mut offset) == 0 && offset != u.hdr.rodata_data_off {
+            if data_offset(&u, &mut offset) == 0 && offset != u.hdr.rodata_data_off {
                 std::process::abort();
             }
             let mut range = RodataRange { offset: 0, size: 0 };
-            if upatch_rodata_symbol_range(&*u, c"fuzz_limits".as_ptr(), &mut range) == 0
+            if symbol_range(&u, c"fuzz_limits", &mut range) == 0
                 && (range.offset > u.hdr.data_len || range.size > u.hdr.data_len - range.offset)
             {
                 std::process::abort();
             }
             for json in [false, true] {
-                if upatch_rodata_print(&*u, c"fuzz".as_ptr(), json) == 0 {
+                if print(&u, c"fuzz", json) == 0 {
                     libc::fflush(core::ptr::null_mut());
                 }
             }

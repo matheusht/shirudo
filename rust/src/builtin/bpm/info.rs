@@ -20,7 +20,7 @@ use crate::util::json::MAX_BYTES;
 use crate::util::upatch::{
     FILE_MAX as UPATCH_FILE_MAX, Upatch, is_unload, upatch_close, upatch_open_memory,
 };
-use crate::util::upatch_rodata::upatch_rodata_print;
+use crate::util::upatch_rodata;
 
 /// The most a Beefile takes.
 const BEEFILE_MAX: usize = 4 << 20;
@@ -182,8 +182,7 @@ pub(super) fn data(source: &[u8], member: &[u8], json: bool) -> Result {
             Err(-EINVAL)
         }
         0 => {
-            // SAFETY: the open container and a C string.
-            let ret = unsafe { upatch_rodata_print(&u, member_path.as_ptr(), json) };
+            let ret = upatch_rodata::print(&u, &member_path, json);
             match ret {
                 r if r == -ENODATA => error(&[
                     b"bpm info data: ",
