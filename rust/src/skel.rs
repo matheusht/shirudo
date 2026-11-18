@@ -47,6 +47,36 @@ static SEAL_BLOB: EmbeddedBpf = EmbeddedBpf {
     size: seal::LOADER.len(),
 };
 
+impl EmbeddedBpf {
+    /// Its name, bpf2 or seal.
+    pub(crate) fn name(&self) -> &'static [u8] {
+        // SAFETY: a static C string of this module.
+        unsafe { crate::ffi::c_str(self.name) }
+    }
+
+    /// Whether this build embeds no loader for it.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.size == 0
+    }
+
+    /// The LSM hooks its programs attach to, or none for an object this
+    /// build does not embed.
+    pub(crate) fn lsm_hooks(&self) -> Option<&'static [&'static str]> {
+        if core::ptr::eq(self, &BPF2_BLOB) {
+            Some(bpf2::LSM_HOOKS)
+        } else if core::ptr::eq(self, &SEAL_BLOB) {
+            Some(seal::LSM_HOOKS)
+        } else {
+            None
+        }
+    }
+}
+
+/// The objects init loads, bpf2 first.
+pub(crate) fn embedded() -> [&'static EmbeddedBpf; 2] {
+    [&BPF2_BLOB, &SEAL_BLOB]
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn bpf2_blob() -> *const EmbeddedBpf {
     &BPF2_BLOB

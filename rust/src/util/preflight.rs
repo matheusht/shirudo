@@ -19,7 +19,7 @@ use crate::text::{cstr, decimal, strscpy, strsprintf};
 use crate::util::config::{self, Scrubbed};
 use crate::util::crypto_openssl::{Cert, cert_free, cert_key_algorithm};
 use crate::util::initrd;
-use crate::util::kernel_abi::kernel_abi_check;
+use crate::util::kernel_abi::{self, kernel_abi_check};
 use crate::util::keys::{self, TrustedSet};
 
 /// `PREFLIGHT_DETAIL_MAX`.
@@ -30,13 +30,14 @@ const PRE_ROOT: c_int = 0;
 const PRE_BPF_LSM: c_int = 1;
 const PRE_BPFFS: c_int = 2;
 const PRE_SIGNED_LOADER_ABI: c_int = 3;
-const PRE_CERT_ON_DISK: c_int = 4;
-const PRE_CERT_ALGORITHM: c_int = 5;
-const PRE_CERT_KERNEL_ALGO: c_int = 6;
-const PRE_KEYRING: c_int = 7;
-const PRE_EMBEDDED_LOADER: c_int = 8;
-const PRE_TPM: c_int = 9;
-const PRE_MAX: usize = 10;
+const PRE_LSM_HOOKS: c_int = 4;
+const PRE_CERT_ON_DISK: c_int = 5;
+const PRE_CERT_ALGORITHM: c_int = 6;
+const PRE_CERT_KERNEL_ALGO: c_int = 7;
+const PRE_KEYRING: c_int = 8;
+const PRE_EMBEDDED_LOADER: c_int = 9;
+const PRE_TPM: c_int = 10;
+const PRE_MAX: usize = 11;
 
 /// The keyrings and keyctl(2) commands of linux/keyctl.h the checks use.
 const KEY_SPEC_THREAD_KEYRING: c_long = -1;
@@ -66,7 +67,7 @@ pub struct PreflightResult {
 }
 
 const _: () = assert!(size_of::<PreflightCheck>() == 280);
-const _: () = assert!(size_of::<PreflightResult>() == 2808);
+const _: () = assert!(size_of::<PreflightResult>() == 3088);
 
 impl PreflightResult {
     /// The next check's slot, named, its detail emptied: its index.
@@ -215,6 +216,43 @@ fn check_signed_loader_abi(r: &mut PreflightResult) {
     } else {
         r.checks[i].ok = false;
         r.n_failed += 1;
+    }
+}
+
+/// The hooks come from the embedded objects themselves, so a program
+/// added on a hook only a carried kernel patch provides is checked
+/// without a list here to keep in step.
+fn check_lsm_hooks(r: &mut PreflightResult) {
+    let i = r.next_slot(PRE_LSM_HOOKS, c"kernel_lsm_hooks");
+    let mut hooks = kernel_abi::LsmHooks::new();
+
+    for obj in crate::skel::embedded() {
+        if obj.is_empty() {
+            r.pass_with(i, b"skipped (embedded objects missing)");
+            return;
+        }
+        if let Err(err) = kernel_abi::lsm_hooks(obj, &mut hooks) {
+            r.fail(
+                i,
+                &[
+                    b"cannot read the LSM hooks of the embedded ",
+                    obj.name(),
+                    b" object: ",
+                    errstr(-err),
+                ],
+            );
+            return;
+        }
+    }
+    match kernel_abi::check_lsm_hooks(&hooks) {
+        Ok(()) => r.pass(i),
+        Err(detail) => {
+            if strscpy(&mut r.checks[i].detail, &detail).is_err() {
+                let _ = strscpy(&mut r.checks[i].detail, b"?");
+            }
+            r.checks[i].ok = false;
+            r.n_failed += 1;
+        }
     }
 }
 
@@ -503,6 +541,7 @@ unsafe fn run(out: *mut PreflightResult) {
     check_bpf_lsm(r);
     check_bpffs(r);
     check_signed_loader_abi(r);
+    check_lsm_hooks(r);
     check_cert(r);
     check_cert_algorithm(r);
     check_cert_kernel_algo(r);

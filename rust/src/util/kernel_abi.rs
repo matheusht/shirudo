@@ -11,10 +11,11 @@ use core::ffi::{CStr, c_char, c_int};
 use core::ptr;
 
 use crate::bpf::btf::{
-    Btf, INT_SIGNED, KIND_ARRAY, KIND_CONST, KIND_INT, KIND_PTR, KIND_RESTRICT, KIND_STRUCT,
-    KIND_TYPE_TAG, KIND_TYPEDEF, KIND_VOLATILE, Member,
+    Btf, INT_SIGNED, KIND_ARRAY, KIND_CONST, KIND_FUNC, KIND_INT, KIND_PTR, KIND_RESTRICT,
+    KIND_STRUCT, KIND_TYPE_TAG, KIND_TYPEDEF, KIND_VOLATILE, Member,
 };
-use crate::errno::EOPNOTSUPP;
+use crate::errno::{E2BIG, EINVAL, EOPNOTSUPP};
+use crate::skel::EmbeddedBpf;
 use crate::sys::libc::strerror;
 use crate::text::capi::strscpy;
 use crate::util::kernel_btf;
@@ -313,6 +314,145 @@ unsafe fn check(detail: *mut c_char, detail_sz: usize) -> c_int {
     }
 }
 
+/// `LSM_HOOKS_MAX` and `LSM_HOOK_NAME_MAX`.
+const LSM_HOOKS_MAX: usize = 128;
+const LSM_HOOK_NAME_MAX: usize = 64;
+/// `KERNEL_ABI_DETAIL_MAX`.
+const DETAIL_MAX: usize = 256;
+
+/// `struct lsm_hooks`: the hooks programs attach to, each once.
+#[repr(C)]
+pub struct LsmHooks {
+    name: [[u8; LSM_HOOK_NAME_MAX]; LSM_HOOKS_MAX],
+    n: usize,
+}
+
+const _: () = assert!(size_of::<LsmHooks>() == 8200);
+
+impl LsmHooks {
+    pub(crate) fn new() -> Box<Self> {
+        Box::new(LsmHooks {
+            name: [[0; LSM_HOOK_NAME_MAX]; LSM_HOOKS_MAX],
+            n: 0,
+        })
+    }
+
+    fn names(&self) -> impl Iterator<Item = &[u8]> {
+        self.name[..self.n.min(LSM_HOOKS_MAX)]
+            .iter()
+            .map(|n| crate::text::cstr(n))
+    }
+
+    /// Adds `hook` unless it is there: -E2BIG when it does not fit.
+    fn add(&mut self, hook: &[u8]) -> Result<(), c_int> {
+        if self.names().any(|h| h == hook) {
+            return Ok(());
+        }
+        if self.n >= LSM_HOOKS_MAX || hook.len() >= LSM_HOOK_NAME_MAX {
+            return Err(-E2BIG);
+        }
+        let slot = &mut self.name[self.n];
+        slot[..hook.len()].copy_from_slice(hook);
+        slot[hook.len()] = 0;
+        self.n += 1;
+        Ok(())
+    }
+}
+
+/// Adds the hooks the lsm and lsm.s programs of `obj` attach to, which
+/// the skeleton generator read from the object: -EINVAL for an object
+/// this build does not embed, -E2BIG when they do not fit.
+pub(crate) fn lsm_hooks(obj: &EmbeddedBpf, hooks: &mut LsmHooks) -> Result<(), c_int> {
+    obj.lsm_hooks()
+        .ok_or(-EINVAL)?
+        .iter()
+        .try_for_each(|h| hooks.add(h.as_bytes()))
+}
+
+/// Whether `btf` has a bpf_lsm_<hook> function for every hook, or why
+/// not, naming the hooks it lacks as far as the detail holds them.
+pub(crate) fn validate_lsm_hooks(btf: Option<&Btf>, hooks: &LsmHooks) -> Result<(), Vec<u8>> {
+    let Some(btf) = btf else {
+        return Err(b"kernel BTF is unavailable; boot a shirudo-patched kernel".to_vec());
+    };
+    let mut missing: Vec<u8> = Vec::new();
+    let mut n_missing = 0;
+    for hook in hooks.names() {
+        if btf
+            .find_by_name_kind(&[b"bpf_lsm_", hook].concat(), KIND_FUNC)
+            .is_some()
+        {
+            continue;
+        }
+        let sep: &[u8] = if n_missing > 0 { b", " } else { b"" };
+        if missing.len() + sep.len() + hook.len() < DETAIL_MAX {
+            missing.extend_from_slice(sep);
+            missing.extend_from_slice(hook);
+        }
+        n_missing += 1;
+    }
+    if n_missing == 0 {
+        return Ok(());
+    }
+    let plural: &[u8] = if n_missing > 1 { b"s" } else { b"" };
+    Err([
+        &b"kernel has no LSM hook"[..],
+        plural,
+        b" ",
+        &missing,
+        b"; boot a shirudo-patched kernel",
+    ]
+    .concat())
+}
+
+/// validate_lsm_hooks() on the running kernel's BTF.
+pub(crate) fn check_lsm_hooks(hooks: &LsmHooks) -> Result<(), Vec<u8>> {
+    match kernel_btf::load_vmlinux() {
+        Ok(btf) => validate_lsm_hooks(Some(&btf), hooks),
+        Err(err) => Err([
+            &b"cannot read target kernel BTF: "[..],
+            // SAFETY: strerror() gives a C string.
+            unsafe { crate::ffi::c_str(strerror(-err)) },
+            b"; boot a shirudo-patched kernel",
+        ]
+        .concat()),
+    }
+}
+
+/// A detail into the caller's room: -EOPNOTSUPP, the detail "?" when it
+/// does not fit.
+///
+/// # Safety
+///
+/// `detail` is NULL or room for `detail_sz` bytes.
+unsafe fn fail_with(detail: *mut c_char, detail_sz: usize, text: &[u8]) -> c_int {
+    if !detail.is_null() && detail_sz != 0 {
+        // SAFETY: the caller's room.
+        let room = unsafe { core::slice::from_raw_parts_mut(detail.cast::<u8>(), detail_sz) };
+        if crate::text::strscpy(room, text).is_err() {
+            let _ = crate::text::strscpy(room, b"?");
+        }
+    }
+    -EOPNOTSUPP
+}
+
+/// The result of a hook check into the caller's room.
+///
+/// # Safety
+///
+/// `detail` is NULL or room for `detail_sz` bytes.
+unsafe fn report_hooks(r: Result<(), Vec<u8>>, detail: *mut c_char, detail_sz: usize) -> c_int {
+    if !detail.is_null() && detail_sz != 0 {
+        // SAFETY: the caller's room.
+        unsafe { *detail = 0 };
+    }
+    match r {
+        Ok(()) => 0,
+        // SAFETY: the caller's room.
+        Err(text) => unsafe { fail_with(detail, detail_sz, &text) },
+    }
+}
+
 pub(crate) use capi::kernel_abi_check;
 
 mod capi {
@@ -341,5 +481,54 @@ mod capi {
     pub unsafe extern "C" fn kernel_abi_check(detail: *mut c_char, detail_sz: usize) -> c_int {
         // SAFETY: the caller passes the room.
         unsafe { super::check(detail, detail_sz) }
+    }
+
+    /// # Safety
+    ///
+    /// `obj` is an embedded object and `hooks` a hook list.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kernel_abi_lsm_hooks(
+        obj: *const super::EmbeddedBpf,
+        hooks: *mut super::LsmHooks,
+    ) -> c_int {
+        // SAFETY: the caller passes an object and a list.
+        unsafe { super::lsm_hooks(&*obj, &mut *hooks) }
+            .err()
+            .unwrap_or(0)
+    }
+
+    /// # Safety
+    ///
+    /// `btf` is NULL or a BTF shirudo_btf_new() made, `hooks` a hook
+    /// list, and `detail` NULL or room for `detail_sz` bytes.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kernel_abi_validate_lsm_hooks(
+        btf: *const Btf,
+        hooks: *const super::LsmHooks,
+        detail: *mut c_char,
+        detail_sz: usize,
+    ) -> c_int {
+        // SAFETY: the caller passes a BTF or NULL, a list and the room.
+        unsafe {
+            super::report_hooks(
+                super::validate_lsm_hooks(btf.as_ref(), &*hooks),
+                detail,
+                detail_sz,
+            )
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `hooks` is a hook list, and `detail` NULL or room for `detail_sz`
+    /// bytes.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kernel_abi_check_lsm_hooks(
+        hooks: *const super::LsmHooks,
+        detail: *mut c_char,
+        detail_sz: usize,
+    ) -> c_int {
+        // SAFETY: the caller passes a list and the room.
+        unsafe { super::report_hooks(super::check_lsm_hooks(&*hooks), detail, detail_sz) }
     }
 }

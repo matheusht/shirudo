@@ -196,6 +196,19 @@ pub(crate) fn write(
          /// The loader tools/bpf-lskel generated with this Rust.\n\
          pub(crate) static LOADER: &[u8] = include_bytes!({lskel:?});\n\n"
     );
+    let mut hooks: Vec<String> = Vec::new();
+    for p in obj.programs() {
+        let sec = String::from_utf8_lossy(&p.sec_name);
+        let hook = sec.strip_prefix("lsm/").or_else(|| sec.strip_prefix("lsm.s/"));
+        if let Some(hook) = hook.filter(|h| !hooks.iter().any(|k| k == h)) {
+            hooks.push(hook.to_owned());
+        }
+    }
+    out += &format!(
+        "/// The LSM hooks its lsm and lsm.s programs attach to, each once,\n\
+         /// which the pre-flight looks for in the kernel.\n\
+         pub(crate) static LSM_HOOKS: &[&str] = &{hooks:?};\n\n"
+    );
     for (c_name, s) in &g.structs {
         match share.and_then(|sh| sh.structs.get(c_name).map(|t| (sh, t))) {
             Some((sh, theirs)) if theirs == s => {

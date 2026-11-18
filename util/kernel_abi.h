@@ -46,7 +46,7 @@ int kernel_abi_lsm_hooks(const struct embedded_bpf *obj,
  * Whether btf has a bpf_lsm_<hook> function for every hook: 0, or
  * -EOPNOTSUPP with the hooks it lacks named in detail.
  */
-int kernel_abi_validate_lsm_hooks(const struct btf *btf,
+int kernel_abi_validate_lsm_hooks(const struct shirudo_btf *btf,
 				  const struct lsm_hooks *hooks,
 				  char *detail, size_t detail_sz);
 

@@ -14,6 +14,7 @@
 #include "kernel_abi.h"
 #include "loader.h"
 #include "kernel_btf.h"
+#include "loader.h"
 #include "unit.h"
 
 enum fixture {
@@ -269,12 +270,19 @@ static void needs_verdict_unsigned(void)
 	check(VERDICT_SIGNED, 0, "verdict must have type u8");
 }
 
-/* A BTF with a bpf_lsm_<hook> function for each hook but skip's. */
-static struct btf *lsm_btf(const struct lsm_hooks *hooks, const char *skip)
+/*
+ * A BTF with a bpf_lsm_<hook> function for each hook but skip's, as
+ * shirudo parses it.
+ */
+static struct shirudo_btf *lsm_btf(const struct lsm_hooks *hooks,
+				   const char *skip)
 {
 	char function[LSM_HOOK_NAME_MAX + 8];
+	struct shirudo_btf *parsed;
 	int ret_type, proto;
+	const void *raw;
 	struct btf *btf;
+	__u32 size;
 	size_t i;
 
 	btf = btf__new_empty();
@@ -292,7 +300,10 @@ static struct btf *lsm_btf(const struct lsm_hooks *hooks, const char *skip)
 		    btf__add_func(btf, function, BTF_FUNC_GLOBAL, proto) < 0)
 			goto err;
 	}
-	return btf;
+	raw = btf__raw_data(btf, &size);
+	parsed = raw ? shirudo_btf_new(raw, size) : NULL;
+	btf__free(btf);
+	return parsed;
 err:
 	btf__free(btf);
 	return NULL;
@@ -346,7 +357,7 @@ static void lsm_hooks_all_present(void)
 	static const char *const names[] = { "bpf", "file_open" };
 	char detail[KERNEL_ABI_DETAIL_MAX] = {};
 	static struct lsm_hooks hooks;
-	struct btf *btf;
+	struct shirudo_btf *btf;
 
 	hooks_of(&hooks, names, ARRAY_SIZE(names));
 	btf = lsm_btf(&hooks, NULL);
@@ -354,7 +365,7 @@ static void lsm_hooks_all_present(void)
 	EXPECT_EQ(kernel_abi_validate_lsm_hooks(btf, &hooks, detail,
 						sizeof(detail)), 0);
 	EXPECT_STREQ(detail, "");
-	btf__free(btf);
+	shirudo_btf_free(btf);
 }
 
 static void lsm_hooks_missing_are_named(void)
@@ -363,7 +374,7 @@ static void lsm_hooks_missing_are_named(void)
 	static const char *const two[] = { "bpf", "x_one", "x_two" };
 	char detail[KERNEL_ABI_DETAIL_MAX] = {};
 	static struct lsm_hooks hooks;
-	struct btf *btf;
+	struct shirudo_btf *btf;
 
 	hooks_of(&hooks, names, ARRAY_SIZE(names));
 	btf = lsm_btf(&hooks, "mm_read_access");
@@ -372,7 +383,7 @@ static void lsm_hooks_missing_are_named(void)
 						sizeof(detail)), -EOPNOTSUPP);
 	EXPECT_STREQ(detail, "kernel has no LSM hook mm_read_access; "
 		     "boot a shirudo-patched kernel");
-	btf__free(btf);
+	shirudo_btf_free(btf);
 
 	hooks_of(&hooks, names, 1);
 	btf = lsm_btf(&hooks, NULL);
@@ -382,28 +393,28 @@ static void lsm_hooks_missing_are_named(void)
 						sizeof(detail)), -EOPNOTSUPP);
 	EXPECT_STREQ(detail, "kernel has no LSM hooks x_one, x_two; "
 		     "boot a shirudo-patched kernel");
-	btf__free(btf);
+	shirudo_btf_free(btf);
 }
 
 static void lsm_hooks_of_the_embedded_objects_checked(void)
 {
 	char detail[KERNEL_ABI_DETAIL_MAX] = {};
 	static struct lsm_hooks hooks;
-	struct btf *btf;
+	struct shirudo_btf *btf;
 
 	embedded_hooks(&hooks);
 	btf = lsm_btf(&hooks, NULL);
 	ASSERT_TRUE(btf);
 	EXPECT_EQ(kernel_abi_validate_lsm_hooks(btf, &hooks, detail,
 						sizeof(detail)), 0);
-	btf__free(btf);
+	shirudo_btf_free(btf);
 	btf = lsm_btf(&hooks, "mm_read_access");
 	ASSERT_TRUE(btf);
 	EXPECT_EQ(kernel_abi_validate_lsm_hooks(btf, &hooks, detail,
 						sizeof(detail)), -EOPNOTSUPP);
 	EXPECT_STREQ(detail, "kernel has no LSM hook mm_read_access; "
 		     "boot a shirudo-patched kernel");
-	btf__free(btf);
+	shirudo_btf_free(btf);
 }
 
 static void lsm_hooks_need_btf(void)
