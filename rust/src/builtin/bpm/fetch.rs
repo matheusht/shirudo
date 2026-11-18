@@ -102,7 +102,7 @@ pub(super) fn sha256_of(data: &[u8]) -> Result<[u8; 64]> {
     let mut hex = [0; 65];
     let mut out = [0; 64];
 
-    status(sha256_hex(data.as_ptr(), data.len(), &mut hex))?;
+    status(sha256_hex(data, &mut hex))?;
     out.copy_from_slice(&hex[..64]);
     Ok(out)
 }

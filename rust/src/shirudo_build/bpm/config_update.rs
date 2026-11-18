@@ -140,7 +140,7 @@ fn download(reference: &[u8], want: &[u8]) -> Result<Vec<u8>, c_int> {
     let url = c.url(&repo, b"manifests", &tag)?;
     let manifest = c.get(&url, MANIFEST_MEDIA, false)?;
     let mut hex = [0u8; 65];
-    if sha256_hex(manifest.bytes().as_ptr(), manifest.bytes().len(), &mut hex) != 0 {
+    if sha256_hex(manifest.bytes(), &mut hex) != 0 {
         return Err(-EINVAL);
     }
     let served = crate::text::cstr(&hex);
@@ -191,8 +191,7 @@ fn download(reference: &[u8], want: &[u8]) -> Result<Vec<u8>, c_int> {
         Err(err) => return fail(err),
     };
     let mut hex = [0u8; 65];
-    if sha256_hex(body.as_ptr(), body.len(), &mut hex) != 0
-        || !digest_matches(layer.digest(), crate::text::cstr(&hex))
+    if sha256_hex(&body, &mut hex) != 0 || !digest_matches(layer.digest(), crate::text::cstr(&hex))
     {
         return fail(-EKEYREJECTED);
     }

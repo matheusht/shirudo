@@ -21,8 +21,8 @@ use crate::ffi;
 use crate::heap::{xfree, xreallocarray};
 use crate::sys::curl::{self, Curl, CurlSlist};
 use crate::sys::libc::{self, SEEK_SET, scrub};
-use crate::util::crypto_openssl::{SHA256_LEN, sha256_buffer};
-use crate::util::hex::hex_encode;
+use crate::util::crypto_openssl::sha256;
+use crate::util::hex::encode;
 use crate::util::io::write_complete;
 use crate::util::tls_openssl::{tls_ca_cleanup, tls_curl_policy};
 
@@ -803,16 +803,13 @@ fn request(c: &mut OciClient, req: &Request, r: &mut HttpResponse) -> c_int {
     0
 }
 
-/// The SHA-256 of `len` bytes at `data` in lowercase hex.
-pub(crate) fn sha256_hex(data: *const u8, len: usize, hex: &mut [u8]) -> c_int {
-    let mut digest = [0u8; SHA256_LEN];
-
-    // SAFETY: the caller's len bytes at data, NULL only for none.
-    if hex.len() < 65 || unsafe { sha256_buffer(data.cast(), len, digest.as_mut_ptr()) } != 0 {
+/// The SHA-256 of `data` in lowercase hex, and a NUL, into `hex`.
+pub(crate) fn sha256_hex(data: &[u8], hex: &mut [u8]) -> c_int {
+    let (Some(out), Ok(digest)) = (hex.get_mut(..65), sha256(data)) else {
         return -EINVAL;
-    }
-    // SAFETY: 32 bytes in, and 65 bytes of room for their hex and a NUL.
-    unsafe { hex_encode(digest.as_ptr(), digest.len(), hex.as_mut_ptr().cast()) };
+    };
+    out[..64].copy_from_slice(&encode(&digest));
+    out[64] = 0;
     0
 }
 
@@ -859,8 +856,10 @@ pub(crate) fn get_signed(
         if ret != 0 {
             return ret;
         }
+        // SAFETY: the buffer the GET filled, len bytes at data.
+        let got = unsafe { crate::ffi::slice(dst.data, dst.len) };
         if (layer.size >= 0 && dst.len as i64 != layer.size)
-            || sha256_hex(dst.data, dst.len, &mut hex) != 0
+            || sha256_hex(got, &mut hex) != 0
             || !digest_matches(cstr(&layer.digest), cstr(&hex))
         {
             return -EKEYREJECTED;
@@ -907,7 +906,7 @@ fn push_blob_with(
     let mut blob_url = [0u8; PATH_MAX];
     let mut upload = [0u8; PATH_MAX];
 
-    if sha256_hex(body.as_ptr(), body.len(), &mut hex) != 0 {
+    if sha256_hex(body, &mut hex) != 0 {
         return -EINVAL;
     }
     if strsprintf(&mut digest, &[b"sha256:", cstr(&hex)]).is_err() {
@@ -993,9 +992,7 @@ pub(super) fn put_manifest(
     let mut manifest_url = [0u8; PATH_MAX];
     let mut r = HttpResponse::new();
 
-    if sha256_hex(body.as_ptr(), body.len(), &mut hex) != 0
-        || strsprintf(digest, &[b"sha256:", cstr(&hex)]).is_err()
-    {
+    if sha256_hex(body, &mut hex) != 0 || strsprintf(digest, &[b"sha256:", cstr(&hex)]).is_err() {
         return -ENAMETOOLONG;
     }
     let ret = url(c, repository, b"manifests", reference, &mut manifest_url);

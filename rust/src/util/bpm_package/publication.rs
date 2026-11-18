@@ -81,7 +81,7 @@ pub(super) fn emit_tree_manifest(
 ) -> Result<usize, c_int> {
     let mut hex = [0u8; 65];
 
-    if sha256_hex(b"{}".as_ptr(), 2, &mut hex) != 0 {
+    if sha256_hex(b"{}", &mut hex) != 0 {
         return Err(-EINVAL);
     }
     let config = Descriptor::of(EMPTY_CONFIG_MEDIA, &[b"sha256:", cstr(&hex)].concat(), 2);
@@ -211,7 +211,9 @@ fn fetch_checked(
     if manifest_digest.len() < 72 {
         return -ENAMETOOLONG;
     }
-    if sha256_hex(f.manifest.data, f.manifest.len, &mut hex) != 0 {
+    // SAFETY: the fetch filled len bytes at data.
+    let manifest = unsafe { ffi::slice(f.manifest.data, f.manifest.len) };
+    if sha256_hex(manifest, &mut hex) != 0 {
         return -EINVAL;
     }
     if strsprintf(manifest_digest, &[b"sha256:", cstr(&hex)]).is_err() {
@@ -222,8 +224,6 @@ fn fetch_checked(
     if f.layers.is_null() {
         return -ENOMEM;
     }
-    // SAFETY: the manifest's len bytes.
-    let manifest = unsafe { ffi::slice(f.manifest.data, f.manifest.len) };
     let ret = parse_manifest(manifest, f.layers, MAX_ENTRIES as c_int, &mut nl, None);
     if ret != 0 {
         return ret;

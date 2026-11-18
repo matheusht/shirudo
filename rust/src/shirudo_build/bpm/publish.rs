@@ -160,7 +160,7 @@ pub(super) fn artifact_manifest(
 
 fn sha256_text(body: &[u8]) -> Result<Vec<u8>, c_int> {
     let mut hex = [0u8; 65];
-    if sha256_hex(body.as_ptr(), body.len(), &mut hex) != 0 {
+    if sha256_hex(body, &mut hex) != 0 {
         return Err(-EINVAL);
     }
     Ok(crate::text::cstr(&hex).to_vec())
