@@ -25,7 +25,7 @@ use std::path::Path;
 
 use crate::errno::{
     E2BIG, EACCES, EBUSY, EEXIST, EINPROGRESS, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENODEV,
-    ENOENT, ENOKEY, ENXIO, EPERM, EPROTO, ESTALE, EUCLEAN,
+    ENOENT, ENOKEY, ENXIO, EPERM, EPROTO, ESTALE, EUCLEAN, last_errno, text,
 };
 use crate::heap::xfree;
 use crate::sys::identity::{DEVICE_CONFIG, DEVICE_RUNTIME, DeviceAuthority, Identity};
@@ -186,17 +186,6 @@ fn error(text: String) {
 
 fn warn(text: String) {
     say(crate::log::warn, text);
-}
-
-fn strerror(err: c_int) -> String {
-    let e = std::io::Error::from_raw_os_error(-err).to_string();
-    e.split(" (os error").next().unwrap_or_default().to_owned()
-}
-
-fn errno() -> c_int {
-    -std::io::Error::last_os_error()
-        .raw_os_error()
-        .unwrap_or(EIO)
 }
 
 fn io_err(e: &std::io::Error) -> c_int {
@@ -391,12 +380,12 @@ fn device_observed(device: u64, root: Option<&[u8; 32]>, kind: u32) -> c_int {
     let mut diskseq = 0u64;
     // SAFETY: the open block device and room for its sequence number.
     if unsafe { ioctl(block.as_raw_fd(), BLKGETDISKSEQ, &mut diskseq) } != 0 {
-        return errno();
+        return last_errno();
     }
     // SAFETY: a C string.
     let fd = unsafe { bpf_obj_get(DEVICES_MAP.as_ptr()) };
     if fd < 0 {
-        return errno();
+        return last_errno();
     }
     // SAFETY: the map bpf_obj_get() opened, the fd's from here.
     let map = unsafe { OwnedFd::from_raw_fd(fd) };
@@ -447,7 +436,7 @@ fn mount_flags(fd: c_int, executable: bool) -> c_int {
     let mut st: Statvfs = unsafe { core::mem::zeroed() };
     // SAFETY: the caller's fd and room for its filesystem's state.
     if unsafe { fstatvfs(fd, &mut st) } != 0 {
-        return errno();
+        return last_errno();
     }
     if st.f_flag & required == required {
         0
@@ -596,7 +585,7 @@ fn mount_runtime(s: &mut State, trusted_boot: bool) -> c_int {
         if cleanup != 0 {
             warn(format!(
                 "image: cannot remove runtime mapping: {}",
-                strerror(cleanup)
+                text(cleanup)
             ));
         }
     }
@@ -614,12 +603,12 @@ fn mount_runtime(s: &mut State, trusted_boot: bool) -> c_int {
         if ret != 0 && unsafe { umount2(RUNTIME_DIR.as_ptr(), MNT_DETACH) } != 0 {
             warn(format!(
                 "image: cannot unmount the runtime: {}",
-                strerror(errno())
+                text(last_errno())
             ));
         }
     }
     if ret != 0 {
-        error(format!("image: {step}: {}", strerror(ret)));
+        error(format!("image: {step}: {}", text(ret)));
     }
     ret
 }
@@ -637,7 +626,7 @@ unsafe extern "C" fn seal_fd(_: *mut c_void, fd: c_int) -> c_int {
         )
     } != 0
     {
-        return errno();
+        return last_errno();
     }
     0
 }
@@ -684,7 +673,7 @@ unsafe extern "C" fn collect_mapping(name: *const c_char, device: u64, ctx: *mut
         warn(format!(
             "image: cannot remove retired mapping {}: {}",
             String::from_utf8_lossy(name),
-            strerror(ret)
+            text(ret)
         ));
     }
     0
@@ -700,7 +689,7 @@ fn collect_mappings(journal_open: bool) {
     if ret != 0 {
         warn(format!(
             "image: cannot collect retired mappings: {}",
-            strerror(ret)
+            text(ret)
         ));
     }
 }
@@ -709,11 +698,11 @@ fn close_candidate(s: &mut State, journal_open: bool) {
     s.candidate_fd = None;
     // SAFETY: a C string.
     if journal_open && unsafe { umount2(CONFIG_CANDIDATE_DIR.as_ptr(), MNT_DETACH) } != 0 {
-        let err = errno();
+        let err = last_errno();
         if err != -EINVAL && err != -ENOENT {
             warn(format!(
                 "image: cannot release candidate mount: {}",
-                strerror(err)
+                text(err)
             ));
         }
     }
@@ -776,7 +765,7 @@ fn mount_candidate(s: &mut State) -> c_int {
     } else {
         // SAFETY: a C string.
         if unsafe { umount2(CONFIG_CANDIDATE_DIR.as_ptr(), MNT_DETACH) } != 0 {
-            let err = errno();
+            let err = last_errno();
             if err != -EINVAL && err != -ENOENT {
                 return err;
             }
@@ -873,7 +862,7 @@ fn prepare_config(s: &mut State, target: &ConfigUpdateTarget, purpose: Prepare) 
             warn(format!(
                 "image: cannot remove rejected mapping {}: {}",
                 String::from_utf8_lossy(cstr(&s.candidate_device.name)),
-                strerror(cleanup)
+                text(cleanup)
             ));
         }
     }
@@ -898,7 +887,7 @@ fn activate_config(s: &mut State, boot: bool) -> c_int {
     if dev != s.candidate_device.device {
         // SAFETY: a C string.
         if unsafe { umount2(CONFIG_IMAGE_DIR.as_ptr(), MNT_DETACH) } != 0 {
-            let err = errno();
+            let err = last_errno();
             if err != -EINVAL {
                 return err;
             }
@@ -1032,7 +1021,7 @@ fn boot_target(target: &mut ConfigUpdateTarget) -> c_int {
 }
 
 fn boot_keys_error(step: &str, ret: c_int) -> c_int {
-    error(format!("initrd boot keys: {step}: {}", strerror(ret)));
+    error(format!("initrd boot keys: {step}: {}", text(ret)));
     ret
 }
 
@@ -1247,7 +1236,7 @@ pub(crate) fn boot_keys_close() -> c_int {
         let mut ret = 0;
         // SAFETY: a C string.
         if unsafe { umount2(CONFIG_CANDIDATE_DIR.as_ptr(), 0) } != 0 {
-            let err = errno();
+            let err = last_errno();
             if err != -EINVAL && err != -ENOENT {
                 ret = err;
             }
@@ -1259,7 +1248,7 @@ pub(crate) fn boot_keys_close() -> c_int {
             if image.is_none() {
                 // SAFETY: a C string.
                 if unsafe { umount2(RUNTIME_DIR.as_ptr(), 0) } != 0 {
-                    let err = errno();
+                    let err = last_errno();
                     if err != -EINVAL && err != -ENOENT && ret == 0 {
                         ret = err;
                     }

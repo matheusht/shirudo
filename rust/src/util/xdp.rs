@@ -11,7 +11,7 @@ use core::sync::atomic::{AtomicU16, Ordering};
 
 use crate::errno::{
     E2BIG, EACCES, EAGAIN, EBADMSG, EINVAL, EMEDIUMTYPE, EMFILE, ENFILE, ENOBUFS, ENODEV, ENOMEM,
-    ENOPROTOOPT, ENOSPC, ENOTTY, EOPNOTSUPP, EPERM, ERANGE, EREMOTE, ETIMEDOUT, EXDEV,
+    ENOPROTOOPT, ENOSPC, ENOTTY, EOPNOTSUPP, EPERM, ERANGE, EREMOTE, ETIMEDOUT, EXDEV, last_errno,
 };
 use crate::sys::libc;
 use crate::util::upatch::{XDP_NETWORK, XDP_UNKNOWN, XDP_VIRTUAL, XDP_VM};
@@ -371,10 +371,6 @@ impl Request {
     }
 }
 
-fn errno() -> c_int {
-    -libc::errno()
-}
-
 /// A socket descriptor, closed when it goes.
 struct Socket(c_int);
 
@@ -402,7 +398,7 @@ fn exchange(
         )
     };
     if fd < 0 {
-        return errno();
+        return last_errno();
     }
     let sock = Socket(fd);
     let timeout = libc::Timeval {
@@ -420,7 +416,7 @@ fn exchange(
         )
     } != 0
     {
-        return errno();
+        return last_errno();
     }
     let mut buf = Vec::new();
     if buf.try_reserve_exact(NETLINK_BUFFER_SIZE).is_err() {
@@ -441,7 +437,7 @@ fn exchange(
         )
     } < 0
     {
-        return errno();
+        return last_errno();
     }
     loop {
         let mut sender = libc::netlink_kernel();
@@ -633,7 +629,7 @@ fn device_details(dev: &mut XdpDevice) -> Result<(), c_int> {
     // SAFETY: socket(2) takes numbers.
     let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
     if fd < 0 {
-        return Err(errno());
+        return Err(last_errno());
     }
     let sock = Socket(fd);
     if !same_device(sock.0, &name, dev.ifindex) {
@@ -647,7 +643,7 @@ fn device_details(dev: &mut XdpDevice) -> Result<(), c_int> {
     };
     // SAFETY: a socket and an ifreq whose data points at the drvinfo.
     let mut ret = if unsafe { libc::ioctl(sock.0, SIOCETHTOOL, &raw mut ifr) } != 0 {
-        errno()
+        last_errno()
     } else {
         0
     };
@@ -795,7 +791,7 @@ pub(crate) fn netns_initial() -> c_int {
     // SAFETY: socket(2) takes numbers.
     let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
     if fd < 0 {
-        return errno();
+        return last_errno();
     }
     let sock = Socket(fd);
     let mut cookie = 0u64;
@@ -811,7 +807,7 @@ pub(crate) fn netns_initial() -> c_int {
         )
     } != 0
     {
-        return errno();
+        return last_errno();
     }
     if cookie == NET_NS_INIT_COOKIE {
         0

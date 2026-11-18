@@ -9,7 +9,7 @@
 use core::ffi::{CStr, c_int};
 use std::ffi::CString;
 
-use crate::errno::{EINVAL, EKEYREJECTED, ENOENT, ENOKEY};
+use crate::errno::{EINVAL, EKEYREJECTED, ENOENT, ENOKEY, last_errno, text};
 use crate::heap::xfree;
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
@@ -35,21 +35,6 @@ fn error(text: String) {
 
     // SAFETY: a "%s" format with a C string.
     unsafe { crate::log::log_c!(crate::log::err, c"%s".as_ptr(), text.as_ptr()) };
-}
-
-fn strerror(err: c_int) -> String {
-    std::io::Error::from_raw_os_error(-err)
-        .to_string()
-        .split(" (os error")
-        .next()
-        .unwrap_or_default()
-        .to_owned()
-}
-
-fn errno() -> c_int {
-    -std::io::Error::last_os_error()
-        .raw_os_error()
-        .unwrap_or(EINVAL)
 }
 
 fn hex_digit(c: u8) -> Option<u8> {
@@ -98,7 +83,7 @@ fn open_dir(at: c_int, name: &CStr) -> Result<Option<Fd>, c_int> {
     if fd >= 0 {
         return Ok(Some(Fd(fd)));
     }
-    match errno() {
+    match last_errno() {
         e if e == -ENOENT => Ok(None),
         e => Err(e),
     }
@@ -117,7 +102,7 @@ fn revoked_cert(dir: c_int, name: &CStr, dev: (u32, u32)) -> Result<Vec<u8>, c_i
         )
     });
     if fd.0 < 0 {
-        return Err(errno());
+        return Err(last_errno());
     }
     let mut st = Statx::zeroed();
     let ret = stat_fd(fd.0, &mut st);
@@ -186,7 +171,7 @@ fn revocations(root_fd: c_int, apply: bool, boot: bool) -> c_int {
     // SAFETY: the open directory, whose fd the stream takes over.
     let dir = unsafe { fdopendir(dir_fd) };
     if dir.is_null() {
-        return errno();
+        return last_errno();
     }
     core::mem::forget(revoked);
 
@@ -197,7 +182,7 @@ fn revocations(root_fd: c_int, apply: bool, boot: bool) -> c_int {
         // SAFETY: the open stream.
         let entry = unsafe { readdir(dir) };
         if entry.is_null() {
-            let err = errno();
+            let err = last_errno();
             if err != 0 {
                 ret = err;
             }
@@ -232,7 +217,7 @@ pub(crate) fn validate_set(primary: &CStr, root_fd: c_int, set: &mut TrustedSet)
     if ret != 0 {
         error(format!(
             "image trust set: validate config image: {}",
-            strerror(ret)
+            text(ret)
         ));
         return ret;
     }
@@ -240,17 +225,14 @@ pub(crate) fn validate_set(primary: &CStr, root_fd: c_int, set: &mut TrustedSet)
     if ret != 0 {
         error(format!(
             "image trust set: validate revocations: {}",
-            strerror(ret)
+            text(ret)
         ));
         return ret;
     }
     // SAFETY: a C string, the image and the set to fill.
     let ret = unsafe { keys_load_image_root(primary.as_ptr(), root_fd, true, set) };
     if ret != 0 {
-        error(format!(
-            "image trust set: load certificates: {}",
-            strerror(ret)
-        ));
+        error(format!("image trust set: load certificates: {}", text(ret)));
         return ret;
     }
     if set.len() == 0 || set.n_unvouched() != 0 {

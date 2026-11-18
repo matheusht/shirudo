@@ -15,7 +15,7 @@ use core::ffi::{CStr, c_char, c_int, c_void};
 use core::ptr;
 use std::ffi::CString;
 
-use crate::errno::{E2BIG, EINVAL, ENAMETOOLONG, ENODATA, ENOENT, ENOMEM, ERANGE, ESTALE};
+use crate::errno::{E2BIG, EINVAL, ENAMETOOLONG, ENODATA, ENOENT, ENOMEM, ERANGE, ESTALE, text};
 use crate::sys::libc::{close, explicit_bzero, snprintf};
 use crate::sys::luajit::{
     LUA_MASKCOUNT, LUA_REGISTRYINDEX, LUA_TBOOLEAN, LUA_TFUNCTION, LUA_TNIL, LUA_TNUMBER,
@@ -1285,8 +1285,7 @@ pub(crate) fn run(d: &DecoderView, v: &MapView, otel: bool, max: usize) -> Resul
             } else {
                 if call.ret != 0 {
                     log_err(
-                        format!("upatch map: decoder encode failed: {}", strerror(call.ret))
-                            .as_bytes(),
+                        format!("upatch map: decoder encode failed: {}", text(call.ret)).as_bytes(),
                     );
                 }
                 call.ret
@@ -1301,11 +1300,6 @@ pub(crate) fn run(d: &DecoderView, v: &MapView, otel: bool, max: usize) -> Resul
     }
     drop(states);
     Ok(Output { ptr: buf, len })
-}
-
-fn strerror(err: c_int) -> String {
-    let e = std::io::Error::from_raw_os_error(-err).to_string();
-    e.split(" (os error").next().unwrap_or_default().to_owned()
 }
 
 /// Whether the decoder is a Lua one of API 1 on map input, exporting a

@@ -16,7 +16,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 
 use crate::errno::{
-    EEXIST, EINVAL, ELOOP, ENAMETOOLONG, ENODATA, ENOENT, ENOTDIR, EOPNOTSUPP, EPERM, ERANGE,
+    EEXIST, EINVAL, ELOOP, ENAMETOOLONG, ENODATA, ENOENT, ENOTDIR, EOPNOTSUPP, EPERM, ERANGE, text,
 };
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
@@ -62,11 +62,6 @@ fn errno() -> c_int {
 
 fn shown(p: &[u8]) -> std::borrow::Cow<'_, str> {
     String::from_utf8_lossy(p)
-}
-
-fn strerror(err: c_int) -> String {
-    let e = std::io::Error::from_raw_os_error(err).to_string();
-    e.split(" (os error").next().unwrap_or_default().to_owned()
 }
 
 /// An fd, closed when it goes; [`Fd::close`] for when the close's
@@ -259,7 +254,7 @@ impl Walk {
         }
         let ret = label(&c);
         if ret != 0 {
-            error(format!("seal: label {}: {}", shown(path), strerror(-ret)));
+            error(format!("seal: label {}: {}", shown(path), text(ret)));
             return Err(ret);
         }
         Ok(())

@@ -55,3 +55,28 @@ pub const EREMOTE: c_int = 66;
 pub const ENOPROTOOPT: c_int = 92;
 pub const ENOBUFS: c_int = 105;
 pub const EMEDIUMTYPE: c_int = 124;
+
+/// The negative errno the C library call that just failed left. std
+/// alone, as the build tools take this file without the crate.
+pub(crate) fn last_errno() -> c_int {
+    -std::io::Error::last_os_error()
+        .raw_os_error()
+        .unwrap_or(EIO)
+}
+
+/// What the C library calls the error `e`, as strerror() words it.
+pub(crate) fn describe(e: &std::io::Error) -> String {
+    let text = e.to_string();
+    match text.find(" (os error ") {
+        Some(end) => text[..end].to_owned(),
+        None => text,
+    }
+}
+
+/// As [`describe`], for the negative errno `err`.
+pub(crate) fn text(err: c_int) -> String {
+    describe(&std::io::Error::from_raw_os_error(-err))
+}
+
+#[cfg(test)]
+mod tests;
