@@ -94,10 +94,6 @@ static FAKE: Global<FakeIdentity> = Global(UnsafeCell::new(FakeIdentity {
     fd: -1,
 }));
 
-unsafe extern "C" {
-    fn __real_syscall(number: c_long, ...) -> c_long;
-}
-
 fn set_errno(e: c_int) {
     // SAFETY: this thread's errno.
     unsafe { *libc::__errno_location() = e };
@@ -105,20 +101,9 @@ fn set_errno(e: c_int) {
 
 /// The identity map init would have pinned, the test's or its error,
 /// faked at the bpf() syscall.
-///
-/// # Safety
-///
-/// As syscall(2) with these arguments.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __wrap_syscall(
-    number: c_long,
-    a0: c_long,
-    a1: c_long,
-    a2: c_long,
-    a3: c_long,
-    a4: c_long,
-    a5: c_long,
-) -> c_long {
+/// The syscall hook of test-tpm-session.
+fn fake_bpf(number: c_long, args: [c_long; 6]) -> Option<c_long> {
+    let [a0, a1, ..] = args;
     if number == libc::SYS_bpf {
         let attr = a1 as *mut u8;
         // SAFETY: the fake, on this thread, and the caller's attribute of
@@ -133,10 +118,10 @@ pub unsafe extern "C" fn __wrap_syscall(
                 {
                     if fake.error != 0 {
                         set_errno(-fake.error);
-                        return -1;
+                        return Some(-1);
                     }
                     fake.fd = libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
-                    return fake.fd.into();
+                    return Some(fake.fd.into());
                 }
                 BPF_OBJ_GET_INFO_BY_FD
                     if fake.fd >= 0 && at(0).cast::<u32>().read_unaligned() as c_int == fake.fd =>
@@ -151,21 +136,20 @@ pub unsafe extern "C" fn __wrap_syscall(
                         .cast::<u32>()
                         .write_unaligned(size_of::<Identity>() as u32);
                     info.add(16).cast::<u32>().write_unaligned(1);
-                    return 0;
+                    return Some(0);
                 }
                 BPF_MAP_LOOKUP_ELEM
                     if fake.fd >= 0 && at(0).cast::<u32>().read_unaligned() as c_int == fake.fd =>
                 {
                     let value = at(16).cast::<u64>().read_unaligned() as *mut Identity;
                     value.write_unaligned(core::ptr::read(&fake.identity));
-                    return 0;
+                    return Some(0);
                 }
                 _ => {}
             }
         }
     }
-    // SAFETY: the caller's call, made.
-    unsafe { __real_syscall(number, a0, a1, a2, a3, a4, a5) }
+    None
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -707,6 +691,7 @@ fn run(args: &[&CStr]) -> c_int {
     };
     keys.event[0] = 2;
     let mut defined = false;
+    super::set_syscall_hook(fake_bpf);
     let result = (|| {
         check!(args.len() == 2);
         forge_reply_cases()?;

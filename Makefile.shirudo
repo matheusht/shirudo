@@ -740,9 +740,9 @@ TPMSIM_CFLAGS := $(shell pkg-config --cflags libtpms 2>/dev/null)
 TPMSIM_LIBS := $(shell pkg-config --libs libtpms 2>/dev/null)
 TPMSIM_HELPER := $(if $(TPMSIM_LIBS),testing/helper/tpmsim-cmd,)
 
-# The test helpers written in Rust: functions of a build of the Rust
-# library with its test-helpers feature, each run by a main object made
-# from testing/helper/main.rs.in, which make links as the C ones.
+# The test helpers: functions of a build of the Rust library with its
+# test-helpers feature, each run by a main object made from
+# testing/helper/main.rs.in, which make links with what the helper wraps.
 RUST_HELPER_TARGET := build/rust-helpers
 RUST_HELPER_LIB    := $(RUST_HELPER_TARGET)/release/libshirudo_rs.a
 HELPER_MAIN_DIR    := build/helper-main
@@ -784,14 +784,12 @@ else
 VERITY_TEST_LIBS := $(DYNAMIC_LIBS)
 endif
 
-build/verity-tests/shirudo-image-fault: testing/helper/image-fault.c \
-		testing/helper/image-fault.h \
-		$(MAIN_OBJ)  $(UTIL_OBJS) $(VERSION_OBJ) $(LIBBPF_A) \
-		$(RUST_LIB)
-	@printf '  CC      $@\n'
+build/verity-tests/shirudo-image-fault: $(MAIN_OBJ) $(UTIL_OBJS) $(VERSION_OBJ) \
+		$(LIBBPF_A) $(RUST_HELPER_LIB)
+	@printf '  LD      $@\n'
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(CC) $(CFLAGS) $(LDFLAGS) $(RPATH_LDFLAGS) \
-		$(VERITY_TEST_LDFLAGS) -o $@ $(filter-out %.h,$^) \
+		$(VERITY_TEST_LDFLAGS) -o $@ $^ \
 		-Wl,--wrap=main,--wrap=Esys_PCR_Extend \
 		-Wl,--wrap=config_root_begin,--wrap=config_root_end,--wrap=syscall \
 		$(STATIC_LIBS) $(VERITY_TEST_LIBS) $(RUST_TEST_LDLIBS)
