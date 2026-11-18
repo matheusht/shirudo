@@ -884,11 +884,10 @@ testing/helper/test-keyring-seal: $(HELPER_MAIN_DIR)/test-keyring-seal.o \
 	$(Q)$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ \
 		$(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
-testing/helper/test-tpm-preopened: testing/helper/test-tpm-preopened.c \
-                                 $(TPM_CLIENT_SRCS) $(REGISTER_OBJS)
-	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) -o $@ $(filter-out %.h,$^) $(REGISTER_LIBS) \
-		-Wl,--wrap=enforcement_active
+testing/helper/test-tpm-preopened: $(HELPER_MAIN_DIR)/test-tpm-preopened.o \
+		$(VERSION_OBJ) $(LIBBPF_A) $(RUST_HELPER_LIB)
+	@printf '  LD      $@\n'
+	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(REGISTER_LIBS) -Wl,--wrap=prctl
 
 testing/helper/test-keys: $(HELPER_MAIN_DIR)/test-keys.o $(VERSION_OBJ) $(LIBBPF_A) $(RUST_HELPER_LIB)
 	@printf '  LD      $@\n'
@@ -928,11 +927,10 @@ testing/helper/tpmsim-cmd: testing/helper/tpmsim-cmd.c
 	@printf '  CC      $@\n'
 	$(Q)$(CC) $(CFLAGS_BASE) -Iinclude $(TPMSIM_CFLAGS) -o $@ $< $(TPMSIM_LIBS) -lcrypto
 
-testing/helper/test-nv-cphash: testing/helper/test-nv-cphash.c \
-		$(TPM_CLIENT_SRCS) $(REGISTER_OBJS)
-	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) -o $@ $(filter-out %.h,$^) $(REGISTER_LIBS) \
-		-Wl,--wrap=enforcement_active
+testing/helper/test-nv-cphash: $(HELPER_MAIN_DIR)/test-nv-cphash.o \
+		$(VERSION_OBJ) $(LIBBPF_A) $(RUST_HELPER_LIB)
+	@printf '  LD      $@\n'
+	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(REGISTER_LIBS) -Wl,--wrap=prctl
 
 testing/helper/test-tpm-session: testing/helper/test-tpm-session.c \
 		  $(TPM_CLIENT_SRCS) $(REGISTER_OBJS) $(RUST_LIB)

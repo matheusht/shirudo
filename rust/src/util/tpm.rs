@@ -59,7 +59,7 @@ const CONF_PATH: &CStr = c"/etc/shirudo/shirudo.conf";
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TpmKey {
-    handle: u32,
+    pub(crate) handle: u32,
     pub(crate) public: [u8; PUBLIC_MAX],
     pub(crate) public_len: usize,
     pub(crate) name: [u8; NAME_LEN],
@@ -82,10 +82,10 @@ impl TpmKey {
 /// look inside.
 #[repr(C)]
 pub struct Tpm {
-    session_key: TpmKey,
-    tcti: *mut TctiContext,
-    esys: *mut EsysContext,
-    session: EsysTr,
+    pub(crate) session_key: TpmKey,
+    pub(crate) tcti: *mut TctiContext,
+    pub(crate) esys: *mut EsysContext,
+    pub(crate) session: EsysTr,
     writer_seed: [u8; DIGEST_LEN],
     writer_public: [u8; NV_RSA_BYTES],
     writer_set: bool,
@@ -129,7 +129,7 @@ impl TpmAttestation {
 pub struct WriterAuthorization {
     nonce: Tpm2bDigest,
     cphash: Tpm2bDigest,
-    digest: [u8; DIGEST_LEN],
+    pub(crate) digest: [u8; DIGEST_LEN],
 }
 
 const _: () = assert!(size_of::<TpmKey>() == 576);
@@ -160,7 +160,12 @@ macro_rules! err {
 /// Starts a salted session bound to the session key: an audit HMAC
 /// session for commands without an authorization handle, or a policy
 /// session.
-fn session_start(esys: *mut EsysContext, key: EsysTr, ty: u8, session: &mut EsysTr) -> c_int {
+pub(crate) fn session_start(
+    esys: *mut EsysContext,
+    key: EsysTr,
+    ty: u8,
+    session: &mut EsysTr,
+) -> c_int {
     let sym = sym_def_null();
     let mut attrs = SESSION_CONTINUESESSION;
 
@@ -657,7 +662,7 @@ fn owner_auth_error(op: &CStr, index: u32, ret: Rc) -> c_int {
     -EIO
 }
 
-fn nv_define(
+pub(crate) fn nv_define(
     t: &Tpm,
     index: u32,
     policy: &[u8; DIGEST_LEN],
@@ -700,7 +705,12 @@ fn nv_define(
     0
 }
 
-fn nv_undefine(t: &Tpm, index: u32, owner_auth: *const u8, owner_auth_len: usize) -> c_int {
+pub(crate) fn nv_undefine(
+    t: &Tpm,
+    index: u32,
+    owner_auth: *const u8,
+    owner_auth_len: usize,
+) -> c_int {
     let mut nv = 0;
     let e = nv_handle(t, index, &mut nv);
 
@@ -733,7 +743,7 @@ fn nv_undefine(t: &Tpm, index: u32, owner_auth: *const u8, owner_auth_len: usize
     0
 }
 
-fn nv_read(t: &Tpm, index: u32, out: &mut [u8; DIGEST_LEN]) -> c_int {
+pub(crate) fn nv_read(t: &Tpm, index: u32, out: &mut [u8; DIGEST_LEN]) -> c_int {
     let mut data: *mut Tpm2bMaxNvBuffer = ptr::null_mut();
     let mut nv = 0;
     let e = nv_handle(t, index, &mut nv);
@@ -792,7 +802,7 @@ fn session_flush(t: &Tpm, session: EsysTr) {
 /// The command hash of the NV_Extend of `event` to the index named
 /// `name`, the TPM's nonce of the session, and their digest, which the
 /// NV writer signs.
-fn writer_prepare(
+pub(crate) fn writer_prepare(
     t: &Tpm,
     session: EsysTr,
     name: &[u8; NAME_LEN],
@@ -843,7 +853,7 @@ fn writer_prepare(
 /// owner seed reproduces it after a reset, and the frozen modulus
 /// `expected` refuses one made under another owner seed. 0 with the key
 /// loaded in `*key`, or -errno with it flushed.
-fn writer_primary(
+pub(crate) fn writer_primary(
     t: &Tpm,
     seed: &[u8; DIGEST_LEN],
     expected: Option<&[u8; NV_RSA_BYTES]>,
@@ -1042,7 +1052,7 @@ fn writer_sign(
 
 /// TPM2_PolicySigned with the NV writer's signature over the
 /// authorization: the TPM's code.
-fn writer_authorize(
+pub(crate) fn writer_authorize(
     t: &Tpm,
     key: EsysTr,
     session: EsysTr,
@@ -1142,7 +1152,11 @@ fn policy_writer_signed(t: &Tpm, session: EsysTr, index: u32, event: &[u8; DIGES
 
 /// PolicyCommandCode(NV_Extend) closes the session, whose digest must be
 /// the one computed in software: a drift is caught here.
-fn policy_session_finish(t: &Tpm, session: EsysTr, expected: &[u8; DIGEST_LEN]) -> c_int {
+pub(crate) fn policy_session_finish(
+    t: &Tpm,
+    session: EsysTr,
+    expected: &[u8; DIGEST_LEN],
+) -> c_int {
     let mut digest: *mut Tpm2bDigest = ptr::null_mut();
     // SAFETY: the context, handles and a command code.
     let ret = unsafe {
