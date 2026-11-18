@@ -13,6 +13,20 @@
 #include "util/config.h"
 #include "util/image_config.h"
 
+#include "image-cli.h"
+
+int __wrap_keys_load_image_root(const char *primary, int root_fd,
+				bool with_trusted, struct trusted_set *set)
+{
+	set->n = 1;
+	return 0;
+}
+
+int __wrap_keys_check_image_set(const struct trusted_set *set)
+{
+	return set->n == 1 ? 0 : -EINVAL;
+}
+
 int main(int argc, const char **argv)
 {
 	struct config bootstrap;
