@@ -561,7 +561,7 @@ impl S3 {
                 CURLOPT_SSL_VERIFYHOST,
                 if self.insecure_tls { 0 } else { 2 },
             );
-            if tls_curl_policy(curl, core::ptr::null_mut()) != 0 {
+            if tls_curl_policy(curl, None) != 0 {
                 return Err(-EINVAL);
             }
             if let Some(ca) = &self.ca_file {

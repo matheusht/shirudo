@@ -23,7 +23,6 @@ pub(crate) use refs::url;
 use crate::errno::E2BIG;
 use crate::sys::libc::PATH_MAX;
 use crate::text::{at, contains, cstr, find, strscpy, strsprintf};
-use crate::util::tls_openssl::TlsCa;
 
 pub(crate) const MAX_NAME: usize = 128;
 pub(crate) const MAX_ENDPOINT: usize = 512;
@@ -75,7 +74,6 @@ pub struct OciClient {
     password: [u8; PASSWORD_SIZE],
     token: [u8; TOKEN_SIZE],
     ca_file: [u8; PATH_MAX],
-    tls_ca: TlsCa,
 }
 
 /// `struct bpm_descriptor`.
@@ -90,7 +88,7 @@ pub struct Descriptor {
 
 const _: () = assert!(size_of::<BpmBuffer>() == 24);
 const _: () = assert!(size_of::<HttpResponse>() == 6368);
-const _: () = assert!(size_of::<OciClient>() == 13584);
+const _: () = assert!(size_of::<OciClient>() == 13568);
 const _: () = assert!(size_of::<Descriptor>() == 4424);
 
 impl BpmBuffer {

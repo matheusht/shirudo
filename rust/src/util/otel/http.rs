@@ -825,7 +825,7 @@ impl Transport {
                 CURLOPT_SSL_VERIFYHOST,
                 if self.insecure_tls { 0 } else { 2 },
             );
-            if tls_curl_policy(curl, core::ptr::null_mut()) != 0 {
+            if tls_curl_policy(curl, None) != 0 {
                 return (Err(-EINVAL), 0);
             }
             for (opt, v) in [

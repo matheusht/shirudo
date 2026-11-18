@@ -109,7 +109,7 @@ unsafe fn download_https(source: *const c_char, d: &mut Download) -> c_int {
         return -ENOMEM;
     }
     // SAFETY: the handle, without a CA of the caller's.
-    let mut ret = unsafe { tls_curl_policy(curl, ptr::null_mut()) };
+    let mut ret = unsafe { tls_curl_policy(curl, None) };
     if ret == 0 {
         let write: WriteCallback = curl_write;
 

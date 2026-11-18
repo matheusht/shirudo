@@ -42,14 +42,6 @@ const TLS_GROUPS: &str = "*X25519MLKEM768:SecP256r1MLKEM768";
 /// classical ones after.
 const TLS_CLASSICAL_GROUPS: &str = "*X25519MLKEM768:SecP256r1MLKEM768:X25519:secp256r1";
 
-/// `struct tls_ca`: the CA file a client trusts, and what the TLS policy
-/// made of it.
-#[repr(C)]
-pub struct TlsCa {
-    pub path: *const c_char,
-    imp: *mut c_void,
-}
-
 /// Whether `host`, without its trailing dot, is a DNS name the list of
 /// exact names apart by commas holds, case aside. An entry too long to
 /// be a name, or not one, matches nothing.
@@ -157,21 +149,17 @@ unsafe extern "C" fn info_callback(ssl: *const SSL, kind: c_int, _ret: c_int) {
 /// CURLE_SSL_CACERT_BADFILE for a file that cannot be opened or read, is
 /// not trusted or holds no PEM certificate. A certificate the store
 /// already has, or cannot add, leaves the store as it was.
-///
-/// # Safety
-///
-/// `path` is a C string.
-unsafe fn add_ca(ctx: &mut SslContextBuilder, path: *const c_char) -> CurlCode {
-    // SAFETY: the caller's C string, and flags.
-    let fd = unsafe { open(path, O_RDONLY | O_CLOEXEC) };
+fn add_ca(ctx: &mut SslContextBuilder, path: &CStr) -> CurlCode {
+    // SAFETY: a C string, and flags.
+    let fd = unsafe { open(path.as_ptr(), O_RDONLY | O_CLOEXEC) };
 
     if fd < 0 {
         return CURLE_SSL_CACERT_BADFILE;
     }
     // SAFETY: the fd open() gave, owned from here.
     let file = File::from(unsafe { OwnedFd::from_raw_fd(fd) });
-    // SAFETY: the fd, and the caller's C string.
-    if unsafe { check_trusted(file.as_raw_fd(), path, false) } != 0 {
+    // SAFETY: the fd, and a C string.
+    if unsafe { check_trusted(file.as_raw_fd(), path.as_ptr(), false) } != 0 {
         return CURLE_SSL_CACERT_BADFILE;
     }
     let mut text = Vec::new();
@@ -193,14 +181,14 @@ unsafe fn add_ca(ctx: &mut SslContextBuilder, path: *const c_char) -> CurlCode {
 /// # Safety
 ///
 /// `curl` is the handle connecting, `sslctx` its `SSL_CTX`, and
-/// `userptr` NULL or the TLS CA given to tls_curl_policy().
+/// `userptr` NULL or the CA path given to tls_curl_policy().
 unsafe extern "C" fn sslctx_callback(
     curl: *mut Curl,
     sslctx: *mut c_void,
     userptr: *mut c_void,
 ) -> CurlCode {
-    // SAFETY: the client's TLS CA, if any.
-    let path = unsafe { userptr.cast::<TlsCa>().as_ref() }.map_or(ptr::null(), |ca| ca.path);
+    // SAFETY: the client's CA path, a C string, if it has one.
+    let ca = (!userptr.is_null()).then(|| unsafe { CStr::from_ptr(userptr.cast()) });
     // SAFETY: the context libcurl hands over, which it keeps and frees, so
     // that it is never dropped here.
     let mut ctx = ManuallyDrop::new(unsafe { SslContextBuilder::from_ptr(sslctx.cast()) });
@@ -228,47 +216,35 @@ unsafe extern "C" fn sslctx_callback(
     if !set {
         return CURLE_SSL_CIPHER;
     }
-    // SAFETY: the client's path, NULL or a C string.
-    if path.is_null() || unsafe { *path } == 0 {
-        return CURLE_OK;
+    match ca {
+        Some(path) if !path.is_empty() => add_ca(&mut ctx, path),
+        _ => CURLE_OK,
     }
-    // SAFETY: the client's C string.
-    unsafe { add_ca(&mut ctx, path) }
 }
 
 /// The policy on `curl`: TLS 1.3 at least, and the context callback,
-/// with `ca`, that settles the rest each time libcurl connects. 0, or
-/// -EINVAL for no handle or one that refused an option.
+/// with `ca`, the path of the CA file a client trusts, that settles the
+/// rest each time libcurl connects. 0, or -EINVAL for no handle or one
+/// that refused an option.
 ///
 /// # Safety
 ///
-/// `curl` is NULL or a live handle, and `ca` NULL or a TLS CA that
-/// outlives the handle's transfers.
-pub(crate) unsafe fn tls_curl_policy(curl: *mut Curl, ca: *mut TlsCa) -> c_int {
+/// `curl` is NULL or a live handle, and `ca` outlives the handle's
+/// transfers.
+pub(crate) unsafe fn tls_curl_policy(curl: *mut Curl, ca: Option<&CStr>) -> c_int {
     if curl.is_null() {
         return -EINVAL;
     }
     let callback: SslCtxCallback = sslctx_callback;
+    let ca = ca.map_or(ptr::null(), CStr::as_ptr);
     // SAFETY: the caller's handle, a long option, a callback option and
     // the pointer it is called with.
     let set = unsafe {
         curl_easy_setopt(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSV1_3) == CURLE_OK
             && curl_easy_setopt(curl, CURLOPT_SSL_CTX_FUNCTION, callback) == CURLE_OK
-            && curl_easy_setopt(curl, CURLOPT_SSL_CTX_DATA, ca.cast::<c_void>()) == CURLE_OK
+            && curl_easy_setopt(curl, CURLOPT_SSL_CTX_DATA, ca) == CURLE_OK
     };
     if set { 0 } else { -EINVAL }
-}
-
-/// Forgets what the policy made of the CA.
-///
-/// # Safety
-///
-/// `ca` is NULL or a TLS CA.
-pub(crate) unsafe fn tls_ca_cleanup(ca: *mut TlsCa) {
-    if !ca.is_null() {
-        // SAFETY: the caller's TLS CA.
-        unsafe { (*ca).imp = ptr::null_mut() };
-    }
 }
 
 #[cfg(test)]

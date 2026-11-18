@@ -61,7 +61,6 @@ pub(super) fn parse_endpoint(endpoint: &[u8], c: &mut OciClient) -> c_int {
         crate::log::err(b"bpm OCI: BPM_OCI_CA_FILE must name a non-empty regular PEM file");
         return -EINVAL;
     }
-    c.tls_ca.path = c_ptr(&c.ca_file);
     let registry = c.registry;
     load_registry_auth(cstr(&registry), c)
 }

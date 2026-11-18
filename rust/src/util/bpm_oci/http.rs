@@ -25,7 +25,7 @@ use crate::util::crypto_openssl::sha256;
 use crate::util::curl::Slist;
 use crate::util::hex::encode;
 use crate::util::io::write_complete;
-use crate::util::tls_openssl::{tls_ca_cleanup, tls_curl_policy};
+use crate::util::tls_openssl::tls_curl_policy;
 
 /// A download bounded by the size its manifest declares.
 pub(super) struct FileSink {
@@ -328,7 +328,7 @@ fn curl_once(
         }
         curl::set_long(handle, curl::CURLOPT_SSL_VERIFYPEER, 1);
         curl::set_long(handle, curl::CURLOPT_SSL_VERIFYHOST, 2);
-        if tls_curl_policy(handle, &mut c.tls_ca) != 0 {
+        if tls_curl_policy(handle, Some(as_cstr(&c.ca_file))) != 0 {
             crate::log::err(
                 &[
                     &b"bpm OCI request "[..],
@@ -398,11 +398,8 @@ fn curl_once(
             unsafe { (*f).overflow = true };
         }
     }
-    // SAFETY: the handle, done with, and the client's TLS state.
-    unsafe {
-        curl::curl_easy_cleanup(handle);
-        tls_ca_cleanup(&mut c.tls_ca);
-    }
+    // SAFETY: the handle, done with.
+    unsafe { curl::curl_easy_cleanup(handle) };
     if status < 0 { -EHOSTUNREACH } else { 0 }
 }
 
@@ -450,12 +447,11 @@ fn get_bearer_token(c: &mut OciClient, challenge: &[u8]) -> c_int {
     scrub(&mut basic);
     scrub(&mut auth_header);
     // SAFETY: what curl allocated for the escapes, NULL when it did not,
-    // the handle and the client's TLS state.
+    // and the handle.
     unsafe {
         curl::curl_free(esc[0].cast());
         curl::curl_free(esc[1].cast());
         curl::curl_easy_cleanup(handle);
-        tls_ca_cleanup(&mut c.tls_ca);
     }
     buffer_free(&mut r.body);
     ret
@@ -535,7 +531,7 @@ fn token_exchange(
         curl::set_ptr(handle, curl::CURLOPT_WRITEDATA, r_ptr);
         curl::set_long(handle, curl::CURLOPT_SSL_VERIFYPEER, 1);
         curl::set_long(handle, curl::CURLOPT_SSL_VERIFYHOST, 2);
-        if tls_curl_policy(handle, &mut c.tls_ca) != 0 {
+        if tls_curl_policy(handle, Some(as_cstr(&c.ca_file))) != 0 {
             return -EINVAL;
         }
         let cc = curl::curl_easy_perform(handle);
