@@ -155,6 +155,62 @@ jobs:
           path: build/host-openssl
           key: ${{ steps.lvh-openssl.outputs.cache-primary-key }}
 
+  # Miri runs the unit suites of the Rust that calls no C in its
+  # interpreter, for what unsafe Rust can do wrong: a read of memory
+  # never written, out of bounds or after a free, or one that breaks the
+  # aliasing of a reference. It needs a nightly Rust, a dated one, so
+  # that a new nightly does not fail the job by itself; rustup's cargo
+  # runs it alone, and the build keeps the toolchain the other jobs use.
+  miri:
+    name: Miri
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Restore the LVH OpenSSL toolchain
+        id: lvh-openssl
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build/host-openssl
+          key: host-openssl-lvh-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/scripts/vm-toolchain.sh') }}
+
+      - name: Run the unit suites that call no C under Miri in LVH VM
+        uses: ./.github/actions/lvh
+        with:
+          test-name: shirudo-miri
+          image: kind
+          image-version: bpf-next-20260603.072225
+          kernel-version: bpf-next-main
+          host-mount: ${{ github.workspace }}
+          images-folder-parent: ${{ runner.temp }}/lvh
+          install-dependencies: true
+          cmd: |
+            grep -aq 'signature_size' /sys/kernel/btf/vmlinux || {
+              echo 'kernel BTF lacks bpf_attr.signature_size; needs a signed-BPF capable bpf-next kernel' >&2
+              exit 1
+            }
+            systemctl start host.mount
+            cd /host
+            .github/scripts/vm-toolchain.sh
+            . build/vm-toolchain.env
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+              sh -s -- -y --no-modify-path --profile minimal \
+                --default-toolchain none
+            "\$HOME/.cargo/bin/rustup" toolchain install nightly-2026-11-17 \
+              --profile minimal --component miri,rust-src
+            make -j"\$(nproc)" -C testing miri \
+              MIRI_CARGO="\$HOME/.cargo/bin/cargo" \
+              MIRI_TOOLCHAIN=nightly-2026-11-17
+
+      - name: Save the LVH OpenSSL toolchain
+        if: always() && steps.lvh-openssl.outputs.cache-hit != 'true' && hashFiles('build/host-openssl/.shirudo-openssl-built') != ''
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build/host-openssl
+          key: ${{ steps.lvh-openssl.outputs.cache-primary-key }}
+
   libfuzzer:
     name: libFuzzer
     runs-on: ubuntu-latest

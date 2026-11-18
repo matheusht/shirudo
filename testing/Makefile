@@ -29,7 +29,7 @@ test-vm-arch = $(shell TEST_VM_ARCH='$(TEST_VM_ARCH)'; \
 .DEFAULT_GOAL := all
 .PHONY: all help clean unit ci-checks functional end2end backend build-host build-operator build-unit kernel-btf \
 	test-helpers \
-	fuzz afl valgrind bundle test-vm-bundle require-vm-kernel vm vm-console vm-ssh vm-enroll vm-sbom vm-stop vm-clean \
+	fuzz afl valgrind miri bundle test-vm-bundle require-vm-kernel vm vm-console vm-ssh vm-enroll vm-sbom vm-stop vm-clean \
 	vm-operator-end2end
 
 PACKAGE_FORMAT ?= $(call test-vm-arch,TEST_VM_HOST_PKG_FORMAT)
@@ -459,6 +459,30 @@ valgrind: build-unit
 	+$(Q)flock $(BUILD_LOCK) $(MAKE) -C $(ROOT) -f Makefile.shirudo replay-targets
 	$(Q)sh $(ROOT)/testing/valgrind.sh
 
+# Miri runs the unit suites of the Rust that calls no C in its
+# interpreter, for what unsafe Rust can do wrong: a read of memory never
+# written, out of bounds or after a free, or one that breaks the
+# aliasing of a reference. It cannot call into C, so a suite that
+# reaches OpenSSL, libcurl, LuaJIT or the C library's own functions is
+# left out, and text's, which takes it longer than a quarter of an hour.
+# Needs a nightly Rust with the miri component, MIRI_TOOLCHAIN. The
+# sysroot is built outside the checkout, whose cargo configuration takes
+# crates from rust/vendor alone; the suites that use the file system do
+# so with isolation off.
+MIRI_CARGO ?= cargo
+MIRI_TOOLCHAIN ?= nightly
+MIRI_SUITES := util::attest util::bpm_oci util::bpm_state \
+	util::bpm_tree_overlap util::hex util::integrity util::json \
+	util::kernel_build_id util::kernel_release util::sysinfo \
+	util::tamper util::upatch util::upatch_resolve
+
+miri: build-unit
+	$(Q)cd "$${TMPDIR:-/tmp}" && $(MIRI_CARGO) +$(MIRI_TOOLCHAIN) miri setup
+	$(Q)cd $(ROOT)/rust && MIRIFLAGS=-Zmiri-disable-isolation \
+	    $(MIRI_CARGO) +$(MIRI_TOOLCHAIN) miri test --offline --lib \
+	    --target-dir $(ROOT)/build/rust-miri -- \
+	    $(addsuffix ::tests::,$(MIRI_SUITES))
+
 bundle: test-vm-bundle
 
 help:
@@ -478,6 +502,7 @@ help:
 	  '  make -C testing fuzz [FUZZ_SECONDS=60] [FUZZ_CORPUS=<dir>] [FUZZERS=<target>...]' \
 	  '  make -C testing afl [AFL_SECONDS=600] [FUZZ_CORPUS=<dir>] [FUZZERS=<target>...]' \
 	  '  make -C testing valgrind                memcheck over unit tests and fuzz corpora' \
+	  '  make -C testing miri [MIRI_TOOLCHAIN=nightly]  Miri over suites that call no C' \
 	  '  make -C testing vm, vm-console, vm-ssh, vm-enroll, vm-sbom, vm-stop, or vm-clean' \
 	  '  VM_KERNEL=bpf-next (default) selects the pinned CI kernel artifact,' \
 	  '  fetched when artifacts/bpf-next-kernel-debs has none' \

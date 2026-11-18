@@ -437,6 +437,25 @@ leaves out the decoder's target: LuaJIT's interpreter reads memory that
 memcheck takes for unwritten. The ``Valgrind`` job of the
 ``Sanitizers`` workflow runs the same on each push and pull request.
 
+Run under Miri
+--------------
+
+Miri runs Rust in an interpreter that checks every access, and finds
+what unsafe Rust can do wrong: a read of memory never written, out of
+bounds or after a free, or one that breaks the aliasing of a reference.
+It cannot call into C, so ``make -C testing miri`` runs the unit suites
+that do not reach OpenSSL, libcurl, LuaJIT or the C library's own
+functions, ``MIRI_SUITES`` in :src:`testing/Makefile`. It needs a
+nightly Rust with the ``miri`` component and takes some minutes:
+
+.. code-block:: console
+
+   $ rustup toolchain install nightly --component miri,rust-src
+   $ make -C testing miri
+
+The ``Miri`` job of the ``Sanitizers`` workflow runs the same with a
+dated nightly on each push and pull request.
+
 Run the fuzz targets
 --------------------
 

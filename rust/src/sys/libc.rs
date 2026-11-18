@@ -7,8 +7,10 @@
 
 use core::ffi::{CStr, c_char, c_int, c_long, c_ulong};
 
+#[cfg(not(miri))]
+pub use libc::explicit_bzero;
 pub use libc::{
-    _exit, abort, access, calloc, close, closedir, execv, execvp, explicit_bzero, faccessat,
+    _exit, abort, access, calloc, close, closedir, execv, execvp, faccessat,
     fchmod, fclose, fcntl, fdopen, fdopendir, ferror, fgetc, fgets, fgetxattr, fileno, flock,
     fopen, fprintf, fputc, fputs, free, fsetxattr, fstatfs, fstatvfs, fsync, ftello, ftruncate,
     fwrite, getenv, geteuid, gethostname, getline, getrandom, getsockopt, getxattr, gmtime_r,
@@ -19,6 +21,20 @@ pub use libc::{
     statfs, statvfs, statx, strcasecmp, strcmp, strerror, strftime, strlen, strncasecmp, strnlen,
     strptime, syscall, sysconf, syslog, timegm, umount2, uname, unlink, unlinkat, unsetenv, write,
 };
+
+/// explicit_bzero(3), for Miri, which cannot call the C library: the `n`
+/// bytes at `s` zeroed by writes the compiler keeps.
+///
+/// # Safety
+///
+/// `s` is valid for writes of `n` bytes.
+#[cfg(miri)]
+pub unsafe fn explicit_bzero(s: *mut core::ffi::c_void, n: usize) {
+    for i in 0..n {
+        // SAFETY: the caller's n bytes at s.
+        unsafe { s.cast::<u8>().add(i).write_volatile(0) };
+    }
+}
 pub use libc::{
     AF_INET, AF_NETLINK, AF_UNIX, AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, EOF,
     F_DUPFD_CLOEXEC, F_GETFD, F_OK, F_SETFD, ITIMER_PROF, ITIMER_REAL, ITIMER_VIRTUAL, LOCK_EX,
