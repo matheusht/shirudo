@@ -241,41 +241,34 @@ pub(super) fn write(
     cert_path: &[u8],
     fingerprint: &[u8],
     out_dir: &[u8],
-) -> c_int {
+) -> Result<(), c_int> {
     let top = [&spec.name[..], b"-", version].concat();
     let output = [out_dir, b"/", &top, b".bee"].concat();
 
     if top.len() >= PATH_MAX || output.len() >= PATH_MAX {
-        return -ENAMETOOLONG;
+        return Err(-ENAMETOOLONG);
     }
-    let Ok(env) = environment(spec, version, fingerprint) else {
-        return -EIO;
-    };
-    let Ok(cert) = read_file(cert_path, MAX_FILE) else {
-        return -ENOENT;
-    };
-    let file = match std::fs::File::create(path(&output)) {
-        Ok(f) => f,
-        Err(e) => return -e.raw_os_error().unwrap_or(EIO),
-    };
-    let mut tar = match GzWrite::new(file, 9, 3) {
-        Ok(gz) => Tar(gz, 0),
-        Err(_) => return -EIO,
-    };
+    let env = environment(spec, version, fingerprint).map_err(|_| -EIO)?;
+    let cert = read_file(cert_path, MAX_FILE).map_err(|_| -ENOENT)?;
+    let file = std::fs::File::create(path(&output)).map_err(|e| errno_of(&e))?;
+    let mut tar = Tar(GzWrite::new(file, 9, 3).map_err(|_| -EIO)?, 0);
     let written = entries(&mut tar, spec, &top, &cert, &env);
     let finished = tar.0.finish().map(|_| ()).map_err(|_| -EIO);
-    let mut ret = written.and(finished).err().unwrap_or(0);
-    if ret == -EFBIG {
-        crate::log::err(
-            format!(
-                "{command}: the members of the package are more than {} MiB together, the most a target installs",
-                MAX_PACKAGE >> 20
-            )
-            .as_bytes(),
-        );
-        ret = -EINVAL;
-    }
-    if ret != 0 {
+    let ret = written.and(finished).map_err(|err| {
+        if err == -EFBIG {
+            crate::log::err(
+                format!(
+                    "{command}: the members of the package are more than {} MiB together, the most a target installs",
+                    MAX_PACKAGE >> 20
+                )
+                .as_bytes(),
+            );
+            -EINVAL
+        } else {
+            err
+        }
+    });
+    if ret.is_err() {
         let _ = std::fs::remove_file(path(&output));
     } else {
         let line = [&output[..], b"\n"].concat();

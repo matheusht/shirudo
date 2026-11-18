@@ -110,7 +110,7 @@ pub(super) fn parse_override(
 }
 
 /// Every override names an input of some converter.
-pub(super) fn overrides_known(spec: &Spec, overrides: &[Override]) -> c_int {
+pub(super) fn overrides_known(spec: &Spec, overrides: &[Override]) -> Result<(), c_int> {
     let known = |name: &[u8]| {
         spec.upatches
             .iter()
@@ -118,9 +118,9 @@ pub(super) fn overrides_known(spec: &Spec, overrides: &[Override]) -> c_int {
             .any(|r| input_name(&r.input) == Some(name))
     };
     if overrides.iter().all(|o| known(&o.name)) {
-        0
+        Ok(())
     } else {
-        -ENOENT
+        Err(-ENOENT)
     }
 }
 
@@ -137,7 +137,13 @@ fn command_source(r: &Rodata, update: bool) -> Option<&[u8]> {
 
 /// Runs a converter in the scope: its words, then --input, --symbol and
 /// --output.
-fn run_converter(spec: &Spec, r: &Rodata, update: bool, input: &[u8], output: &[u8]) -> c_int {
+fn run_converter(
+    spec: &Spec,
+    r: &Rodata,
+    update: bool,
+    input: &[u8],
+    output: &[u8],
+) -> Result<(), c_int> {
     let command = if update { &r.update } else { &r.generator };
     let args = [
         b"--input".as_slice(),
@@ -153,8 +159,8 @@ fn run_converter(spec: &Spec, r: &Rodata, update: bool, input: &[u8], output: &[
         .current_dir(path(&spec.scope))
         .status();
     match status {
-        Ok(s) if s.code() == Some(0) => 0,
-        _ => -EIO,
+        Ok(s) if s.code() == Some(0) => Ok(()),
+        _ => Err(-EIO),
     }
 }
 
@@ -167,19 +173,18 @@ pub(super) fn rodata_apply(
     keys: &KeyFiles,
     overrides: &[Override],
     update: bool,
-) -> c_int {
+) -> Result<(), c_int> {
     let u = &spec.upatches[idx];
 
     for (i, r) in u.rodata.iter().enumerate() {
-        let Some(name) = input_name(&r.input) else {
-            return -EINVAL;
-        };
+        let name = input_name(&r.input).ok_or(-EINVAL)?;
+        let resolved;
         let input = match overrides.iter().find(|o| o.name == name) {
-            Some(o) => o.path.clone(),
-            None => match resolve_source(spec, &r.input) {
-                Ok(p) => p,
-                Err(err) => return err,
-            },
+            Some(o) => &o.path,
+            None => {
+                resolved = resolve_source(spec, &r.input)?;
+                &resolved
+            }
         };
         let generated = format!(
             "{}/rodata-{idx}-{i}.bin",
@@ -192,12 +197,11 @@ pub(super) fn rodata_apply(
         )
         .into_bytes();
         if generated.len() >= PATH_MAX || patched.len() >= PATH_MAX {
-            return -ENAMETOOLONG;
+            return Err(-ENAMETOOLONG);
         }
         let _ = std::fs::remove_file(path(&generated));
         let _ = std::fs::remove_file(path(&patched));
-        let mut ret = run_converter(spec, r, update, &input, &generated);
-        if ret != 0 {
+        let converted = run_converter(spec, r, update, input, &generated).inspect_err(|_| {
             let what = if update { "config update" } else { "build" };
             error(
                 format!(
@@ -206,29 +210,26 @@ pub(super) fn rodata_apply(
                 )
                 .as_bytes(),
             );
-        } else {
-            ret = match archive::read_file(&generated, FILE_MAX) {
-                Ok(value) => {
-                    let (l, p) = (cstring(load), cstring(&patched));
-                    let s = cstring(&r.symbol);
-                    package::patch_rodata(&l, &p, &s, &value, keys)
-                        .and_then(|()| {
-                            std::fs::rename(path(&patched), path(load))
-                                .map_err(|e| -e.raw_os_error().unwrap_or(EIO))
-                        })
-                        .err()
-                        .unwrap_or(0)
-                }
-                Err(err) => err,
-            };
-        }
+        });
+        let updated = converted.and_then(|()| {
+            let value = archive::read_file(&generated, FILE_MAX)?;
+            package::patch_rodata(
+                &cstring(load),
+                &cstring(&patched),
+                &cstring(&r.symbol),
+                &value,
+                keys,
+            )?;
+            std::fs::rename(path(&patched), path(load))
+                .map_err(|e| -e.raw_os_error().unwrap_or(EIO))
+        });
         let _ = std::fs::remove_file(path(&generated));
-        if ret != 0 {
+        if updated.is_err() {
             let _ = std::fs::remove_file(path(&patched));
-            return ret;
         }
+        updated?;
     }
-    0
+    Ok(())
 }
 
 pub(super) fn cstring(b: &[u8]) -> CString {
@@ -244,7 +245,7 @@ fn below(dir: &[u8], path: &[u8]) -> bool {
 /// itself carries. A name is a file or a directory, not both: a target
 /// below another, or below a member bpm build writes itself, would build
 /// and never install.
-fn add_target(seen: &mut Vec<Vec<u8>>, target: &[u8]) -> c_int {
+fn add_target(seen: &mut Vec<Vec<u8>>, target: &[u8]) -> Result<(), c_int> {
     const OWN: [&[u8]; 4] = [
         b"Beefile",
         b"README.md",
@@ -253,32 +254,32 @@ fn add_target(seen: &mut Vec<Vec<u8>>, target: &[u8]) -> c_int {
     ];
 
     if !target_ok(target) {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
     if OWN.iter().any(|own| *own == target || below(own, target))
         || seen
             .iter()
             .any(|s| s == target || below(s, target) || below(target, s))
     {
-        return -EEXIST;
+        return Err(-EEXIST);
     }
     if seen.len() >= MAX_ENTRIES * 3 {
-        return -E2BIG;
+        return Err(-E2BIG);
     }
     seen.push(target.to_vec());
-    0
+    Ok(())
 }
 
 /// The checks the build makes of a Beefile beyond its syntax: every
 /// target unique and safe, every source in the scope, every converter
 /// input and program there, one input of each name, and each policy one
 /// bit throughout.
-pub(super) fn validate(spec: &Spec, allow_missing_upatch_source: bool) -> c_int {
+pub(super) fn validate(spec: &Spec, allow_missing_upatch_source: bool) -> Result<(), c_int> {
     let mut seen = Vec::new();
 
     for f in &spec.files {
-        if add_target(&mut seen, &f.target) != 0 || resolve_source(spec, &f.source).is_err() {
-            return -EINVAL;
+        if add_target(&mut seen, &f.target).is_err() || resolve_source(spec, &f.source).is_err() {
+            return Err(-EINVAL);
         }
     }
     for (i, u) in spec.upatches.iter().enumerate() {
@@ -287,18 +288,18 @@ pub(super) fn validate(spec: &Spec, allow_missing_upatch_source: bool) -> c_int 
         } else {
             resolve_source(spec, &u.source).is_ok()
         };
-        if add_target(&mut seen, &u.load_target) != 0
-            || add_target(&mut seen, &u.unload_target) != 0
+        if add_target(&mut seen, &u.load_target).is_err()
+            || add_target(&mut seen, &u.unload_target).is_err()
             || !source_ok
         {
-            return -EINVAL;
+            return Err(-EINVAL);
         }
         for (j, r) in u.rodata.iter().enumerate() {
             let Some(name) = resolve_source(spec, &r.input)
                 .ok()
                 .and(input_name(&r.input))
             else {
-                return -EINVAL;
+                return Err(-EINVAL);
             };
             let earlier = spec.upatches[..i]
                 .iter()
@@ -306,37 +307,37 @@ pub(super) fn validate(spec: &Spec, allow_missing_upatch_source: bool) -> c_int 
                 .chain(&u.rodata[..j]);
             for prev in earlier {
                 let Some(other) = input_name(&prev.input) else {
-                    return -EINVAL;
+                    return Err(-EINVAL);
                 };
                 if name == other && r.input != prev.input {
-                    return -EEXIST;
+                    return Err(-EEXIST);
                 }
             }
             for update in [false, true] {
                 match command_source(r, update) {
                     Some(s) if resolve_source(spec, s).is_ok() => {}
-                    _ => return -EINVAL,
+                    _ => return Err(-EINVAL),
                 }
             }
         }
         for (j, p) in u.policies.iter().enumerate() {
             if p.id.is_empty() || p.bit == 0 || p.paths.is_empty() || p.bit & (p.bit - 1) != 0 {
-                return -EINVAL;
+                return Err(-EINVAL);
             }
             if p.paths.iter().any(|path| path.first() != Some(&b'/')) {
-                return -EINVAL;
+                return Err(-EINVAL);
             }
             for (x, other) in spec.upatches[..=i].iter().enumerate() {
                 let limit = if x == i { j } else { other.policies.len() };
                 for q in &other.policies[..limit] {
                     if (p.id == q.id) != (p.bit == q.bit) {
-                        return -EEXIST;
+                        return Err(-EEXIST);
                     }
                 }
             }
         }
     }
-    0
+    Ok(())
 }
 
 /// The upatch name of a source or object path: its file name without
@@ -422,12 +423,12 @@ fn build_upatches(
     vmlinux: Option<&CStr>,
     incdir: Option<&CStr>,
     overrides: &[Override],
-) -> c_int {
+) -> Result<(), c_int> {
     let mut vmlinux_h: Option<CString> = vmlinux.map(CStr::to_owned);
 
     for i in 0..spec.upatches.len() {
         let Ok(source) = resolve_source(spec, &spec.upatches[i].source) else {
-            return -EINVAL;
+            return Err(-EINVAL);
         };
         let stage = String::from_utf8_lossy(&spec.stage).into_owned();
         let (load, unload) = (
@@ -435,7 +436,7 @@ fn build_upatches(
             format!("{stage}/{i}.unload.upatch").into_bytes(),
         );
         if load.len() >= PATH_MAX || unload.len() >= PATH_MAX {
-            return -ENAMETOOLONG;
+            return Err(-ENAMETOOLONG);
         }
         spec.upatches[i].load_path = load.clone();
         spec.upatches[i].unload_path = unload.clone();
@@ -446,12 +447,12 @@ fn build_upatches(
                     Some(v) => vmlinux_h = Some(v.to_owned()),
                     None => {
                         error(format!("bpm build: vmlinux.h not found (tried ./vmlinux.h, ./vendor/linux/vmlinux.h, {})", compile::VMLINUX_PATH).as_bytes());
-                        return -ENOENT;
+                        return Err(-ENOENT);
                     }
                 }
             }
             if object.len() >= PATH_MAX {
-                return -ENAMETOOLONG;
+                return Err(-ENAMETOOLONG);
             }
             let v = vmlinux_h.as_deref().unwrap_or_default();
             if let Err(ret) =
@@ -465,7 +466,7 @@ fn build_upatches(
                     ]
                     .concat(),
                 );
-                return if ret < 0 { ret } else { -EIO };
+                return Err(if ret < 0 { ret } else { -EIO });
             }
             (object.clone(), Some(cstring(&source)))
         } else if !name_has_suffix(&source, b".o") {
@@ -477,12 +478,12 @@ fn build_upatches(
                 ]
                 .concat(),
             );
-            return -EINVAL;
+            return Err(-EINVAL);
         } else {
             (source.clone(), None)
         };
         let Ok(name) = upatch_name(&source) else {
-            return -ENAMETOOLONG;
+            return Err(-ENAMETOOLONG);
         };
         let (labels, nr) = policy_labels(&spec.upatches[i]);
         let ret = package::load(
@@ -497,30 +498,19 @@ fn build_upatches(
         if bpf_o == object {
             let _ = std::fs::remove_file(path(&object));
         }
-        if let Err(err) = ret {
-            return err;
-        }
-        let ret = rodata_apply(spec, i, &load, keys, overrides, false);
-        if ret != 0 {
-            return ret;
-        }
-        let ret = record_payload(spec, i, &load, false);
-        if ret != 0 {
-            return ret;
-        }
+        ret?;
+        rodata_apply(spec, i, &load, keys, overrides, false)?;
+        record_payload(spec, i, &load, false)?;
         let u = &spec.upatches[i];
         let digest = digest_of(&u.payload_sha256);
-        let ret = package::unload(
+        package::unload(
             &cstring(&u.name),
             &digest,
             &cstring(&unload),
             (&keys.pkey, &keys.cert),
-        );
-        if let Err(err) = ret {
-            return err;
-        }
+        )?;
     }
-    0
+    Ok(())
 }
 
 /// The 32 bytes of a hex digest the build recorded.
@@ -536,10 +526,15 @@ pub(super) fn digest_of(hex_digest: &[u8]) -> [u8; 32] {
 /// Records what the signed load artifact at `load` says it is: its
 /// name, payload digest and type. Refuses an unload directive and, with
 /// `named`, one whose name is empty.
-pub(super) fn record_payload(spec: &mut Spec, i: usize, load: &[u8], update: bool) -> c_int {
+pub(super) fn record_payload(
+    spec: &mut Spec,
+    i: usize,
+    load: &[u8],
+    update: bool,
+) -> Result<(), c_int> {
     let p = cstring(load);
     let Ok(u) = upatch::Opened::open(&p) else {
-        return -EINVAL;
+        return Err(-EINVAL);
     };
     let refused = upatch::is_unload(&u) || (!update && u.hdr.name[0] == 0);
     let mut name = [0u8; upatch::NAME_MAX + 1];
@@ -549,13 +544,13 @@ pub(super) fn record_payload(spec: &mut Spec, i: usize, load: &[u8], update: boo
     let digest = u.hdr.payload_sha256;
     drop(u);
     if refused {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
     let up = &mut spec.upatches[i];
     up.name = crate::text::cstr(&name).to_vec();
     up.payload_sha256 = hex(&digest);
     up.ty = b"bpf".to_vec();
-    0
+    Ok(())
 }
 
 /// `--version`: a SemVer 2.0.0 version, which the target orders as the
@@ -583,10 +578,7 @@ pub(super) fn load_spec(file: &[u8], allow_missing: bool, what: &str) -> Result<
     let loaded = super::beefile::parse(&body).and_then(|mut spec| {
         spec.scope = resolved[..slash].to_vec();
         if !what.is_empty() {
-            let ret = validate(&spec, allow_missing);
-            if ret != 0 {
-                return Err(ret);
-            }
+            validate(&spec, allow_missing)?;
         }
         Ok(spec)
     });
@@ -717,6 +709,8 @@ pub(super) fn run(args: &[&CStr]) -> c_int {
         return -EINVAL;
     }
     build(context, file, version, keys_arg, vmlinux_arg, &overrides)
+        .err()
+        .unwrap_or(0)
 }
 
 fn build(
@@ -726,7 +720,7 @@ fn build(
     keys_arg: Option<&CStr>,
     vmlinux_arg: Option<&CStr>,
     overrides: &[Override],
-) -> c_int {
+) -> Result<(), c_int> {
     let keys_dir = super::resolve_keys_dir(keys_arg);
     let Some(keys_abs) = keys_dir.as_deref().and_then(|d| realpath(d).ok()) else {
         let shown = keys_dir.unwrap_or_default();
@@ -737,14 +731,11 @@ fn build(
             )
             .as_bytes(),
         );
-        return -ENOENT;
+        return Err(-ENOENT);
     };
-    let keys = match KeyFiles::under(&keys_abs) {
-        Ok(k) => k,
-        Err(err) => return err,
-    };
+    let keys = KeyFiles::under(&keys_abs)?;
     if crate::shirudo_build::check_keys(&keys.pkey, &keys.cert) != 0 {
-        return -crate::errno::EACCES;
+        return Err(-crate::errno::EACCES);
     }
     let vmlinux = match vmlinux_arg {
         Some(v) => match realpath(v.to_bytes()) {
@@ -759,7 +750,7 @@ fn build(
                     ]
                     .concat(),
                 );
-                return err;
+                return Err(err);
             }
         },
         None => [&b"./vmlinux.h"[..], b"./vendor/linux/vmlinux.h"]
@@ -767,10 +758,7 @@ fn build(
             .find_map(|p| realpath(p).ok())
             .map(|p| cstring(&p)),
     };
-    let out_dir = match std::env::current_dir() {
-        Ok(d) => d.as_os_str().as_bytes().to_vec(),
-        Err(e) => return -e.raw_os_error().unwrap_or(EIO),
-    };
+    let out_dir = std::env::current_dir().map_err(|e| -e.raw_os_error().unwrap_or(EIO))?;
     let incdir = realpath(b"bpf/lib")
         .ok()
         .filter(|d| {
@@ -779,56 +767,37 @@ fn build(
         })
         .map(|d| cstring(&d));
     let build_file = match file {
-        Some(f) if f.to_bytes().len() >= PATH_MAX => return -ENAMETOOLONG,
+        Some(f) if f.to_bytes().len() >= PATH_MAX => return Err(-ENAMETOOLONG),
         Some(f) => f.to_bytes().to_vec(),
         None => {
             let p = [context, b"/Beefile"].concat();
             if p.len() >= PATH_MAX {
-                return -ENAMETOOLONG;
+                return Err(-ENAMETOOLONG);
             }
             p
         }
     };
-    if let Err(err) = realpath(&build_file) {
-        return err;
-    }
-    let mut spec = match load_spec(&build_file, false, "build") {
-        Ok(s) => s,
-        Err(err) => return err,
-    };
-    let ret = overrides_known(&spec, overrides);
-    if ret != 0 {
-        return ret;
-    }
-    let fp = match fingerprint(&keys.cert) {
-        Ok(f) => f,
-        Err(err) => return err,
-    };
+    realpath(&build_file)?;
+    let mut spec = load_spec(&build_file, false, "build")?;
+    overrides_known(&spec, overrides)?;
+    let fp = fingerprint(&keys.cert)?;
     // Compile in the package directory so ./vmlinux.h and the vendored
     // headers resolve the way they do for `shirudo build` run there.
-    if let Err(e) = std::env::set_current_dir(path(&spec.scope)) {
-        return -e.raw_os_error().unwrap_or(EIO);
-    }
-    if let Err(err) = stage_open(&mut spec) {
-        return err;
-    }
-    let mut ret = build_upatches(
+    std::env::set_current_dir(path(&spec.scope)).map_err(|e| -e.raw_os_error().unwrap_or(EIO))?;
+    stage_open(&mut spec)?;
+    build_upatches(
         &mut spec,
         &keys,
         vmlinux.as_deref(),
         incdir.as_deref(),
         overrides,
-    );
-    if ret == 0 {
-        ret = archive::write(
-            "bpm build",
-            &spec,
-            version.to_bytes(),
-            keys.cert.to_bytes(),
-            &fp,
-            &out_dir,
-        );
-    }
-    drop(spec);
-    ret
+    )?;
+    archive::write(
+        "bpm build",
+        &spec,
+        version.to_bytes(),
+        keys.cert.to_bytes(),
+        &fp,
+        out_dir.as_os_str().as_bytes(),
+    )
 }

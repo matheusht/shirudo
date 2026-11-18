@@ -82,13 +82,10 @@ pub(super) fn read_member(package: &CStr, member: &[u8], max: usize) -> Result<V
 
 /// Member `member` of the package, written to `output`, which must not
 /// exist, with the directories above it.
-fn copy_member(package: &CStr, member: &[u8], output: &[u8]) -> c_int {
-    let body = match read_member(package, member, archive::MAX_FILE) {
-        Ok(b) => b,
-        Err(err) => return err,
-    };
+fn copy_member(package: &CStr, member: &[u8], output: &[u8]) -> Result<(), c_int> {
+    let body = read_member(package, member, archive::MAX_FILE)?;
     if output.len() >= PATH_MAX {
-        return -ENAMETOOLONG;
+        return Err(-ENAMETOOLONG);
     }
     if let Some(slash) = output.iter().rposition(|&c| c == b'/') {
         let parent = &output[..slash];
@@ -105,29 +102,25 @@ fn copy_member(package: &CStr, member: &[u8], output: &[u8]) -> c_int {
             let dir = &parent[..end];
             if let Err(e) = builder.create(path(dir)) {
                 if e.kind() != std::io::ErrorKind::AlreadyExists {
-                    return -e.raw_os_error().unwrap_or(EIO);
+                    return Err(-e.raw_os_error().unwrap_or(EIO));
                 }
             }
             match std::fs::symlink_metadata(path(dir)) {
                 Ok(m) if m.is_dir() => {}
-                Ok(_) => return -ENOTDIR,
-                Err(e) => return -e.raw_os_error().unwrap_or(EIO),
+                Ok(_) => return Err(-ENOTDIR),
+                Err(e) => return Err(-e.raw_os_error().unwrap_or(EIO)),
             }
         }
     }
-    let file = std::fs::OpenOptions::new()
+    let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(path(output));
-    let mut file = match file {
-        Ok(f) => f,
-        Err(e) => return -e.raw_os_error().unwrap_or(EIO),
-    };
-    match file.write_all(&body).and_then(|()| file.sync_all()) {
-        Ok(()) => 0,
-        Err(e) => -e.raw_os_error().unwrap_or(EIO),
-    }
+        .open(path(output))
+        .map_err(|e| -e.raw_os_error().unwrap_or(EIO))?;
+    file.write_all(&body)
+        .and_then(|()| file.sync_all())
+        .map_err(|e| -e.raw_os_error().unwrap_or(EIO))
 }
 
 /// A base package downloaded into a file of /tmp, private to this
@@ -373,6 +366,8 @@ pub(super) fn run(args: &[&CStr]) -> c_int {
         },
     };
     update(&cstring(package), file, version, keys_arg, &overrides)
+        .err()
+        .unwrap_or(0)
 }
 
 fn update(
@@ -381,40 +376,30 @@ fn update(
     version: &CStr,
     keys_arg: Option<&CStr>,
     overrides: &[Override],
-) -> c_int {
-    let info = match Info::load(package) {
-        Ok(i) => i,
-        Err(err) => return err,
-    };
+) -> Result<(), c_int> {
+    let info = Info::load(package)?;
     if semver_compare(version.to_bytes(), crate::text::cstr(&info.0.version)) <= 0 {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
-    let out_dir = match std::env::current_dir() {
-        Ok(d) => d.as_os_str().as_bytes().to_vec(),
-        Err(e) => return -e.raw_os_error().unwrap_or(EIO),
-    };
+    let out_dir = std::env::current_dir().map_err(|e| -e.raw_os_error().unwrap_or(EIO))?;
+    let out_dir = out_dir.as_os_str().as_bytes();
     let Some(keys_abs) =
         super::resolve_keys_dir(keys_arg).and_then(|d| std::fs::canonicalize(path(&d)).ok())
     else {
-        return -ENOENT;
+        return Err(-ENOENT);
     };
-    let keys = match KeyFiles::under(keys_abs.as_os_str().as_bytes()) {
-        Ok(k) => k,
-        Err(err) => return err,
-    };
+    let keys = KeyFiles::under(keys_abs.as_os_str().as_bytes())?;
     if check_keys(&keys.pkey, &keys.cert) != 0 {
-        return -EACCES;
+        return Err(-EACCES);
     }
     let mut spec = super::beefile::Spec::default();
     let ret = staged(
-        &mut spec, package, &info, file, version, &keys, overrides, &out_dir,
+        &mut spec, package, &info, file, version, &keys, overrides, out_dir,
     );
     if !spec.stage.is_empty() {
-        let back = std::env::set_current_dir(path(&out_dir));
+        let back = std::env::set_current_dir(path(out_dir));
         drop(spec);
-        if let (Err(e), 0) = (back, ret) {
-            return -e.raw_os_error().unwrap_or(EIO);
-        }
+        return ret.and(back.map_err(|e| -e.raw_os_error().unwrap_or(EIO)));
     }
     ret
 }
@@ -429,94 +414,61 @@ fn staged(
     keys: &KeyFiles,
     overrides: &[Override],
     out_dir: &[u8],
-) -> c_int {
+) -> Result<(), c_int> {
     let from_package = file.is_none();
     let build_file = if from_package {
-        if let Err(err) = build::stage_open(spec) {
-            return err;
-        }
+        build::stage_open(spec)?;
         let source_dir = [&spec.stage[..], b"/source"].concat();
-        if let Err(e) = std::fs::DirBuilder::new()
+        std::fs::DirBuilder::new()
             .mode(0o700)
             .create(path(&source_dir))
-        {
-            return -e.raw_os_error().unwrap_or(EIO);
-        }
+            .map_err(|e| -e.raw_os_error().unwrap_or(EIO))?;
         let bf = [&source_dir[..], b"/Beefile"].concat();
-        let ret = copy_member(package, b"Beefile", &bf);
-        if ret == -ENOENT {
-            error(format!("bpm config update: base package {} has no Beefile; rebuild it with a Beefile or pass --file <name>.bee", String::from_utf8_lossy(package.to_bytes())).as_bytes());
-            return -EINVAL;
-        }
-        if ret != 0 {
-            return ret;
+        match copy_member(package, b"Beefile", &bf) {
+            Err(err) if err == -ENOENT => {
+                error(format!("bpm config update: base package {} has no Beefile; rebuild it with a Beefile or pass --file <name>.bee", String::from_utf8_lossy(package.to_bytes())).as_bytes());
+                return Err(-EINVAL);
+            }
+            other => other?,
         }
         bf
     } else {
         file.map(|f| f.to_bytes().to_vec()).unwrap_or_default()
     };
-    let stage = core::mem::take(&mut spec.stage);
-    *spec = match build::load_spec(&build_file, false, "") {
-        Ok(s) => s,
-        Err(err) => {
-            spec.stage = stage;
-            return err;
-        }
-    };
-    spec.stage = stage;
-    let mut ret = 0;
+    let mut parsed = build::load_spec(&build_file, false, "")?;
+    parsed.stage = core::mem::take(&mut spec.stage);
+    *spec = parsed;
     if from_package {
         for f in &spec.files {
             if !super::beefile::target_ok(&f.source) || !super::beefile::target_ok(&f.target) {
-                ret = -EINVAL;
-                break;
+                return Err(-EINVAL);
             }
             let out = [&spec.scope[..], b"/", &f.source].concat();
-            ret = copy_member(package, &f.target, &out);
-            if ret != 0 {
-                break;
-            }
+            copy_member(package, &f.target, &out)?;
         }
-        if ret == 0 {
-            ret = copy_member(
-                package,
-                b"README.md",
-                &[&spec.scope[..], b"/README.md"].concat(),
-            );
-            if ret == -ENOENT {
-                ret = 0;
-            }
+        match copy_member(
+            package,
+            b"README.md",
+            &[&spec.scope[..], b"/README.md"].concat(),
+        ) {
+            Err(err) if err == -ENOENT => {}
+            other => other?,
         }
     }
-    if ret == 0 {
-        ret = build::validate(spec, from_package);
+    build::validate(spec, from_package)?;
+    build::overrides_known(spec, overrides)?;
+    if spec.name != crate::text::cstr(&info.0.name)
+        || spec.upatches.iter().all(|u| u.rodata.is_empty())
+    {
+        return Err(-EINVAL);
     }
-    if ret == 0 {
-        ret = build::overrides_known(spec, overrides);
-    }
-    if ret == 0 && spec.name != crate::text::cstr(&info.0.name) {
-        ret = -EINVAL;
-    }
-    if ret == 0 && spec.upatches.iter().all(|u| u.rodata.is_empty()) {
-        ret = -EINVAL;
-    }
-    if ret != 0 {
-        return ret;
-    }
-    let fp = match build::fingerprint(&keys.cert) {
-        Ok(f) => f,
-        Err(err) => return err,
-    };
+    let fp = build::fingerprint(&keys.cert)?;
     if fp != crate::text::cstr(&info.0.signer) {
-        return -EKEYREJECTED;
+        return Err(-EKEYREJECTED);
     }
-    if let Err(e) = std::env::set_current_dir(path(&spec.scope)) {
-        return -e.raw_os_error().unwrap_or(EIO);
-    }
+    std::env::set_current_dir(path(&spec.scope)).map_err(|e| -e.raw_os_error().unwrap_or(EIO))?;
     if spec.stage.is_empty() {
-        if let Err(err) = build::stage_open(spec) {
-            return err;
-        }
+        build::stage_open(spec)?;
     }
     for i in 0..spec.upatches.len() {
         let stage = String::from_utf8_lossy(&spec.stage).into_owned();
@@ -525,43 +477,24 @@ fn staged(
             format!("{stage}/update-{i}.unload.upatch").into_bytes(),
         );
         if load.len() >= PATH_MAX || unload.len() >= PATH_MAX {
-            return -ENAMETOOLONG;
+            return Err(-ENAMETOOLONG);
         }
-        let ret = copy_member(package, &spec.upatches[i].load_target, &load);
-        if ret != 0 {
-            return ret;
-        }
-        if let Err(err) = package::verify_package(&cstring(&load), &keys.cert) {
-            return err;
-        }
-        let expected = match build::upatch_name(&spec.upatches[i].source) {
-            Ok(n) => n,
-            Err(err) => return err,
-        };
-        let ret = name_matches(&load, &expected);
-        if ret != 0 {
-            return ret;
-        }
-        let ret = build::rodata_apply(spec, i, &load, keys, overrides, true);
-        if ret != 0 {
-            return ret;
-        }
-        let ret = build::record_payload(spec, i, &load, true);
-        if ret != 0 {
-            return ret;
-        }
+        copy_member(package, &spec.upatches[i].load_target, &load)?;
+        package::verify_package(&cstring(&load), &keys.cert)?;
+        let expected = build::upatch_name(&spec.upatches[i].source)?;
+        name_matches(&load, &expected)?;
+        build::rodata_apply(spec, i, &load, keys, overrides, true)?;
+        build::record_payload(spec, i, &load, true)?;
         let u = &mut spec.upatches[i];
         u.load_path = load;
         u.unload_path = unload.clone();
         let digest = build::digest_of(&u.payload_sha256);
-        if let Err(err) = package::unload(
+        package::unload(
             &cstring(&u.name),
             &digest,
             &cstring(&unload),
             (&keys.pkey, &keys.cert),
-        ) {
-            return err;
-        }
+        )?;
     }
     archive::write(
         "bpm config update",
@@ -574,16 +507,13 @@ fn staged(
 }
 
 /// The load artifact at `load` is a load directive named `expected`.
-fn name_matches(load: &[u8], expected: &[u8]) -> c_int {
+fn name_matches(load: &[u8], expected: &[u8]) -> Result<(), c_int> {
     let p = cstring(load);
-    let u = match upatch::Opened::open(&p) {
-        Ok(u) => u,
-        Err(err) => return err,
-    };
+    let u = upatch::Opened::open(&p)?;
     let name = &u.hdr.name;
     let n = expected.len().min(name.len());
     let same =
         name[..n] == expected[..n] && (expected.len() >= name.len() || name[expected.len()] == 0);
     let bad = upatch::is_unload(&u) || !same;
-    if bad { -EINVAL } else { 0 }
+    if bad { Err(-EINVAL) } else { Ok(()) }
 }
