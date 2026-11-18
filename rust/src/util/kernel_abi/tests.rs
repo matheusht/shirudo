@@ -2,110 +2,11 @@
 // Copyright (c) 2026 Authors of shirudo
 
 use super::*;
+use crate::btf_builder::BtfBuilder;
 use crate::text::cstr;
 
-/// A BTF built type by type, ids from 1 in the order added, as libbpf's
-/// btf__add_*() build one.
-struct BtfBuilder {
-    types: Vec<u8>,
-    strings: Vec<u8>,
-    n: u32,
-}
-
-const KIND_INT: u32 = 1;
-const KIND_PTR: u32 = 2;
-const KIND_ARRAY: u32 = 3;
-const KIND_STRUCT: u32 = 4;
-const KIND_TYPEDEF: u32 = 8;
-const KIND_FUNC: u32 = 12;
-const KIND_FUNC_PROTO: u32 = 13;
 const INT_SIGNED: u32 = 1;
 const INT_CHAR: u32 = 2;
-const FUNC_GLOBAL: u32 = 1;
-
-impl BtfBuilder {
-    fn new() -> Self {
-        BtfBuilder {
-            types: Vec::new(),
-            strings: vec![0],
-            n: 0,
-        }
-    }
-
-    fn name(&mut self, s: &str) -> u32 {
-        if s.is_empty() {
-            return 0;
-        }
-        let off = self.strings.len() as u32;
-        self.strings.extend_from_slice(s.as_bytes());
-        self.strings.push(0);
-        off
-    }
-
-    fn add(&mut self, name: &str, kind: u32, vlen: u32, size_or_type: u32, extra: &[u32]) -> u32 {
-        let name = self.name(name);
-        for v in [name, (kind << 24) | vlen, size_or_type]
-            .iter()
-            .chain(extra)
-        {
-            self.types.extend_from_slice(&v.to_ne_bytes());
-        }
-        self.n += 1;
-        self.n
-    }
-
-    fn int(&mut self, name: &str, size: u32, encoding: u32) -> u32 {
-        self.add(name, KIND_INT, 0, size, &[(encoding << 24) | (size * 8)])
-    }
-
-    fn typedef(&mut self, name: &str, ty: u32) -> u32 {
-        self.add(name, KIND_TYPEDEF, 0, ty, &[])
-    }
-
-    fn array(&mut self, index: u32, elem: u32, n: u32) -> u32 {
-        self.add("", KIND_ARRAY, 0, 0, &[elem, index, n])
-    }
-
-    fn ptr(&mut self, ty: u32) -> u32 {
-        self.add("", KIND_PTR, 0, ty, &[])
-    }
-
-    /// A struct of `size` bytes and its members: name, type and bit offset.
-    fn structure(&mut self, name: &str, size: u32, members: &[(&str, u32, u32)]) -> u32 {
-        let extra: Vec<u32> = members
-            .iter()
-            .flat_map(|&(name, ty, off)| [self.name(name), ty, off])
-            .collect();
-        self.add(name, KIND_STRUCT, members.len() as u32, size, &extra)
-    }
-
-    fn func_proto(&mut self, ret: u32) -> u32 {
-        self.add("", KIND_FUNC_PROTO, 0, ret, &[])
-    }
-
-    fn func(&mut self, name: &str, proto: u32) -> u32 {
-        self.add(name, KIND_FUNC, FUNC_GLOBAL, proto, &[])
-    }
-
-    /// The BTF as shirudo parses it.
-    fn parse(&self) -> Btf {
-        let mut raw = Vec::new();
-        raw.extend_from_slice(&0xeb9fu16.to_ne_bytes());
-        raw.extend_from_slice(&[1, 0]);
-        for v in [
-            24,
-            0,
-            self.types.len() as u32,
-            self.types.len() as u32,
-            self.strings.len() as u32,
-        ] {
-            raw.extend_from_slice(&v.to_ne_bytes());
-        }
-        raw.extend_from_slice(&self.types);
-        raw.extend_from_slice(&self.strings);
-        Btf::parse(&raw).unwrap()
-    }
-}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Fixture {
@@ -176,7 +77,7 @@ fn fixture(f: Fixture) -> Btf {
         b.structure("bpf_map", 64, &members);
     }
     if f == NoProgAux {
-        return b.parse();
+        return b.parse().unwrap();
     }
     let mut sig = u32;
     if f != SigType {
@@ -208,7 +109,7 @@ fn fixture(f: Fixture) -> Btf {
         members.push(("future_aux_field", u32, 64));
     }
     b.structure("bpf_prog_aux", 32, &members);
-    b.parse()
+    b.parse().unwrap()
 }
 
 /// validate_btf() of the fixture: Ok, or the detail of its refusal.
@@ -270,12 +171,12 @@ fn each_missing_or_mistyped_field_is_named() {
 fn lsm_btf(hooks: &LsmHooks, skip: Option<&[u8]>) -> Btf {
     let mut b = BtfBuilder::new();
     let ret = b.int("int", 4, INT_SIGNED);
-    let proto = b.func_proto(ret);
+    let proto = b.func_proto(ret, &[]);
 
     for hook in hooks.names().filter(|h| Some(*h) != skip) {
         b.func(&format!("bpf_lsm_{}", String::from_utf8_lossy(hook)), proto);
     }
-    b.parse()
+    b.parse().unwrap()
 }
 
 fn hooks_of(names: &[&str]) -> Box<LsmHooks> {

@@ -966,9 +966,9 @@ testing/helper/test-xfs-attrmulti: $(HELPER_MAIN_DIR)/test-xfs-attrmulti.o $(RUS
 	@printf '  LD      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(RUST_TEST_LDLIBS)
 
-testing/helper/test-perf-attach: testing/helper/test-perf-attach.c util/string.o
-	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) -I$(BPF_UAPI_INCLUDE) -o $@ $^
+testing/helper/test-perf-attach: $(HELPER_MAIN_DIR)/test-perf-attach.o $(RUST_HELPER_LIB)
+	@printf '  LD      $@\n'
+	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(RUST_TEST_LDLIBS)
 
 testing/helper/test-upatch-link-lockdown: $(HELPER_MAIN_DIR)/test-upatch-link-lockdown.o $(RUST_HELPER_LIB)
 	@printf '  LD      $@\n'
@@ -980,10 +980,9 @@ testing/helper/test-xdp: $(HELPER_MAIN_DIR)/test-xdp.o $(RUST_HELPER_LIB)
 
 # Needs the vendored uapi bpf.h (excl_prog_hash / fd_array_cnt / keyring_id
 # are newer than a stock system header) and libcrypto for SHA-256.
-testing/helper/test-signed-load: testing/helper/test-signed-load.c
-	@printf '  CC      $@\n'
-	$(Q)$(CC) $(CFLAGS) -I$(BPF_UAPI_INCLUDE) \
-	    -o $@ $^ -lcrypto
+testing/helper/test-signed-load: $(HELPER_MAIN_DIR)/test-signed-load.o $(RUST_HELPER_LIB)
+	@printf '  LD      $@\n'
+	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(RUST_TEST_LDLIBS)
 
 testing/helper/test-otel-map: testing/helper/test-otel-map.c \
                          util/string.o util/log.o \
@@ -1008,11 +1007,9 @@ testing/helper/test-upatch-serializer-pages: $(HELPER_MAIN_DIR)/test-upatch-seri
 	@printf '  LD      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
-testing/helper/test-upatch-rodata: testing/helper/test-upatch-rodata.c \
-                                 \
-                               util/string.o util/malloc.o  \
-                               util/log.o  $(RUST_LIB)
-	@printf '  CC      $@\n'
+testing/helper/test-upatch-rodata: $(HELPER_MAIN_DIR)/test-upatch-rodata.o \
+                                $(RUST_HELPER_LIB)
+	@printf '  LD      $@\n'
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(STATIC_LIBS) $(DYNAMIC_LIBS) $(RUST_TEST_LDLIBS)
 
 testing/helper/test-upatch-decode: $(HELPER_MAIN_DIR)/test-upatch-decode.o \

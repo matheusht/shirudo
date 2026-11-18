@@ -518,7 +518,13 @@ fn append(buf: &mut [u8], off: &mut usize, parts: &[&[u8]]) -> c_int {
 }
 
 /// The name of type `id`, its modifiers dropped, after `*off` in `buf`.
-fn append_type_name(btf: &Btf, id: u32, buf: &mut [u8], off: &mut usize, depth: u32) -> c_int {
+pub(crate) fn append_type_name(
+    btf: &Btf,
+    id: u32,
+    buf: &mut [u8],
+    off: &mut usize,
+    depth: u32,
+) -> c_int {
     if depth >= JSON_MAX_DEPTH || *off >= buf.len() {
         return -E2BIG;
     }
@@ -890,9 +896,9 @@ fn decl_printable(btf: &Btf, mut id: u32) -> bool {
 
 /// What the dumper visits of a value of a type: values printed, types
 /// deep.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 #[repr(C)]
-struct DumpCost {
+pub(crate) struct DumpCost {
     values: u32,
     height: u32,
 }
@@ -909,7 +915,7 @@ struct DumpCost {
 /// fine, so a type reached again brings its depth and values along.
 ///
 /// `cost` has a slot for each of the BTF's types.
-fn dump_cost(btf: &Btf, id: u32, depth: u32, cost: &mut [DumpCost]) -> c_int {
+pub(crate) fn dump_cost(btf: &Btf, id: u32, depth: u32, cost: &mut [DumpCost]) -> c_int {
     let mut c = DumpCost {
         values: 1,
         height: 1,

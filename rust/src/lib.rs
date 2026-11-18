@@ -7,6 +7,8 @@
 extern crate alloc;
 
 mod bpf;
+#[cfg(any(test, feature = "test-helpers"))]
+mod btf_builder;
 mod builtin;
 mod errno;
 mod ffi;
