@@ -8,6 +8,8 @@
 //! strtok_r() left it.
 
 mod capi;
+#[cfg(shirudo_fuzz)]
+mod fuzz;
 mod records;
 
 pub(crate) use capi::{

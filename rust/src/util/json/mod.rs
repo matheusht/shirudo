@@ -44,5 +44,7 @@ fn utf8_width(s: &[u8]) -> usize {
     }
 }
 
+#[cfg(shirudo_fuzz)]
+mod fuzz;
 #[cfg(test)]
 mod tests;

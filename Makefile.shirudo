@@ -1227,10 +1227,6 @@ FUZZ_TARGETS := $(patsubst testing/fuzz/%.c,$(FUZZ_OUT)/%, \
 $(FUZZ_OUT)/fuzz-tpm-command: testing/fuzz/fuzz-tpm-command.c $(FUZZ_BASE) \
                                include/shirudo/tpm_command.h
 
-$(FUZZ_OUT)/fuzz-json: testing/fuzz/fuzz-json.c $(FUZZ_BASE)
-$(FUZZ_OUT)/fuzz-tree: testing/fuzz/fuzz-tree.c $(FUZZ_BASE) \
-                          \
-                         $(FUZZ_OCI)
 $(FUZZ_OUT)/fuzz-rodata: testing/fuzz/fuzz-rodata.c $(FUZZ_BASE) \
                             \
                            $(FUZZ_SEAL) $(LIBBPF_A)
@@ -1244,12 +1240,6 @@ $(FUZZ_OUT)/fuzz-attest: testing/fuzz/fuzz-attest.c $(FUZZ_BASE) \
                           $(LIBBPF_A)
 $(FUZZ_OUT)/fuzz-attest: FUZZ_CFLAGS += $(TSS2_CFLAGS) $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-attest: FUZZ_LIBS += $(TSS2_LIBS) $(LIBBPF_A) $(LIBELF_LIBS) $(ZLIB_LIBS)
-$(FUZZ_OUT)/fuzz-eventlog: testing/fuzz/fuzz-eventlog.c $(FUZZ_BASE) \
-                             \
-                            $(FUZZ_SEAL)  \
-                             $(LIBBPF_A)
-$(FUZZ_OUT)/fuzz-eventlog: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
-$(FUZZ_OUT)/fuzz-eventlog: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS) $(ZLIB_LIBS)
 $(FUZZ_OUT)/fuzz-serializer: testing/fuzz/fuzz-serializer.c $(FUZZ_BASE) \
                                 \
                                $(FUZZ_SEAL)  util/paths.c \
@@ -1257,16 +1247,12 @@ $(FUZZ_OUT)/fuzz-serializer: testing/fuzz/fuzz-serializer.c $(FUZZ_BASE) \
 $(FUZZ_OUT)/fuzz-serializer: FUZZ_CFLAGS += $(LIBELF_CFLAGS)
 $(FUZZ_OUT)/fuzz-serializer: FUZZ_LIBS += $(LIBBPF_A) $(LIBELF_LIBS) \
 	-Wl,--wrap=syscall
-$(FUZZ_OUT)/fuzz-cms: testing/fuzz/fuzz-cms.c $(FUZZ_BASE) \
-                        $(FUZZ_SEAL)
 $(FUZZ_OUT)/fuzz-decoder: testing/fuzz/fuzz-decoder.c $(FUZZ_BASE) \
                               \
                            $(FUZZ_SEAL)
 $(FUZZ_OUT)/fuzz-decoder: FUZZ_CFLAGS += $(LUAJIT_CFLAGS) -DHAVE_LUAJIT \
 	-DFUZZ_SOURCE_TREE='"$(CURDIR)"'
 $(FUZZ_OUT)/fuzz-decoder: FUZZ_LIBS += $(LUAJIT_LIBS)
-$(FUZZ_OUT)/fuzz-otel: testing/fuzz/fuzz-otel.c $(FUZZ_BASE) \
-                        $(VERSION_OBJ)
 $(FUZZ_OUT)/fuzz-config-update: testing/fuzz/fuzz-config-update.c \
                                  $(FUZZ_BASE) \
                                   $(FUZZ_SEAL)
@@ -1355,8 +1341,8 @@ $(FUZZ_TARGETS): $(FUZZ_HEADERS) $(FUZZ_STAMP) $(RUST_FUZZ_LIB)
 # The targets written in Rust: functions of the fuzz build of the library,
 # each run by an entry object made from testing/fuzz/target.rs.in.
 FUZZ_RUST := kernel beefile elf tree-state image prog-metadata upatch \
-	     bpm-tar bpm-index bpm-package oci-http oci-manifest \
-	     oci-ref registry-auth config tpm-wire
+	     bpm-tar bpm-index bpm-package oci-manifest oci-http \
+	     oci-ref registry-auth config tpm-wire json tree cms eventlog otel
 FUZZ_MAIN_DIR := build/fuzz-main
 FUZZ_RUST_TARGETS := $(addprefix $(FUZZ_OUT)/fuzz-,$(FUZZ_RUST))
 

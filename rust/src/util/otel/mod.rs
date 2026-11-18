@@ -339,6 +339,8 @@ pub(crate) fn retry_after(value: &[u8], now: i64) -> Result<u64, c_int> {
     http::retry_after(value, now)
 }
 
+#[cfg(shirudo_fuzz)]
+mod fuzz;
 mod capi {
     use core::ffi::{CStr, c_char, c_int};
 

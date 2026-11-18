@@ -1268,6 +1268,8 @@ impl Drop for Publication {
     }
 }
 
+#[cfg(shirudo_fuzz)]
+mod fuzz;
 #[cfg(test)]
 mod tests;
 

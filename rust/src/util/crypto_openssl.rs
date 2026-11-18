@@ -1228,6 +1228,8 @@ pub(crate) unsafe fn openssl_complain(where_: *const c_char) {
     complain_code(where_, unsafe { ffi::ERR_get_error() });
 }
 
+#[cfg(shirudo_fuzz)]
+mod fuzz;
 #[cfg(test)]
 mod tests;
 
