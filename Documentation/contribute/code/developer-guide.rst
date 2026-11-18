@@ -764,7 +764,7 @@ can rewrite what it finds does so with ``-D patch``:
    * - ``option_by_hand``
      - A value compared with an option name, a literal that starts with
        ``-`` and is longer than one character, outside
-       :src:`util/options.c`, which parses every command's options from
+       :src:`rust/src/util/options.rs`, which parses every command's options from
        its table, and the help and image gate code that looks for
        ``--help`` and the options an image refuses.
    * - ``test_after_use``
