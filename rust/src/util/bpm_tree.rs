@@ -385,7 +385,7 @@ unsafe fn selector_copy(dst: *mut TreeSelector, src: *const TreeSelector) -> c_i
     0
 }
 
-fn publication_free(p: &mut TreePublication) {
+pub(crate) fn publication_free(p: &mut TreePublication) {
     let held = count(p.operations_capacity, usize::MAX);
 
     if !p.operations.is_null() {

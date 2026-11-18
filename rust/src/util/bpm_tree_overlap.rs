@@ -198,48 +198,5 @@ pub(crate) unsafe fn add_live(p: &TreePublication, index: usize) -> bool {
     !unsafe { add_withdrawn(&ops[index], &ops[index + 1..]) }
 }
 
-mod capi {
-    use core::ffi::c_int;
-
-    use crate::util::bpm_tree::{TreeOperation, TreePublication, TreeSelector};
-
-    /// # Safety
-    ///
-    /// `a` and `b` are selectors whose pairs are as their counts say.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn tree_selectors_disjoint(
-        a: *const TreeSelector,
-        b: *const TreeSelector,
-    ) -> bool {
-        // SAFETY: the caller's selectors.
-        unsafe { super::selectors_disjoint(&*a, &*b) }
-    }
-
-    /// # Safety
-    ///
-    /// `p` is a publication whose operations are as its count says, and
-    /// `index` one of them.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn tree_add_live(p: *const TreePublication, index: c_int) -> bool {
-        // SAFETY: the caller's publication and index.
-        unsafe { super::add_live(&*p, index as usize) }
-    }
-
-    /// # Safety
-    ///
-    /// `add` is an operation and `later` holds `n` operations.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn tree_add_withdrawn(
-        add: *const TreeOperation,
-        later: *const TreeOperation,
-        n: c_int,
-    ) -> bool {
-        // SAFETY: the caller's operations.
-        unsafe {
-            super::add_withdrawn(
-                &*add,
-                crate::ffi::slice(later, usize::try_from(n).unwrap_or(0)),
-            )
-        }
-    }
-}
+#[cfg(test)]
+mod tests;
