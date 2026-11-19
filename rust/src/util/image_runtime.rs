@@ -449,7 +449,7 @@ fn load_runtime_config(s: &mut State, trusted_boot: bool) -> c_int {
     s.bootstrap.n_certificates = 0;
     let mut ret = image_bootstrap::read_fd(conf.as_raw_fd(), &mut s.bootstrap, false);
     if ret == 0 {
-        ret = config::load_fd(&mut s.bootstrap_config, conf.as_raw_fd(), RUNTIME_CONF_PATH);
+        ret = config::load_fd(&mut s.bootstrap_config, conf.as_fd(), RUNTIME_CONF_PATH);
     }
     drop(conf);
     if ret != 0 {

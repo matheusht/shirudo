@@ -10,12 +10,11 @@ use core::mem::MaybeUninit;
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::mem::ManuallyDrop;
-use std::os::fd::{BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, IntoRawFd};
 use std::os::unix::ffi::OsStrExt;
 
 use crate::errno::{EINVAL, EIO, ENOENT, EPERM};
-use crate::sys::libc::{F_DUPFD_CLOEXEC, close, env, errno, explicit_bzero, fcntl, scrub};
+use crate::sys::libc::{close, env, errno, explicit_bzero, scrub};
 use crate::text::{dns_name_valid, parse_u64, strscpy, trim_blanks};
 use crate::util::hex::hex_decode_max;
 use crate::util::io::check_trusted;
@@ -340,22 +339,15 @@ fn parse_line(cfg: &mut Config, line: &[u8]) {
 /// a line longer than MAX is skipped, one with a NUL ends the read.
 /// What the file holds, and the copies made of it, go back to the
 /// allocator, which scrubs them.
-fn parse(cfg: &mut Config, f: File, path: &CStr) -> c_int {
+fn parse(cfg: &mut Config, mut f: File, path: &CStr) -> c_int {
     const MAX: usize = MAP_EXPORT_PATH_MAX + 127;
-    let fd = f.into_raw_fd();
     let mut ret = 0;
 
-    // SAFETY: the file's fd, open until closed below.
-    let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
-    if check_trusted(borrowed, path, false) != 0 {
-        // SAFETY: the fd, closed once.
-        unsafe { close(fd) };
+    if check_trusted(f.as_fd(), path, false) != 0 {
         return -EPERM;
     }
-    // SAFETY: the fd, owned until it is closed below.
-    let mut file = ManuallyDrop::new(unsafe { File::from_raw_fd(fd) });
     let mut text = Vec::new();
-    let read = file.read_to_end(&mut text);
+    let read = f.read_to_end(&mut text);
     // What a failed read gave, up to its last whole line, as getline()
     // gave it before the call that failed.
     let whole = match &read {
@@ -383,13 +375,13 @@ fn parse(cfg: &mut Config, f: File, path: &CStr) -> c_int {
         unreadable(path, ret);
     }
     // The TPM owner's authorization is for no other user's eyes.
-    if cfg.tpm_owner_auth_len != 0 && check_trusted(borrowed, path, true) != 0 {
+    if cfg.tpm_owner_auth_len != 0 && check_trusted(f.as_fd(), path, true) != 0 {
         scrub(&mut cfg.tpm_owner_auth);
         cfg.tpm_owner_auth_len = 0;
         ret = -EPERM;
     }
-    // SAFETY: the fd, closed once; the File is not dropped.
-    if unsafe { close(fd) } != 0 && ret == 0 {
+    // SAFETY: the file's fd, closed once; the File gave it up.
+    if unsafe { close(f.into_raw_fd()) } != 0 && ret == 0 {
         ret = -errno();
     }
     ret
@@ -467,18 +459,12 @@ pub(crate) fn load(cfg: &mut Config) -> c_int {
 
 /// The configuration in the file open on `fd`, read from its start
 /// through a copy of the fd; the caller keeps its own.
-pub(crate) fn load_fd(cfg: &mut Config, fd: c_int, label: &CStr) -> c_int {
-    if fd < 0 {
-        return -EINVAL;
-    }
+pub(crate) fn load_fd(cfg: &mut Config, fd: BorrowedFd<'_>, label: &CStr) -> c_int {
     *cfg = Config::defaults();
-    // SAFETY: the caller's fd, and a minimum.
-    let copy = unsafe { fcntl(fd, F_DUPFD_CLOEXEC, 3) };
-    if copy < 0 {
-        return -errno();
-    }
-    // SAFETY: the copy fcntl() gave, owned from here.
-    let mut f = File::from(unsafe { OwnedFd::from_raw_fd(copy) });
+    let mut f = match fd.try_clone_to_owned() {
+        Ok(copy) => File::from(copy),
+        Err(e) => return -e.raw_os_error().unwrap_or(EIO),
+    };
     if let Err(e) = f.seek(SeekFrom::Start(0)) {
         return -e.raw_os_error().unwrap_or(EIO);
     }

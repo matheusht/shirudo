@@ -21,7 +21,7 @@ use crate::sys::libc::{
 use crate::text::parse_u64;
 use crate::util::config::{Config, Scrubbed, load_fd};
 use crate::util::io::open_beneath;
-use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd};
+use std::os::fd::{AsFd, IntoRawFd, OwnedFd};
 
 /// `enum image_path`: the entries of the image, by their paths under its
 /// root.
@@ -114,7 +114,7 @@ pub(crate) fn get(out: &mut Config) -> c_int {
 /// The image's shirudo.conf into `cfg`, read through its root.
 fn load_root(cfg: &mut Config, root_fd: c_int) -> c_int {
     match open_beneath(root_fd, SHIRUDO_CONF, O_RDONLY) {
-        Ok(fd) => load_fd(cfg, fd.as_raw_fd(), c"config image shirudo.conf"),
+        Ok(fd) => load_fd(cfg, fd.as_fd(), c"config image shirudo.conf"),
         Err(err) => err,
     }
 }
