@@ -30,7 +30,7 @@ use crate::util::config_update::{
     BootIdentity, Checkpoint, ConfigUpdate, ConfigUpdateOps, ConfigUpdateTarget,
 };
 use crate::util::hex::encode;
-use crate::util::tpm::{Tpm, tpm_boot_identity, tpm_close, tpm_open, tpm_pcr_extend, tpm_pcr_read};
+use crate::util::tpm::Tpm;
 use libc::ECANCELED;
 
 helper_main!(shirudo_helper_test_config_update, run);
@@ -68,7 +68,7 @@ const _: () = assert!(size_of::<Simulated>() == 88);
 /// the configs `/verified/config-<id>` whose root is 32 bytes of `<id>`.
 struct Context<'a> {
     sim: Simulated,
-    tpm: *mut Tpm,
+    tpm: Option<Tpm>,
     directory: &'a CStr,
     staging: bool,
 }
@@ -149,14 +149,9 @@ impl Context<'_> {
         if env("SHIRUDO_TEST_CONFIG_READ_FAIL").is_some() {
             return Err(-EIO);
         }
-        if self.tpm.is_null() {
-            return Ok(self.sim.value);
-        }
-        let mut value = [0u8; 32];
-        // SAFETY: the connection and 32 bytes of room.
-        match unsafe { tpm_pcr_read(self.tpm, pcr, value.as_mut_ptr()) } {
-            0 => Ok(value),
-            err => Err(err),
+        match &self.tpm {
+            Some(tpm) => tpm.pcr_read(pcr),
+            None => Ok(self.sim.value),
         }
     }
 }
@@ -164,18 +159,12 @@ impl Context<'_> {
 impl ConfigUpdateOps for RefCell<Context<'_>> {
     fn boot_identity(&self) -> Result<BootIdentity, c_int> {
         let c = self.borrow();
-        if c.tpm.is_null() {
-            return Ok(BootIdentity {
-                reset: c.sim.reset_count,
-                restart: c.sim.restart_count,
-            });
-        }
-        let (mut reset, mut restart) = (0u32, 0u32);
-        // SAFETY: the connection and rooms for its counts.
-        match unsafe { tpm_boot_identity(c.tpm, &mut reset, &mut restart) } {
-            0 => Ok(BootIdentity { reset, restart }),
-            err => Err(err),
-        }
+        let (reset, restart) = match &c.tpm {
+            Some(tpm) => tpm.boot_identity()?,
+            None => (c.sim.reset_count, c.sim.restart_count),
+        };
+
+        Ok(BootIdentity { reset, restart })
     }
 
     fn pcr_read(&self, pcr: u32) -> Result<[u8; 32], c_int> {
@@ -198,14 +187,14 @@ impl ConfigUpdateOps for RefCell<Context<'_>> {
         } else {
             event
         };
-        let ret = if c.tpm.is_null() {
-            fold(&mut c.sim.value, event)
-        } else {
-            // SAFETY: the connection and the event's 32 bytes.
-            unsafe { tpm_pcr_extend(c.tpm, pcr, event.as_ptr()) }
-        };
-        if ret != 0 {
-            return Err(ret);
+        match &c.tpm {
+            Some(tpm) => tpm.pcr_extend(pcr, event)?,
+            None => {
+                let ret = fold(&mut c.sim.value, event);
+                if ret != 0 {
+                    return Err(ret);
+                }
+            }
         }
         c.save()?;
         if mode == Some(b"ambiguous") {
@@ -439,7 +428,7 @@ fn run(args: &[&CStr]) -> c_int {
 
     let c = RefCell::new(Context {
         sim: Simulated::default(),
-        tpm: core::ptr::null_mut(),
+        tpm: None,
         directory: args[1],
         staging: false,
     });
@@ -448,10 +437,9 @@ fn run(args: &[&CStr]) -> c_int {
             break 'out err;
         }
         if env("SHIRUDO_TEST_CONFIG_TPM").is_some() {
-            // SAFETY: room for the connection, closed at the end.
-            let ret = unsafe { tpm_open(&mut c.borrow_mut().tpm) };
-            if ret != 0 {
-                break 'out ret;
+            match Tpm::open() {
+                Ok(tpm) => c.borrow_mut().tpm = Some(tpm),
+                Err(err) => break 'out err,
             }
         }
         let lock_wait_ms =
@@ -464,11 +452,7 @@ fn run(args: &[&CStr]) -> c_int {
         inspect(&c.borrow(), &journal);
         ret
     };
-    let tpm = c.into_inner().tpm;
-    if !tpm.is_null() {
-        // SAFETY: the connection tpm_open() gave, closed once.
-        unsafe { tpm_close(tpm) };
-    }
+    drop(c);
     out(&format!("rc={ret}\n"));
     c_int::from(ret != 0)
 }

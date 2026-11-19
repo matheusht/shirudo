@@ -6,25 +6,20 @@
 //! and ak fields in base64.
 
 use core::ffi::c_int;
-use core::ptr;
 
-use crate::errno::E2BIG;
 use crate::util::crypto_openssl::{base64, sha256};
-use crate::util::tpm::{
-    Tpm, TpmAttestation, TpmKey, tpm_ak_create, tpm_close, tpm_key_flush, tpm_open, tpm_quote,
-};
+use crate::util::tpm::{Attestation, KeyPublic, Tpm};
 
 /// attest=<TPMS_ATTEST>;sig=<TPMT_SIGNATURE>;ak=<TPMT_PUBLIC> in padded
 /// base64.
-pub(crate) fn format(att: &TpmAttestation, ak: &TpmKey) -> Result<Vec<u8>, c_int> {
-    let part = |b: &[u8], len: usize| base64(b.get(..len).ok_or(-E2BIG)?);
+pub(crate) fn format(att: &Attestation, ak: &KeyPublic) -> Result<Vec<u8>, c_int> {
     Ok([
         &b"attest="[..],
-        &part(&att.attest, att.attest_len)?,
+        &base64(&att.attest)?,
         b";sig=",
-        &part(&att.signature, att.signature_len)?,
+        &base64(&att.signature)?,
         b";ak=",
-        &part(&ak.public, ak.public_len)?,
+        &base64(&ak.area)?,
     ]
     .concat())
 }
@@ -34,32 +29,11 @@ pub(crate) fn format(att: &TpmAttestation, ak: &TpmKey) -> Result<Vec<u8>, c_int
 /// of attest.
 pub(crate) fn quote(body: &[u8]) -> Result<Vec<u8>, c_int> {
     let digest = sha256(body)?;
-    let mut tpm: *mut Tpm = ptr::null_mut();
-    let mut ak = TpmKey::zeroed();
-    let mut att = TpmAttestation::zeroed();
+    let tpm = Tpm::open()?;
+    let ak = tpm.ak_create()?;
+    let att = tpm.quote(&ak, &digest, 0)?;
 
-    // SAFETY: room for the connection.
-    let ret = unsafe { tpm_open(&mut tpm) };
-    if ret != 0 {
-        return Err(ret);
-    }
-    // SAFETY: the connection tpm_open() gave, and room for the key.
-    let mut ret = unsafe { tpm_ak_create(tpm, &mut ak) };
-    if ret == 0 {
-        // SAFETY: the connection, the key made on it, the digest, and
-        // room for the quote.
-        ret = unsafe { tpm_quote(tpm, &ak, digest.as_ptr(), digest.len(), 0, &mut att) };
-    }
-    let quoted = if ret == 0 {
-        format(&att, &ak)
-    } else {
-        Err(ret)
-    };
-    // SAFETY: the key, made on the connection or empty, flushed once.
-    unsafe { tpm_key_flush(tpm, &mut ak) };
-    // SAFETY: the connection tpm_open() gave, closed once.
-    unsafe { tpm_close(tpm) };
-    quoted
+    format(&att, ak.public())
 }
 
 #[cfg(test)]

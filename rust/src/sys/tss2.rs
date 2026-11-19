@@ -126,6 +126,11 @@ impl Zeroed for Tpm2bName {}
 impl Zeroed for Tpm2bMaxNvBuffer {}
 impl Zeroed for Tpm2bPublicKeyRsa {}
 impl Zeroed for Tpm2bEccParameter {}
+impl Zeroed for DigestList {}
+impl Zeroed for DigestValues {}
+impl Zeroed for Signature {}
+impl Zeroed for Tpm2bIdObject {}
+impl Zeroed for Tpm2bEncryptedSecret {}
 
 /// A symmetric definition: `algorithm` with `key_bits` in `mode`, or
 /// none with ALG_NULL.

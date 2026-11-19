@@ -7,7 +7,7 @@
 # tests) links, at a commit newer than any distribution package. Ubuntu
 # noble's 0.9.3 null-derefs inside NvReadRamIndexAttributes() when an
 # orderly NV index's RAM entry goes missing across a save/restore cycle,
-# which this test's tpm_open()/tpm_close()-per-cycle usage can trigger
+# which this test's Tpm::open()-and-drop-per-cycle usage can trigger
 # under load; fixed upstream by
 # a0f832aaa50d52bf9a4f3cfd30e76573c1561d5b ("tpm2: Check orderly RAM
 # entries against NV indices on state load"), not yet in a tagged

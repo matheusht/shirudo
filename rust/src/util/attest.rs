@@ -6,7 +6,6 @@
 //! operator runs against the evidence.
 
 use core::ffi::{CStr, c_char, c_int};
-use core::ptr;
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::Read;
@@ -36,10 +35,8 @@ use crate::util::hex::{decode, decode_max, encode};
 use crate::util::io;
 use crate::util::json::{JsonEmit, JsonField, MAX_BYTES as JSON_MAX_BYTES, parse_schema};
 use crate::util::tpm::{
-    ATTEST_MAX, EK_ATTRS, PUBLIC_MAX, REGISTER_ATTRS, SIGNATURE_MAX, Tpm, TpmAttestation, TpmKey,
-    TpmNvInfo, tpm_activate_credential, tpm_ak_create, tpm_close, tpm_ek_certificate,
-    tpm_ek_create, tpm_key_flush, tpm_nv_certify, tpm_nv_info, tpm_nv_read, tpm_open, tpm_pcr_read,
-    tpm_quote,
+    ATTEST_MAX, Attestation, EK_ATTRS, Key, KeyPublic, NvInfo, PUBLIC_MAX, REGISTER_ATTRS,
+    SIGNATURE_MAX, Tpm,
 };
 use crate::util::tpm_wire::{
     ALG_ECC, ALG_RSA, CREDENTIAL_LEN, EK_POLICY, ID_OBJECT_LEN, NAME_LEN, NV_RSA_BYTES,
@@ -294,11 +291,6 @@ fn emit_hex(e: &mut JsonEmit, key: &[u8], data: &[u8]) {
     e.kv_string(key, &encode(data));
 }
 
-/// The first `len` bytes of `buf`, as many as it holds.
-fn bytes_of(buf: &[u8], len: usize) -> &[u8] {
-    buf.get(..len).unwrap_or(buf)
-}
-
 /// The digest a quote over `mask` carries: SHA-256 of the PCR values
 /// it selects, in index order. None where the hash fails, which the
 /// target and the operator alike take as a digest that does not match.
@@ -313,59 +305,19 @@ fn pcr_values_digest(mask: u32, values: &[[u8; 32]; 24]) -> Option<[u8; 32]> {
 
 /// What the quote `quote` holds, as far as it parses: none where it
 /// does not.
-fn quoted(quote: &TpmAttestation) -> Option<TpmAttest> {
+fn quoted(quote: &Attestation) -> Option<TpmAttest> {
     let mut a = TpmAttest::zeroed();
-    let bytes = quote.attest.get(..quote.attest_len)?;
 
-    (attest_parse(bytes, &mut a) == 0).then_some(a)
+    (attest_parse(&quote.attest, &mut a) == 0).then_some(a)
 }
 
 /// Whether the quote covers the PCR values read beside it, which alone
 /// makes it acceptable.
-fn quote_covers(quote: &TpmAttestation, mask: u32, values: &[[u8; 32]; 24]) -> bool {
+fn quote_covers(quote: &Attestation, mask: u32, values: &[[u8; 32]; 24]) -> bool {
     let Some(a) = quoted(quote).filter(|a| a.ty == ST_ATTEST_QUOTE && a.pcr_mask == mask) else {
         return false;
     };
     pcr_values_digest(mask, values).is_some_and(|d| !memneq_explicit(&d, &a.pcr_digest))
-}
-
-/// A connection to the TPM and the keys attest makes on it, which go
-/// with it: each key flushed, the endorsement key first, then the
-/// connection closed.
-struct Session {
-    tpm: *mut Tpm,
-    ak: TpmKey,
-    ek: TpmKey,
-}
-
-impl Session {
-    /// A connection, or -ENXIO where no TPM answers.
-    fn open() -> Result<Self, c_int> {
-        let mut tpm = ptr::null_mut();
-
-        // SAFETY: room for the connection.
-        if unsafe { tpm_open(&mut tpm) } != 0 {
-            return Err(-ENXIO);
-        }
-        Ok(Session {
-            tpm,
-            ak: TpmKey::zeroed(),
-            ek: TpmKey::zeroed(),
-        })
-    }
-}
-
-impl Drop for Session {
-    fn drop(&mut self) {
-        // SAFETY: the endorsement key, made on the connection or empty,
-        // flushed once.
-        unsafe { tpm_key_flush(self.tpm, &mut self.ek) };
-        // SAFETY: the attestation key likewise.
-        unsafe { tpm_key_flush(self.tpm, &mut self.ak) };
-        // SAFETY: the connection tpm_open() gave, closed once, after its
-        // keys.
-        unsafe { tpm_close(self.tpm) };
-    }
 }
 
 /// What the TPM gave the evidence: the PCRs quoted and their values, the
@@ -375,12 +327,11 @@ struct Measured {
     pcr_mask: u32,
     values: [[u8; 32]; 24],
     register: [u8; 32],
-    nv: TpmNvInfo,
-    quote: TpmAttestation,
-    certify: TpmAttestation,
-    /// The attestation and endorsement keys, on the heap so that they
-    /// are scrubbed when they go.
-    keys: Box<[TpmKey; 2]>,
+    nv: NvInfo,
+    quote: Attestation,
+    certify: Attestation,
+    ak: KeyPublic,
+    ek: KeyPublic,
     ek_rsa: bool,
     ek_certificate: Option<Vec<u8>>,
     /// On the heap, so that it is scrubbed when it goes.
@@ -390,39 +341,20 @@ struct Measured {
 /// The PCRs of `mask` read and quoted with the nonce, again while they
 /// change under the quote: -EAGAIN when they kept changing.
 fn quote_pcrs(
-    session: &Session,
+    tpm: &Tpm,
+    ak: &Key<'_>,
     nonce: &[u8],
     mask: u32,
     values: &mut [[u8; 32]; 24],
-) -> Result<TpmAttestation, c_int> {
-    let mut quote = TpmAttestation::zeroed();
-
+) -> Result<Attestation, c_int> {
     for _ in 0..QUOTE_ATTEMPTS {
         for (i, value) in (0u32..).zip(values.iter_mut()) {
             if mask & (1 << i) == 0 {
                 continue;
             }
-            // SAFETY: the session's connection, and room for the value.
-            let ret = unsafe { tpm_pcr_read(session.tpm, i, value.as_mut_ptr()) };
-            if ret != 0 {
-                return Err(ret);
-            }
+            *value = tpm.pcr_read(i)?;
         }
-        // SAFETY: the session's connection and key, the nonce, and room
-        // for the quote.
-        let ret = unsafe {
-            tpm_quote(
-                session.tpm,
-                &session.ak,
-                nonce.as_ptr(),
-                nonce.len(),
-                mask,
-                &mut quote,
-            )
-        };
-        if ret != 0 {
-            return Err(ret);
-        }
+        let quote = tpm.quote(ak, nonce, mask)?;
         if quote_covers(&quote, mask, values) {
             return Ok(quote);
         }
@@ -433,62 +365,31 @@ fn quote_pcrs(
 
 /// The TPM's EK certificate in base64, and whether its key is RSA; none
 /// where it has no certificate or it does not encode.
-fn ek_certificate_base64(session: &Session) -> (Option<Vec<u8>>, bool) {
-    let mut cert = vec![0u8; EK_CERT_MAX];
-    let mut len = 0usize;
-    let mut rsa = false;
-
-    // SAFETY: the session's connection, room for a certificate, and for
-    // its length and kind.
-    let ret = unsafe {
-        tpm_ek_certificate(
-            session.tpm,
-            cert.as_mut_ptr(),
-            cert.len(),
-            &mut len,
-            &mut rsa,
-        )
-    };
-    if ret != 0 {
-        return (None, rsa);
+fn ek_certificate_base64(tpm: &Tpm) -> (Option<Vec<u8>>, bool) {
+    match tpm.ek_certificate(EK_CERT_MAX) {
+        Ok((der, rsa)) => (base64(&der).ok(), rsa),
+        Err(_) => (None, false),
     }
-    (cert.get(..len).and_then(|der| base64(der).ok()), rsa)
 }
 
-/// The credential the challenge carries, activated with the session's
-/// keys: -EKEYREJECTED for a challenge of another attestation key, or the
+/// The credential the challenge carries, activated with the keys:
+/// -EKEYREJECTED for a challenge of another attestation key, or the
 /// TPM's refusal.
-fn activate(session: &Session, c: &AttestChallenge) -> Result<Vec<u8>, c_int> {
-    let ak = &session.ak;
-    let mut credential = vec![0u8; CREDENTIAL_LEN];
-    let mut len = 0usize;
-
-    if ak.name_len != NAME_LEN || c.ak_name != ak.name {
+fn activate(tpm: &Tpm, ak: &Key<'_>, ek: &Key<'_>, c: &AttestChallenge) -> Result<Vec<u8>, c_int> {
+    if c.ak_name != ak.public().name {
         crate::log::err(b"attest: the challenge was made for another attestation key");
         return Err(-EKEYREJECTED);
     }
-    // SAFETY: the session's connection and keys, the challenge's blob and
-    // secret, and room for the credential and its length.
-    let ret = unsafe {
-        tpm_activate_credential(
-            session.tpm,
-            ak,
-            &session.ek,
-            c.blob.as_ptr(),
-            c.blob.len(),
-            c.secret.as_ptr(),
-            c.secret.len(),
-            credential.as_mut_ptr(),
-            credential.len(),
-            &mut len,
-        )
-    };
-    if ret != 0 {
-        crate::log::err(b"attest: the TPM refused the challenge: not made for this attestation key under this endorsement key");
-        return Err(ret);
-    }
-    credential.truncate(len);
-    Ok(credential)
+    tpm.activate_credential(ak, ek, &c.blob, &c.secret)
+        .and_then(|credential| {
+            if credential.len() > CREDENTIAL_LEN {
+                return Err(-E2BIG);
+            }
+            Ok(credential)
+        })
+        .inspect_err(|_| {
+            crate::log::err(b"attest: the TPM refused the challenge: not made for this attestation key under this endorsement key");
+        })
 }
 
 /// What the TPM gives the evidence, the TPM let go of before the file
@@ -500,34 +401,21 @@ fn measure(
     mut pcr_mask: u32,
     challenge: Option<&AttestChallenge>,
 ) -> Result<Measured, c_int> {
-    let mut nv = TpmNvInfo::zeroed();
     let mut values = [[0u8; 32]; 24];
-    let mut register = [0u8; 32];
-    let mut certify = TpmAttestation::zeroed();
 
     if config.present {
         pcr_mask |= 1 << config.pcr;
     }
-    let mut session = Session::open()?;
-    // SAFETY: the session's connection, and room for the index's state.
-    let ret = unsafe { tpm_nv_info(session.tpm, NV_INDEX, &mut nv) };
-    if ret != 0 {
-        return Err(ret);
-    }
+    // The keys go before the connection, the endorsement key first, on
+    // every path out: they are dropped in the reverse of their making.
+    let tpm = Tpm::open().map_err(|_| -ENXIO)?;
+    let nv = tpm.nv_info(NV_INDEX)?;
     if !nv.defined || !nv.written {
         return Err(-ENODEV);
     }
-    // SAFETY: the session's connection, and room for the value.
-    let ret = unsafe { tpm_nv_read(session.tpm, NV_INDEX, register.as_mut_ptr()) };
-    if ret != 0 {
-        return Err(ret);
-    }
-    // SAFETY: the session's connection, and room for the key.
-    let ret = unsafe { tpm_ak_create(session.tpm, &mut session.ak) };
-    if ret != 0 {
-        return Err(ret);
-    }
-    let quote = quote_pcrs(&session, nonce, pcr_mask, &mut values)?;
+    let register = tpm.nv_read(NV_INDEX)?;
+    let ak = tpm.ak_create()?;
+    let quote = quote_pcrs(&tpm, &ak, nonce, pcr_mask, &mut values)?;
     if config.present
         && quoted(&quote).is_none_or(|q| {
             q.reset_count != config.reset_count
@@ -537,38 +425,23 @@ fn measure(
     {
         return Err(-EUCLEAN);
     }
-    // SAFETY: the session's connection and key, the nonce, and room for
-    // the certification.
-    let ret = unsafe {
-        tpm_nv_certify(
-            session.tpm,
-            &session.ak,
-            NV_INDEX,
-            nonce.as_ptr(),
-            nonce.len(),
-            &mut certify,
-        )
-    };
-    if ret != 0 {
-        return Err(ret);
-    }
-    let (ek_certificate, ek_cert_rsa) = ek_certificate_base64(&session);
+    let certify = tpm.nv_certify(&ak, NV_INDEX, nonce)?;
+    let (ek_certificate, ek_cert_rsa) = ek_certificate_base64(&tpm);
     // The endorsement key the certificate describes, or the one the
     // challenge was made for; a TPM without a certificate yields its ECC
     // key, which the operator pins by name.
     let ek_rsa = challenge.map_or(ek_cert_rsa, |c| c.ek_rsa);
-    // SAFETY: the session's connection, and room for the key.
-    let ret = unsafe { tpm_ek_create(session.tpm, ek_rsa, &mut session.ek) };
-    if ret != 0 {
-        return Err(ret);
-    }
+    let ek = tpm.ek_create(ek_rsa)?;
     let credential = match challenge {
-        Some(c) => activate(&session, c)?,
+        Some(c) => activate(&tpm, &ak, &ek, c)?,
         None => Vec::new(),
     };
-    // The keys are flushed before the file work; keep their public parts.
-    let keys = Box::new([session.ak, session.ek]);
-    drop(session);
+    let (ak_public, ek_public) = (ak.public().clone(), ek.public().clone());
+
+    // The keys are flushed and the TPM closed before the file work.
+    drop(ek);
+    drop(ak);
+    drop(tpm);
     Ok(Measured {
         pcr_mask,
         values,
@@ -576,7 +449,8 @@ fn measure(
         nv,
         quote,
         certify,
-        keys,
+        ak: ak_public,
+        ek: ek_public,
         ek_rsa,
         ek_certificate,
         credential,
@@ -647,7 +521,7 @@ fn emit_evidence(
 ) -> Result<(), c_int> {
     let mut ts = [0u8; 32];
     let mut boot_id = [0u8; 64];
-    let [ak, ek] = &*m.keys;
+    let (ak, ek) = (&m.ak, &m.ek);
 
     eventlog::timestamp(&mut ts);
     eventlog::read_boot_id(&mut boot_id);
@@ -674,37 +548,25 @@ fn emit_evidence(
     }
     e.arr_close();
     e.obj_open_key(b"ak");
-    emit_hex(e, b"public", bytes_of(&ak.public, ak.public_len));
-    emit_hex(e, b"name", bytes_of(&ak.name, ak.name_len));
+    emit_hex(e, b"public", &ak.area);
+    emit_hex(e, b"name", &ak.name);
     e.obj_close();
     e.obj_open_key(b"ek");
     e.kv_string(b"type", if m.ek_rsa { b"rsa" } else { b"ecc" });
-    emit_hex(e, b"public", bytes_of(&ek.public, ek.public_len));
-    emit_hex(e, b"name", bytes_of(&ek.name, ek.name_len));
+    emit_hex(e, b"public", &ek.area);
+    emit_hex(e, b"name", &ek.name);
     e.obj_close();
     e.obj_open_key(b"quote");
-    emit_hex(e, b"attest", bytes_of(&m.quote.attest, m.quote.attest_len));
-    emit_hex(
-        e,
-        b"signature",
-        bytes_of(&m.quote.signature, m.quote.signature_len),
-    );
+    emit_hex(e, b"attest", &m.quote.attest);
+    emit_hex(e, b"signature", &m.quote.signature);
     e.obj_close();
     e.obj_open_key(b"register");
     e.kv_string(b"nv_index", format!("0x{NV_INDEX:08X}").as_bytes());
     e.kv_int(b"pcr", i64::from(CHAIN_PCR));
-    emit_hex(e, b"name", bytes_of(&m.nv.name, m.nv.name_len));
+    emit_hex(e, b"name", m.nv.name());
     emit_hex(e, b"value", &m.register);
-    emit_hex(
-        e,
-        b"attest",
-        bytes_of(&m.certify.attest, m.certify.attest_len),
-    );
-    emit_hex(
-        e,
-        b"signature",
-        bytes_of(&m.certify.signature, m.certify.signature_len),
-    );
+    emit_hex(e, b"attest", &m.certify.attest);
+    emit_hex(e, b"signature", &m.certify.signature);
     e.obj_close();
     e.arr_open(b"eventlog");
     eventlog::boot_lines(&mut |line| {

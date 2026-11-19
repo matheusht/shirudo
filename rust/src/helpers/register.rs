@@ -35,12 +35,7 @@ use crate::util::hex::{decode, encode};
 use crate::util::identity::IDENTITY_PIN;
 use crate::util::json::JsonEmit;
 use crate::util::nv_writer;
-use crate::util::tpm::{
-    Tpm, TpmAttestation, TpmKey, TpmNvInfo, tpm_ak_create, tpm_close, tpm_ek_create, tpm_key_flush,
-    tpm_nv_certify, tpm_nv_define, tpm_nv_extend_first, tpm_nv_info, tpm_nv_read,
-    tpm_nv_set_writer, tpm_nv_undefine, tpm_open, tpm_pcr_extend, tpm_pcr_read, tpm_quote,
-    tpm_reset_count,
-};
+use crate::util::tpm::{Attestation, Branches, KeyPublic, NvInfo, Tpm};
 use crate::util::tpm_wire::{NV_RSA_BYTES, tpm_register_policy};
 
 helper_main!(shirudo_helper_test_register, run);
@@ -291,35 +286,32 @@ fn status() -> c_int {
 }
 
 /// `f` on a TPM connection, closed after; None when it does not open.
-fn with_tpm<R>(f: impl FnOnce(*mut Tpm) -> R) -> Option<R> {
-    let mut t: *mut Tpm = core::ptr::null_mut();
-    // SAFETY: room for the connection, closed once.
-    unsafe {
-        if tpm_open(&mut t) != 0 {
-            tpm_close(t);
-            return None;
-        }
-        let r = f(t);
-        tpm_close(t);
-        Some(r)
-    }
+fn with_tpm<R>(f: impl FnOnce(&mut Tpm) -> R) -> Option<R> {
+    let mut t = Tpm::open().ok()?;
+
+    Some(f(&mut t))
+}
+
+/// What a step returned, as the helper prints it.
+fn rc<T>(result: &Result<T, c_int>) -> c_int {
+    result.as_ref().err().copied().unwrap_or(0)
+}
+
+/// 0 as success, any other code as its error.
+fn zero_or(ret: c_int) -> Result<(), c_int> {
+    if ret != 0 { Err(ret) } else { Ok(()) }
 }
 
 fn ek_public(kind: &CStr) -> c_int {
-    let Some(ret) = with_tpm(|t| {
-        let mut ek = TpmKey::zeroed();
-        // SAFETY: the connection and room for the key, flushed after.
-        unsafe {
-            let ret = tpm_ek_create(t, kind.to_bytes() == b"rsa", &mut ek);
-            if ret == 0 {
-                out("public=");
-                puthex(&ek.public[..ek.public_len]);
-                out("name=");
-                puthex(&ek.name[..ek.name_len]);
-                tpm_key_flush(t, &mut ek);
-            }
-            ret
+    let Some(ret) = with_tpm(|t| match t.ek_create(kind.to_bytes() == b"rsa") {
+        Ok(ek) => {
+            out("public=");
+            puthex(&ek.public().area);
+            out("name=");
+            puthex(&ek.public().name);
+            0
         }
+        Err(ret) => ret,
     }) else {
         return 1;
     };
@@ -329,33 +321,22 @@ fn ek_public(kind: &CStr) -> c_int {
 
 /// The attack: recreate the index with the same public area.
 fn recreate() -> c_int {
-    // SAFETY: a structure of numbers and arrays, for which zeros are a
-    // value.
-    let mut nv: TpmNvInfo = unsafe { core::mem::zeroed() };
-    let Some(ret) = with_tpm(|t| {
-        // SAFETY: the connection, the index's info and its policy.
-        unsafe {
-            let mut ret = tpm_nv_info(t, NV_INDEX, &mut nv);
-            if ret == 0 && nv.defined {
-                ret = tpm_nv_undefine(t, NV_INDEX, core::ptr::null(), 0);
-            }
-            if ret == 0 {
-                ret = tpm_nv_define(t, NV_INDEX, nv.policy.as_ptr(), core::ptr::null(), 0);
-            }
-            if ret == 0 {
-                ret = tpm_nv_info(t, NV_INDEX, &mut nv);
-            }
-            ret
+    let Some(result) = with_tpm(|t| {
+        let nv = t.nv_info(NV_INDEX)?;
+        if nv.defined {
+            t.nv_undefine(NV_INDEX, &[])?;
         }
+        t.nv_define(NV_INDEX, &nv.policy, &[])?;
+        t.nv_info(NV_INDEX)
     }) else {
         return 1;
     };
-    out(&format!("rc={ret}\n"));
-    if ret != 0 {
+    out(&format!("rc={}\n", rc(&result)));
+    let Ok(nv) = result else {
         return 1;
-    }
+    };
     out(&format!("written={}\nname=", c_int::from(nv.written)));
-    puthex(&nv.name[..nv.name_len]);
+    puthex(nv.name());
     0
 }
 
@@ -391,25 +372,17 @@ fn first_write(event_hex: &CStr) -> c_int {
         err(&format!("register policy: {}\n", strerror(-ret)));
         return 1;
     }
-    let Some(ret) = with_tpm(|t| {
-        // SAFETY: the connection, the writer and the branches.
-        unsafe {
-            let mut ret = tpm_nv_set_writer(t, seed.as_ptr(), public.as_ptr());
-            if ret == 0 {
-                ret = tpm_nv_extend_first(
-                    t,
-                    NV_INDEX,
-                    PCR_MASK,
-                    written.as_ptr(),
-                    init.as_ptr(),
-                    event.as_ptr(),
-                );
-            }
-            ret
-        }
+    let branches = Branches {
+        written: &written,
+        init: &init,
+    };
+    let Some(result) = with_tpm(|t| {
+        t.set_writer(&seed, &public)?;
+        t.nv_extend_first(NV_INDEX, PCR_MASK, &branches, &event)
     }) else {
         return 1;
     };
+    let ret = rc(&result);
     out(&format!("rc={ret}\n"));
     c_int::from(ret != 0)
 }
@@ -422,114 +395,85 @@ struct Forged {
     anchor_digest: [u8; 32],
     value: [u8; 32],
     values: [[u8; 32]; 24],
-    ak: TpmKey,
-    ek: TpmKey,
-    quote: TpmAttestation,
-    certify: TpmAttestation,
-    nv: TpmNvInfo,
+    ak: KeyPublic,
+    ek: KeyPublic,
+    quote: Attestation,
+    certify: Attestation,
+    nv: NvInfo,
 }
 
 /// The register of the target's own at `index`, bound to `pcr` and
 /// `phase`, written with `event`, anchored into `pcr`, quoted and
 /// certified with `nonce`.
-#[allow(clippy::too_many_arguments)]
 fn forge_on_tpm(
-    t: *mut Tpm,
-    f: &mut Forged,
+    t: &mut Tpm,
     seed: &[u8; 32],
     public: &[u8; NV_RSA_BYTES],
     index: u32,
     (pcr, phase): (u32, u32),
     event: &[u8; 32],
     nonce: &[u8],
-) -> c_int {
+) -> Result<Forged, c_int> {
     let mask = (1u32 << pcr) | (1u32 << phase);
     let quoted = PCR_DEFAULT | mask;
     let (mut written, mut init, mut policy) = ([0u8; 32], [0u8; 32], [0u8; 32]);
-    let mut ak = TpmKey::zeroed();
-    let mut ek = TpmKey::zeroed();
-    // SAFETY: the connection, its keys and rooms of this helper.
-    let ret = unsafe {
-        let mut ret = tpm_nv_set_writer(t, seed.as_ptr(), public.as_ptr());
-        if ret == 0 {
-            ret = tpm_reset_count(t, &mut f.reset);
-        }
-        if ret == 0 {
-            ret = tpm_pcr_read(t, pcr, f.before.as_mut_ptr());
-        }
-        if ret == 0 {
-            ret = tpm_pcr_read(t, phase, f.before.as_mut_ptr().add(32));
-        }
-        if ret == 0 {
-            ret = tpm_register_policy(
-                mask,
-                f.before.as_ptr(),
-                2,
-                public.as_ptr(),
-                written.as_mut_ptr(),
-                init.as_mut_ptr(),
-                policy.as_mut_ptr(),
-            );
-        }
-        if ret == 0 {
-            ret = tpm_nv_define(t, index, policy.as_ptr(), core::ptr::null(), 0);
-        }
-        if ret == 0 {
-            ret = tpm_nv_extend_first(
-                t,
-                index,
-                mask,
-                written.as_ptr(),
-                init.as_ptr(),
-                event.as_ptr(),
-            );
-        }
-        if ret == 0 {
-            ret = tpm_nv_info(t, index, &mut f.nv);
-        }
-        if ret == 0 {
-            ret = chain::anchor(&f.nv.name, &mut f.anchor);
-        }
-        if ret == 0 {
-            match sha256(crate::text::cstr(&f.anchor)) {
-                Ok(d) => f.anchor_digest = d,
-                Err(e) => ret = e,
-            }
-        }
-        if ret == 0 {
-            ret = tpm_pcr_extend(t, pcr, f.anchor_digest.as_ptr());
-        }
-        if ret == 0 {
-            ret = tpm_nv_read(t, index, f.value.as_mut_ptr());
-        }
-        if ret == 0 {
-            ret = tpm_ak_create(t, &mut ak);
-        }
-        if ret == 0 {
-            ret = tpm_ek_create(t, false, &mut ek);
-        }
-        for i in 0..24 {
-            if ret == 0 && quoted & (1 << i) != 0 {
-                ret = tpm_pcr_read(t, i, f.values[i as usize].as_mut_ptr());
-            }
-        }
-        if ret == 0 {
-            ret = tpm_quote(t, &ak, nonce.as_ptr(), nonce.len(), quoted, &mut f.quote);
-        }
-        if ret == 0 {
-            ret = tpm_nv_certify(t, &ak, index, nonce.as_ptr(), nonce.len(), &mut f.certify);
-        }
-        ret
+    let mut before = [0u8; 64];
+    let mut anchor = [0u8; ANCHOR_MAX];
+    let mut values = [[0u8; 32]; 24];
+
+    t.set_writer(seed, public)?;
+    let reset = t.reset_count()?;
+    before[..32].copy_from_slice(&t.pcr_read(pcr)?);
+    before[32..].copy_from_slice(&t.pcr_read(phase)?);
+    // SAFETY: the PCR values, the writer's key and rooms for the policy.
+    zero_or(unsafe {
+        tpm_register_policy(
+            mask,
+            before.as_ptr(),
+            2,
+            public.as_ptr(),
+            written.as_mut_ptr(),
+            init.as_mut_ptr(),
+            policy.as_mut_ptr(),
+        )
+    })?;
+    t.nv_define(index, &policy, &[])?;
+    let branches = Branches {
+        written: &written,
+        init: &init,
     };
-    // Flushing scrubs the keys; keep their public parts.
-    f.ak = ak;
-    f.ek = ek;
-    // SAFETY: the connection's keys, flushed once.
-    unsafe {
-        tpm_key_flush(t, &mut ek);
-        tpm_key_flush(t, &mut ak);
+    t.nv_extend_first(index, mask, &branches, event)?;
+    let nv = t.nv_info(index)?;
+    zero_or(chain::anchor(nv.name(), &mut anchor))?;
+    let anchor_digest = sha256(crate::text::cstr(&anchor))?;
+    t.pcr_extend(pcr, &anchor_digest)?;
+    let value = t.nv_read(index)?;
+    let ak = t.ak_create()?;
+    let ek = t.ek_create(false)?;
+    for (i, value) in (0u32..).zip(values.iter_mut()) {
+        if quoted & (1 << i) != 0 {
+            *value = t.pcr_read(i)?;
+        }
     }
-    ret
+    let quote = t.quote(&ak, nonce, quoted)?;
+    let certify = t.nv_certify(&ak, index, nonce)?;
+    // Flushing lets the keys go; keep their public parts.
+    let (ak_public, ek_public) = (ak.public().clone(), ek.public().clone());
+    drop(ek);
+    drop(ak);
+    Ok(Forged {
+        reset,
+        before,
+        anchor,
+        anchor_digest,
+        value,
+        values,
+        ak: ak_public,
+        ek: ek_public,
+        quote,
+        certify,
+        nv,
+    })
 }
 
 /// The attack: a register of the target's own at another handle, bound
@@ -568,26 +512,18 @@ fn forge(args: &[&CStr]) -> c_int {
     if nv_writer::read(&mut seed, &mut public) != 0 {
         return 1;
     }
-    // SAFETY: what the forge fills, all of whose bits zero are a value.
-    let mut f: Box<Forged> = Box::new(unsafe { core::mem::zeroed() });
-    let Some(ret) = with_tpm(|t| {
-        forge_on_tpm(
-            t,
-            &mut f,
-            &seed,
-            &public,
-            index,
-            (pcr, phase),
-            &event,
-            nonce,
-        )
-    }) else {
+    let Some(result) =
+        with_tpm(|t| forge_on_tpm(t, &seed, &public, index, (pcr, phase), &event, nonce))
+    else {
         return 1;
     };
-    if ret != 0 {
-        out(&format!("rc={ret}\n"));
-        return 1;
-    }
+    let f = match result {
+        Ok(f) => f,
+        Err(ret) => {
+            out(&format!("rc={ret}\n"));
+            return 1;
+        }
+    };
     let quoted = PCR_DEFAULT | (1u32 << pcr) | (1u32 << phase);
     let (mut ts, mut boot_id) = ([0u8; 32], [0u8; 64]);
     timestamp(&mut ts);
@@ -619,34 +555,25 @@ fn forge(args: &[&CStr]) -> c_int {
     }
     e.arr_close();
     e.obj_open_key(b"ak");
-    e.kv_string(b"public", &encode(&f.ak.public[..f.ak.public_len]));
-    e.kv_string(b"name", &encode(&f.ak.name[..f.ak.name_len]));
+    e.kv_string(b"public", &encode(&f.ak.area));
+    e.kv_string(b"name", &encode(&f.ak.name));
     e.obj_close();
     e.obj_open_key(b"ek");
     e.kv_string(b"type", b"ecc");
-    e.kv_string(b"public", &encode(&f.ek.public[..f.ek.public_len]));
-    e.kv_string(b"name", &encode(&f.ek.name[..f.ek.name_len]));
+    e.kv_string(b"public", &encode(&f.ek.area));
+    e.kv_string(b"name", &encode(&f.ek.name));
     e.obj_close();
     e.obj_open_key(b"quote");
-    e.kv_string(b"attest", &encode(&f.quote.attest[..f.quote.attest_len]));
-    e.kv_string(
-        b"signature",
-        &encode(&f.quote.signature[..f.quote.signature_len]),
-    );
+    e.kv_string(b"attest", &encode(&f.quote.attest));
+    e.kv_string(b"signature", &encode(&f.quote.signature));
     e.obj_close();
     e.obj_open_key(b"register");
     e.kv_string(b"nv_index", nv_index.as_bytes());
     e.kv_int(b"pcr", pcr.into());
-    e.kv_string(b"name", &encode(&f.nv.name[..f.nv.name_len]));
+    e.kv_string(b"name", &encode(f.nv.name()));
     e.kv_string(b"value", &encode(&f.value));
-    e.kv_string(
-        b"attest",
-        &encode(&f.certify.attest[..f.certify.attest_len]),
-    );
-    e.kv_string(
-        b"signature",
-        &encode(&f.certify.signature[..f.certify.signature_len]),
-    );
+    e.kv_string(b"attest", &encode(&f.certify.attest));
+    e.kv_string(b"signature", &encode(&f.certify.signature));
     e.obj_close();
     e.arr_open(b"eventlog");
     e.obj_open();
@@ -663,7 +590,7 @@ fn forge(args: &[&CStr]) -> c_int {
     e.kv_int(b"phase_pcr", phase.into());
     e.kv_string(b"phase_before", &encode(&f.before[32..]));
     e.kv_string(b"bound_in", b"initrd");
-    e.kv_string(b"nv_name", &encode(&f.nv.name[..f.nv.name_len]));
+    e.kv_string(b"nv_name", &encode(f.nv.name()));
     e.kv_string(b"nv_writer_public", &encode(&public));
     e.kv_string(b"anchor", crate::text::cstr(&f.anchor));
     e.kv_string(b"anchor_digest", &encode(&f.anchor_digest));
@@ -764,26 +691,22 @@ fn run(args: &[&CStr]) -> c_int {
             let Some(d) = digest(args[3]) else {
                 return 2;
             };
-            // SAFETY: the connection and the digest.
-            match with_tpm(|t| unsafe { tpm_pcr_extend(t, atoi(args[2]) as u32, d.as_ptr()) }) {
-                Some(ret) => {
+            match with_tpm(|t| t.pcr_extend(atoi(args[2]) as u32, &d)) {
+                Some(result) => {
+                    let ret = rc(&result);
                     out(&format!("rc={ret}\n"));
                     c_int::from(ret != 0)
                 }
                 None => 2,
             }
         }
-        (b"pcr", 3) => {
-            let mut v = [0u8; 32];
-            // SAFETY: the connection and room for the PCR.
-            match with_tpm(|t| unsafe { tpm_pcr_read(t, atoi(args[2]) as u32, v.as_mut_ptr()) }) {
-                Some(0) => {
-                    puthex(&v);
-                    0
-                }
-                _ => 1,
+        (b"pcr", 3) => match with_tpm(|t| t.pcr_read(atoi(args[2]) as u32)) {
+            Some(Ok(v)) => {
+                puthex(&v);
+                0
             }
-        }
+            _ => 1,
+        },
         // The endorsement key of a type, as a target without a certificate
         // presents it.
         (b"ek-public", 3) => ek_public(args[2]),

@@ -23,22 +23,13 @@ use crate::util::config_attest::{Evidence, Quote, parse, verify};
 use crate::util::config_measure::nvpcr;
 use crate::util::config_update::{BootIdentity, ConfigUpdate, ConfigUpdateOps, ConfigUpdateTarget};
 use crate::util::json::MAX_BYTES;
-use crate::util::tpm::{Tpm, tpm_boot_identity, tpm_close, tpm_open, tpm_pcr_read};
+use crate::util::tpm::Tpm;
 
 helper_main!(shirudo_helper_test_config_attest, run);
 
 /// `read` of a TPM connection opened for it and closed after.
-fn with_tpm(read: impl FnOnce(*mut Tpm) -> c_int) -> c_int {
-    let mut tpm: *mut Tpm = core::ptr::null_mut();
-    // SAFETY: room for the connection, closed once, after.
-    unsafe {
-        let mut ret = tpm_open(&mut tpm);
-        if ret == 0 {
-            ret = read(tpm);
-        }
-        tpm_close(tpm);
-        ret
-    }
+fn with_tpm<R>(read: impl FnOnce(&Tpm) -> Result<R, c_int>) -> Result<R, c_int> {
+    read(&Tpm::open()?)
 }
 
 /// A journal read, as attest reads it, that changes nothing.
@@ -46,21 +37,13 @@ struct ReadOnly;
 
 impl ConfigUpdateOps for ReadOnly {
     fn boot_identity(&self) -> Result<BootIdentity, c_int> {
-        let (mut reset, mut restart) = (0u32, 0u32);
-        // SAFETY: a connection and rooms for its counts.
-        match with_tpm(|tpm| unsafe { tpm_boot_identity(tpm, &mut reset, &mut restart) }) {
-            0 => Ok(BootIdentity { reset, restart }),
-            err => Err(err),
-        }
+        let (reset, restart) = with_tpm(Tpm::boot_identity)?;
+
+        Ok(BootIdentity { reset, restart })
     }
 
     fn pcr_read(&self, pcr: u32) -> Result<[u8; 32], c_int> {
-        let mut value = [0u8; 32];
-        // SAFETY: a connection and room for a digest.
-        match with_tpm(|tpm| unsafe { tpm_pcr_read(tpm, pcr, value.as_mut_ptr()) }) {
-            0 => Ok(value),
-            err => Err(err),
-        }
+        with_tpm(|tpm| tpm.pcr_read(pcr))
     }
 
     fn pcr_extend(&self, _: u32, _: &[u8; 32]) -> Result<(), c_int> {

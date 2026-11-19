@@ -7,17 +7,17 @@
 //! command goes through a salted HMAC session bound to the endorsement
 //! key init froze.
 
-use core::ffi::{CStr, c_int, c_uint};
+use core::ffi::{CStr, c_int};
+use core::mem::ManuallyDrop;
 use core::ptr;
 use std::ffi::CString;
 
 use crate::errno::{
-    E2BIG, EACCES, EINVAL, EIO, EKEYREJECTED, ENODATA, ENODEV, ENOENT, ENOMEM, EPROTO,
-    EPROTONOSUPPORT, text,
+    E2BIG, EACCES, EINVAL, EIO, EKEYREJECTED, ENODATA, ENODEV, ENOENT, EPROTO, EPROTONOSUPPORT,
+    text,
 };
-use crate::heap::{xcalloc, xfree};
 use crate::sys::identity::Identity;
-use crate::sys::libc::{env, errno, explicit_bzero, setenv, unsetenv};
+use crate::sys::libc::{env, errno, scrub, setenv, unsetenv};
 use crate::sys::tss2::*;
 use crate::text::cstr;
 use crate::util::config::{self, Scrubbed};
@@ -54,188 +54,238 @@ const NV_POLICY_REF: &[u8] = b"shirudo-nv-writer-v1";
 /// CONF_PATH of util/paths.h, which a message names.
 const CONF_PATH: &CStr = c"/etc/shirudo/shirudo.conf";
 
-/// `struct tpm_key`.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct TpmKey {
-    pub(crate) handle: u32,
-    pub(crate) public: [u8; PUBLIC_MAX],
-    pub(crate) public_len: usize,
-    pub(crate) name: [u8; NAME_LEN],
-    pub(crate) name_len: usize,
-}
+/// The TCTI library's context, finalized when it goes.
+struct Tcti(*mut TctiContext);
 
-impl TpmKey {
-    pub(crate) const fn zeroed() -> Self {
-        TpmKey {
-            handle: 0,
-            public: [0; PUBLIC_MAX],
-            public_len: 0,
-            name: [0; NAME_LEN],
-            name_len: 0,
+impl Tcti {
+    /// The TCTI `conf` names, loaded: the loader's code on failure.
+    fn load(conf: &CStr) -> Result<Self, Rc> {
+        let mut context = ptr::null_mut();
+        // SAFETY: a C string and room for the context the loader allocates.
+        let ret = unsafe { Tss2_TctiLdr_Initialize(conf.as_ptr(), &mut context) };
+
+        if ret != RC_SUCCESS {
+            return Err(ret);
         }
+        Ok(Tcti(context))
     }
 }
 
-/// A TPM client, laid out for the tests that look inside.
-#[repr(C)]
-pub struct Tpm {
-    pub(crate) session_key: TpmKey,
-    pub(crate) tcti: *mut TctiContext,
-    pub(crate) esys: *mut EsysContext,
-    pub(crate) session: EsysTr,
-    writer_seed: [u8; DIGEST_LEN],
-    writer_public: [u8; NV_RSA_BYTES],
-    writer_set: bool,
+impl Drop for Tcti {
+    fn drop(&mut self) {
+        // SAFETY: the context the loader gave, finalized once.
+        unsafe { Tss2_TctiLdr_Finalize(&mut self.0) };
+    }
 }
 
-/// `struct tpm_nv_info`.
-#[repr(C)]
-pub struct TpmNvInfo {
+/// An ESYS context and the TCTI it talks through, which outlives it:
+/// the context is finalized first when it goes.
+struct Esys {
+    context: *mut EsysContext,
+    /// Held for the context, which uses it until it is finalized.
+    _tcti: Tcti,
+}
+
+impl Drop for Esys {
+    fn drop(&mut self) {
+        // SAFETY: the context Esys_Initialize() gave, finalized once and
+        // before its TCTI.
+        unsafe { Esys_Finalize(&mut self.context) };
+    }
+}
+
+/// An output ESYS allocates for a command, freed with Esys_Free() when
+/// it goes.
+struct EsysOut<T>(*mut T);
+
+impl<T> EsysOut<T> {
+    fn new() -> Self {
+        EsysOut(ptr::null_mut())
+    }
+
+    /// Where the command puts the output.
+    fn room(&mut self) -> *mut *mut T {
+        &mut self.0
+    }
+
+    /// The output, or None while ESYS has given none.
+    fn get(&self) -> Option<&T> {
+        // SAFETY: NULL, or the T a command allocated and filled through
+        // room(), which stays until drop() frees it.
+        unsafe { self.0.as_ref() }
+    }
+}
+
+impl<T> Drop for EsysOut<T> {
+    fn drop(&mut self) {
+        // SAFETY: NULL, which Esys_Free() takes, or what ESYS allocated,
+        // freed once.
+        unsafe { Esys_Free(self.0.cast()) };
+    }
+}
+
+/// The NV writer a connection authorizes register writes with: the salt
+/// of its key and the modulus init froze.
+struct Writer {
+    seed: [u8; DIGEST_LEN],
+    public: [u8; NV_RSA_BYTES],
+}
+
+/// A connection to the TPM: its ESYS context, the salted HMAC session
+/// every command goes through, the endorsement key that salts it, and
+/// once set the NV writer. Dropping it flushes the session and then the
+/// key and closes the context. The methods take `&self`, as what they
+/// change is the TPM's and ESYS's, behind a raw pointer that keeps a
+/// `Tpm` on its thread.
+pub(crate) struct Tpm {
+    esys: Esys,
+    session: EsysTr,
+    session_key: EsysTr,
+    ek_name: [u8; NAME_LEN],
+    /// On the heap, so that the seed is scrubbed when it goes.
+    writer: Option<Box<Writer>>,
+}
+
+impl Drop for Tpm {
+    fn drop(&mut self) {
+        self.flush(self.session);
+        self.flush(self.session_key);
+    }
+}
+
+/// A key or session the TPM holds for a connection, flushed when it
+/// goes.
+pub(crate) struct Handle<'t> {
+    tpm: &'t Tpm,
+    handle: EsysTr,
+}
+
+impl Drop for Handle<'_> {
+    fn drop(&mut self) {
+        self.tpm.flush(self.handle);
+    }
+}
+
+#[cfg(feature = "test-helpers")]
+impl Handle<'_> {
+    /// The ESYS handle, for a test helper's own commands.
+    pub(crate) fn raw(&self) -> EsysTr {
+        self.handle
+    }
+
+    /// Flushes the handle now: the TPM's code.
+    pub(crate) fn flush(self) -> Rc {
+        let this = ManuallyDrop::new(self);
+
+        // SAFETY: the context and its handle, flushed here in place of the
+        // drop that ManuallyDrop holds back.
+        unsafe { Esys_FlushContext(this.tpm.context(), this.handle) }
+    }
+}
+
+/// What a key shows of itself: its marshalled TPMT_PUBLIC and its name.
+#[derive(Clone)]
+pub(crate) struct KeyPublic {
+    pub(crate) area: Vec<u8>,
+    pub(crate) name: [u8; NAME_LEN],
+}
+
+/// A primary key under the endorsement hierarchy, flushed when it goes,
+/// with its public area and name.
+pub(crate) struct Key<'t> {
+    handle: Handle<'t>,
+    public: KeyPublic,
+}
+
+impl Key<'_> {
+    pub(crate) fn public(&self) -> &KeyPublic {
+        &self.public
+    }
+
+    /// The handle, which the caller now owns, and the public parts.
+    fn into_raw(self) -> (EsysTr, KeyPublic) {
+        let Key { handle, public } = self;
+        let handle = ManuallyDrop::new(handle);
+
+        (handle.handle, public)
+    }
+
+    /// The ESYS handle, for a test helper's own commands.
+    #[cfg(feature = "test-helpers")]
+    pub(crate) fn raw(&self) -> EsysTr {
+        self.handle.handle
+    }
+}
+
+/// The ESYS handle of an NV index, closed when it goes.
+struct NvIndex<'t> {
+    tpm: &'t Tpm,
+    handle: EsysTr,
+}
+
+impl Drop for NvIndex<'_> {
+    fn drop(&mut self) {
+        // SAFETY: the context and its handle of the index, closed once.
+        unsafe { Esys_TR_Close(self.tpm.context(), &mut self.handle) };
+    }
+}
+
+/// The owner hierarchy's password, set for the commands made while it
+/// lives and cleared when it goes.
+struct OwnerAuth<'t>(&'t Tpm);
+
+impl Drop for OwnerAuth<'_> {
+    fn drop(&mut self) {
+        let empty = Tpm2bDigest::zeroed();
+
+        // SAFETY: the context, a handle and an empty password.
+        unsafe { Esys_TR_SetAuth(self.0.context(), ESYS_TR_RH_OWNER, &empty) };
+    }
+}
+
+/// An NV index as the TPM describes it.
+pub(crate) struct NvInfo {
     pub(crate) defined: bool,
     pub(crate) written: bool,
-    attrs: u32,
-    data_size: u16,
     pub(crate) policy: [u8; DIGEST_LEN],
-    pub(crate) name: [u8; NAME_LEN],
-    pub(crate) name_len: usize,
+    name: [u8; NAME_LEN],
+    name_len: usize,
 }
 
-impl TpmNvInfo {
-    pub(crate) const fn zeroed() -> Self {
-        TpmNvInfo {
-            defined: false,
-            written: false,
-            attrs: 0,
-            data_size: 0,
-            policy: [0; DIGEST_LEN],
-            name: [0; NAME_LEN],
-            name_len: 0,
-        }
+impl NvInfo {
+    const UNDEFINED: NvInfo = NvInfo {
+        defined: false,
+        written: false,
+        policy: [0; DIGEST_LEN],
+        name: [0; NAME_LEN],
+        name_len: 0,
+    };
+
+    /// The index's name, empty when the TPM gave one longer than a
+    /// SHA-256 name.
+    pub(crate) fn name(&self) -> &[u8] {
+        &self.name[..self.name_len]
     }
 }
 
-/// `struct tpm_attestation`.
-#[repr(C)]
-pub struct TpmAttestation {
-    pub(crate) attest: [u8; ATTEST_MAX],
-    pub(crate) attest_len: usize,
-    pub(crate) signature: [u8; SIGNATURE_MAX],
-    pub(crate) signature_len: usize,
+/// A quote or a certification as the TPM marshalled it, and the
+/// attestation key's TPMT_SIGNATURE over it.
+pub(crate) struct Attestation {
+    pub(crate) attest: Vec<u8>,
+    pub(crate) signature: Vec<u8>,
 }
 
-impl TpmAttestation {
-    pub(crate) const fn zeroed() -> Self {
-        TpmAttestation {
-            attest: [0; ATTEST_MAX],
-            attest_len: 0,
-            signature: [0; SIGNATURE_MAX],
-            signature_len: 0,
-        }
-    }
-}
-
-/// `struct tpm_writer_authorization`: what the NV writer signs to
-/// authorize one NV_Extend.
-#[repr(C)]
-pub struct WriterAuthorization {
+/// What the NV writer signs to authorize one NV_Extend.
+pub(crate) struct WriterAuthorization {
     nonce: Tpm2bDigest,
     cphash: Tpm2bDigest,
     pub(crate) digest: [u8; DIGEST_LEN],
 }
 
-const _: () = assert!(size_of::<TpmKey>() == 576);
-const _: () = assert!(size_of::<Tpm>() == 1016);
-const _: () = assert!(core::mem::offset_of!(Tpm, esys) == 584);
-const _: () = assert!(core::mem::offset_of!(Tpm, session) == 592);
-const _: () = assert!(core::mem::offset_of!(Tpm, writer_set) == 1012);
-const _: () = assert!(size_of::<TpmNvInfo>() == 88);
-const _: () = assert!(core::mem::offset_of!(TpmNvInfo, name_len) == 80);
-const _: () = assert!(size_of::<TpmAttestation>() == 1200);
-const _: () = assert!(size_of::<WriterAuthorization>() == 164);
-
-/// A structure of tss2's of all zero bits, as `= {}` is in C.
-fn zeroed<T>() -> T {
-    // SAFETY: only for the structures of integers, arrays and unions of
-    // them below, of which all zero bits are a value.
-    unsafe { core::mem::zeroed() }
-}
-
-/// Starts a salted session bound to the session key: an audit HMAC
-/// session for commands without an authorization handle, or a policy
-/// session.
-pub(crate) fn session_start(t: &Tpm, key: EsysTr, ty: u8, session: &mut EsysTr) -> c_int {
-    let sym = sym_def_null();
-    let mut attrs = SESSION_CONTINUESESSION;
-
-    if ty == SE_HMAC {
-        attrs |= SESSION_AUDIT;
-    }
-    // SAFETY: the context, handles, a template and room for the session.
-    let mut ret = unsafe {
-        Esys_StartAuthSession(
-            t.esys,
-            key,
-            ESYS_TR_NONE,
-            ESYS_TR_NONE,
-            ESYS_TR_NONE,
-            ESYS_TR_NONE,
-            ptr::null(),
-            ty,
-            &sym,
-            ALG_SHA256,
-            session,
-        )
-    };
-    if ret == RC_SUCCESS {
-        // SAFETY: the context and the session it started.
-        ret = unsafe { Esys_TRSess_SetAttributes(t.esys, *session, attrs, 0xff) };
-    }
-    if ret != RC_SUCCESS {
-        crate::log::err(format!("tpm: start salted session: rc=0x{ret:08x}").as_bytes());
-        if *session != ESYS_TR_NONE {
-            // SAFETY: the context and its session.
-            unsafe { Esys_FlushContext(t.esys, *session) };
-            *session = ESYS_TR_NONE;
-        }
-        return -EIO;
-    }
-    0
-}
-
-/// The session key: the ECC endorsement key, which once enforcement is
-/// active must be the one init froze in the identity.
-fn session_setup(t: &mut Tpm, active: bool) -> c_int {
-    let mut id = Identity::zeroed();
-
-    if active {
-        let ret = identity::read(&mut id);
-
-        if ret != 0 {
-            crate::log::err(format!("tpm: frozen identity unreadable: {}", text(ret)).as_bytes());
-            return ret;
-        }
-        if id.ek_name[0] != 0 || u16::from(id.ek_name[1]) != ALG_SHA256 {
-            crate::log::err(b"tpm: no frozen session key; trusted reboot required");
-            return -EACCES;
-        }
-    }
-    let mut key = TpmKey::zeroed();
-    let ret = ek_create(t, false, &mut key);
-
-    t.session_key = key;
-    if ret != 0 {
-        return ret;
-    }
-    if t.session_key.name_len != NAME_LEN || (active && t.session_key.name != id.ek_name) {
-        crate::log::err(b"tpm: not the TPM init bound (session key name differs)");
-        return -EACCES;
-    }
-    let mut session = t.session;
-    let ret = session_start(t, t.session_key.handle, SE_HMAC, &mut session);
-
-    t.session = session;
-    ret
+/// The branches of a register write.
+pub(crate) struct Branches<'a> {
+    pub(crate) written: &'a [u8; DIGEST_LEN],
+    pub(crate) init: &'a [u8; DIGEST_LEN],
 }
 
 /// The TCTI: SHIRUDO_TPM_TCTI or the configuration's before an
@@ -265,130 +315,23 @@ pub(crate) fn tcti() -> Result<CString, c_int> {
     CString::new(value).map_err(|_| -EINVAL)
 }
 
-/// Opens the TPM, its library logging off since that can expose session
-/// keys even during bootstrap: 0 with `*out` set, or -errno.
-///
-/// # Safety
-///
-/// `out` is room for a pointer.
-unsafe fn open_tpm(out: *mut *mut Tpm, quiet: bool) -> c_int {
-    let active = identity::enforcement_active();
+/// The library's logging off, since that can expose session keys even
+/// during bootstrap.
+fn library_logging_off() -> Result<(), c_int> {
+    // SAFETY: two C strings; the environment is this command's alone.
+    let mut set = unsafe { setenv(c"TSS2_LOG".as_ptr(), c"all+none".as_ptr(), 1) } == 0;
 
-    if active < 0 {
-        crate::log::err(
-            format!("tpm: cannot determine enforcement state: {}", text(active)).as_bytes(),
-        );
-        return active;
+    if set {
+        // SAFETY: a C string; the environment is this command's alone.
+        set = unsafe { unsetenv(c"TSS2_LOGFILE".as_ptr()) } == 0;
     }
-    // SAFETY: C strings.
-    let set = unsafe {
-        setenv(c"TSS2_LOG".as_ptr(), c"all+none".as_ptr(), 1) == 0
-            && unsetenv(c"TSS2_LOGFILE".as_ptr()) == 0
-    };
     if !set {
         let e = -errno();
 
         crate::log::err(format!("tpm: cannot disable library logging: {}", text(e)).as_bytes());
-        return e;
+        return Err(e);
     }
-    let conf = match tcti() {
-        Ok(conf) => conf,
-        Err(e) => {
-            if !quiet && e == -EACCES {
-                crate::log::err(b"tpm: authenticated runtime requires a device TCTI");
-            } else if !quiet {
-                crate::log::err(
-                    format!("tpm: the TCTI is longer than {} bytes", TCTI_MAX - 1).as_bytes(),
-                );
-            }
-            return e;
-        }
-    };
-    // SAFETY: a count and a size.
-    let t = unsafe { xcalloc(1, size_of::<Tpm>()) }.cast::<Tpm>();
-
-    if t.is_null() {
-        return -ENOMEM;
-    }
-    // SAFETY: the zeroed connection allocated above, all of whose bits
-    // zeroed are one.
-    let tr = unsafe { &mut *t };
-
-    tr.session = ESYS_TR_NONE;
-    tr.session_key.handle = ESYS_TR_NONE;
-    // SAFETY: the TCTI, a C string, and room for its context.
-    let ret = unsafe { Tss2_TctiLdr_Initialize(conf.as_ptr(), &mut tr.tcti) };
-
-    if ret != RC_SUCCESS {
-        if !quiet {
-            crate::log::err(
-                &[
-                    &b"tpm: TctiLdr_Initialize("[..],
-                    conf.to_bytes(),
-                    b"): rc=0x",
-                    format!("{ret:08x}").as_bytes(),
-                ]
-                .concat(),
-            );
-        }
-        // SAFETY: the allocation above, freed once.
-        unsafe { xfree(t.cast(), size_of::<Tpm>()) };
-        return -EIO;
-    }
-    // SAFETY: room for the context, and the TCTI's.
-    let ret = unsafe { Esys_Initialize(&mut tr.esys, tr.tcti, ptr::null_mut()) };
-
-    if ret != RC_SUCCESS {
-        if !quiet {
-            crate::log::err(format!("tpm: Esys_Initialize: rc=0x{ret:08x}").as_bytes());
-        }
-        // SAFETY: the TCTI and the allocation, each released once.
-        unsafe {
-            Tss2_TctiLdr_Finalize(&mut tr.tcti);
-            xfree(t.cast(), size_of::<Tpm>());
-        }
-        return -EIO;
-    }
-    let e = session_setup(tr, active != 0);
-
-    if e != 0 {
-        // SAFETY: the connection, closed once.
-        unsafe { close(t) };
-        return e;
-    }
-    // SAFETY: the caller's room.
-    unsafe { *out = t };
-    0
-}
-
-/// Closes what open_tpm() opened; NULL is nothing to close.
-///
-/// # Safety
-///
-/// `t` is NULL or a connection open_tpm() gave.
-unsafe fn close(t: *mut Tpm) {
-    // SAFETY: the caller's connection, if any.
-    let Some(tr) = (unsafe { t.as_mut() }) else {
-        return;
-    };
-    if !tr.esys.is_null() {
-        if tr.session != ESYS_TR_NONE {
-            // SAFETY: the context and its session.
-            unsafe { Esys_FlushContext(tr.esys, tr.session) };
-        }
-        let esys = tr.esys;
-
-        // SAFETY: the connection's context, not yet finalized.
-        unsafe { key_flush(esys, &mut tr.session_key) };
-        // SAFETY: the context, finalized once.
-        unsafe { Esys_Finalize(&mut tr.esys) };
-    }
-    if !tr.tcti.is_null() {
-        // SAFETY: the TCTI, finalized once.
-        unsafe { Tss2_TctiLdr_Finalize(&mut tr.tcti) };
-    }
-    // SAFETY: the allocation open_tpm() made, freed once.
-    unsafe { xfree(t.cast(), size_of::<Tpm>()) };
+    Ok(())
 }
 
 /// Whether `ret` is the TPM's `code`, of either format.
@@ -412,219 +355,28 @@ fn rc_is_auth_failure(ret: Rc) -> bool {
 /// The SHA-256 bank's PCRs of `mask`.
 fn pcr_selection(mask: u32) -> PcrSelectionList {
     let mut sel = PcrSelectionList::zeroed();
+    let [low, middle, high, _] = mask.to_le_bytes();
 
     sel.count = 1;
     sel.pcrSelections[0].hash = ALG_SHA256;
     sel.pcrSelections[0].sizeofSelect = PCR_SELECT_LEN;
-    sel.pcrSelections[0].pcrSelect[0] = mask as u8;
-    sel.pcrSelections[0].pcrSelect[1] = (mask >> 8) as u8;
-    sel.pcrSelections[0].pcrSelect[2] = (mask >> 16) as u8;
+    sel.pcrSelections[0].pcrSelect[..3].copy_from_slice(&[low, middle, high]);
     sel
 }
 
-fn pcr_read(t: &Tpm, pcr: u32, out: &mut [u8; DIGEST_LEN]) -> c_int {
-    let mut values: *mut DigestList = ptr::null_mut();
-    let mut counter = 0u32;
-
-    if pcr >= 24 {
-        return -EINVAL;
-    }
-    let sel = pcr_selection(1 << pcr);
-    // SAFETY: the context, handles, the selection and room for the
-    // results.
-    let ret = unsafe {
-        Esys_PCR_Read(
-            t.esys,
-            t.session,
-            ESYS_TR_NONE,
-            ESYS_TR_NONE,
-            &sel,
-            &mut counter,
-            ptr::null_mut(),
-            &mut values,
-        )
-    };
-    if ret != RC_SUCCESS {
-        crate::log::err(format!("tpm: PCR_Read({pcr}): rc=0x{ret:08x}").as_bytes());
-        return -EIO;
-    }
-    // SAFETY: the values ESYS gave on success.
-    let v = unsafe { &*values };
-
-    if v.count != 1 || v.digests[0].size != 32 {
-        crate::log::err(format!("tpm: PCR {pcr} has no SHA-256 bank").as_bytes());
-        // SAFETY: the values, freed once.
-        unsafe { Esys_Free(values.cast()) };
-        return -ENOENT;
-    }
-    out.copy_from_slice(&v.digests[0].buffer[..32]);
-    // SAFETY: the values, freed once.
-    unsafe { Esys_Free(values.cast()) };
-    0
-}
-
-fn pcr_extend(t: &Tpm, pcr: u32, digest: &[u8; DIGEST_LEN]) -> c_int {
-    let mut dv: DigestValues = zeroed();
-
-    dv.count = 1;
-    if pcr >= 24 {
-        return -EINVAL;
-    }
-    dv.digests[0].hashAlg = ALG_SHA256;
-    let mut sha256 = [0u8; 32];
-    sha256.copy_from_slice(&digest[..32]);
-    dv.digests[0].digest.sha256 = sha256;
-    // SAFETY: the context, handles and the digests.
-    let ret = unsafe {
-        Esys_PCR_Extend(
-            t.esys,
-            ESYS_TR_PCR0 + pcr,
-            t.session,
-            ESYS_TR_NONE,
-            ESYS_TR_NONE,
-            &dv,
-        )
-    };
-
-    if ret != RC_SUCCESS {
-        crate::log::err(format!("tpm: PCR_Extend({pcr}): rc=0x{ret:08x}").as_bytes());
-        return -EIO;
-    }
-    0
-}
-
-/// The TPM's clock: its reset and restart counts.
-fn read_clock(t: &Tpm) -> Result<(u32, u32), c_int> {
-    let mut info: *mut TimeInfo = ptr::null_mut();
-    // SAFETY: the context, handles and room for the time.
-    let ret = unsafe { Esys_ReadClock(t.esys, t.session, ESYS_TR_NONE, ESYS_TR_NONE, &mut info) };
-
-    if ret != RC_SUCCESS {
-        crate::log::err(format!("tpm: ReadClock: rc=0x{ret:08x}").as_bytes());
-        return Err(-EIO);
-    }
-    // SAFETY: the time ESYS gave on success, freed once.
-    unsafe {
-        let counts = ((*info).clockInfo.resetCount, (*info).clockInfo.restartCount);
-
-        Esys_Free(info.cast());
-        Ok(counts)
-    }
-}
-
-/// The ESYS handle of the NV index: 0, -ENOENT, quiet, for one not
-/// defined, or -EIO.
-fn nv_handle(t: &Tpm, index: u32, out: &mut EsysTr) -> c_int {
-    // SAFETY: the context, an index, handles and room for the handle.
-    let ret =
-        unsafe { Esys_TR_FromTPMPublic(t.esys, index, t.session, ESYS_TR_NONE, ESYS_TR_NONE, out) };
-
-    if rc_is(ret, RC_HANDLE) {
-        return -ENOENT; // quiet: undefined is normal
-    }
-    if ret != RC_SUCCESS {
-        crate::log::err(format!("tpm: TR_FromTPMPublic(0x{index:08x}): rc=0x{ret:08x}").as_bytes());
-        return -EIO;
-    }
-    0
-}
-
-/// Closes an ESYS handle of an NV index.
-fn tr_close(t: &Tpm, nv: &mut EsysTr) {
-    // SAFETY: the context and its handle.
-    unsafe { Esys_TR_Close(t.esys, nv) };
-}
-
-fn nv_info(t: &Tpm, index: u32, info: &mut TpmNvInfo) -> c_int {
-    let mut public: *mut Tpm2bNvPublic = ptr::null_mut();
-    let mut name: *mut Tpm2bName = ptr::null_mut();
-    let mut nv = 0;
-
-    // SAFETY: the caller's info, all of whose bits zeroed are one.
-    unsafe { ptr::from_mut(info).write_bytes(0, 1) };
-    let e = nv_handle(t, index, &mut nv);
-
-    if e == -ENOENT {
-        return 0;
-    }
-    if e != 0 {
-        return e;
-    }
-    // SAFETY: the context, the index's handle, handles and room for its
-    // public area and name.
-    let ret = unsafe {
-        Esys_NV_ReadPublic(
-            t.esys,
-            nv,
-            t.session,
-            ESYS_TR_NONE,
-            ESYS_TR_NONE,
-            &mut public,
-            &mut name,
-        )
-    };
-
-    tr_close(t, &mut nv);
-    if ret != RC_SUCCESS {
-        crate::log::err(format!("tpm: NV_ReadPublic(0x{index:08x}): rc=0x{ret:08x}").as_bytes());
-        return -EIO;
-    }
-    // SAFETY: what ESYS gave on success, each freed once.
-    unsafe {
-        let p = &(*public).nvPublic;
-        let n = &*name;
-
-        info.defined = true;
-        info.written = p.attributes & NV_WRITTEN != 0;
-        info.attrs = p.attributes;
-        info.data_size = p.dataSize;
-        if p.authPolicy.size == 32 {
-            info.policy.copy_from_slice(&p.authPolicy.buffer[..32]);
-        }
-        if usize::from(n.size) <= info.name.len() {
-            let len = usize::from(n.size);
-
-            info.name[..len].copy_from_slice(&n.name[..len]);
-            info.name_len = len;
-        }
-        Esys_Free(public.cast());
-        Esys_Free(name.cast());
-    }
-    0
-}
-
-/// The owner hierarchy's password for the next command.
-fn owner_auth_set(t: &Tpm, auth: &[u8]) -> c_int {
-    let mut owner = Tpm2bDigest::zeroed();
-
+/// `data` as a TPM2B_DIGEST.
+fn digest2b(data: &[u8]) -> Result<Tpm2bDigest, c_int> {
+    let mut digest = Tpm2bDigest::zeroed();
     let (Some(room), Ok(size)) = (
-        owner.buffer.get_mut(..auth.len()),
-        u16::try_from(auth.len()),
+        digest.buffer.get_mut(..data.len()),
+        u16::try_from(data.len()),
     ) else {
-        return -EINVAL;
+        return Err(-EINVAL);
     };
-    room.copy_from_slice(auth);
-    owner.size = size;
-    // SAFETY: the context, a handle and the password; then the copy
-    // scrubbed.
-    let ret = unsafe {
-        let ret = Esys_TR_SetAuth(t.esys, ESYS_TR_RH_OWNER, &owner);
 
-        explicit_bzero(owner.buffer.as_mut_ptr().cast(), owner.buffer.len());
-        ret
-    };
-    if ret != RC_SUCCESS {
-        crate::log::err(format!("tpm: TR_SetAuth(owner): rc=0x{ret:08x}").as_bytes());
-        return -EIO;
-    }
-    0
-}
-
-fn owner_auth_clear(t: &Tpm) {
-    let empty = Tpm2bDigest::zeroed();
-
-    // SAFETY: the context, a handle and an empty password.
-    unsafe { Esys_TR_SetAuth(t.esys, ESYS_TR_RH_OWNER, &empty) };
+    room.copy_from_slice(data);
+    digest.size = size;
+    Ok(digest)
 }
 
 fn owner_auth_error(op: &CStr, index: u32, ret: Rc) -> c_int {
@@ -659,1739 +411,1643 @@ fn owner_auth_error(op: &CStr, index: u32, ret: Rc) -> c_int {
     -EIO
 }
 
-pub(crate) fn nv_define(
-    t: &Tpm,
-    index: u32,
-    policy: &[u8; DIGEST_LEN],
-    owner_auth: &[u8],
-) -> c_int {
-    let mut public: Tpm2bNvPublic = zeroed();
-    let nv_auth = Tpm2bDigest::zeroed();
-    let mut nv = ESYS_TR_NONE;
-    let e = owner_auth_set(t, owner_auth);
-
-    if e != 0 {
-        return e;
-    }
-    public.nvPublic.nvIndex = index;
-    public.nvPublic.nameAlg = ALG_SHA256;
-    public.nvPublic.attributes = REGISTER_ATTRS;
-    public.nvPublic.authPolicy.size = 32;
-    public.nvPublic.authPolicy.buffer[..32].copy_from_slice(policy);
-    public.nvPublic.dataSize = DIGEST_LEN as u16;
-    // SAFETY: the context, handles, the index's password and public
-    // area, and room for its handle.
-    let ret = unsafe {
-        Esys_NV_DefineSpace(
-            t.esys,
-            ESYS_TR_RH_OWNER,
-            t.session,
-            ESYS_TR_NONE,
-            ESYS_TR_NONE,
-            &nv_auth,
-            &public,
-            &mut nv,
-        )
-    };
-    owner_auth_clear(t);
-    if ret != RC_SUCCESS {
-        return owner_auth_error(c"NV_DefineSpace", index, ret);
-    }
-    tr_close(t, &mut nv);
-    0
-}
-
-pub(crate) fn nv_undefine(t: &Tpm, index: u32, owner_auth: &[u8]) -> c_int {
-    let mut nv = 0;
-    let e = nv_handle(t, index, &mut nv);
-
-    if e != 0 {
-        return e;
-    }
-    let e = owner_auth_set(t, owner_auth);
-
-    if e != 0 {
-        tr_close(t, &mut nv);
-        return e;
-    }
-    // SAFETY: the context and handles.
-    let ret = unsafe {
-        Esys_NV_UndefineSpace(
-            t.esys,
-            ESYS_TR_RH_OWNER,
-            nv,
-            t.session,
-            ESYS_TR_NONE,
-            ESYS_TR_NONE,
-        )
-    };
-
-    owner_auth_clear(t);
-    if ret != RC_SUCCESS {
-        tr_close(t, &mut nv);
-        return owner_auth_error(c"NV_UndefineSpace", index, ret);
-    }
-    0
-}
-
-pub(crate) fn nv_read(t: &Tpm, index: u32, out: &mut [u8; DIGEST_LEN]) -> c_int {
-    let mut data: *mut Tpm2bMaxNvBuffer = ptr::null_mut();
-    let mut nv = 0;
-    let e = nv_handle(t, index, &mut nv);
-
-    if e != 0 {
-        return e;
-    }
-    // SAFETY: the context, handles and room for the data.
-    let ret = unsafe {
-        Esys_NV_Read(
-            t.esys,
-            nv,
-            nv,
-            t.session,
-            ESYS_TR_NONE,
-            ESYS_TR_NONE,
-            DIGEST_LEN as u16,
-            0,
-            &mut data,
-        )
-    };
-    tr_close(t, &mut nv);
-    if rc_is(ret, RC_NV_UNINITIALIZED) {
-        return -ENODATA; // quiet: nothing written this boot
-    }
-    if ret != RC_SUCCESS {
-        crate::log::err(format!("tpm: NV_Read(0x{index:08x}): rc=0x{ret:08x}").as_bytes());
-        return -EIO;
-    }
-    // SAFETY: the data ESYS gave on success.
-    let d = unsafe { &*data };
-
-    if usize::from(d.size) != DIGEST_LEN {
-        crate::log::err(
-            format!(
-                "tpm: NV_Read returned {} bytes, expected {}",
-                c_uint::from(d.size),
-                DIGEST_LEN as c_uint
-            )
-            .as_bytes(),
-        );
-        // SAFETY: the data, freed once.
-        unsafe { Esys_Free(data.cast()) };
-        return -EIO;
-    }
-    out.copy_from_slice(&d.buffer[..DIGEST_LEN]);
-    // SAFETY: the data, freed once.
-    unsafe { Esys_Free(data.cast()) };
-    0
-}
-
-fn session_flush(t: &Tpm, session: EsysTr) {
-    if session != ESYS_TR_NONE {
-        // SAFETY: the context and its session.
-        unsafe { Esys_FlushContext(t.esys, session) };
-    }
-}
-
-/// The command hash of the NV_Extend of `event` to the index named
-/// `name`, the TPM's nonce of the session, and their digest, which the
-/// NV writer signs.
-pub(crate) fn writer_prepare(
-    t: &Tpm,
-    session: EsysTr,
-    name: &[u8; NAME_LEN],
-    event: &[u8; DIGEST_LEN],
-    authorization: &mut WriterAuthorization,
-) -> c_int {
-    let mut nonce: *mut Tpm2bDigest = ptr::null_mut();
-    let mut cphash = [0u8; DIGEST_LEN];
-
-    authorization.cphash.size = DIGEST_LEN as u16;
-    // The C hashed into the caller's buffer in place: start from what
-    // the caller left there.
-    cphash.copy_from_slice(&authorization.cphash.buffer[..DIGEST_LEN]);
-    let e = nv_extend_cphash(name, event, &mut cphash);
-
-    authorization.cphash.buffer[..DIGEST_LEN].copy_from_slice(&cphash);
-    if e != 0 {
-        crate::log::err(format!("tpm: compute NV_Extend command hash: {}", text(e)).as_bytes());
-        return e;
-    }
-    // SAFETY: the context, the session and room for its nonce.
-    let ret = unsafe { Esys_TRSess_GetNonceTPM(t.esys, session, &mut nonce) };
-
-    if ret != RC_SUCCESS || nonce.is_null() {
-        crate::log::err(format!("tpm: NV writer PolicySigned: rc=0x{ret:08x}").as_bytes());
-        // SAFETY: what ESYS gave, or NULL, freed once.
-        unsafe { Esys_Free(nonce.cast()) };
-        return -EACCES;
-    }
-    // SAFETY: the nonce ESYS gave on success, copied and freed once.
-    unsafe {
-        authorization.nonce = *nonce;
-        Esys_Free(nonce.cast());
-    }
-    let n = &authorization.nonce;
-    let e = match n.buffer.get(..usize::from(n.size)) {
-        Some(nonce) => writer_auth_hash(nonce, &cphash, &mut authorization.digest),
-        None => -EINVAL,
-    };
-    if e != 0 {
-        crate::log::err(format!("tpm: compute NV writer authorization: {}", text(e)).as_bytes());
-    }
-    e
-}
-
-/// The NV writer: an RSA primary under the owner hierarchy whose unique
-/// field the salt `seed` fills. The salt varies the key each boot, the
-/// owner seed reproduces it after a reset, and the frozen modulus
-/// `expected` refuses one made under another owner seed. 0 with the key
-/// loaded in `*key`, or -errno with it flushed.
-pub(crate) fn writer_primary(
-    t: &Tpm,
-    seed: &[u8; DIGEST_LEN],
-    expected: Option<&[u8; NV_RSA_BYTES]>,
-    public: &mut [u8; NV_RSA_BYTES],
-    key: &mut EsysTr,
-) -> c_int {
-    let mut public_area = [0u8; NV_RSA_PUBLIC_AREA_LEN];
-    let mut computed = [0u8; NAME_LEN];
-    let creation_pcr = PcrSelectionList::zeroed();
-    let sensitive = Tpm2bSensitiveCreate::zeroed();
-    let mut out_pub: *mut Tpm2bPublic = ptr::null_mut();
-    let mut cfg = Scrubbed::new();
-    let mut in_pub = Tpm2bPublic::zeroed();
-    let mut name: *mut Tpm2bName = ptr::null_mut();
-    let outside = Tpm2bData::zeroed();
-
-    *key = ESYS_TR_NONE;
-    let p = &mut in_pub.publicArea;
-
-    p.type_ = ALG_RSA;
-    p.nameAlg = ALG_SHA256;
-    p.objectAttributes = WRITER_ATTRS;
-    p.parameters.rsaDetail = RsaParms {
-        symmetric: sym_def(ALG_NULL, 0, 0),
-        scheme: rsa_scheme(ALG_RSASSA, ALG_SHA256),
-        keyBits: 3072,
-        exponent: 65537,
-    };
-    let mut rsa = Tpm2bPublicKeyRsa {
-        size: DIGEST_LEN as u16,
-        buffer: [0; 512],
-    };
-    rsa.buffer[..DIGEST_LEN].copy_from_slice(seed);
-    p.unique.rsa = rsa;
-
-    let mut e = config::load(&mut cfg);
-    if e == 0 {
-        let c = &*cfg;
-
-        e = match c.tpm_owner_auth.get(..c.tpm_owner_auth_len) {
-            Some(auth) => owner_auth_set(t, auth),
-            None => -EINVAL,
-        };
-    }
-    cfg.scrub();
-    if e != 0 {
-        return e;
-    }
-    // SAFETY: the context, handles, the templates, and room for the
-    // handle and public area.
-    let ret = unsafe {
-        Esys_CreatePrimary(
-            t.esys,
-            ESYS_TR_RH_OWNER,
-            t.session,
-            ESYS_TR_NONE,
-            ESYS_TR_NONE,
-            &sensitive,
-            &in_pub,
-            &outside,
-            &creation_pcr,
-            key,
-            &mut out_pub,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-        )
-    };
-    owner_auth_clear(t);
-    let e = 'cleanup: {
-        if ret != RC_SUCCESS {
-            crate::log::err(format!("tpm: CreatePrimary(NV writer): rc=0x{ret:08x}").as_bytes());
-            break 'cleanup if rc_is_auth_failure(ret) {
-                -EACCES
-            } else {
-                -EIO
-            };
-        }
-        let e = 'out: {
-            if out_pub.is_null() {
-                break 'out -EPROTO;
-            }
-            // SAFETY: the public area ESYS gave.
-            let p = unsafe { &(*out_pub).publicArea };
-            // SAFETY: the RSA variants, integers of which any bits are
-            // values, as the C read them whatever the type.
-            let (r, n) = unsafe { (&p.parameters.rsaDetail, &p.unique.rsa) };
-            let bad = p.type_ != ALG_RSA
-                || p.nameAlg != ALG_SHA256
-                || p.objectAttributes != WRITER_ATTRS
-                || p.authPolicy.size != 0
-                || r.symmetric.algorithm != ALG_NULL
-                || r.scheme.scheme != ALG_RSASSA
-                // SAFETY: every scheme of a key holds its hash first.
-                || unsafe { r.scheme.details.anySig.hashAlg } != ALG_SHA256
-                || r.keyBits != 3072
-                || r.exponent != 65537
-                || usize::from(n.size) != NV_RSA_BYTES;
-
-            if bad {
-                break 'out -EPROTO;
-            }
-            public.copy_from_slice(&n.buffer[..NV_RSA_BYTES]);
-            if expected.is_some_and(|x| *x != *public) {
-                break 'out -EKEYREJECTED;
-            }
-            writer_public(public, &mut public_area);
-            let e = object_name(&public_area, &mut computed);
-
-            if e != 0 {
-                break 'out e;
-            }
-            // SAFETY: the context, the key and room for its name.
-            let ret = unsafe { Esys_TR_GetName(t.esys, *key, &mut name) };
-            // SAFETY: the name ESYS gave, if any.
-            let given = unsafe { name.as_ref() };
-            let differs = ret != RC_SUCCESS
-                || given.is_none_or(|n| {
-                    usize::from(n.size) != NAME_LEN || n.name[..NAME_LEN] != computed
-                });
-
-            if differs { -EPROTO } else { 0 }
-        };
-        if e != 0 {
-            crate::log::err(b"tpm: NV writer public key differs from the expected key");
-        }
-        e
-    };
-    // SAFETY: what ESYS gave, or NULL, each freed once.
-    unsafe {
-        Esys_Free(name.cast());
-        Esys_Free(out_pub.cast());
-    }
-    if e != 0 {
-        session_flush(t, *key);
-        *key = ESYS_TR_NONE;
-    }
-    e
-}
-
-/// The NV writer's RSASSA signature over `hash`.
-fn writer_sign(
-    t: &Tpm,
-    key: EsysTr,
-    hash: &[u8; DIGEST_LEN],
-    out: &mut [u8; NV_RSA_BYTES],
-) -> c_int {
-    let mut validation: TkHashcheck = zeroed();
-    let scheme = sig_scheme(ALG_RSASSA, ALG_SHA256);
-    let mut signature: *mut Signature = ptr::null_mut();
-    let mut digest = Tpm2bDigest::zeroed();
-
-    validation.tag = ST_HASHCHECK;
-    validation.hierarchy = RH_NULL;
-    digest.size = DIGEST_LEN as u16;
-    digest.buffer[..DIGEST_LEN].copy_from_slice(hash);
-    // SAFETY: the context, handles, the digest, scheme and ticket, and
-    // room for the signature.
-    let ret = unsafe {
-        Esys_Sign(
-            t.esys,
-            key,
-            t.session,
-            ESYS_TR_NONE,
-            ESYS_TR_NONE,
-            &digest,
-            &scheme,
-            &validation,
-            &mut signature,
-        )
-    };
-    let e = if ret != RC_SUCCESS {
-        crate::log::err(format!("tpm: Sign(NV writer): rc=0x{ret:08x}").as_bytes());
-        -EACCES
-    } else {
-        // SAFETY: the signature ESYS gave, if any; its RSASSA variant read
-        // only once its algorithm says so.
-        unsafe {
-            match signature.as_ref() {
-                Some(s)
-                    if s.sigAlg == ALG_RSASSA
-                        && s.signature.rsassa.hash == ALG_SHA256
-                        && usize::from(s.signature.rsassa.sig.size) == NV_RSA_BYTES =>
-                {
-                    out.copy_from_slice(&s.signature.rsassa.sig.buffer[..NV_RSA_BYTES]);
-                    0
-                }
-                _ => -EPROTO,
-            }
-        }
-    };
-    // SAFETY: what ESYS gave, or NULL, freed once.
-    unsafe { Esys_Free(signature.cast()) };
-    e
-}
-
-/// TPM2_PolicySigned with the NV writer's signature over the
-/// authorization: the TPM's code.
-pub(crate) fn writer_authorize(
-    t: &Tpm,
-    key: EsysTr,
-    session: EsysTr,
-    authorization: &WriterAuthorization,
-    signature: &[u8; NV_RSA_BYTES],
-) -> Rc {
-    let mut policy_ref = Tpm2bDigest::zeroed();
-    let mut sig: Signature = zeroed();
-    let mut timeout: *mut Tpm2bDigest = ptr::null_mut();
-    let mut ticket: *mut TkAuth = ptr::null_mut();
-    let mut rsassa = SignatureRsa {
-        hash: ALG_SHA256,
-        sig: Tpm2bPublicKeyRsa {
-            size: NV_RSA_BYTES as u16,
-            buffer: [0; 512],
-        },
-    };
-
-    policy_ref.size = NV_POLICY_REF.len() as u16;
-    sig.sigAlg = ALG_RSASSA;
-    rsassa.sig.buffer[..NV_RSA_BYTES].copy_from_slice(signature);
-    sig.signature.rsassa = rsassa;
-    policy_ref.buffer[..NV_POLICY_REF.len()].copy_from_slice(NV_POLICY_REF);
-    // SAFETY: the context, handles, the authorization's nonce and command
-    // hash, the reference and signature, and room for the outputs, which
-    // are freed once.
-    unsafe {
-        let ret = Esys_PolicySigned(
-            t.esys,
-            key,
-            session,
-            ESYS_TR_NONE,
-            ESYS_TR_NONE,
-            ESYS_TR_NONE,
-            &authorization.nonce,
-            &authorization.cphash,
-            &policy_ref,
-            0,
-            &sig,
-            &mut timeout,
-            &mut ticket,
-        );
-        Esys_Free(timeout.cast());
-        Esys_Free(ticket.cast());
-        ret
-    }
-}
-
-/// The policy session's PolicySigned by the NV writer over the exact
-/// NV_Extend of `event` to `index`.
-fn policy_writer_signed(t: &Tpm, session: EsysTr, index: u32, event: &[u8; DIGEST_LEN]) -> c_int {
-    let mut authorization: WriterAuthorization = zeroed();
-    let mut signature = [0u8; NV_RSA_BYTES];
-    let mut public = [0u8; NV_RSA_BYTES];
-    let mut key = ESYS_TR_NONE;
-    let mut nv: TpmNvInfo = zeroed();
-
-    if !t.writer_set {
-        return -EKEYREJECTED;
-    }
-    let e = nv_info(t, index, &mut nv);
-
-    if e != 0 {
-        return e;
-    }
-    if !nv.defined || nv.name_len != NAME_LEN {
-        crate::log::err(b"tpm: NV writer requires a defined register");
-        return -ENODEV;
-    }
-    let e = writer_prepare(t, session, &nv.name, event, &mut authorization);
-
-    if e != 0 {
-        return e;
-    }
-    let seed = t.writer_seed;
-    let expected = t.writer_public;
-    let e = writer_primary(t, &seed, Some(&expected), &mut public, &mut key);
-
-    if e != 0 {
-        return e;
-    }
-    let mut e = writer_sign(t, key, &authorization.digest, &mut signature);
-
-    if e == 0 {
-        let ret = writer_authorize(t, key, session, &authorization, &signature);
-
-        if ret != RC_SUCCESS {
-            crate::log::err(format!("tpm: NV writer PolicySigned: rc=0x{ret:08x}").as_bytes());
-            e = -EACCES;
-        }
-    }
-    session_flush(t, key);
-    // SAFETY: the signature's bytes.
-    unsafe { explicit_bzero(signature.as_mut_ptr().cast(), signature.len()) };
-    e
-}
-
-/// PolicyCommandCode(NV_Extend) closes the session, whose digest must be
-/// the one computed in software: a drift is caught here.
-pub(crate) fn policy_session_finish(
-    t: &Tpm,
-    session: EsysTr,
-    expected: &[u8; DIGEST_LEN],
-) -> c_int {
-    let mut digest: *mut Tpm2bDigest = ptr::null_mut();
-    // SAFETY: the context, handles and a command code.
-    let ret = unsafe {
-        Esys_PolicyCommandCode(
-            t.esys,
-            session,
-            ESYS_TR_NONE,
-            ESYS_TR_NONE,
-            ESYS_TR_NONE,
-            CC_NV_EXTEND,
-        )
-    };
-
-    if ret != RC_SUCCESS {
-        crate::log::err(format!("tpm: register policy assertion: rc=0x{ret:08x}").as_bytes());
-        return -EACCES;
-    }
-    // SAFETY: the context, handles and room for the digest.
-    let ret = unsafe {
-        Esys_PolicyGetDigest(
-            t.esys,
-            session,
-            t.session,
-            ESYS_TR_NONE,
-            ESYS_TR_NONE,
-            &mut digest,
-        )
-    };
-    // SAFETY: the digest ESYS gave, if any.
-    let given = unsafe { digest.as_ref() };
-    let differs = ret != RC_SUCCESS
-        || given.is_none_or(|d| {
-            usize::from(d.size) != DIGEST_LEN || d.buffer[..DIGEST_LEN] != *expected
-        });
-    let e = if differs {
-        crate::log::err(
-            format!(
-                "tpm: register policy digest does not match the computed policy (rc=0x{ret:08x})"
-            )
-            .as_bytes(),
-        );
-        -EPROTO
-    } else {
-        0
-    };
-    // SAFETY: what ESYS gave, or NULL, freed once.
-    unsafe { Esys_Free(digest.cast()) };
-    e
-}
-
-/// The branches of a register write.
-struct Branches<'a> {
-    written: &'a [u8; DIGEST_LEN],
-    init: &'a [u8; DIGEST_LEN],
-}
-
-/// Walks one branch of the register's write policy in a real session,
-/// the first write of a boot the init branch, and authorizes the exact
-/// NV_Extend with the TPM-held writer after PolicyOR. The session's
-/// digest is checked against the software policy to catch a drift.
-fn policy_session_register(
-    t: &Tpm,
-    init: bool,
-    index: u32,
-    event: &[u8; DIGEST_LEN],
-    pcr_mask: u32,
-    branches: &Branches<'_>,
-    session: &mut EsysTr,
-) -> c_int {
-    let mut list: DigestList = zeroed();
-    let mut expected = [0u8; DIGEST_LEN];
-
-    list.count = 2;
-    if !t.writer_set {
-        crate::log::err(b"tpm: register policy requires the NV writer public key");
-        return -EACCES;
-    }
-    let e = session_start(t, t.session_key.handle, SE_POLICY, session);
-
-    if e != 0 {
-        return e;
-    }
-    // SAFETY: the context, the session and handles.
-    let mut ret = unsafe {
-        Esys_PolicyNvWritten(
-            t.esys,
-            *session,
-            ESYS_TR_NONE,
-            ESYS_TR_NONE,
-            ESYS_TR_NONE,
-            if init { NO } else { YES },
-        )
-    };
-    if ret == RC_SUCCESS && init {
-        let live = Tpm2bDigest::zeroed();
-        let sel = pcr_selection(pcr_mask);
-
-        // SAFETY: the context, the session, handles, an empty digest and
-        // the selection.
-        ret = unsafe {
-            Esys_PolicyPCR(
-                t.esys,
-                *session,
-                ESYS_TR_NONE,
-                ESYS_TR_NONE,
-                ESYS_TR_NONE,
-                &live,
-                &sel,
-            )
-        };
-    }
-    if ret == RC_SUCCESS {
-        list.digests[0].size = 32;
-        list.digests[0].buffer[..32].copy_from_slice(branches.written);
-        list.digests[1].size = 32;
-        list.digests[1].buffer[..32].copy_from_slice(branches.init);
-        // SAFETY: the context, the session, handles and the branches.
-        ret = unsafe {
-            Esys_PolicyOR(
-                t.esys,
-                *session,
-                ESYS_TR_NONE,
-                ESYS_TR_NONE,
-                ESYS_TR_NONE,
-                &list,
-            )
-        };
-    }
-    if ret == RC_SUCCESS {
-        let e = policy_writer_signed(t, *session, index, event);
-
-        if e != 0 {
-            session_flush(t, *session);
-            *session = ESYS_TR_NONE;
-            return e;
-        }
-    }
-    if ret != RC_SUCCESS {
-        if rc_is(ret, RC_VALUE) && init {
-            crate::log::err(b"tpm: the anchoring PCR moved; the register can only be initialised in the boot window");
-        } else {
-            crate::log::err(format!("tpm: register policy assertion: rc=0x{ret:08x}").as_bytes());
-        }
-        session_flush(t, *session);
-        *session = ESYS_TR_NONE;
-        return -EACCES;
-    }
-    let mut e = register_policy_final(
-        branches.written,
-        branches.init,
-        &t.writer_public,
-        &mut expected,
-    );
-
-    if e != 0 {
-        crate::log::err(format!("tpm: compute signed register policy: {}", text(e)).as_bytes());
-    } else {
-        e = policy_session_finish(t, *session, &expected);
-    }
-    if e != 0 {
-        session_flush(t, *session);
-        *session = ESYS_TR_NONE;
-    }
-    e
-}
-
-fn nv_extend_session(t: &Tpm, index: u32, session: EsysTr, event: &[u8; DIGEST_LEN]) -> c_int {
-    let mut data: Tpm2bMaxNvBuffer = zeroed();
-    let mut nv = 0;
-
-    data.size = DIGEST_LEN as u16;
-    let e = nv_handle(t, index, &mut nv);
-
-    if e != 0 {
-        return e;
-    }
-    data.buffer[..DIGEST_LEN].copy_from_slice(event);
-    // SAFETY: the context, handles and the data.
-    let ret = unsafe { Esys_NV_Extend(t.esys, nv, nv, session, ESYS_TR_NONE, ESYS_TR_NONE, &data) };
-
-    tr_close(t, &mut nv);
-    if ret != RC_SUCCESS {
-        crate::log::err(format!("tpm: NV_Extend(0x{index:08x}): rc=0x{ret:08x}").as_bytes());
-        return if rc_is_auth_failure(ret) {
-            -EACCES
-        } else {
-            -EIO
-        };
-    }
-    0
-}
-
-/// One extend of the register, through the policy branch `init` names.
-fn nv_extend_through(
-    t: &Tpm,
-    init: bool,
-    index: u32,
-    pcr_mask: u32,
-    branches: &Branches<'_>,
-    event: &[u8; DIGEST_LEN],
-) -> c_int {
-    let mut session = ESYS_TR_NONE;
-    let e = policy_session_register(t, init, index, event, pcr_mask, branches, &mut session);
-
-    if e != 0 {
-        return e;
-    }
-    let e = nv_extend_session(t, index, session, event);
-
-    session_flush(t, session);
-    e
-}
-
-/// `put_be16()`.
-fn put_be16(out: &mut [u8], v: u16) {
-    out[..2].copy_from_slice(&v.to_be_bytes());
-}
-
-/// `tpm_put2b()`: a TPM2B of `data` at the start of `out`, its length.
-fn put2b(out: &mut [u8], data: &[u8]) -> usize {
-    put_be16(out, data.len() as u16);
-    out[2..2 + data.len()].copy_from_slice(data);
-    data.len() + 2
-}
-
 /// The marshalled TPMT_PUBLIC of a key shirudo makes, from the area ESYS
 /// gave.
-fn public_from_tss(p: &Public, out: &mut [u8], len: &mut usize) -> c_int {
+fn public_from_tss(p: &Public) -> Result<Vec<u8>, c_int> {
     let mut public = TpmPublic::zeroed();
+    let mut out = [0u8; PUBLIC_MAX];
+    let mut len = 0;
 
     if p.nameAlg != ALG_SHA256 || p.authPolicy.size > 32 {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
     public.ty = p.type_;
     public.attrs = p.objectAttributes;
     public.policy_len = usize::from(p.authPolicy.size);
     public.policy[..public.policy_len].copy_from_slice(&p.authPolicy.buffer[..public.policy_len]);
     if p.type_ == ALG_ECC {
-        // SAFETY: an ECC key's variants, read once its type says ECC.
-        let (ecc, point) = unsafe { (&p.parameters.eccDetail, &p.unique.ecc) };
-
-        public.sym_alg = ecc.symmetric.algorithm;
-        if public.sym_alg != ALG_NULL {
-            // SAFETY: a symmetric definition's bits and mode, as the C read
-            // them whatever the algorithm.
-            (public.sym_bits, public.sym_mode) =
-                unsafe { (ecc.symmetric.keyBits.sym, ecc.symmetric.mode.sym) };
-        }
-        public.scheme = ecc.scheme.scheme;
-        if public.scheme != ALG_NULL {
-            // SAFETY: every scheme of a key holds its hash first.
-            public.scheme_hash = unsafe { ecc.scheme.details.anySig.hashAlg };
-        }
-        public.curve = ecc.curveID;
-        if ecc.kdf.scheme != ALG_NULL || point.x.size != 32 || point.y.size != 32 {
-            return -EINVAL;
-        }
-        public.x.copy_from_slice(&point.x.buffer[..32]);
-        public.y.copy_from_slice(&point.y.buffer[..32]);
+        ecc_public_from_tss(p, &mut public)?;
     } else if p.type_ == ALG_RSA {
-        // SAFETY: an RSA key's variants, read once its type says RSA.
-        let (rsa, n) = unsafe { (&p.parameters.rsaDetail, &p.unique.rsa) };
-
-        public.sym_alg = rsa.symmetric.algorithm;
-        if public.sym_alg != ALG_NULL {
-            // SAFETY: a symmetric definition's bits and mode, as the C read
-            // them whatever the algorithm.
-            (public.sym_bits, public.sym_mode) =
-                unsafe { (rsa.symmetric.keyBits.sym, rsa.symmetric.mode.sym) };
-        }
-        public.scheme = rsa.scheme.scheme;
-        if public.scheme != ALG_NULL {
-            // SAFETY: every scheme of a key holds its hash first.
-            public.scheme_hash = unsafe { rsa.scheme.details.anySig.hashAlg };
-        }
-        public.rsa_bits = rsa.keyBits;
-        public.rsa_exponent = rsa.exponent;
-        if usize::from(n.size) > public.n.len() {
-            return -EINVAL;
-        }
-        public.n_len = usize::from(n.size);
-        public.n[..public.n_len].copy_from_slice(&n.buffer[..public.n_len]);
+        rsa_public_from_tss(p, &mut public)?;
     } else {
-        return -EPROTONOSUPPORT;
+        return Err(-EPROTONOSUPPORT);
     }
-    public_marshal(&public, out, len)
+    let e = public_marshal(&public, &mut out, &mut len);
+
+    if e != 0 {
+        return Err(e);
+    }
+    out.get(..len).map(<[u8]>::to_vec).ok_or(-EINVAL)
+}
+
+/// An ECC key's parameters and point into `public`.
+fn ecc_public_from_tss(p: &Public, public: &mut TpmPublic) -> Result<(), c_int> {
+    // SAFETY: the ECC parameters, which the key's type says it has.
+    let ecc = unsafe { &p.parameters.eccDetail };
+    // SAFETY: the ECC point, likewise.
+    let point = unsafe { &p.unique.ecc };
+
+    public.sym_alg = ecc.symmetric.algorithm;
+    if public.sym_alg != ALG_NULL {
+        // SAFETY: a symmetric definition's bits, integers of which any
+        // bits are a value, as the C read them whatever the algorithm.
+        public.sym_bits = unsafe { ecc.symmetric.keyBits.sym };
+        // SAFETY: its mode, likewise.
+        public.sym_mode = unsafe { ecc.symmetric.mode.sym };
+    }
+    public.scheme = ecc.scheme.scheme;
+    if public.scheme != ALG_NULL {
+        // SAFETY: every scheme of a key holds its hash first.
+        public.scheme_hash = unsafe { ecc.scheme.details.anySig.hashAlg };
+    }
+    public.curve = ecc.curveID;
+    if ecc.kdf.scheme != ALG_NULL || point.x.size != 32 || point.y.size != 32 {
+        return Err(-EINVAL);
+    }
+    public.x.copy_from_slice(&point.x.buffer[..32]);
+    public.y.copy_from_slice(&point.y.buffer[..32]);
+    Ok(())
+}
+
+/// An RSA key's parameters and modulus into `public`.
+fn rsa_public_from_tss(p: &Public, public: &mut TpmPublic) -> Result<(), c_int> {
+    // SAFETY: the RSA parameters, which the key's type says it has.
+    let rsa = unsafe { &p.parameters.rsaDetail };
+    // SAFETY: the modulus, likewise.
+    let n = unsafe { &p.unique.rsa };
+
+    public.sym_alg = rsa.symmetric.algorithm;
+    if public.sym_alg != ALG_NULL {
+        // SAFETY: a symmetric definition's bits, integers of which any
+        // bits are a value, as the C read them whatever the algorithm.
+        public.sym_bits = unsafe { rsa.symmetric.keyBits.sym };
+        // SAFETY: its mode, likewise.
+        public.sym_mode = unsafe { rsa.symmetric.mode.sym };
+    }
+    public.scheme = rsa.scheme.scheme;
+    if public.scheme != ALG_NULL {
+        // SAFETY: every scheme of a key holds its hash first.
+        public.scheme_hash = unsafe { rsa.scheme.details.anySig.hashAlg };
+    }
+    public.rsa_bits = rsa.keyBits;
+    public.rsa_exponent = rsa.exponent;
+    let Some(modulus) = n
+        .buffer
+        .get(..usize::from(n.size))
+        .filter(|m| m.len() <= public.n.len())
+    else {
+        return Err(-EINVAL);
+    };
+    public.n_len = modulus.len();
+    public.n[..modulus.len()].copy_from_slice(modulus);
+    Ok(())
+}
+
+/// `data` as a TPM2B: its size, most significant byte first, and itself.
+fn put2b(out: &mut Vec<u8>, data: &[u8]) -> Result<(), c_int> {
+    let size = u16::try_from(data.len()).map_err(|_| -EINVAL)?;
+
+    out.extend_from_slice(&size.to_be_bytes());
+    out.extend_from_slice(data);
+    Ok(())
+}
+
+/// A P-256 ECDSA signature's r or s, of at most 64 bytes.
+fn signature_half(p: &Tpm2bEccParameter) -> Option<&[u8]> {
+    p.buffer
+        .get(..usize::from(p.size))
+        .filter(|half| half.len() <= 64)
 }
 
 /// An ECDSA signature as TPMT_SIGNATURE.
-fn marshal_signature(sig: &Signature, out: &mut [u8], len: &mut usize) -> c_int {
-    // SAFETY: the ECDSA variant, whose fields any bits are values of;
-    // used only once the algorithm says ECDSA.
+fn marshal_signature(sig: &Signature) -> Result<Vec<u8>, c_int> {
+    // SAFETY: the ECDSA variant, integers and arrays of them of which any
+    // bits are a value; used only once the algorithm says ECDSA.
     let e = unsafe { &sig.signature.ecdsa };
-
-    if sig.sigAlg != ALG_ECDSA
-        || e.signatureR.size > 64
-        || e.signatureS.size > 64
-        || out.len() < 8 + 128
-    {
-        return -EINVAL;
-    }
-    let mut off = 0;
-
-    put_be16(&mut out[off..], sig.sigAlg);
-    off += 2;
-    put_be16(&mut out[off..], e.hash);
-    off += 2;
-    off += put2b(
-        &mut out[off..],
-        &e.signatureR.buffer[..usize::from(e.signatureR.size)],
-    );
-    off += put2b(
-        &mut out[off..],
-        &e.signatureS.buffer[..usize::from(e.signatureS.size)],
-    );
-    *len = off;
-    0
-}
-
-/// A primary under the endorsement hierarchy, with its marshalled public
-/// area and its name, the latter checked against the area so that what
-/// the evidence carries is what the TPM named.
-fn endorsement_primary(t: &Tpm, in_pub: &Tpm2bPublic, what: &CStr, key: &mut TpmKey) -> c_int {
-    let sensitive = Tpm2bSensitiveCreate::zeroed();
-    let creation_pcr = PcrSelectionList::zeroed();
-    let mut out_pub: *mut Tpm2bPublic = ptr::null_mut();
-    let mut name: *mut Tpm2bName = ptr::null_mut();
-    let outside = Tpm2bData::zeroed();
-    let mut computed = [0u8; NAME_LEN];
-    let mut handle: EsysTr = 0;
-
-    // SAFETY: the caller's key, all of whose bits zeroed are one,
-    // padding included as memset() left it.
-    unsafe { ptr::from_mut(key).write_bytes(0, 1) };
-    let auth = if t.session == ESYS_TR_NONE {
-        ESYS_TR_PASSWORD
-    } else {
-        t.session
+    let (true, Some(r), Some(s)) = (
+        sig.sigAlg == ALG_ECDSA,
+        signature_half(&e.signatureR),
+        signature_half(&e.signatureS),
+    ) else {
+        return Err(-EINVAL);
     };
-    // SAFETY: the context, handles, the templates and room for the
-    // handle and public area.
-    let ret = unsafe {
-        Esys_CreatePrimary(
-            t.esys,
-            ESYS_TR_RH_ENDORSEMENT,
-            auth,
-            ESYS_TR_NONE,
-            ESYS_TR_NONE,
-            &sensitive,
-            in_pub,
-            &outside,
-            &creation_pcr,
-            &mut handle,
-            &mut out_pub,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-        )
+    let mut out = Vec::with_capacity(SIGNATURE_MAX);
+
+    out.extend_from_slice(&sig.sigAlg.to_be_bytes());
+    out.extend_from_slice(&e.hash.to_be_bytes());
+    put2b(&mut out, r)?;
+    put2b(&mut out, s)?;
+    Ok(out)
+}
+
+/// An attestation and its signature as ESYS gave them: -E2BIG for one
+/// longer than ATTEST_MAX.
+fn attestation(
+    attest: &EsysOut<Tpm2bAttest>,
+    sig: &EsysOut<Signature>,
+) -> Result<Attestation, c_int> {
+    let (Some(attest), Some(sig)) = (attest.get(), sig.get()) else {
+        return Err(-EPROTO);
     };
-    if ret != RC_SUCCESS {
-        if rc_is_auth_failure(ret) {
-            crate::log::err(
-                &[
-                    &b"tpm: CreatePrimary("[..],
-                    what.to_bytes(),
-                    b"): the endorsement hierarchy has an auth value (rc=0x",
-                    format!("{ret:08x}").as_bytes(),
-                    b")",
-                ]
-                .concat(),
-            );
-        } else {
-            crate::log::err(
-                &[
-                    &b"tpm: CreatePrimary("[..],
-                    what.to_bytes(),
-                    b"): rc=0x",
-                    format!("{ret:08x}").as_bytes(),
-                ]
-                .concat(),
-            );
-        }
-        return -EIO;
-    }
-    key.handle = handle;
-    // SAFETY: the public area ESYS gave on success, freed once.
-    let mut e = unsafe {
-        let e = public_from_tss(&(*out_pub).publicArea, &mut key.public, &mut key.public_len);
-
-        Esys_Free(out_pub.cast());
-        e
+    let Some(data) = attest
+        .attestationData
+        .get(..usize::from(attest.size))
+        .filter(|a| a.len() <= ATTEST_MAX)
+    else {
+        return Err(-E2BIG);
     };
-    if e == 0 {
-        e = match key.public.get(..key.public_len) {
-            Some(public) => object_name(public, &mut computed),
-            None => -EINVAL,
-        };
-    }
-    if e == 0 {
-        // SAFETY: the context, the key and room for its name.
-        let ret = unsafe { Esys_TR_GetName(t.esys, handle, &mut name) };
-        // SAFETY: the name ESYS gave on success.
-        let given = unsafe { name.as_ref() };
 
-        match given {
-            Some(n)
-                if ret == RC_SUCCESS
-                    && usize::from(n.size) == NAME_LEN
-                    && n.name[..NAME_LEN] == computed =>
-            {
-                key.name.copy_from_slice(&n.name[..NAME_LEN]);
-                key.name_len = NAME_LEN;
-            }
-            _ => {
-                crate::log::err(
-                    &[
-                        &b"tpm: "[..],
-                        what.to_bytes(),
-                        b" name does not match its marshalled public area",
-                    ]
-                    .concat(),
-                );
-                e = -EPROTO;
-            }
-        }
-        // SAFETY: what ESYS gave, or NULL, freed once.
-        unsafe { Esys_Free(name.cast()) };
-    }
-    if e != 0 {
-        // SAFETY: the open connection's context.
-        unsafe { key_flush(t.esys, key) };
-    }
-    e
-}
-
-fn ak_create(t: &Tpm, ak: &mut TpmKey) -> c_int {
-    let mut in_pub = Tpm2bPublic::zeroed();
-    let p = &mut in_pub.publicArea;
-
-    p.type_ = ALG_ECC;
-    p.nameAlg = ALG_SHA256;
-    p.objectAttributes = OBJECT_FIXEDTPM
-        | OBJECT_FIXEDPARENT
-        | OBJECT_SENSITIVEDATAORIGIN
-        | OBJECT_USERWITHAUTH
-        | OBJECT_RESTRICTED
-        | OBJECT_SIGN_ENCRYPT;
-    p.parameters.eccDetail = EccParms {
-        symmetric: sym_def(ALG_NULL, 0, 0),
-        scheme: ecc_scheme(ALG_ECDSA, ALG_SHA256),
-        curveID: ECC_NIST_P256,
-        kdf: kdf_null(),
-    };
-    endorsement_primary(t, &in_pub, c"attestation key", ak)
-}
-
-fn ek_create(t: &Tpm, rsa: bool, ek: &mut TpmKey) -> c_int {
-    let mut in_pub = Tpm2bPublic::zeroed();
-    let p = &mut in_pub.publicArea;
-    let symmetric = sym_def(ALG_AES, 128, ALG_CFB);
-
-    p.type_ = if rsa { ALG_RSA } else { ALG_ECC };
-    p.nameAlg = ALG_SHA256;
-    p.objectAttributes = EK_ATTRS;
-    p.authPolicy.size = 32;
-    p.authPolicy.buffer[..32].copy_from_slice(&EK_POLICY);
-    if rsa {
-        p.parameters.rsaDetail = RsaParms {
-            symmetric,
-            scheme: rsa_scheme(ALG_NULL, 0),
-            keyBits: 2048,
-            exponent: 0,
-        };
-        p.unique.rsa = Tpm2bPublicKeyRsa {
-            size: 256,
-            buffer: [0; 512],
-        };
-    } else {
-        p.parameters.eccDetail = EccParms {
-            symmetric,
-            scheme: ecc_scheme(ALG_NULL, 0),
-            curveID: ECC_NIST_P256,
-            kdf: kdf_null(),
-        };
-        let empty = Tpm2bEccParameter {
-            size: 32,
-            buffer: [0; 128],
-        };
-        p.unique.ecc = EccPoint { x: empty, y: empty };
-    }
-    endorsement_primary(t, &in_pub, c"endorsement key", ek)
-}
-
-/// Flushes the key's handle, if any, and forgets the key.
-///
-/// # Safety
-///
-/// `esys` is the context of the open connection the key's handle
-/// belongs to, or anything when the key has none.
-unsafe fn key_flush(esys: *mut EsysContext, key: &mut TpmKey) {
-    if key.handle != ESYS_TR_NONE && key.handle != 0 {
-        // SAFETY: the caller's context, and the key's handle in it.
-        unsafe { Esys_FlushContext(esys, key.handle) };
-    }
-    // SAFETY: the key's bytes.
-    unsafe { explicit_bzero(ptr::from_mut(key).cast(), size_of::<TpmKey>()) };
-    key.handle = ESYS_TR_NONE;
-}
-
-fn attestation_copy(attest: &Tpm2bAttest, sig: &Signature, out: &mut TpmAttestation) -> c_int {
-    let size = usize::from(attest.size);
-
-    if size > out.attest.len() {
-        return -E2BIG;
-    }
-    out.attest[..size].copy_from_slice(&attest.attestationData[..size]);
-    out.attest_len = size;
-    marshal_signature(sig, &mut out.signature, &mut out.signature_len)
+    Ok(Attestation {
+        attest: data.to_vec(),
+        signature: marshal_signature(sig)?,
+    })
 }
 
 /// The caller's nonce as qualifying data: -EINVAL for one too long.
-///
-/// # Safety
-///
-/// `nonce` holds `nonce_len` bytes.
-unsafe fn qualifying(nonce: *const u8, nonce_len: usize) -> Result<Tpm2bData, c_int> {
+fn qualifying(nonce: &[u8]) -> Result<Tpm2bData, c_int> {
     let mut qual = Tpm2bData::zeroed();
-
-    if nonce_len > qual.buffer.len() {
+    let (Some(room), Ok(size)) = (
+        qual.buffer.get_mut(..nonce.len()),
+        u16::try_from(nonce.len()),
+    ) else {
         return Err(-EINVAL);
-    }
-    // SAFETY: the caller's nonce_len bytes.
-    unsafe { ptr::copy_nonoverlapping(nonce, qual.buffer.as_mut_ptr(), nonce_len) };
-    qual.size = nonce_len as u16;
+    };
+
+    room.copy_from_slice(nonce);
+    qual.size = size;
     Ok(qual)
 }
 
-/// Copies an attestation and its signature ESYS gave, and frees them.
-///
-/// # Safety
-///
-/// `attest` and `sig` are ESYS's outputs of a successful command.
-unsafe fn attestation_take(
-    attest: *mut Tpm2bAttest,
-    sig: *mut Signature,
-    out: &mut TpmAttestation,
-) -> c_int {
-    // SAFETY: the outputs, copied and then each freed once.
-    unsafe {
-        let e = attestation_copy(&*attest, &*sig, out);
-
-        Esys_Free(attest.cast());
-        Esys_Free(sig.cast());
-        e
+impl Tpm {
+    /// Opens the TPM.
+    pub(crate) fn open() -> Result<Tpm, c_int> {
+        Self::open_logged(false)
     }
-}
 
-/// # Safety
-///
-/// `nonce` holds `nonce_len` bytes.
-unsafe fn quote(
-    t: &Tpm,
-    ak: &TpmKey,
-    nonce: *const u8,
-    nonce_len: usize,
-    pcr_mask: u32,
-    out: &mut TpmAttestation,
-) -> c_int {
-    let scheme = sig_scheme(ALG_NULL, 0);
-    let mut sig: *mut Signature = ptr::null_mut();
-    let mut quoted: *mut Tpm2bAttest = ptr::null_mut();
-    // SAFETY: the caller's nonce.
-    let qual = match unsafe { qualifying(nonce, nonce_len) } {
-        Ok(q) => q,
-        Err(e) => return e,
-    };
-    let sel = pcr_selection(pcr_mask);
-    // SAFETY: the context, handles, the nonce, scheme and selection, and
-    // room for the quote and signature.
-    let ret = unsafe {
-        Esys_Quote(
-            t.esys,
-            ak.handle,
-            t.session,
-            ESYS_TR_NONE,
-            ESYS_TR_NONE,
-            &qual,
-            &scheme,
-            &sel,
-            &mut quoted,
-            &mut sig,
-        )
-    };
-    if ret != RC_SUCCESS {
-        crate::log::err(format!("tpm: Quote: rc=0x{ret:08x}").as_bytes());
-        return -EIO;
+    /// Opens the TPM without the messages of one that is not there.
+    pub(crate) fn open_quiet() -> Result<Tpm, c_int> {
+        Self::open_logged(true)
     }
-    // SAFETY: the outputs of the successful command.
-    unsafe { attestation_take(quoted, sig, out) }
-}
 
-/// # Safety
-///
-/// `nonce` holds `nonce_len` bytes.
-unsafe fn nv_certify(
-    t: &Tpm,
-    ak: &TpmKey,
-    index: u32,
-    nonce: *const u8,
-    nonce_len: usize,
-    out: &mut TpmAttestation,
-) -> c_int {
-    let scheme = sig_scheme(ALG_NULL, 0);
-    let mut sig: *mut Signature = ptr::null_mut();
-    let mut info: *mut Tpm2bAttest = ptr::null_mut();
-    let mut nv = 0;
-    // SAFETY: the caller's nonce.
-    let qual = match unsafe { qualifying(nonce, nonce_len) } {
-        Ok(q) => q,
-        Err(e) => return e,
-    };
-    let e = nv_handle(t, index, &mut nv);
+    fn open_logged(quiet: bool) -> Result<Tpm, c_int> {
+        let active = identity::enforcement_active();
 
-    if e != 0 {
-        return e;
-    }
-    // SAFETY: the context, handles, the nonce and scheme, and room for
-    // the certification and signature.
-    let ret = unsafe {
-        Esys_NV_Certify(
-            t.esys,
-            ak.handle,
-            nv,
-            nv,
-            t.session,
-            ESYS_TR_PASSWORD,
-            ESYS_TR_NONE,
-            &qual,
-            &scheme,
-            DIGEST_LEN as u16,
-            0,
-            &mut info,
-            &mut sig,
-        )
-    };
-    tr_close(t, &mut nv);
-    if ret != RC_SUCCESS {
-        crate::log::err(format!("tpm: NV_Certify(0x{index:08x}): rc=0x{ret:08x}").as_bytes());
-        return if rc_is(ret, RC_NV_UNINITIALIZED) {
-            -ENODATA
-        } else {
-            -EIO
-        };
-    }
-    // SAFETY: the outputs of the successful command.
-    unsafe { attestation_take(info, sig, out) }
-}
-
-/// A credential and its protector, as an operator made them for `ak`
-/// under `ek`.
-struct Credential<'a> {
-    blob: &'a [u8],
-    secret: &'a [u8],
-}
-
-/// TPM2_ActivateCredential through the endorsement key's policy: the
-/// credential into `out`, or -EKEYREJECTED for one the TPM refuses.
-fn activate_credential(
-    t: &Tpm,
-    ak: &TpmKey,
-    ek: &TpmKey,
-    cred: &Credential<'_>,
-    out: &mut [u8],
-    out_len: &mut usize,
-) -> c_int {
-    let mut sec: Tpm2bEncryptedSecret = zeroed();
-    let mut cert_info: *mut Tpm2bDigest = ptr::null_mut();
-    let mut session = ESYS_TR_NONE;
-    let mut id: Tpm2bIdObject = zeroed();
-
-    if cred.blob.len() > id.credential.len() || cred.secret.len() > sec.secret.len() {
-        return -EINVAL;
-    }
-    id.size = cred.blob.len() as u16;
-    id.credential[..cred.blob.len()].copy_from_slice(cred.blob);
-    sec.size = cred.secret.len() as u16;
-    sec.secret[..cred.secret.len()].copy_from_slice(cred.secret);
-    let e = session_start(t, t.session_key.handle, SE_POLICY, &mut session);
-
-    if e != 0 {
-        return e;
-    }
-    // The endorsement key's policy: the hierarchy's own authorisation.
-    // SAFETY: the context and handles, the rest NULL.
-    let ret = unsafe {
-        Esys_PolicySecret(
-            t.esys,
-            ESYS_TR_RH_ENDORSEMENT,
-            session,
-            t.session,
-            ESYS_TR_NONE,
-            ESYS_TR_NONE,
-            ptr::null(),
-            ptr::null(),
-            ptr::null(),
-            0,
-            ptr::null_mut(),
-            ptr::null_mut(),
-        )
-    };
-    if ret != RC_SUCCESS {
-        crate::log::err(format!("tpm: PolicySecret(endorsement): rc=0x{ret:08x}").as_bytes());
-        session_flush(t, session);
-        return -EACCES;
-    }
-    // SAFETY: the context, handles, the credential and secret, and room
-    // for what it protects.
-    let ret = unsafe {
-        Esys_ActivateCredential(
-            t.esys,
-            ak.handle,
-            ek.handle,
-            t.session,
-            session,
-            ESYS_TR_NONE,
-            &id,
-            &sec,
-            &mut cert_info,
-        )
-    };
-    session_flush(t, session);
-    if ret != RC_SUCCESS {
-        crate::log::err(format!("tpm: ActivateCredential: rc=0x{ret:08x}").as_bytes());
-        return if ret & 0xFFFF_0000 == 0 {
-            -EKEYREJECTED
-        } else {
-            -EIO
-        };
-    }
-    // SAFETY: the credential ESYS gave on success, freed once.
-    unsafe {
-        let c = &*cert_info;
-        let size = usize::from(c.size);
-
-        if size > out.len() {
-            Esys_Free(cert_info.cast());
-            return -E2BIG;
+        if active < 0 {
+            crate::log::err(
+                format!("tpm: cannot determine enforcement state: {}", text(active)).as_bytes(),
+            );
+            return Err(active);
         }
-        out[..size].copy_from_slice(&c.buffer[..size]);
-        *out_len = size;
-        Esys_Free(cert_info.cast());
+        library_logging_off()?;
+        let conf = tcti().inspect_err(|&e| {
+            if !quiet && e == -EACCES {
+                crate::log::err(b"tpm: authenticated runtime requires a device TCTI");
+            } else if !quiet {
+                crate::log::err(
+                    format!("tpm: the TCTI is longer than {} bytes", TCTI_MAX - 1).as_bytes(),
+                );
+            }
+        })?;
+        let tcti = Tcti::load(&conf).map_err(|ret| {
+            if !quiet {
+                crate::log::err(
+                    &[
+                        &b"tpm: TctiLdr_Initialize("[..],
+                        conf.to_bytes(),
+                        b"): rc=0x",
+                        format!("{ret:08x}").as_bytes(),
+                    ]
+                    .concat(),
+                );
+            }
+            -EIO
+        })?;
+        let mut context = ptr::null_mut();
+        // SAFETY: room for the context, over the TCTI, which the Esys made
+        // of both keeps until it has finalized the context.
+        let ret = unsafe { Esys_Initialize(&mut context, tcti.0, ptr::null_mut()) };
+
+        if ret != RC_SUCCESS {
+            if !quiet {
+                crate::log::err(format!("tpm: Esys_Initialize: rc=0x{ret:08x}").as_bytes());
+            }
+            return Err(-EIO);
+        }
+        let mut tpm = Tpm {
+            esys: Esys {
+                context,
+                _tcti: tcti,
+            },
+            session: ESYS_TR_NONE,
+            session_key: ESYS_TR_NONE,
+            ek_name: [0; NAME_LEN],
+            writer: None,
+        };
+
+        tpm.session_setup(active != 0)?;
+        Ok(tpm)
     }
-    0
-}
 
-/// The whole of an NV index, in chunks the TPM takes, into `out`.
-fn nv_read_all(t: &Tpm, index: u32, out: &mut [u8], len: &mut usize) -> c_int {
-    let mut public: *mut Tpm2bNvPublic = ptr::null_mut();
-    let mut nv = 0;
-    let e = nv_handle(t, index, &mut nv);
-
-    if e != 0 {
-        return e;
+    fn context(&self) -> *mut EsysContext {
+        self.esys.context
     }
-    // SAFETY: the context, handles and room for the public area.
-    let ret = unsafe {
-        Esys_NV_ReadPublic(
-            t.esys,
-            nv,
-            t.session,
-            ESYS_TR_NONE,
-            ESYS_TR_NONE,
-            &mut public,
-            ptr::null_mut(),
-        )
-    };
 
-    if ret != RC_SUCCESS {
-        tr_close(t, &mut nv);
-        return -EIO;
+    /// Flushes `handle`, a key or session of the connection, unless it is
+    /// ESYS_TR_NONE.
+    fn flush(&self, handle: EsysTr) {
+        if handle != ESYS_TR_NONE {
+            // SAFETY: the context and its handle.
+            unsafe { Esys_FlushContext(self.context(), handle) };
+        }
     }
-    // SAFETY: the public area ESYS gave on success, freed once.
-    let total = unsafe {
-        let total = usize::from((*public).nvPublic.dataSize);
 
-        Esys_Free(public.cast());
-        total
-    };
-    if total > out.len() {
-        tr_close(t, &mut nv);
-        return -E2BIG;
+    /// The session key: the ECC endorsement key, which once enforcement
+    /// is active must be the one init froze in the identity.
+    fn session_setup(&mut self, active: bool) -> Result<(), c_int> {
+        let mut id = Identity::zeroed();
+
+        if active {
+            let ret = identity::read(&mut id);
+
+            if ret != 0 {
+                crate::log::err(
+                    format!("tpm: frozen identity unreadable: {}", text(ret)).as_bytes(),
+                );
+                return Err(ret);
+            }
+            if id.ek_name[0] != 0 || u16::from(id.ek_name[1]) != ALG_SHA256 {
+                crate::log::err(b"tpm: no frozen session key; trusted reboot required");
+                return Err(-EACCES);
+            }
+        }
+        let (key, public) = self.ek_create(false)?.into_raw();
+
+        self.session_key = key;
+        self.ek_name = public.name;
+        if active && self.ek_name != id.ek_name {
+            crate::log::err(b"tpm: not the TPM init bound (session key name differs)");
+            return Err(-EACCES);
+        }
+        self.session = self.start_session(SE_HMAC)?;
+        Ok(())
     }
-    let mut off = 0;
 
-    while off < total {
-        let mut data: *mut Tpm2bMaxNvBuffer = ptr::null_mut();
-        let want = (total - off).min(NV_READ_CHUNK);
-        // SAFETY: the context, handles and room for the data.
+    /// Starts a salted session bound to the session key: an audit HMAC
+    /// session for commands without an authorization handle, or a policy
+    /// session.
+    fn start_session(&self, ty: u8) -> Result<EsysTr, c_int> {
+        let sym = sym_def_null();
+        let mut attrs = SESSION_CONTINUESESSION;
+        let mut session = ESYS_TR_NONE;
+
+        if ty == SE_HMAC {
+            attrs |= SESSION_AUDIT;
+        }
+        // SAFETY: the context, handles, a template and room for the
+        // session.
+        let mut ret = unsafe {
+            Esys_StartAuthSession(
+                self.context(),
+                self.session_key,
+                ESYS_TR_NONE,
+                ESYS_TR_NONE,
+                ESYS_TR_NONE,
+                ESYS_TR_NONE,
+                ptr::null(),
+                ty,
+                &sym,
+                ALG_SHA256,
+                &mut session,
+            )
+        };
+        if ret == RC_SUCCESS {
+            // SAFETY: the context and the session it started.
+            ret = unsafe { Esys_TRSess_SetAttributes(self.context(), session, attrs, 0xff) };
+        }
+        if ret != RC_SUCCESS {
+            crate::log::err(format!("tpm: start salted session: rc=0x{ret:08x}").as_bytes());
+            self.flush(session);
+            return Err(-EIO);
+        }
+        Ok(session)
+    }
+
+    /// A salted policy session, flushed when it goes.
+    pub(crate) fn start_policy_session(&self) -> Result<Handle<'_>, c_int> {
+        let handle = self.start_session(SE_POLICY)?;
+
+        Ok(Handle { tpm: self, handle })
+    }
+
+    /// The name of the endorsement key that salts the sessions.
+    pub(crate) fn ek_name(&self) -> &[u8; NAME_LEN] {
+        &self.ek_name
+    }
+
+    /// The NV writer a register write is authorized by: -EACCES for a
+    /// modulus whose top bit is clear, which is none.
+    pub(crate) fn set_writer(
+        &mut self,
+        seed: &[u8; DIGEST_LEN],
+        public: &[u8; NV_RSA_BYTES],
+    ) -> Result<(), c_int> {
+        if public[0] & 0x80 == 0 {
+            crate::log::err(b"tpm: NV writer identity is required");
+            return Err(-EACCES);
+        }
+        let writer = self.writer.insert(Box::new(Writer {
+            seed: [0; DIGEST_LEN],
+            public: [0; NV_RSA_BYTES],
+        }));
+
+        writer.seed.copy_from_slice(seed);
+        writer.public.copy_from_slice(public);
+        Ok(())
+    }
+
+    pub(crate) fn pcr_read(&self, pcr: u32) -> Result<[u8; DIGEST_LEN], c_int> {
+        let mut values = EsysOut::<DigestList>::new();
+        let mut counter = 0u32;
+
+        if pcr >= 24 {
+            return Err(-EINVAL);
+        }
+        let sel = pcr_selection(1 << pcr);
+        // SAFETY: the context, handles, the selection and room for the
+        // results.
         let ret = unsafe {
-            Esys_NV_Read(
-                t.esys,
-                nv,
-                nv,
-                t.session,
+            Esys_PCR_Read(
+                self.context(),
+                self.session,
                 ESYS_TR_NONE,
                 ESYS_TR_NONE,
-                want as u16,
-                off as u16,
-                &mut data,
+                &sel,
+                &mut counter,
+                ptr::null_mut(),
+                values.room(),
             )
         };
         if ret != RC_SUCCESS {
-            tr_close(t, &mut nv);
-            return -EIO;
+            crate::log::err(format!("tpm: PCR_Read({pcr}): rc=0x{ret:08x}").as_bytes());
+            return Err(-EIO);
         }
-        // SAFETY: the data ESYS gave on success, freed once.
-        let got = unsafe {
-            let d = &*data;
-            let size = usize::from(d.size);
+        match values.get() {
+            Some(v) if v.count == 1 && usize::from(v.digests[0].size) == DIGEST_LEN => {
+                let mut value = [0u8; DIGEST_LEN];
 
-            if size == 0 || size > want {
-                Esys_Free(data.cast());
-                None
-            } else {
-                out[off..off + size].copy_from_slice(&d.buffer[..size]);
-                Esys_Free(data.cast());
-                Some(size)
+                value.copy_from_slice(&v.digests[0].buffer[..DIGEST_LEN]);
+                Ok(value)
             }
+            _ => {
+                crate::log::err(format!("tpm: PCR {pcr} has no SHA-256 bank").as_bytes());
+                Err(-ENOENT)
+            }
+        }
+    }
+
+    pub(crate) fn pcr_extend(&self, pcr: u32, digest: &[u8; DIGEST_LEN]) -> Result<(), c_int> {
+        let mut dv = DigestValues::zeroed();
+
+        dv.count = 1;
+        if pcr >= 24 {
+            return Err(-EINVAL);
+        }
+        dv.digests[0].hashAlg = ALG_SHA256;
+        dv.digests[0].digest.sha256 = *digest;
+        // SAFETY: the context, handles and the digests.
+        let ret = unsafe {
+            Esys_PCR_Extend(
+                self.context(),
+                ESYS_TR_PCR0 + pcr,
+                self.session,
+                ESYS_TR_NONE,
+                ESYS_TR_NONE,
+                &dv,
+            )
         };
-        let Some(size) = got else {
-            tr_close(t, &mut nv);
-            return -EIO;
+
+        if ret != RC_SUCCESS {
+            crate::log::err(format!("tpm: PCR_Extend({pcr}): rc=0x{ret:08x}").as_bytes());
+            return Err(-EIO);
+        }
+        Ok(())
+    }
+
+    /// The TPM's clock: its reset and restart counts.
+    fn clock(&self) -> Result<(u32, u32), c_int> {
+        let mut info = EsysOut::<TimeInfo>::new();
+        // SAFETY: the context, handles and room for the time.
+        let ret = unsafe {
+            Esys_ReadClock(
+                self.context(),
+                self.session,
+                ESYS_TR_NONE,
+                ESYS_TR_NONE,
+                info.room(),
+            )
         };
-        off += size;
-    }
-    tr_close(t, &mut nv);
-    *len = total;
-    0
-}
 
-/// The endorsement key's certificate from its TCG NV index, the ECC one
-/// first, `*rsa` telling which; -ENOENT for none.
-fn ek_certificate(t: &Tpm, out: &mut [u8], len: &mut usize, rsa: &mut bool) -> c_int {
-    *rsa = false;
-    let mut e = nv_read_all(t, EK_CERT_NV_ECC, out, len);
-
-    if e == -ENOENT {
-        e = nv_read_all(t, EK_CERT_NV_RSA, out, len);
-        *rsa = e == 0;
-    }
-    e
-}
-
-/// For Rust callers.
-pub(crate) use capi::{
-    tpm_activate_credential, tpm_ak_create, tpm_boot_identity, tpm_close, tpm_ek_certificate,
-    tpm_ek_create, tpm_ek_name, tpm_key_flush, tpm_nv_certify, tpm_nv_define, tpm_nv_extend,
-    tpm_nv_extend_first, tpm_nv_info, tpm_nv_read, tpm_nv_set_writer, tpm_nv_undefine, tpm_open,
-    tpm_open_quiet, tpm_pcr_extend, tpm_pcr_read, tpm_quote, tpm_reset_count, tpm_writer_create,
-};
-
-mod capi {
-    use core::ffi::{c_int, c_void};
-
-    use super::{
-        Branches, Credential, DIGEST_LEN, NAME_LEN, NV_RSA_BYTES, Tpm, TpmAttestation, TpmKey,
-        TpmNvInfo,
-    };
-    use crate::errno::{EACCES, EINVAL};
-    use crate::ffi;
-    use crate::sys::tss2::ESYS_TR_NONE;
-
-    /// A fixed-size array at `p`.
-    ///
-    /// # Safety
-    ///
-    /// `p` points to `N` readable bytes.
-    unsafe fn arr<'a, const N: usize>(p: *const u8) -> &'a [u8; N] {
-        // SAFETY: the caller's N bytes.
-        unsafe { &*p.cast::<[u8; N]>() }
-    }
-
-    /// Room for a fixed-size array at `p`.
-    ///
-    /// # Safety
-    ///
-    /// `p` points to `N` writable bytes.
-    unsafe fn arr_mut<'a, const N: usize>(p: *mut u8) -> &'a mut [u8; N] {
-        // SAFETY: the caller's N bytes.
-        unsafe { &mut *p.cast::<[u8; N]>() }
-    }
-
-    /// # Safety
-    ///
-    /// `out` is room for a pointer.
-    pub unsafe extern "C" fn tpm_open(out: *mut *mut Tpm) -> c_int {
-        // SAFETY: the caller passes room.
-        unsafe { super::open_tpm(out, false) }
-    }
-
-    /// # Safety
-    ///
-    /// `out` is room for a pointer.
-    pub unsafe extern "C" fn tpm_open_quiet(out: *mut *mut Tpm) -> c_int {
-        // SAFETY: the caller passes room.
-        unsafe { super::open_tpm(out, true) }
-    }
-
-    /// # Safety
-    ///
-    /// `t` is NULL or a connection tpm_open() gave.
-    pub unsafe extern "C" fn tpm_close(t: *mut Tpm) {
-        // SAFETY: the caller passes a connection.
-        unsafe { super::close(t) }
-    }
-
-    /// # Safety
-    ///
-    /// `t` is a connection, and `out` room for a name.
-    pub unsafe extern "C" fn tpm_ek_name(t: *mut Tpm, out: *mut u8) {
-        // SAFETY: the caller passes a connection and room.
-        unsafe { *arr_mut::<NAME_LEN>(out) = (*t).session_key.name };
-    }
-
-    /// # Safety
-    ///
-    /// `t` is NULL or a connection, and `seed` and `public` NULL or a
-    /// seed and a modulus.
-    pub unsafe extern "C" fn tpm_nv_set_writer(
-        t: *mut Tpm,
-        seed: *const u8,
-        public: *const u8,
-    ) -> c_int {
-        // SAFETY: the modulus's first byte, once its pointer is not NULL.
-        let top = unsafe { public.as_ref() }.copied().unwrap_or(0);
-
-        if t.is_null() || seed.is_null() || public.is_null() || top & 0x80 == 0 {
-            crate::log::err(b"tpm: NV writer identity is required");
-            return -EACCES;
+        if ret != RC_SUCCESS {
+            crate::log::err(format!("tpm: ReadClock: rc=0x{ret:08x}").as_bytes());
+            return Err(-EIO);
         }
-        // SAFETY: the caller's connection, seed and modulus.
-        unsafe {
-            let t = &mut *t;
+        let c = &info.get().ok_or(-EPROTO)?.clockInfo;
 
-            t.writer_seed = *arr::<DIGEST_LEN>(seed);
-            t.writer_public = *arr::<NV_RSA_BYTES>(public);
-            t.writer_set = true;
-        }
-        0
+        Ok((c.resetCount, c.restartCount))
     }
 
-    /// # Safety
-    ///
-    /// `t` is a connection, and `out` room for a digest.
-    pub unsafe extern "C" fn tpm_pcr_read(t: *mut Tpm, pcr: u32, out: *mut u8) -> c_int {
-        // SAFETY: the caller passes a connection and room.
-        unsafe { super::pcr_read(&*t, pcr, arr_mut(out)) }
+    /// The TPM's reset count.
+    pub(crate) fn reset_count(&self) -> Result<u32, c_int> {
+        self.clock().map(|(reset, _)| reset)
     }
 
-    /// # Safety
-    ///
-    /// `t` is a connection, and `digest` a digest.
-    pub unsafe extern "C" fn tpm_pcr_extend(t: *mut Tpm, pcr: u32, digest: *const u8) -> c_int {
-        // SAFETY: the caller passes a connection and a digest.
-        unsafe { super::pcr_extend(&*t, pcr, arr(digest)) }
+    /// The TPM's reset and restart counts, which name this boot.
+    pub(crate) fn boot_identity(&self) -> Result<(u32, u32), c_int> {
+        self.clock()
     }
 
-    /// # Safety
-    ///
-    /// `t` is a connection, and `out` room for a count.
-    pub unsafe extern "C" fn tpm_reset_count(t: *mut Tpm, out: *mut u32) -> c_int {
-        // SAFETY: the caller passes a connection and room.
-        match super::read_clock(unsafe { &*t }) {
-            Ok((reset, _)) => {
-                // SAFETY: as above.
-                unsafe { *out = reset };
-                0
-            }
-            Err(e) => e,
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `t`, `reset` and `restart` are NULL or a connection and room for
-    /// two counts.
-    pub unsafe extern "C" fn tpm_boot_identity(
-        t: *mut Tpm,
-        reset: *mut u32,
-        restart: *mut u32,
-    ) -> c_int {
-        if t.is_null() || reset.is_null() || restart.is_null() {
-            return -EINVAL;
-        }
-        // SAFETY: the caller passes a connection and room.
-        match super::read_clock(unsafe { &*t }) {
-            Ok((r, s)) => {
-                // SAFETY: as above.
-                unsafe {
-                    *reset = r;
-                    *restart = s;
-                }
-                0
-            }
-            Err(e) => e,
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `t` is a connection, and `info` room for the info.
-    pub unsafe extern "C" fn tpm_nv_info(t: *mut Tpm, index: u32, info: *mut TpmNvInfo) -> c_int {
-        // SAFETY: the caller passes a connection and room.
-        unsafe { super::nv_info(&*t, index, &mut *info) }
-    }
-
-    /// # Safety
-    ///
-    /// `t` is a connection, `policy` a digest, and `owner_auth` holds
-    /// `owner_auth_len` bytes.
-    pub unsafe extern "C" fn tpm_nv_define(
-        t: *mut Tpm,
-        index: u32,
-        policy: *const u8,
-        owner_auth: *const c_void,
-        owner_auth_len: usize,
-    ) -> c_int {
-        // SAFETY: the caller passes a connection, a digest and the
-        // password.
-        unsafe {
-            super::nv_define(
-                &*t,
+    /// The ESYS handle of the NV index: -ENOENT, quiet, for one not
+    /// defined, or -EIO.
+    fn nv_index(&self, index: u32) -> Result<NvIndex<'_>, c_int> {
+        let mut handle = ESYS_TR_NONE;
+        // SAFETY: the context, an index, handles and room for the handle.
+        let ret = unsafe {
+            Esys_TR_FromTPMPublic(
+                self.context(),
                 index,
-                arr(policy),
-                ffi::slice(owner_auth.cast(), owner_auth_len),
+                self.session,
+                ESYS_TR_NONE,
+                ESYS_TR_NONE,
+                &mut handle,
             )
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `t` is a connection, and `owner_auth` holds `owner_auth_len`
-    /// bytes.
-    pub unsafe extern "C" fn tpm_nv_undefine(
-        t: *mut Tpm,
-        index: u32,
-        owner_auth: *const c_void,
-        owner_auth_len: usize,
-    ) -> c_int {
-        // SAFETY: the caller passes a connection and the password.
-        unsafe { super::nv_undefine(&*t, index, ffi::slice(owner_auth.cast(), owner_auth_len)) }
-    }
-
-    /// # Safety
-    ///
-    /// `t` is a connection, and `out` room for a digest.
-    pub unsafe extern "C" fn tpm_nv_read(t: *mut Tpm, index: u32, out: *mut u8) -> c_int {
-        // SAFETY: the caller passes a connection and room.
-        unsafe { super::nv_read(&*t, index, arr_mut(out)) }
-    }
-
-    /// # Safety
-    ///
-    /// `t` is a connection, and the rest are digests.
-    pub unsafe extern "C" fn tpm_nv_extend_first(
-        t: *mut Tpm,
-        index: u32,
-        pcr_mask: u32,
-        branch_written: *const u8,
-        branch_init: *const u8,
-        event: *const u8,
-    ) -> c_int {
-        // SAFETY: the caller passes a connection and digests.
-        unsafe {
-            let branches = Branches {
-                written: arr(branch_written),
-                init: arr(branch_init),
-            };
-
-            super::nv_extend_through(&*t, true, index, pcr_mask, &branches, arr(event))
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `t` is a connection, and the rest are digests.
-    pub unsafe extern "C" fn tpm_nv_extend(
-        t: *mut Tpm,
-        index: u32,
-        branch_written: *const u8,
-        branch_init: *const u8,
-        event: *const u8,
-    ) -> c_int {
-        // SAFETY: the caller passes a connection and digests.
-        unsafe {
-            let branches = Branches {
-                written: arr(branch_written),
-                init: arr(branch_init),
-            };
-
-            super::nv_extend_through(&*t, false, index, 0, &branches, arr(event))
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `t` is a connection, and `ak` room for a key.
-    pub unsafe extern "C" fn tpm_ak_create(t: *mut Tpm, ak: *mut TpmKey) -> c_int {
-        // SAFETY: the caller passes a connection and room.
-        unsafe { super::ak_create(&*t, &mut *ak) }
-    }
-
-    /// # Safety
-    ///
-    /// `t` is a connection, and `ek` room for a key.
-    pub unsafe extern "C" fn tpm_ek_create(t: *mut Tpm, rsa: bool, ek: *mut TpmKey) -> c_int {
-        // SAFETY: the caller passes a connection and room.
-        unsafe { super::ek_create(&*t, rsa, &mut *ek) }
-    }
-
-    /// # Safety
-    ///
-    /// `t` is a connection, `ak` and `ek` keys, `blob` and `secret` hold
-    /// their lengths' bytes, and `out` is room for `cap`.
-    pub unsafe extern "C" fn tpm_activate_credential(
-        t: *mut Tpm,
-        ak: *const TpmKey,
-        ek: *const TpmKey,
-        blob: *const u8,
-        blob_len: usize,
-        secret: *const u8,
-        secret_len: usize,
-        out: *mut u8,
-        cap: usize,
-        out_len: *mut usize,
-    ) -> c_int {
-        // SAFETY: the caller passes a connection, keys, the bytes and
-        // room.
-        unsafe {
-            let cred = Credential {
-                blob: ffi::slice(blob, blob_len),
-                secret: ffi::slice(secret, secret_len),
-            };
-
-            super::activate_credential(
-                &*t,
-                &*ak,
-                &*ek,
-                &cred,
-                ffi::bytes_mut(out, cap),
-                &mut *out_len,
-            )
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `key` is a key, and `t` a connection when the key holds a handle:
-    /// as the C did, an empty key is flushed without one, so a caller's
-    /// cleanup may pass a connection it already closed.
-    pub unsafe extern "C" fn tpm_key_flush(t: *mut Tpm, key: *mut TpmKey) {
-        // SAFETY: the caller passes a key.
-        let key = unsafe { &mut *key };
-        let esys = if key.handle != ESYS_TR_NONE && key.handle != 0 {
-            // SAFETY: a key with a handle comes with its connection.
-            unsafe { (*t).esys }
-        } else {
-            core::ptr::null_mut()
         };
-        // SAFETY: the connection of a key with a handle, else NULL for a
-        // key with none.
-        unsafe { super::key_flush(esys, key) };
-    }
 
-    /// # Safety
-    ///
-    /// `t` is a connection, `ak` a key, `nonce` holds `nonce_len` bytes,
-    /// and `out` is room for an attestation.
-    pub unsafe extern "C" fn tpm_quote(
-        t: *mut Tpm,
-        ak: *const TpmKey,
-        nonce: *const u8,
-        nonce_len: usize,
-        pcr_mask: u32,
-        out: *mut TpmAttestation,
-    ) -> c_int {
-        // SAFETY: the caller passes a connection, a key, the nonce and
-        // room.
-        unsafe { super::quote(&*t, &*ak, nonce, nonce_len, pcr_mask, &mut *out) }
-    }
-
-    /// # Safety
-    ///
-    /// `t` is a connection, `ak` a key, `nonce` holds `nonce_len` bytes,
-    /// and `out` is room for an attestation.
-    pub unsafe extern "C" fn tpm_nv_certify(
-        t: *mut Tpm,
-        ak: *const TpmKey,
-        index: u32,
-        nonce: *const u8,
-        nonce_len: usize,
-        out: *mut TpmAttestation,
-    ) -> c_int {
-        // SAFETY: the caller passes a connection, a key, the nonce and
-        // room.
-        unsafe { super::nv_certify(&*t, &*ak, index, nonce, nonce_len, &mut *out) }
-    }
-
-    /// # Safety
-    ///
-    /// `t` is a connection, `out` room for `cap` bytes, and `len` and
-    /// `rsa` room for a length and a flag.
-    pub unsafe extern "C" fn tpm_ek_certificate(
-        t: *mut Tpm,
-        out: *mut u8,
-        cap: usize,
-        len: *mut usize,
-        rsa: *mut bool,
-    ) -> c_int {
-        // SAFETY: the caller passes a connection and room.
-        unsafe { super::ek_certificate(&*t, ffi::bytes_mut(out, cap), &mut *len, &mut *rsa) }
-    }
-
-    /// # Safety
-    ///
-    /// `t` is a connection, `seed` a seed, and `public` room for a
-    /// modulus.
-    pub unsafe extern "C" fn tpm_writer_create(
-        t: *mut Tpm,
-        seed: *const u8,
-        public: *mut u8,
-    ) -> c_int {
-        let mut key = ESYS_TR_NONE;
-
-        // SAFETY: the caller passes a connection, a seed and room.
-        unsafe {
-            let t = &*t;
-            let e = super::writer_primary(t, arr(seed), None, arr_mut(public), &mut key);
-
-            super::session_flush(t, key);
-            e
+        if rc_is(ret, RC_HANDLE) {
+            return Err(-ENOENT); // quiet: undefined is normal
         }
+        if ret != RC_SUCCESS {
+            crate::log::err(
+                format!("tpm: TR_FromTPMPublic(0x{index:08x}): rc=0x{ret:08x}").as_bytes(),
+            );
+            return Err(-EIO);
+        }
+        Ok(NvIndex { tpm: self, handle })
+    }
+
+    /// The NV index's state, `defined` false for one there is not.
+    pub(crate) fn nv_info(&self, index: u32) -> Result<NvInfo, c_int> {
+        let mut public = EsysOut::<Tpm2bNvPublic>::new();
+        let mut name = EsysOut::<Tpm2bName>::new();
+        let nv = match self.nv_index(index) {
+            Err(e) if e == -ENOENT => return Ok(NvInfo::UNDEFINED),
+            nv => nv?,
+        };
+        // SAFETY: the context, the index's handle, handles and room for
+        // its public area and name.
+        let ret = unsafe {
+            Esys_NV_ReadPublic(
+                self.context(),
+                nv.handle,
+                self.session,
+                ESYS_TR_NONE,
+                ESYS_TR_NONE,
+                public.room(),
+                name.room(),
+            )
+        };
+
+        drop(nv);
+        if ret != RC_SUCCESS {
+            crate::log::err(
+                format!("tpm: NV_ReadPublic(0x{index:08x}): rc=0x{ret:08x}").as_bytes(),
+            );
+            return Err(-EIO);
+        }
+        let (Some(public), Some(name)) = (public.get(), name.get()) else {
+            return Err(-EPROTO);
+        };
+        let p = &public.nvPublic;
+        let mut info = NvInfo {
+            defined: true,
+            written: p.attributes & NV_WRITTEN != 0,
+            ..NvInfo::UNDEFINED
+        };
+
+        if usize::from(p.authPolicy.size) == DIGEST_LEN {
+            info.policy
+                .copy_from_slice(&p.authPolicy.buffer[..DIGEST_LEN]);
+        }
+        if let Some(given) = name
+            .name
+            .get(..usize::from(name.size))
+            .filter(|n| n.len() <= NAME_LEN)
+        {
+            info.name[..given.len()].copy_from_slice(given);
+            info.name_len = given.len();
+        }
+        Ok(info)
+    }
+
+    /// The owner hierarchy's password `auth` for the commands made while
+    /// what this returns lives.
+    fn owner_auth(&self, auth: &[u8]) -> Result<OwnerAuth<'_>, c_int> {
+        let mut owner = digest2b(auth)?;
+        // SAFETY: the context, a handle and the password, which ESYS
+        // copies.
+        let ret = unsafe { Esys_TR_SetAuth(self.context(), ESYS_TR_RH_OWNER, &owner) };
+
+        scrub(&mut owner.buffer);
+        if ret != RC_SUCCESS {
+            crate::log::err(format!("tpm: TR_SetAuth(owner): rc=0x{ret:08x}").as_bytes());
+            return Err(-EIO);
+        }
+        Ok(OwnerAuth(self))
+    }
+
+    pub(crate) fn nv_define(
+        &self,
+        index: u32,
+        policy: &[u8; DIGEST_LEN],
+        owner_auth: &[u8],
+    ) -> Result<(), c_int> {
+        let mut public = Tpm2bNvPublic::zeroed();
+        let nv_auth = Tpm2bDigest::zeroed();
+        let mut nv = ESYS_TR_NONE;
+        let auth = self.owner_auth(owner_auth)?;
+
+        public.nvPublic.nvIndex = index;
+        public.nvPublic.nameAlg = ALG_SHA256;
+        public.nvPublic.attributes = REGISTER_ATTRS;
+        public.nvPublic.authPolicy = digest2b(policy)?;
+        public.nvPublic.dataSize = DIGEST_LEN as u16;
+        // SAFETY: the context, handles, the index's password and public
+        // area, and room for its handle.
+        let ret = unsafe {
+            Esys_NV_DefineSpace(
+                self.context(),
+                ESYS_TR_RH_OWNER,
+                self.session,
+                ESYS_TR_NONE,
+                ESYS_TR_NONE,
+                &nv_auth,
+                &public,
+                &mut nv,
+            )
+        };
+        drop(auth);
+        if ret != RC_SUCCESS {
+            return Err(owner_auth_error(c"NV_DefineSpace", index, ret));
+        }
+        drop(NvIndex {
+            tpm: self,
+            handle: nv,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn nv_undefine(&self, index: u32, owner_auth: &[u8]) -> Result<(), c_int> {
+        let nv = self.nv_index(index)?;
+        let auth = self.owner_auth(owner_auth)?;
+        // SAFETY: the context and handles.
+        let ret = unsafe {
+            Esys_NV_UndefineSpace(
+                self.context(),
+                ESYS_TR_RH_OWNER,
+                nv.handle,
+                self.session,
+                ESYS_TR_NONE,
+                ESYS_TR_NONE,
+            )
+        };
+
+        drop(auth);
+        if ret != RC_SUCCESS {
+            drop(nv);
+            return Err(owner_auth_error(c"NV_UndefineSpace", index, ret));
+        }
+        // ESYS released the index's handle with the index.
+        core::mem::forget(nv);
+        Ok(())
+    }
+
+    pub(crate) fn nv_read(&self, index: u32) -> Result<[u8; DIGEST_LEN], c_int> {
+        let mut data = EsysOut::<Tpm2bMaxNvBuffer>::new();
+        let nv = self.nv_index(index)?;
+        // SAFETY: the context, handles and room for the data.
+        let ret = unsafe {
+            Esys_NV_Read(
+                self.context(),
+                nv.handle,
+                nv.handle,
+                self.session,
+                ESYS_TR_NONE,
+                ESYS_TR_NONE,
+                DIGEST_LEN as u16,
+                0,
+                data.room(),
+            )
+        };
+        drop(nv);
+        if rc_is(ret, RC_NV_UNINITIALIZED) {
+            return Err(-ENODATA); // quiet: nothing written this boot
+        }
+        if ret != RC_SUCCESS {
+            crate::log::err(format!("tpm: NV_Read(0x{index:08x}): rc=0x{ret:08x}").as_bytes());
+            return Err(-EIO);
+        }
+        match data.get() {
+            Some(d) if usize::from(d.size) == DIGEST_LEN => {
+                let mut value = [0u8; DIGEST_LEN];
+
+                value.copy_from_slice(&d.buffer[..DIGEST_LEN]);
+                Ok(value)
+            }
+            d => {
+                let size = d.map_or(0, |d| d.size);
+
+                crate::log::err(
+                    format!("tpm: NV_Read returned {size} bytes, expected {DIGEST_LEN}").as_bytes(),
+                );
+                Err(-EIO)
+            }
+        }
+    }
+
+    /// The command hash of the NV_Extend of `event` to the index named
+    /// `name`, the TPM's nonce of `session`, and their digest, which the
+    /// NV writer signs.
+    pub(crate) fn writer_prepare(
+        &self,
+        session: &Handle<'_>,
+        name: &[u8; NAME_LEN],
+        event: &[u8; DIGEST_LEN],
+    ) -> Result<WriterAuthorization, c_int> {
+        let mut tpm_nonce = EsysOut::<Tpm2bDigest>::new();
+        let mut cphash = [0u8; DIGEST_LEN];
+        let e = nv_extend_cphash(name, event, &mut cphash);
+
+        if e != 0 {
+            crate::log::err(format!("tpm: compute NV_Extend command hash: {}", text(e)).as_bytes());
+            return Err(e);
+        }
+        // SAFETY: the context, the session and room for its nonce.
+        let ret =
+            unsafe { Esys_TRSess_GetNonceTPM(self.context(), session.handle, tpm_nonce.room()) };
+        let Some(&nonce) = tpm_nonce.get().filter(|_| ret == RC_SUCCESS) else {
+            crate::log::err(format!("tpm: NV writer PolicySigned: rc=0x{ret:08x}").as_bytes());
+            return Err(-EACCES);
+        };
+        let mut authorization = WriterAuthorization {
+            nonce,
+            cphash: digest2b(&cphash)?,
+            digest: [0; DIGEST_LEN],
+        };
+        let e = match nonce.buffer.get(..usize::from(nonce.size)) {
+            Some(nonce) => writer_auth_hash(nonce, &cphash, &mut authorization.digest),
+            None => -EINVAL,
+        };
+
+        if e != 0 {
+            crate::log::err(
+                format!("tpm: compute NV writer authorization: {}", text(e)).as_bytes(),
+            );
+            return Err(e);
+        }
+        Ok(authorization)
+    }
+
+    /// The NV writer: an RSA primary under the owner hierarchy whose
+    /// unique field the salt `seed` fills. The salt varies the key each
+    /// boot, the owner seed reproduces it after a reset, and the frozen
+    /// modulus `expected` refuses one made under another owner seed. The
+    /// key, loaded until it goes, and its modulus.
+    pub(crate) fn writer_primary(
+        &self,
+        seed: &[u8; DIGEST_LEN],
+        expected: Option<&[u8; NV_RSA_BYTES]>,
+    ) -> Result<(Handle<'_>, [u8; NV_RSA_BYTES]), c_int> {
+        let creation_pcr = PcrSelectionList::zeroed();
+        let sensitive = Tpm2bSensitiveCreate::zeroed();
+        let mut out_pub = EsysOut::<Tpm2bPublic>::new();
+        let mut in_pub = Tpm2bPublic::zeroed();
+        let outside = Tpm2bData::zeroed();
+        let mut handle = ESYS_TR_NONE;
+        let p = &mut in_pub.publicArea;
+        let mut rsa = Tpm2bPublicKeyRsa::zeroed();
+
+        p.type_ = ALG_RSA;
+        p.nameAlg = ALG_SHA256;
+        p.objectAttributes = WRITER_ATTRS;
+        p.parameters.rsaDetail = RsaParms {
+            symmetric: sym_def(ALG_NULL, 0, 0),
+            scheme: rsa_scheme(ALG_RSASSA, ALG_SHA256),
+            keyBits: 3072,
+            exponent: 65537,
+        };
+        rsa.size = DIGEST_LEN as u16;
+        rsa.buffer[..DIGEST_LEN].copy_from_slice(seed);
+        p.unique.rsa = rsa;
+        let auth = self.config_owner_auth()?;
+        // SAFETY: the context, handles, the templates, and room for the
+        // handle and public area.
+        let ret = unsafe {
+            Esys_CreatePrimary(
+                self.context(),
+                ESYS_TR_RH_OWNER,
+                self.session,
+                ESYS_TR_NONE,
+                ESYS_TR_NONE,
+                &sensitive,
+                &in_pub,
+                &outside,
+                &creation_pcr,
+                &mut handle,
+                out_pub.room(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        drop(auth);
+        if ret != RC_SUCCESS {
+            crate::log::err(format!("tpm: CreatePrimary(NV writer): rc=0x{ret:08x}").as_bytes());
+            return Err(if rc_is_auth_failure(ret) {
+                -EACCES
+            } else {
+                -EIO
+            });
+        }
+        let key = Handle { tpm: self, handle };
+
+        match self.writer_public(&out_pub, &key, expected) {
+            Ok(public) => Ok((key, public)),
+            Err(e) => {
+                crate::log::err(b"tpm: NV writer public key differs from the expected key");
+                Err(e)
+            }
+        }
+    }
+
+    /// The owner hierarchy's password of the configuration, set until
+    /// what this returns goes.
+    fn config_owner_auth(&self) -> Result<OwnerAuth<'_>, c_int> {
+        let mut cfg = Scrubbed::new();
+        let e = config::load(&mut cfg);
+        let auth = if e == 0 {
+            let c = &*cfg;
+
+            match c.tpm_owner_auth.get(..c.tpm_owner_auth_len) {
+                Some(auth) => self.owner_auth(auth),
+                None => Err(-EINVAL),
+            }
+        } else {
+            Err(e)
+        };
+
+        cfg.scrub();
+        auth
+    }
+
+    /// The modulus of the writer `key` the TPM made, if it is the key
+    /// shirudo asks for and, when given, the `expected` one.
+    fn writer_public(
+        &self,
+        out_pub: &EsysOut<Tpm2bPublic>,
+        key: &Handle<'_>,
+        expected: Option<&[u8; NV_RSA_BYTES]>,
+    ) -> Result<[u8; NV_RSA_BYTES], c_int> {
+        let mut area = [0u8; NV_RSA_PUBLIC_AREA_LEN];
+        let mut computed = [0u8; NAME_LEN];
+        let mut public = [0u8; NV_RSA_BYTES];
+        let p = &out_pub.get().ok_or(-EPROTO)?.publicArea;
+        // SAFETY: the RSA parameters, integers of which any bits are
+        // values, as the C read them whatever the type.
+        let r = unsafe { &p.parameters.rsaDetail };
+        // SAFETY: the modulus, likewise.
+        let n = unsafe { &p.unique.rsa };
+        let bad = p.type_ != ALG_RSA
+            || p.nameAlg != ALG_SHA256
+            || p.objectAttributes != WRITER_ATTRS
+            || p.authPolicy.size != 0
+            || r.symmetric.algorithm != ALG_NULL
+            || r.scheme.scheme != ALG_RSASSA
+            // SAFETY: every scheme of a key holds its hash first.
+            || unsafe { r.scheme.details.anySig.hashAlg } != ALG_SHA256
+            || r.keyBits != 3072
+            || r.exponent != 65537
+            || usize::from(n.size) != NV_RSA_BYTES;
+
+        if bad {
+            return Err(-EPROTO);
+        }
+        public.copy_from_slice(&n.buffer[..NV_RSA_BYTES]);
+        if expected.is_some_and(|x| *x != public) {
+            return Err(-EKEYREJECTED);
+        }
+        writer_public(&public, &mut area);
+        let e = object_name(&area, &mut computed);
+
+        if e != 0 {
+            return Err(e);
+        }
+        if self.object_name(key.handle) != Some(computed) {
+            return Err(-EPROTO);
+        }
+        Ok(public)
+    }
+
+    /// The name ESYS holds for the object `handle`, if it is a SHA-256
+    /// name.
+    fn object_name(&self, handle: EsysTr) -> Option<[u8; NAME_LEN]> {
+        let mut name = EsysOut::<Tpm2bName>::new();
+        // SAFETY: the context, the object and room for its name.
+        let ret = unsafe { Esys_TR_GetName(self.context(), handle, name.room()) };
+        let given = name.get().filter(|_| ret == RC_SUCCESS)?;
+
+        given.name.get(..usize::from(given.size))?.try_into().ok()
+    }
+
+    /// Creates the NV writer of salt `seed` and flushes it: its modulus.
+    pub(crate) fn writer_create(
+        &self,
+        seed: &[u8; DIGEST_LEN],
+    ) -> Result<[u8; NV_RSA_BYTES], c_int> {
+        self.writer_primary(seed, None).map(|(_, public)| public)
+    }
+
+    /// The NV writer's RSASSA signature over `hash`.
+    fn writer_sign(
+        &self,
+        key: &Handle<'_>,
+        hash: &[u8; DIGEST_LEN],
+    ) -> Result<[u8; NV_RSA_BYTES], c_int> {
+        let scheme = sig_scheme(ALG_RSASSA, ALG_SHA256);
+        let mut signature = EsysOut::<Signature>::new();
+        let mut validation = TkHashcheck::zeroed();
+        let digest = digest2b(hash)?;
+
+        validation.tag = ST_HASHCHECK;
+        validation.hierarchy = RH_NULL;
+        // SAFETY: the context, handles, the digest, scheme and ticket, and
+        // room for the signature.
+        let ret = unsafe {
+            Esys_Sign(
+                self.context(),
+                key.handle,
+                self.session,
+                ESYS_TR_NONE,
+                ESYS_TR_NONE,
+                &digest,
+                &scheme,
+                &validation,
+                signature.room(),
+            )
+        };
+        if ret != RC_SUCCESS {
+            crate::log::err(format!("tpm: Sign(NV writer): rc=0x{ret:08x}").as_bytes());
+            return Err(-EACCES);
+        }
+        let s = signature
+            .get()
+            .filter(|s| s.sigAlg == ALG_RSASSA)
+            .ok_or(-EPROTO)?;
+        // SAFETY: the RSASSA variant, which the algorithm says the
+        // signature holds.
+        let rsassa = unsafe { &s.signature.rsassa };
+
+        if rsassa.hash != ALG_SHA256 || usize::from(rsassa.sig.size) != NV_RSA_BYTES {
+            return Err(-EPROTO);
+        }
+        let mut out = [0u8; NV_RSA_BYTES];
+
+        out.copy_from_slice(&rsassa.sig.buffer[..NV_RSA_BYTES]);
+        Ok(out)
+    }
+
+    /// TPM2_PolicySigned in `session` with the NV writer `key`'s signature
+    /// over the authorization: the TPM's code.
+    pub(crate) fn writer_authorize(
+        &self,
+        key: &Handle<'_>,
+        session: &Handle<'_>,
+        authorization: &WriterAuthorization,
+        signature: &[u8; NV_RSA_BYTES],
+    ) -> Rc {
+        let mut timeout = EsysOut::<Tpm2bDigest>::new();
+        let mut ticket = EsysOut::<TkAuth>::new();
+        let mut policy_ref = Tpm2bDigest::zeroed();
+        let mut sig = Signature::zeroed();
+        let mut rsa = Tpm2bPublicKeyRsa::zeroed();
+
+        policy_ref.size = NV_POLICY_REF.len() as u16;
+        policy_ref.buffer[..NV_POLICY_REF.len()].copy_from_slice(NV_POLICY_REF);
+        rsa.size = NV_RSA_BYTES as u16;
+        rsa.buffer[..NV_RSA_BYTES].copy_from_slice(signature);
+        sig.sigAlg = ALG_RSASSA;
+        sig.signature.rsassa = SignatureRsa {
+            hash: ALG_SHA256,
+            sig: rsa,
+        };
+        // SAFETY: the context, handles, the authorization's nonce and
+        // command hash, the reference and signature, and room for the
+        // outputs.
+        unsafe {
+            Esys_PolicySigned(
+                self.context(),
+                key.handle,
+                session.handle,
+                ESYS_TR_NONE,
+                ESYS_TR_NONE,
+                ESYS_TR_NONE,
+                &authorization.nonce,
+                &authorization.cphash,
+                &policy_ref,
+                0,
+                &sig,
+                timeout.room(),
+                ticket.room(),
+            )
+        }
+    }
+
+    /// The policy session's PolicySigned by the NV writer over the exact
+    /// NV_Extend of `event` to `index`.
+    fn policy_writer_signed(
+        &self,
+        session: &Handle<'_>,
+        index: u32,
+        event: &[u8; DIGEST_LEN],
+    ) -> Result<(), c_int> {
+        let Some(writer) = self.writer.as_deref() else {
+            return Err(-EKEYREJECTED);
+        };
+        let nv = self.nv_info(index)?;
+        let name = match <[u8; NAME_LEN]>::try_from(nv.name()) {
+            Ok(name) if nv.defined => name,
+            _ => {
+                crate::log::err(b"tpm: NV writer requires a defined register");
+                return Err(-ENODEV);
+            }
+        };
+        let authorization = self.writer_prepare(session, &name, event)?;
+        let (key, _) = self.writer_primary(&writer.seed, Some(&writer.public))?;
+        let mut signature = self.writer_sign(&key, &authorization.digest);
+        let authorized = signature.as_ref().map_err(|&e| e).and_then(|signature| {
+            let ret = self.writer_authorize(&key, session, &authorization, signature);
+
+            if ret != RC_SUCCESS {
+                crate::log::err(format!("tpm: NV writer PolicySigned: rc=0x{ret:08x}").as_bytes());
+                return Err(-EACCES);
+            }
+            Ok(())
+        });
+
+        drop(key);
+        if let Ok(signature) = &mut signature {
+            scrub(signature);
+        }
+        authorized
+    }
+
+    /// PolicyCommandCode(NV_Extend) closes the session, whose digest must
+    /// be the one computed in software: a drift is caught here.
+    pub(crate) fn policy_session_finish(
+        &self,
+        session: &Handle<'_>,
+        expected: &[u8; DIGEST_LEN],
+    ) -> Result<(), c_int> {
+        let mut digest = EsysOut::<Tpm2bDigest>::new();
+        // SAFETY: the context, handles and a command code.
+        let ret = unsafe {
+            Esys_PolicyCommandCode(
+                self.context(),
+                session.handle,
+                ESYS_TR_NONE,
+                ESYS_TR_NONE,
+                ESYS_TR_NONE,
+                CC_NV_EXTEND,
+            )
+        };
+
+        if ret != RC_SUCCESS {
+            crate::log::err(format!("tpm: register policy assertion: rc=0x{ret:08x}").as_bytes());
+            return Err(-EACCES);
+        }
+        // SAFETY: the context, handles and room for the digest.
+        let ret = unsafe {
+            Esys_PolicyGetDigest(
+                self.context(),
+                session.handle,
+                self.session,
+                ESYS_TR_NONE,
+                ESYS_TR_NONE,
+                digest.room(),
+            )
+        };
+        let differs = ret != RC_SUCCESS
+            || digest.get().is_none_or(|d| {
+                usize::from(d.size) != DIGEST_LEN || d.buffer[..DIGEST_LEN] != *expected
+            });
+
+        if differs {
+            crate::log::err(
+                format!(
+                    "tpm: register policy digest does not match the computed policy (rc=0x{ret:08x})"
+                )
+                .as_bytes(),
+            );
+            return Err(-EPROTO);
+        }
+        Ok(())
+    }
+
+    /// The assertions of the branch `init` names: PolicyNvWritten, then
+    /// PolicyPCR of the live PCRs of `pcr_mask` for the init branch, then
+    /// PolicyOR of both branches. The TPM's code.
+    fn policy_branch(
+        &self,
+        session: &Handle<'_>,
+        init: bool,
+        pcr_mask: u32,
+        branches: &Branches<'_>,
+    ) -> Rc {
+        let mut list = DigestList::zeroed();
+        // SAFETY: the context, the session and handles.
+        let mut ret = unsafe {
+            Esys_PolicyNvWritten(
+                self.context(),
+                session.handle,
+                ESYS_TR_NONE,
+                ESYS_TR_NONE,
+                ESYS_TR_NONE,
+                if init { NO } else { YES },
+            )
+        };
+        if ret == RC_SUCCESS && init {
+            let live = Tpm2bDigest::zeroed();
+            let sel = pcr_selection(pcr_mask);
+
+            // SAFETY: the context, the session, handles, an empty digest
+            // and the selection.
+            ret = unsafe {
+                Esys_PolicyPCR(
+                    self.context(),
+                    session.handle,
+                    ESYS_TR_NONE,
+                    ESYS_TR_NONE,
+                    ESYS_TR_NONE,
+                    &live,
+                    &sel,
+                )
+            };
+        }
+        if ret != RC_SUCCESS {
+            return ret;
+        }
+        list.count = 2;
+        list.digests[0].size = DIGEST_LEN as u16;
+        list.digests[0].buffer[..DIGEST_LEN].copy_from_slice(branches.written);
+        list.digests[1].size = DIGEST_LEN as u16;
+        list.digests[1].buffer[..DIGEST_LEN].copy_from_slice(branches.init);
+        // SAFETY: the context, the session, handles and the branches.
+        unsafe {
+            Esys_PolicyOR(
+                self.context(),
+                session.handle,
+                ESYS_TR_NONE,
+                ESYS_TR_NONE,
+                ESYS_TR_NONE,
+                &list,
+            )
+        }
+    }
+
+    /// Walks one branch of the register's write policy in a real session,
+    /// the first write of a boot the init branch, and authorizes the exact
+    /// NV_Extend with the TPM-held writer after PolicyOR. The session's
+    /// digest is checked against the software policy to catch a drift.
+    fn register_session(
+        &self,
+        init: bool,
+        index: u32,
+        event: &[u8; DIGEST_LEN],
+        pcr_mask: u32,
+        branches: &Branches<'_>,
+    ) -> Result<Handle<'_>, c_int> {
+        let mut expected = [0u8; DIGEST_LEN];
+        let Some(writer) = self.writer.as_deref() else {
+            crate::log::err(b"tpm: register policy requires the NV writer public key");
+            return Err(-EACCES);
+        };
+        let session = self.start_policy_session()?;
+        let ret = self.policy_branch(&session, init, pcr_mask, branches);
+
+        if ret == RC_SUCCESS {
+            self.policy_writer_signed(&session, index, event)?;
+        }
+        if ret != RC_SUCCESS {
+            if rc_is(ret, RC_VALUE) && init {
+                crate::log::err(b"tpm: the anchoring PCR moved; the register can only be initialised in the boot window");
+            } else {
+                crate::log::err(
+                    format!("tpm: register policy assertion: rc=0x{ret:08x}").as_bytes(),
+                );
+            }
+            return Err(-EACCES);
+        }
+        let e = register_policy_final(
+            branches.written,
+            branches.init,
+            &writer.public,
+            &mut expected,
+        );
+
+        if e != 0 {
+            crate::log::err(format!("tpm: compute signed register policy: {}", text(e)).as_bytes());
+            return Err(e);
+        }
+        self.policy_session_finish(&session, &expected)?;
+        Ok(session)
+    }
+
+    fn nv_extend_session(
+        &self,
+        index: u32,
+        session: &Handle<'_>,
+        event: &[u8; DIGEST_LEN],
+    ) -> Result<(), c_int> {
+        let mut data = Tpm2bMaxNvBuffer::zeroed();
+
+        data.size = DIGEST_LEN as u16;
+        let nv = self.nv_index(index)?;
+
+        data.buffer[..DIGEST_LEN].copy_from_slice(event);
+        // SAFETY: the context, handles and the data.
+        let ret = unsafe {
+            Esys_NV_Extend(
+                self.context(),
+                nv.handle,
+                nv.handle,
+                session.handle,
+                ESYS_TR_NONE,
+                ESYS_TR_NONE,
+                &data,
+            )
+        };
+
+        drop(nv);
+        if ret != RC_SUCCESS {
+            crate::log::err(format!("tpm: NV_Extend(0x{index:08x}): rc=0x{ret:08x}").as_bytes());
+            return Err(if rc_is_auth_failure(ret) {
+                -EACCES
+            } else {
+                -EIO
+            });
+        }
+        Ok(())
+    }
+
+    /// One extend of the register, through the policy branch `init`
+    /// names.
+    fn nv_extend_through(
+        &self,
+        init: bool,
+        index: u32,
+        pcr_mask: u32,
+        branches: &Branches<'_>,
+        event: &[u8; DIGEST_LEN],
+    ) -> Result<(), c_int> {
+        let session = self.register_session(init, index, event, pcr_mask, branches)?;
+        let extended = self.nv_extend_session(index, &session, event);
+
+        drop(session);
+        extended
+    }
+
+    /// The register's first extend of this boot, through the init branch
+    /// bound to the PCRs of `pcr_mask`.
+    pub(crate) fn nv_extend_first(
+        &self,
+        index: u32,
+        pcr_mask: u32,
+        branches: &Branches<'_>,
+        event: &[u8; DIGEST_LEN],
+    ) -> Result<(), c_int> {
+        self.nv_extend_through(true, index, pcr_mask, branches, event)
+    }
+
+    /// An extend of the register through the written branch.
+    pub(crate) fn nv_extend(
+        &self,
+        index: u32,
+        branches: &Branches<'_>,
+        event: &[u8; DIGEST_LEN],
+    ) -> Result<(), c_int> {
+        self.nv_extend_through(false, index, 0, branches, event)
+    }
+
+    /// A primary under the endorsement hierarchy, with its marshalled
+    /// public area and its name, the latter checked against the area so
+    /// that what the evidence carries is what the TPM named.
+    fn endorsement_primary(&self, in_pub: &Tpm2bPublic, what: &CStr) -> Result<Key<'_>, c_int> {
+        let sensitive = Tpm2bSensitiveCreate::zeroed();
+        let creation_pcr = PcrSelectionList::zeroed();
+        let mut out_pub = EsysOut::<Tpm2bPublic>::new();
+        let outside = Tpm2bData::zeroed();
+        let mut computed = [0u8; NAME_LEN];
+        let mut handle = ESYS_TR_NONE;
+        let auth = if self.session == ESYS_TR_NONE {
+            ESYS_TR_PASSWORD
+        } else {
+            self.session
+        };
+        // SAFETY: the context, handles, the templates and room for the
+        // handle and public area.
+        let ret = unsafe {
+            Esys_CreatePrimary(
+                self.context(),
+                ESYS_TR_RH_ENDORSEMENT,
+                auth,
+                ESYS_TR_NONE,
+                ESYS_TR_NONE,
+                &sensitive,
+                in_pub,
+                &outside,
+                &creation_pcr,
+                &mut handle,
+                out_pub.room(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        if ret != RC_SUCCESS {
+            let what = what.to_bytes();
+            let rc = format!("{ret:08x}");
+            let message: &[&[u8]] = if rc_is_auth_failure(ret) {
+                &[
+                    b"tpm: CreatePrimary(",
+                    what,
+                    b"): the endorsement hierarchy has an auth value (rc=0x",
+                    rc.as_bytes(),
+                    b")",
+                ]
+            } else {
+                &[b"tpm: CreatePrimary(", what, b"): rc=0x", rc.as_bytes()]
+            };
+
+            crate::log::err(&message.concat());
+            return Err(-EIO);
+        }
+        let handle = Handle { tpm: self, handle };
+        let area = public_from_tss(&out_pub.get().ok_or(-EPROTO)?.publicArea)?;
+
+        drop(out_pub);
+        let e = object_name(&area, &mut computed);
+
+        if e != 0 {
+            return Err(e);
+        }
+        if self.object_name(handle.handle) != Some(computed) {
+            crate::log::err(
+                &[
+                    &b"tpm: "[..],
+                    what.to_bytes(),
+                    b" name does not match its marshalled public area",
+                ]
+                .concat(),
+            );
+            return Err(-EPROTO);
+        }
+        Ok(Key {
+            handle,
+            public: KeyPublic {
+                area,
+                name: computed,
+            },
+        })
+    }
+
+    /// The attestation key: a restricted ECDSA P-256 primary under the
+    /// endorsement hierarchy.
+    pub(crate) fn ak_create(&self) -> Result<Key<'_>, c_int> {
+        let mut in_pub = Tpm2bPublic::zeroed();
+        let p = &mut in_pub.publicArea;
+
+        p.type_ = ALG_ECC;
+        p.nameAlg = ALG_SHA256;
+        p.objectAttributes = OBJECT_FIXEDTPM
+            | OBJECT_FIXEDPARENT
+            | OBJECT_SENSITIVEDATAORIGIN
+            | OBJECT_USERWITHAUTH
+            | OBJECT_RESTRICTED
+            | OBJECT_SIGN_ENCRYPT;
+        p.parameters.eccDetail = EccParms {
+            symmetric: sym_def(ALG_NULL, 0, 0),
+            scheme: ecc_scheme(ALG_ECDSA, ALG_SHA256),
+            curveID: ECC_NIST_P256,
+            kdf: kdf_null(),
+        };
+        self.endorsement_primary(&in_pub, c"attestation key")
+    }
+
+    /// The TCG endorsement key, RSA 2048 or ECC P-256.
+    pub(crate) fn ek_create(&self, rsa: bool) -> Result<Key<'_>, c_int> {
+        let mut in_pub = Tpm2bPublic::zeroed();
+        let p = &mut in_pub.publicArea;
+        let symmetric = sym_def(ALG_AES, 128, ALG_CFB);
+
+        p.type_ = if rsa { ALG_RSA } else { ALG_ECC };
+        p.nameAlg = ALG_SHA256;
+        p.objectAttributes = EK_ATTRS;
+        p.authPolicy = digest2b(&EK_POLICY)?;
+        if rsa {
+            let mut unique = Tpm2bPublicKeyRsa::zeroed();
+
+            unique.size = 256;
+            p.parameters.rsaDetail = RsaParms {
+                symmetric,
+                scheme: rsa_scheme(ALG_NULL, 0),
+                keyBits: 2048,
+                exponent: 0,
+            };
+            p.unique.rsa = unique;
+        } else {
+            let mut empty = Tpm2bEccParameter::zeroed();
+
+            empty.size = 32;
+            p.parameters.eccDetail = EccParms {
+                symmetric,
+                scheme: ecc_scheme(ALG_NULL, 0),
+                curveID: ECC_NIST_P256,
+                kdf: kdf_null(),
+            };
+            p.unique.ecc = EccPoint { x: empty, y: empty };
+        }
+        self.endorsement_primary(&in_pub, c"endorsement key")
+    }
+
+    pub(crate) fn quote(
+        &self,
+        ak: &Key<'_>,
+        nonce: &[u8],
+        pcr_mask: u32,
+    ) -> Result<Attestation, c_int> {
+        let scheme = sig_scheme(ALG_NULL, 0);
+        let mut quoted = EsysOut::<Tpm2bAttest>::new();
+        let mut sig = EsysOut::<Signature>::new();
+        let qual = qualifying(nonce)?;
+        let sel = pcr_selection(pcr_mask);
+        // SAFETY: the context, handles, the nonce, scheme and selection,
+        // and room for the quote and signature.
+        let ret = unsafe {
+            Esys_Quote(
+                self.context(),
+                ak.handle.handle,
+                self.session,
+                ESYS_TR_NONE,
+                ESYS_TR_NONE,
+                &qual,
+                &scheme,
+                &sel,
+                quoted.room(),
+                sig.room(),
+            )
+        };
+        if ret != RC_SUCCESS {
+            crate::log::err(format!("tpm: Quote: rc=0x{ret:08x}").as_bytes());
+            return Err(-EIO);
+        }
+        attestation(&quoted, &sig)
+    }
+
+    pub(crate) fn nv_certify(
+        &self,
+        ak: &Key<'_>,
+        index: u32,
+        nonce: &[u8],
+    ) -> Result<Attestation, c_int> {
+        let scheme = sig_scheme(ALG_NULL, 0);
+        let mut info = EsysOut::<Tpm2bAttest>::new();
+        let mut sig = EsysOut::<Signature>::new();
+        let qual = qualifying(nonce)?;
+        let nv = self.nv_index(index)?;
+        // SAFETY: the context, handles, the nonce and scheme, and room for
+        // the certification and signature.
+        let ret = unsafe {
+            Esys_NV_Certify(
+                self.context(),
+                ak.handle.handle,
+                nv.handle,
+                nv.handle,
+                self.session,
+                ESYS_TR_PASSWORD,
+                ESYS_TR_NONE,
+                &qual,
+                &scheme,
+                DIGEST_LEN as u16,
+                0,
+                info.room(),
+                sig.room(),
+            )
+        };
+        drop(nv);
+        if ret != RC_SUCCESS {
+            crate::log::err(format!("tpm: NV_Certify(0x{index:08x}): rc=0x{ret:08x}").as_bytes());
+            return Err(if rc_is(ret, RC_NV_UNINITIALIZED) {
+                -ENODATA
+            } else {
+                -EIO
+            });
+        }
+        attestation(&info, &sig)
+    }
+
+    /// TPM2_ActivateCredential through the endorsement key's policy: the
+    /// credential an operator made for `ak` under `ek` with `blob` and
+    /// `secret`, or -EKEYREJECTED for one the TPM refuses.
+    pub(crate) fn activate_credential(
+        &self,
+        ak: &Key<'_>,
+        ek: &Key<'_>,
+        blob: &[u8],
+        secret: &[u8],
+    ) -> Result<Vec<u8>, c_int> {
+        let mut sec = Tpm2bEncryptedSecret::zeroed();
+        let mut cert_info = EsysOut::<Tpm2bDigest>::new();
+        let mut id = Tpm2bIdObject::zeroed();
+        let (Some(id_room), Some(sec_room), Ok(id_size), Ok(sec_size)) = (
+            id.credential.get_mut(..blob.len()),
+            sec.secret.get_mut(..secret.len()),
+            u16::try_from(blob.len()),
+            u16::try_from(secret.len()),
+        ) else {
+            return Err(-EINVAL);
+        };
+
+        id_room.copy_from_slice(blob);
+        id.size = id_size;
+        sec_room.copy_from_slice(secret);
+        sec.size = sec_size;
+        let session = self.start_policy_session()?;
+        // The endorsement key's policy: the hierarchy's own authorisation.
+        // SAFETY: the context and handles, the rest NULL.
+        let ret = unsafe {
+            Esys_PolicySecret(
+                self.context(),
+                ESYS_TR_RH_ENDORSEMENT,
+                session.handle,
+                self.session,
+                ESYS_TR_NONE,
+                ESYS_TR_NONE,
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                0,
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        if ret != RC_SUCCESS {
+            crate::log::err(format!("tpm: PolicySecret(endorsement): rc=0x{ret:08x}").as_bytes());
+            return Err(-EACCES);
+        }
+        // SAFETY: the context, handles, the credential and secret, and room
+        // for what it protects.
+        let ret = unsafe {
+            Esys_ActivateCredential(
+                self.context(),
+                ak.handle.handle,
+                ek.handle.handle,
+                self.session,
+                session.handle,
+                ESYS_TR_NONE,
+                &id,
+                &sec,
+                cert_info.room(),
+            )
+        };
+        drop(session);
+        if ret != RC_SUCCESS {
+            crate::log::err(format!("tpm: ActivateCredential: rc=0x{ret:08x}").as_bytes());
+            return Err(if ret & 0xFFFF_0000 == 0 {
+                -EKEYREJECTED
+            } else {
+                -EIO
+            });
+        }
+        let c = cert_info.get().ok_or(-EPROTO)?;
+
+        c.buffer
+            .get(..usize::from(c.size))
+            .map(<[u8]>::to_vec)
+            .ok_or(-E2BIG)
+    }
+
+    /// The whole of an NV index, in chunks the TPM takes: -E2BIG for one
+    /// of more than `max` bytes.
+    fn nv_read_all(&self, index: u32, max: usize) -> Result<Vec<u8>, c_int> {
+        let mut public = EsysOut::<Tpm2bNvPublic>::new();
+        let nv = self.nv_index(index)?;
+        // SAFETY: the context, handles and room for the public area.
+        let ret = unsafe {
+            Esys_NV_ReadPublic(
+                self.context(),
+                nv.handle,
+                self.session,
+                ESYS_TR_NONE,
+                ESYS_TR_NONE,
+                public.room(),
+                ptr::null_mut(),
+            )
+        };
+
+        if ret != RC_SUCCESS {
+            return Err(-EIO);
+        }
+        let total = usize::from(public.get().ok_or(-EIO)?.nvPublic.dataSize);
+
+        drop(public);
+        if total > max {
+            return Err(-E2BIG);
+        }
+        let mut out = Vec::with_capacity(total);
+
+        while out.len() < total {
+            let want = (total - out.len()).min(NV_READ_CHUNK);
+
+            self.nv_read_chunk(&nv, want, &mut out)?;
+        }
+        Ok(out)
+    }
+
+    /// Up to `want` bytes of the index `nv` from where `out` ends,
+    /// appended to it: -EIO for none.
+    fn nv_read_chunk(&self, nv: &NvIndex<'_>, want: usize, out: &mut Vec<u8>) -> Result<(), c_int> {
+        let mut data = EsysOut::<Tpm2bMaxNvBuffer>::new();
+        let (Ok(size), Ok(offset)) = (u16::try_from(want), u16::try_from(out.len())) else {
+            return Err(-EIO);
+        };
+        // SAFETY: the context, handles and room for the data.
+        let ret = unsafe {
+            Esys_NV_Read(
+                self.context(),
+                nv.handle,
+                nv.handle,
+                self.session,
+                ESYS_TR_NONE,
+                ESYS_TR_NONE,
+                size,
+                offset,
+                data.room(),
+            )
+        };
+
+        if ret != RC_SUCCESS {
+            return Err(-EIO);
+        }
+        let chunk = data
+            .get()
+            .and_then(|d| d.buffer.get(..usize::from(d.size)))
+            .filter(|c| !c.is_empty() && c.len() <= want)
+            .ok_or(-EIO)?;
+
+        out.extend_from_slice(chunk);
+        Ok(())
+    }
+
+    /// The endorsement key's certificate from its TCG NV index, the ECC
+    /// one first, and whether it is the RSA one: -ENOENT for none, -E2BIG
+    /// for one of more than `max` bytes.
+    pub(crate) fn ek_certificate(&self, max: usize) -> Result<(Vec<u8>, bool), c_int> {
+        match self.nv_read_all(EK_CERT_NV_ECC, max) {
+            Err(e) if e == -ENOENT => self.nv_read_all(EK_CERT_NV_RSA, max).map(|c| (c, true)),
+            ecc => ecc.map(|c| (c, false)),
+        }
+    }
+}
+
+#[cfg(feature = "test-helpers")]
+impl Tpm {
+    /// The ESYS context, for a test helper's own commands.
+    pub(crate) fn esys_context(&self) -> *mut EsysContext {
+        self.context()
+    }
+
+    /// The TCTI, for a test helper that stands a proxy before it.
+    pub(crate) fn tcti_context(&self) -> *mut TctiContext {
+        self.esys._tcti.0
+    }
+
+    /// The HMAC session the connection's commands go through.
+    pub(crate) fn hmac_session(&self) -> EsysTr {
+        self.session
+    }
+
+    /// The key that salts the connection's sessions replaced by `key`,
+    /// ESYS_TR_NONE for none: the key it held, which the connection
+    /// flushes when it goes only if it holds it again by then.
+    pub(crate) fn replace_salt_key(&mut self, key: EsysTr) -> EsysTr {
+        core::mem::replace(&mut self.session_key, key)
     }
 }

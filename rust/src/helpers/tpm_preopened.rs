@@ -11,23 +11,13 @@ use std::os::fd::AsRawFd;
 use super::{err, helper_main, out, perror};
 use crate::sys::tss2::CC_NV_EXTEND;
 use crate::util::eventlog::NV_INDEX;
-use crate::util::tpm::{Tpm, nv_read, tpm_close, tpm_open};
+use crate::util::tpm::Tpm;
 
 helper_main!(shirudo_helper_test_tpm_preopened, run);
 
 /// The register's value, read through a TPM connection of its own.
 fn read_register() -> Option<[u8; 32]> {
-    let mut t: *mut Tpm = core::ptr::null_mut();
-    let mut value = [0u8; 32];
-    // SAFETY: room for the connection, read through and closed once.
-    unsafe {
-        if tpm_open(&mut t) != 0 {
-            return None;
-        }
-        let ret = nv_read(&*t, NV_INDEX, &mut value);
-        tpm_close(t);
-        (ret == 0).then_some(value)
-    }
+    Tpm::open().ok()?.nv_read(NV_INDEX).ok()
 }
 
 /// An unsigned NV_Extend of the register written to `fd`: refused with

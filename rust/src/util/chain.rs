@@ -11,20 +11,17 @@ use core::ptr;
 use crate::errno::{
     E2BIG, EACCES, EEXIST, EINVAL, EIO, EKEYREJECTED, ENODEV, ENOENT, EPROTO, text,
 };
+use crate::sys::libc::scrub;
 use crate::sys::tss2::NV_WRITTEN;
 use crate::text::{cstr, strsprintf};
 use crate::util::config::{self, Scrubbed};
 use crate::util::crypto_openssl::{
-    Sha256Ctx, sha256_buffer, sha256_final, sha256_free, sha256_init, sha256_update,
+    Sha256Ctx, sha256_final, sha256_free, sha256_init, sha256_into, sha256_update,
 };
 use crate::util::eventlog::{EventlogInit, NV_INDEX, eventlog_boot_init};
 use crate::util::initrd::in_initrd;
 use crate::util::nv_writer;
-use crate::util::tpm::{
-    REGISTER_ATTRS, Tpm, TpmNvInfo, tpm_close, tpm_nv_define, tpm_nv_extend, tpm_nv_extend_first,
-    tpm_nv_info, tpm_nv_read, tpm_nv_set_writer, tpm_nv_undefine, tpm_open, tpm_open_quiet,
-    tpm_pcr_extend, tpm_pcr_read, tpm_reset_count,
-};
+use crate::util::tpm::{Branches, NvInfo, REGISTER_ATTRS, Tpm};
 use crate::util::tpm_wire::{DIGEST_LEN, NAME_LEN, NV_RSA_BYTES, tpm_nv_name, tpm_register_policy};
 use crate::util::upatch::{NAME_MAX, PAYLOAD_HASH_LEN};
 
@@ -362,85 +359,70 @@ fn register_expectation(
     }
 }
 
-fn name_equals(info: &TpmNvInfo, name: &[u8; NAME_LEN]) -> bool {
-    info.name_len == NAME_LEN && !memneq_explicit(&info.name, name)
+fn name_equals(info: &NvInfo, name: &[u8; NAME_LEN]) -> bool {
+    info.name().len() == NAME_LEN && !memneq_explicit(info.name(), name)
+}
+
+/// 0 as success, any other code as its error.
+fn zero_or(ret: c_int) -> Result<(), c_int> {
+    if ret != 0 { Err(ret) } else { Ok(()) }
 }
 
 /// The index defined afresh with `policy`, undefined first when
 /// `defined`, under the owner auth of the configuration.
-fn register_define(tpm: *mut Tpm, defined: bool, policy: &[u8; DIGEST_LEN]) -> c_int {
+fn register_define(tpm: &Tpm, defined: bool, policy: &[u8; DIGEST_LEN]) -> Result<(), c_int> {
     let mut cfg = Scrubbed::new();
 
     config::load(&mut cfg);
     let c = &*cfg;
-    let auth = c.tpm_owner_auth.as_ptr().cast::<c_void>();
+    let auth = c
+        .tpm_owner_auth
+        .get(..c.tpm_owner_auth_len)
+        .ok_or(-EINVAL)?;
 
     if defined {
-        // SAFETY: the connection and the owner auth.
-        let ret = unsafe { tpm_nv_undefine(tpm, NV_INDEX, auth, c.tpm_owner_auth_len) };
-
-        if ret != 0 {
-            return ret;
-        }
+        tpm.nv_undefine(NV_INDEX, auth)?;
     }
-    // SAFETY: the connection, the policy and the owner auth.
-    unsafe { tpm_nv_define(tpm, NV_INDEX, policy.as_ptr(), auth, c.tpm_owner_auth_len) }
+    tpm.nv_define(NV_INDEX, policy, auth)
 }
 
-/// The NV writer init froze, its modulus into `public`, set on the
-/// connection.
-fn register_writer(tpm: *mut Tpm, public: &mut [u8; NV_RSA_BYTES]) -> c_int {
+/// The NV writer init froze, set on the connection: its modulus.
+fn register_writer(tpm: &mut Tpm) -> Result<[u8; NV_RSA_BYTES], c_int> {
     let mut seed = [0u8; DIGEST_LEN];
-    let ret = nv_writer::read(&mut seed, public);
+    let mut public = [0u8; NV_RSA_BYTES];
+    let ret = nv_writer::read(&mut seed, &mut public);
+    let set = zero_or(ret).and_then(|()| tpm.set_writer(&seed, &public));
 
-    if ret != 0 {
-        return ret;
-    }
-    // SAFETY: the connection, the seed and the modulus.
-    unsafe { tpm_nv_set_writer(tpm, seed.as_ptr(), public.as_ptr()) }
+    scrub(&mut seed);
+    set.map(|()| public)
 }
 
 /// A structure of integers, bools and arrays of them, all of whose bits
 /// zeroed are a value.
 fn zeroed<T>() -> T {
-    // SAFETY: only for EventlogInit and TpmNvInfo here, which are such.
+    // SAFETY: only for EventlogInit here, which is such.
     unsafe { core::mem::zeroed() }
 }
 
 /// Bind the register to this boot and write `event` as its first event,
 /// or find the binding a run before made: chain_init().
 pub(crate) fn init(event: &[u8; DIGEST_LEN], info: &mut ChainInitInfo) -> c_int {
-    let mut tpm: *mut Tpm = ptr::null_mut();
-
     // SAFETY: the caller's structure, all of whose bits zeroed are one.
     unsafe { ptr::from_mut(info).write_bytes(0, 1) };
-    // SAFETY: where tpm_open() leaves the connection.
-    if unsafe { tpm_open(&mut tpm) } != 0 {
+    let Ok(mut tpm) = Tpm::open() else {
         return -ENODEV;
-    }
-    let ret = bind(tpm, event, info);
+    };
 
-    // SAFETY: the connection, closed once.
-    unsafe { tpm_close(tpm) };
-    ret
+    bind(&mut tpm, event, info).err().unwrap_or(0)
 }
 
 /// chain_init() on the connection `tpm`.
-fn bind(tpm: *mut Tpm, event: &[u8; DIGEST_LEN], info: &mut ChainInitInfo) -> c_int {
+fn bind(tpm: &mut Tpm, event: &[u8; DIGEST_LEN], info: &mut ChainInitInfo) -> Result<(), c_int> {
     let mut e = Expectation::new();
     let mut rec: EventlogInit = zeroed();
-    let mut nv: TpmNvInfo = zeroed();
 
-    // SAFETY: the connection and room for the count and the index.
-    let ret = unsafe { tpm_reset_count(tpm, &mut info.reset_count) };
-    if ret != 0 {
-        return ret;
-    }
-    // SAFETY: as above.
-    let ret = unsafe { tpm_nv_info(tpm, NV_INDEX, &mut nv) };
-    if ret != 0 {
-        return ret;
-    }
+    info.reset_count = tpm.reset_count()?;
+    let mut nv = tpm.nv_info(NV_INDEX)?;
 
     // A record of this boot for the TPM's reset count means init bound
     // the register already: written and of the recorded name, a re-run
@@ -461,13 +443,11 @@ fn bind(tpm: *mut Tpm, event: &[u8; DIGEST_LEN], info: &mut ChainInitInfo) -> c_
             ]
             .concat(),
         );
-        return ret;
+        return Err(ret);
     }
     let recorded = ret == 0 && (!rec.have_reset_count || rec.reset_count == info.reset_count);
     if recorded {
-        // SAFETY: the connection tpm_open() opened, open until this
-        // function closes it.
-        return rebind(unsafe { &mut *tpm }, &rec, &nv, &mut e, info);
+        return rebind(tpm, &rec, &nv, &mut e, info);
     }
     if nv.defined && nv.written {
         crate::log::warn(
@@ -478,43 +458,21 @@ fn bind(tpm: *mut Tpm, event: &[u8; DIGEST_LEN], info: &mut ChainInitInfo) -> c_
         );
     }
 
-    // SAFETY: the connection and room for the PCR values.
-    let mut ret = unsafe { tpm_pcr_read(tpm, PCR, info.pcr_before.as_mut_ptr()) };
-    if ret == 0 {
-        // SAFETY: as above.
-        ret = unsafe { tpm_pcr_read(tpm, PHASE_PCR, info.phase_before.as_mut_ptr()) };
-    }
-    if ret != 0 {
-        return ret;
-    }
+    info.pcr_before = tpm.pcr_read(PCR)?;
+    info.phase_before = tpm.pcr_read(PHASE_PCR)?;
     info.initrd = in_initrd();
-    let ret = register_writer(tpm, &mut info.writer_public);
-    if ret != 0 {
-        return ret;
-    }
-    let mut ret = register_expectation(
+    info.writer_public = register_writer(tpm)?;
+    zero_or(register_expectation(
         &info.pcr_before,
         &info.phase_before,
         &info.writer_public,
         &mut e,
-    );
-    if ret == 0 {
-        ret = anchor(&e.written, &mut info.anchor[..ANCHOR_MAX]);
-    }
-    if ret != 0 {
-        return ret;
-    }
+    ))?;
+    zero_or(anchor(&e.written, &mut info.anchor[..ANCHOR_MAX]))?;
 
     if !nv.defined || nv.written || !name_equals(&nv, &e.unwritten) {
-        let ret = register_define(tpm, nv.defined, &e.policy);
-        if ret != 0 {
-            return ret;
-        }
-        // SAFETY: the connection and the index's info.
-        let ret = unsafe { tpm_nv_info(tpm, NV_INDEX, &mut nv) };
-        if ret != 0 {
-            return ret;
-        }
+        register_define(tpm, nv.defined, &e.policy)?;
+        nv = tpm.nv_info(NV_INDEX)?;
         if !nv.defined || !name_equals(&nv, &e.unwritten) {
             crate::log::err(
                 format!(
@@ -522,46 +480,24 @@ fn bind(tpm: *mut Tpm, event: &[u8; DIGEST_LEN], info: &mut ChainInitInfo) -> c_
                 )
                 .as_bytes(),
             );
-            return -EPROTO;
+            return Err(-EPROTO);
         }
     }
 
-    // SAFETY: the connection, the branches and the event.
-    let ret = unsafe {
-        tpm_nv_extend_first(
-            tpm,
-            NV_INDEX,
-            PCR_MASK,
-            e.branch_written.as_ptr(),
-            e.branch_init.as_ptr(),
-            event.as_ptr(),
-        )
+    let branches = Branches {
+        written: &e.branch_written,
+        init: &e.branch_init,
     };
-    if ret != 0 {
-        return ret;
-    }
+    tpm.nv_extend_first(NV_INDEX, PCR_MASK, &branches, event)?;
     info.name = e.written;
     info.name_len = NAME_LEN;
-    let len = cstr(&info.anchor).len();
-    // SAFETY: the anchor's bytes and room for its digest.
-    let ret = unsafe {
-        sha256_buffer(
-            info.anchor.as_ptr().cast(),
-            len,
-            info.anchor_digest.as_mut_ptr(),
-        )
-    };
-    if ret != 0 {
-        return ret;
-    }
-    // SAFETY: the connection and the anchor's digest.
-    let ret = unsafe { tpm_pcr_extend(tpm, PCR, info.anchor_digest.as_ptr()) };
-    if ret != 0 {
+    zero_or(sha256_into(cstr(&info.anchor), &mut info.anchor_digest))?;
+    if let Err(ret) = tpm.pcr_extend(PCR, &info.anchor_digest) {
         crate::log::err(format!("tpm: register written but PCR {PCR} not anchored; the init branch stays open until reboot").as_bytes());
-        return ret;
+        return Err(ret);
     }
-    // SAFETY: the connection and room for the value.
-    unsafe { tpm_nv_read(tpm, NV_INDEX, info.value.as_mut_ptr()) }
+    info.value = tpm.nv_read(NV_INDEX)?;
+    Ok(())
 }
 
 /// The binding the record `rec` of this boot names: the register as it
@@ -569,44 +505,38 @@ fn bind(tpm: *mut Tpm, event: &[u8; DIGEST_LEN], info: &mut ChainInitInfo) -> c_
 fn rebind(
     tpm: &mut Tpm,
     rec: &EventlogInit,
-    nv: &TpmNvInfo,
+    nv: &NvInfo,
     e: &mut Expectation,
     info: &mut ChainInitInfo,
-) -> c_int {
-    let ret = register_writer(tpm, &mut info.writer_public);
-    if ret != 0 {
-        return ret;
-    }
-    let ret = register_expectation(&rec.pcr_before, &rec.phase_before, &info.writer_public, e);
-    if ret != 0 {
-        return ret;
-    }
+) -> Result<(), c_int> {
+    info.writer_public = register_writer(tpm)?;
+    zero_or(register_expectation(
+        &rec.pcr_before,
+        &rec.phase_before,
+        &info.writer_public,
+        e,
+    ))?;
     if !name_equals(nv, &e.written) {
         crate::log::err(b"tpm: recorded register has an obsolete policy; trusted reboot required");
-        return -EEXIST;
+        return Err(-EEXIST);
     }
     if memneq_explicit(&info.writer_public, &rec.writer_public) {
         crate::log::err(b"tpm: recorded NV writer differs from the guarded key");
-        return -EKEYREJECTED;
+        return Err(-EKEYREJECTED);
     }
     if nv.defined && nv.written && name_equals(nv, &rec.name) {
-        // SAFETY: the connection and room for the value.
-        let ret = unsafe { tpm_nv_read(tpm, NV_INDEX, info.value.as_mut_ptr()) };
-        if ret != 0 {
-            return ret;
-        }
-        info.name[..nv.name_len].copy_from_slice(&nv.name[..nv.name_len]);
-        info.name_len = nv.name_len;
+        let name = nv.name();
+
+        info.value = tpm.nv_read(NV_INDEX)?;
+        info.name[..name.len()].copy_from_slice(name);
+        info.name_len = name.len();
         info.pcr_before = rec.pcr_before;
         info.phase_before = rec.phase_before;
         info.anchor_digest = rec.anchor_digest;
-        let ret = anchor(&info.name, &mut info.anchor[..ANCHOR_MAX]);
-        if ret != 0 {
-            return ret;
-        }
+        zero_or(anchor(&info.name, &mut info.anchor[..ANCHOR_MAX]))?;
         info.initrd = rec.initrd;
         info.reused = true;
-        return 0;
+        return Ok(());
     }
     let state = if !nv.defined {
         c"gone"
@@ -625,7 +555,7 @@ fn rebind(
         ]
         .concat(),
     );
-    -EEXIST
+    Err(-EEXIST)
 }
 
 /// Extend this boot's register by `event` through the written branch,
@@ -634,7 +564,6 @@ pub(crate) fn extend(event: &[u8; DIGEST_LEN], out_chain: Option<&mut [u8; DIGES
     let mut e = Expectation::new();
     let mut values = [0u8; 2 * DIGEST_LEN];
     let mut rec: EventlogInit = zeroed();
-    let mut tpm: *mut Tpm = ptr::null_mut();
 
     // SAFETY: the record to fill.
     if unsafe { eventlog_boot_init(&mut rec) } != 0 {
@@ -658,112 +587,75 @@ pub(crate) fn extend(event: &[u8; DIGEST_LEN], out_chain: Option<&mut [u8; DIGES
         return ret;
     }
 
-    // SAFETY: where tpm_open() leaves the connection.
-    if unsafe { tpm_open(&mut tpm) } != 0 {
+    let Ok(mut tpm) = Tpm::open() else {
         return -ENODEV;
-    }
-    // SAFETY: the connection.
-    let ret = unsafe { extend_on(tpm, &rec, &e, event, out_chain) };
+    };
 
-    // SAFETY: the connection, closed once.
-    unsafe { tpm_close(tpm) };
-    ret
+    extend_on(&mut tpm, &rec, &e, event, out_chain)
+        .err()
+        .unwrap_or(0)
 }
 
 /// chain_extend() on the connection `tpm`, with the record `rec` and the
 /// branches and policy `e` of its binding.
-///
-/// # Safety
-///
-/// `tpm` is an open connection.
-unsafe fn extend_on(
-    tpm: *mut Tpm,
+fn extend_on(
+    tpm: &mut Tpm,
     rec: &EventlogInit,
     e: &Expectation,
     event: &[u8; DIGEST_LEN],
     out_chain: Option<&mut [u8; DIGEST_LEN]>,
-) -> c_int {
-    let mut writer_public = [0u8; NV_RSA_BYTES];
-    let mut nv: TpmNvInfo = zeroed();
-    let mut reset = 0u32;
+) -> Result<(), c_int> {
+    let nv = tpm.nv_info(NV_INDEX)?;
 
-    // SAFETY: the connection and the index's info.
-    let ret = unsafe { tpm_nv_info(tpm, NV_INDEX, &mut nv) };
-    if ret != 0 {
-        return ret;
-    }
     if !nv.defined || !nv.written {
-        return -ENODEV;
+        return Err(-ENODEV);
     }
     if !name_equals(&nv, &rec.name) {
         crate::log::err(
             format!("tpm: register 0x{NV_INDEX:08x} is not the index init recorded (recreated?)")
                 .as_bytes(),
         );
-        return -EACCES;
+        return Err(-EACCES);
     }
     if memneq_explicit(&nv.policy, &e.policy) {
         crate::log::err(b"tpm: register write policy is obsolete or substituted");
-        return -EACCES;
+        return Err(-EACCES);
     }
-    // SAFETY: the connection and room for the count.
-    let ret = unsafe { tpm_reset_count(tpm, &mut reset) };
-    if ret != 0 {
-        return ret;
-    }
+    let reset = tpm.reset_count()?;
     if !rec.have_reset_count || reset != rec.reset_count {
         crate::log::err(b"tpm: register reset differs from the init record");
-        return -EACCES;
+        return Err(-EACCES);
     }
-    let ret = register_writer(tpm, &mut writer_public);
-    if ret != 0 {
-        return ret;
-    }
+    let writer_public = register_writer(tpm)?;
     if memneq_explicit(&writer_public, &rec.writer_public) {
         crate::log::err(b"tpm: recorded NV writer differs from the guarded key");
-        return -EKEYREJECTED;
+        return Err(-EKEYREJECTED);
     }
-    // SAFETY: the connection, the branches and the event.
-    let ret = unsafe {
-        tpm_nv_extend(
-            tpm,
-            NV_INDEX,
-            e.branch_written.as_ptr(),
-            e.branch_init.as_ptr(),
-            event.as_ptr(),
-        )
+    let branches = Branches {
+        written: &e.branch_written,
+        init: &e.branch_init,
     };
-    if ret != 0 {
-        return -EIO;
+    tpm.nv_extend(NV_INDEX, &branches, event)
+        .map_err(|_| -EIO)?;
+    if let Some(out_chain) = out_chain {
+        *out_chain = tpm.nv_read(NV_INDEX).map_err(|_| -EIO)?;
     }
-    let Some(out_chain) = out_chain else {
-        return 0;
-    };
-    // SAFETY: the connection and the room for the value.
-    if unsafe { tpm_nv_read(tpm, NV_INDEX, out_chain.as_mut_ptr()) } != 0 {
-        -EIO
-    } else {
-        0
-    }
+    Ok(())
 }
 
 /// The register's value this boot into `out`.
 pub(crate) fn read(out: &mut [u8; DIGEST_LEN]) -> c_int {
-    let mut tpm: *mut Tpm = ptr::null_mut();
-
-    // SAFETY: where tpm_open() leaves the connection.
-    if unsafe { tpm_open(&mut tpm) } != 0 {
+    let Ok(tpm) = Tpm::open() else {
         return -ENODEV;
-    }
-    // SAFETY: the connection, the caller's room, and the connection
-    // closed once.
-    let ret = unsafe {
-        let ret = tpm_nv_read(tpm, NV_INDEX, out.as_mut_ptr());
-
-        tpm_close(tpm);
-        ret
     };
-    if ret != 0 { -ENODEV } else { 0 }
+
+    match tpm.nv_read(NV_INDEX) {
+        Ok(value) => {
+            *out = value;
+            0
+        }
+        Err(_) => -ENODEV,
+    }
 }
 
 /// The register as the TPM reports it, over the session init pinned.
@@ -777,108 +669,70 @@ pub(crate) struct ChainLive {
 /// TPM answers or the index is not written this reset, -EIO when a read
 /// fails.
 pub(crate) fn live() -> Result<ChainLive, c_int> {
-    let mut tpm: *mut Tpm = ptr::null_mut();
-    let mut out = ChainLive {
-        name: [0; NAME_LEN],
-        reset_count: 0,
-        value: [0; DIGEST_LEN],
+    let tpm = Tpm::open().map_err(|_| -ENODEV)?;
+    let reset_count = tpm.reset_count().map_err(|_| -EIO)?;
+    let nv = tpm.nv_info(NV_INDEX).map_err(|_| -EIO)?;
+    let name = match <[u8; NAME_LEN]>::try_from(nv.name()) {
+        Ok(name) if nv.defined && nv.written => name,
+        _ => return Err(-ENODEV),
     };
-    let mut nv: TpmNvInfo = zeroed();
+    let value = tpm.nv_read(NV_INDEX).map_err(|_| -EIO)?;
 
-    // SAFETY: where tpm_open() leaves the connection.
-    if unsafe { tpm_open(&mut tpm) } != 0 {
-        return Err(-ENODEV);
-    }
-    // SAFETY: the connection, rooms for what it reads, and the
-    // connection closed once.
-    let ret = unsafe {
-        let mut ret = if tpm_reset_count(tpm, &mut out.reset_count) != 0
-            || tpm_nv_info(tpm, NV_INDEX, &mut nv) != 0
-        {
-            -EIO
-        } else {
-            0
-        };
-        if ret == 0 && (!nv.defined || !nv.written || nv.name_len != NAME_LEN) {
-            ret = -ENODEV;
-        }
-        if ret == 0 {
-            out.name.copy_from_slice(&nv.name[..NAME_LEN]);
-            if tpm_nv_read(tpm, NV_INDEX, out.value.as_mut_ptr()) != 0 {
-                ret = -EIO;
-            }
-        }
-        tpm_close(tpm);
-        ret
-    };
-    if ret != 0 { Err(ret) } else { Ok(out) }
+    Ok(ChainLive {
+        name,
+        reset_count,
+        value,
+    })
 }
 
 /// Whether a TPM answers with the register written: chain_bound().
 pub(crate) fn bound() -> bool {
-    let mut tpm: *mut Tpm = ptr::null_mut();
-    let mut nv: TpmNvInfo = zeroed();
-
-    // SAFETY: where tpm_open_quiet() leaves the connection.
-    if unsafe { tpm_open_quiet(&mut tpm) } != 0 {
+    let Ok(tpm) = Tpm::open_quiet() else {
         return false;
-    }
-    // SAFETY: the connection, the index's info, and the connection
-    // closed once.
-    unsafe {
-        let bound = tpm_nv_info(tpm, NV_INDEX, &mut nv) == 0 && nv.defined && nv.written;
+    };
 
-        tpm_close(tpm);
-        bound
-    }
+    tpm.nv_info(NV_INDEX)
+        .is_ok_and(|nv| nv.defined && nv.written)
 }
 
 /// The register as the TPM and this boot's records show it: chain_status().
 pub(crate) fn status(st: &mut ChainStatus) -> c_int {
-    let mut tpm: *mut Tpm = ptr::null_mut();
-
     // SAFETY: the caller's structure, all of whose bits zeroed are one.
     unsafe { ptr::from_mut(st).write_bytes(0, 1) };
     // SAFETY: the record to fill.
     st.logged = unsafe { eventlog_boot_init(&mut st.init) } == 0;
     st.rebound = st.logged && st.init.records_epoch > 1;
-    // SAFETY: where tpm_open_quiet() leaves the connection.
-    if unsafe { tpm_open_quiet(&mut tpm) } != 0 {
+    let Ok(tpm) = Tpm::open_quiet() else {
         return -ENODEV;
-    }
+    };
     st.tpm = true;
-    // SAFETY: the connection tpm_open_quiet() opened, closed below.
-    let ret = status_on(unsafe { &mut *tpm }, st);
-
-    // SAFETY: the connection, closed once.
-    unsafe { tpm_close(tpm) };
-    ret
+    status_on(&tpm, st)
 }
 
 /// chain_status() on the connection `tpm`.
-fn status_on(tpm: &mut Tpm, st: &mut ChainStatus) -> c_int {
+fn status_on(tpm: &Tpm, st: &mut ChainStatus) -> c_int {
     let mut e = Expectation::new();
     let mut values = [0u8; 2 * DIGEST_LEN];
-    let mut nv: TpmNvInfo = zeroed();
-    let mut reset_count = 0u32;
+    let mut ret = 0;
+    let reset_count = match tpm.reset_count() {
+        Ok(count) => count,
+        Err(ret) => return ret,
+    };
+    let nv = match tpm.nv_info(NV_INDEX) {
+        Ok(nv) => nv,
+        Err(ret) => return ret,
+    };
+    let name = nv.name();
 
-    // SAFETY: the connection and room for the count.
-    let ret = unsafe { tpm_reset_count(tpm, &mut reset_count) };
-    if ret != 0 {
-        return ret;
-    }
-    // SAFETY: the connection and the index's info.
-    let mut ret = unsafe { tpm_nv_info(tpm, NV_INDEX, &mut nv) };
-    if ret != 0 {
-        return ret;
-    }
     st.defined = nv.defined;
     st.written = nv.written;
-    st.name[..nv.name_len].copy_from_slice(&nv.name[..nv.name_len]);
-    st.name_len = nv.name_len;
+    st.name[..name.len()].copy_from_slice(name);
+    st.name_len = name.len();
     if nv.defined && nv.written {
-        // SAFETY: the connection and room for the value.
-        ret = unsafe { tpm_nv_read(tpm, NV_INDEX, st.value.as_mut_ptr()) };
+        match tpm.nv_read(NV_INDEX) {
+            Ok(value) => st.value = value,
+            Err(err) => ret = err,
+        }
     }
     st.anchored = nv.defined
         && nv.written

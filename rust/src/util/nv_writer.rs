@@ -11,7 +11,7 @@ use crate::errno::{EINTR, EIO, EKEYREJECTED, text};
 use crate::sys::identity::Identity;
 use crate::sys::libc::{errno, getrandom, scrub};
 use crate::util::identity;
-use crate::util::tpm::{tpm_close, tpm_open, tpm_writer_create};
+use crate::util::tpm::Tpm;
 use crate::util::tpm_wire::{DIGEST_LEN, NV_RSA_BYTES};
 
 /// A fresh seed into `seed`, and the writer key the TPM creates from it,
@@ -32,20 +32,13 @@ pub(crate) fn create(seed: &mut [u8; DIGEST_LEN], public: &mut [u8; NV_RSA_BYTES
         off += got as usize;
     }
 
-    let mut t = core::ptr::null_mut();
-    // SAFETY: where tpm_open() leaves the connection.
-    let mut err = unsafe { tpm_open(&mut t) };
-
-    if err == 0 {
-        // SAFETY: the connection, the seed, and the room for a modulus.
-        err = unsafe { tpm_writer_create(t, seed.as_ptr(), public.as_mut_ptr()) };
+    match Tpm::open().and_then(|tpm| tpm.writer_create(seed)) {
+        Ok(modulus) => {
+            *public = modulus;
+            0
+        }
+        Err(err) => failed(err, seed, public),
     }
-    // SAFETY: what tpm_open() left, open or NULL.
-    unsafe { tpm_close(t) };
-    if err == 0 {
-        return 0;
-    }
-    failed(err, seed, public)
 }
 
 fn failed(err: c_int, seed: &mut [u8; DIGEST_LEN], public: &mut [u8; NV_RSA_BYTES]) -> c_int {

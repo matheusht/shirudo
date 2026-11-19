@@ -13,7 +13,6 @@
 //! maps it shares with bpf2 from bpf2.
 
 use core::ffi::{CStr, c_int};
-use core::ptr;
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::{NV_INDEX, SIG_KEYRING_BPF, cat, error, info, last_err, strerr};
@@ -37,7 +36,7 @@ use crate::util::io::kernel_dev;
 use crate::util::keyring;
 use crate::util::lskel::{Failed, Prog, Skeleton, pin};
 use crate::util::nv_writer;
-use crate::util::tpm::{Tpm, tpm_close, tpm_ek_name, tpm_open};
+use crate::util::tpm::Tpm;
 
 const BPFFS_DIR: &CStr = c"/run/shirudo/bpffs";
 const RUN_DIR: &CStr = c"/run/shirudo";
@@ -185,19 +184,13 @@ fn dm_verity_anchor(id: &mut Identity) -> c_int {
 /// connections salt their sessions with the key whose name is frozen
 /// here.
 fn record_ek_name(id: &mut Identity) -> c_int {
-    let mut tpm: *mut Tpm = ptr::null_mut();
-
-    // SAFETY: room for the TPM.
-    let ret = unsafe { tpm_open(&mut tpm) };
-    if ret != 0 {
-        return ret;
+    match Tpm::open() {
+        Ok(tpm) => {
+            id.ek_name = *tpm.ek_name();
+            0
+        }
+        Err(ret) => ret,
     }
-    // SAFETY: the TPM opened above and room for the name; then closed.
-    unsafe {
-        tpm_ek_name(tpm, id.ek_name.as_mut_ptr());
-        tpm_close(tpm);
-    }
-    0
 }
 
 /// Seeds the bootstrap task's authority, freezes the shared state but

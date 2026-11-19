@@ -54,7 +54,7 @@ use crate::util::json::JsonEmit;
 use crate::util::keyring;
 use crate::util::keys::{TrustedCert, TrustedSet, members, read_der_fd};
 use crate::util::seal;
-use crate::util::tpm::{Tpm, tpm_boot_identity, tpm_close, tpm_open, tpm_pcr_extend, tpm_pcr_read};
+use crate::util::tpm::Tpm;
 
 const RUNTIME_DIR: &CStr = c"/run/shirudo/runtime";
 const RUNTIME_CONF_PATH: &CStr = c"/run/shirudo/runtime/etc/shirudo/shirudo.conf";
@@ -105,7 +105,7 @@ struct State {
     candidate_device: DmVerity,
     bootstrap_config: Config,
     bootstrap: ImageBootstrap,
-    tpm: *mut Tpm,
+    tpm: Option<Tpm>,
     candidate_fd: Option<OwnedFd>,
     certificates: Vec<ConfigCertificate>,
     /// What current_config() refused status with.
@@ -126,7 +126,7 @@ impl State {
             bootstrap_config: unsafe { core::mem::zeroed() },
             // SAFETY: as above.
             bootstrap: unsafe { core::mem::zeroed() },
-            tpm: ptr::null_mut(),
+            tpm: None,
             candidate_fd: None,
             certificates: Vec::new(),
             config_state: 0,
@@ -818,32 +818,17 @@ static BOOT_OPS: RuntimeOps = RuntimeOps { boot: true };
 
 impl ConfigUpdateOps for RuntimeOps {
     fn boot_identity(&self) -> Result<BootIdentity, c_int> {
-        let tpm = with_state(|s| s.tpm);
-        let (mut reset, mut restart) = (0u32, 0u32);
-        // SAFETY: the TPM open_update() opened and rooms for its counts.
-        match unsafe { tpm_boot_identity(tpm, &mut reset, &mut restart) } {
-            0 => Ok(BootIdentity { reset, restart }),
-            err => Err(err),
-        }
+        let (reset, restart) = with_tpm(Tpm::boot_identity)?;
+
+        Ok(BootIdentity { reset, restart })
     }
 
     fn pcr_read(&self, pcr: u32) -> Result<[u8; 32], c_int> {
-        let tpm = with_state(|s| s.tpm);
-        let mut value = [0u8; 32];
-        // SAFETY: the TPM open_update() opened and room for a digest.
-        match unsafe { tpm_pcr_read(tpm, pcr, value.as_mut_ptr()) } {
-            0 => Ok(value),
-            err => Err(err),
-        }
+        with_tpm(|tpm| tpm.pcr_read(pcr))
     }
 
     fn pcr_extend(&self, pcr: u32, event: &[u8; 32]) -> Result<(), c_int> {
-        let tpm = with_state(|s| s.tpm);
-        // SAFETY: the TPM open_update() opened and the event's digest.
-        match unsafe { tpm_pcr_extend(tpm, pcr, event.as_ptr()) } {
-            0 => Ok(()),
-            err => Err(err),
-        }
+        with_tpm(|tpm| tpm.pcr_extend(pcr, event))
     }
 
     fn prepare(&self, target: &ConfigUpdateTarget) -> Result<(), c_int> {
@@ -879,14 +864,24 @@ impl ConfigUpdateOps for RuntimeOps {
     }
 }
 
+/// `f` on the TPM open_update() opened: -EINVAL before it has.
+fn with_tpm<R>(f: impl FnOnce(&Tpm) -> Result<R, c_int>) -> Result<R, c_int> {
+    with_state(|s| s.tpm.as_ref().map_or(Err(-EINVAL), f))
+}
+
 fn open_update() -> c_int {
     if journal_open() {
         return 0;
     }
     let mut ret = mkdir_owned(CONFIG_UPDATE_DIR);
     if ret == 0 {
-        // SAFETY: room for the TPM.
-        ret = with_state(|s| unsafe { tpm_open(&mut s.tpm) });
+        ret = match Tpm::open() {
+            Ok(tpm) => {
+                with_state(|s| s.tpm = Some(tpm));
+                0
+            }
+            Err(err) => err,
+        };
     }
     if ret == 0 {
         ret = match ConfigUpdate::open(CONFIG_UPDATE_DIR, &UPDATE_OPS, UPDATE_LOCK_WAIT_MS) {
@@ -1448,9 +1443,7 @@ pub(crate) fn leave() {
         JOURNAL.set(None);
     }
     with_state(|s| {
-        // SAFETY: the TPM open_update() opened, or null.
-        unsafe { tpm_close(s.tpm) };
-        s.tpm = ptr::null_mut();
+        s.tpm = None;
         s.certificates.clear();
         // SAFETY: the bootstrap config's bytes, wiped.
         unsafe { explicit_bzero((&raw mut s.bootstrap_config).cast(), size_of::<Config>()) };

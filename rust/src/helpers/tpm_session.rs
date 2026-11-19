@@ -28,13 +28,8 @@ use crate::sys::tss2::{ESYS_TR_NONE, Esys_Free, RC_SUCCESS, Rc, Tpm2bDigest, Tpm
 use crate::util::chain::{PCR_MASK, memneq_explicit};
 use crate::util::crypto_openssl::{hmac_sha256, sha256};
 use crate::util::identity::IDENTITY_PIN;
-use crate::util::tpm::{
-    Tpm, TpmAttestation, TpmKey, TpmNvInfo, tpm_activate_credential, tpm_ak_create,
-    tpm_boot_identity, tpm_close, tpm_ek_create, tpm_ek_name, tpm_key_flush, tpm_nv_certify,
-    tpm_nv_define, tpm_nv_extend, tpm_nv_extend_first, tpm_nv_info, tpm_nv_read, tpm_nv_set_writer,
-    tpm_nv_undefine, tpm_open, tpm_pcr_extend, tpm_pcr_read, tpm_quote, tpm_writer_create,
-};
-use crate::util::tpm_wire::{NV_RSA_BYTES, tpm_register_policy};
+use crate::util::tpm::{Branches, Key, Tpm};
+use crate::util::tpm_wire::tpm_register_policy;
 
 helper_main!(shirudo_helper_test_tpm_session, run);
 
@@ -255,6 +250,19 @@ macro_rules! check {
     };
 }
 
+/// What `$e` gave, or the line it failed at printed and Err(()).
+macro_rules! take {
+    ($e:expr) => {
+        match $e {
+            Ok(value) => value,
+            Err(_) => {
+                err(&format!("line {}: {}\n", line!(), stringify!($e)));
+                return Err(());
+            }
+        }
+    };
+}
+
 fn forge_reply_cases() -> Result<(), ()> {
     let ret = (|| {
         let mut command = [0u8; 97];
@@ -364,11 +372,12 @@ unsafe extern "C" fn receive(
 
 /// The proxy put before the TCTI of `t` for `command`.
 fn intercept(t: &Tpm, command: u32, mode: Mode) {
+    let tcti = t.tcti_context();
     // SAFETY: the connection's TCTI, whose common part is its first,
     // which the proxy alone changes while it stands before it.
-    let c = unsafe { &mut *t.tcti.cast::<tss::TSS2_TCTI_CONTEXT_COMMON_V1>() };
+    let c = unsafe { &mut *tcti.cast::<tss::TSS2_TCTI_CONTEXT_COMMON_V1>() };
     let p = proxy();
-    p.context = t.tcti.cast();
+    p.context = tcti.cast();
     p.transmit = c.transmit;
     p.receive = c.receive;
     p.command = command;
@@ -397,88 +406,72 @@ fn hit() -> bool {
 
 /// A credential made for `ak` under an EK of the kind asked for comes
 /// back through ActivateCredential, and a blob altered by a bit does not.
-fn activate(t: *mut Tpm, ak: &TpmKey, rsa: bool) -> Result<(), ()> {
+fn activate(t: &Tpm, ak: &Key<'_>, rsa: bool) -> Result<(), ()> {
     let mut credential = Tpm2bDigest::zeroed();
     credential.size = 32;
     credential.buffer[0] = 7;
     let mut secret: *mut tss::TPM2B_ENCRYPTED_SECRET = core::ptr::null_mut();
     let mut blob: *mut tss::TPM2B_ID_OBJECT = core::ptr::null_mut();
-    let mut ek = TpmKey::zeroed();
-    let mut recovered = [0u8; 32];
-    // SAFETY: the connection, its keys, and what ESYS gives, freed once.
-    let ret = unsafe {
-        (|| {
-            check!(tpm_ek_create(t, rsa, &mut ek) == 0);
-            let mut name = Tpm2bName::zeroed();
-            name.size = ak.name_len as u16;
-            name.name[..ak.name_len].copy_from_slice(&ak.name[..ak.name_len]);
-            let tr = &*t;
-            check!(
-                tss::Esys_MakeCredential(
-                    tr.esys,
-                    ek.handle,
-                    tr.session,
-                    ESYS_TR_NONE,
-                    ESYS_TR_NONE,
-                    &credential,
-                    &name,
-                    &mut blob,
-                    &mut secret
-                ) == RC_SUCCESS
-            );
-            let (b, s) = (&mut *blob, &*secret);
-            let mut length = 0usize;
-            let activate =
-                |b: &tss::TPM2B_ID_OBJECT, recovered: &mut [u8; 32], length: &mut usize| {
-                    tpm_activate_credential(
-                        t,
-                        ak,
-                        &ek,
-                        b.credential.as_ptr(),
-                        b.size.into(),
-                        s.secret.as_ptr(),
-                        s.size.into(),
-                        recovered.as_mut_ptr(),
-                        recovered.len(),
-                        length,
-                    )
-                };
-            check!(activate(b, &mut recovered, &mut length) == 0);
-            check!(
-                length == usize::from(credential.size)
-                    && !memneq_explicit(&recovered[..length], &credential.buffer[..length])
-            );
-            b.credential[usize::from(b.size) - 1] ^= 1;
-            check!(activate(b, &mut recovered, &mut length) == -EKEYREJECTED);
-            Ok(())
-        })()
-    };
-    recovered.fill(0);
-    // SAFETY: what ESYS gave, scrubbed and freed once, and the EK flushed.
+    let ret = (|| {
+        let ek = take!(t.ek_create(rsa));
+        let mut name = Tpm2bName::zeroed();
+        let ak_name = &ak.public().name;
+        name.size = ak_name.len() as u16;
+        name.name[..ak_name.len()].copy_from_slice(ak_name);
+        // SAFETY: the connection's context and session, its EK, the
+        // credential and name, and room for what ESYS gives.
+        let made = unsafe {
+            tss::Esys_MakeCredential(
+                t.esys_context(),
+                ek.raw(),
+                t.hmac_session(),
+                ESYS_TR_NONE,
+                ESYS_TR_NONE,
+                &credential,
+                &name,
+                &mut blob,
+                &mut secret,
+            )
+        };
+        check!(made == RC_SUCCESS);
+        // SAFETY: what ESYS gave on success.
+        let (b, s) = unsafe { (&mut *blob, &*secret) };
+        let activate = |b: &tss::TPM2B_ID_OBJECT| {
+            let blob = &b.credential[..usize::from(b.size)];
+            t.activate_credential(ak, &ek, blob, &s.secret[..usize::from(s.size)])
+        };
+        let recovered = take!(activate(b));
+        check!(
+            recovered.len() == usize::from(credential.size)
+                && !memneq_explicit(&recovered, &credential.buffer[..recovered.len()])
+        );
+        b.credential[usize::from(b.size) - 1] ^= 1;
+        check!(activate(b).err() == Some(-EKEYREJECTED));
+        Ok(())
+    })();
+    // SAFETY: what ESYS gave, scrubbed and freed once.
     unsafe {
         if let Some(s) = secret.as_mut() {
             core::ptr::write_bytes(s, 0, 1);
         }
         Esys_Free(secret.cast());
         Esys_Free(blob.cast());
-        tpm_key_flush(t, &mut ek);
     }
     ret
 }
 
 /// TSS2_LOG asks for traces into stdout; the client must silence its log
 /// and forget where it went before it talks to the TPM.
-fn open_silenced(t: &mut *mut Tpm) -> Result<(), ()> {
+fn open_silenced() -> Result<Tpm, ()> {
     // SAFETY: the environment, which only this thread touches.
     unsafe {
         std::env::set_var("TSS2_LOG", "all+TRACE");
         std::env::set_var("TSS2_LOGFILE", "stdout");
     }
-    // SAFETY: room for the connection.
-    check!(unsafe { tpm_open(t) } == 0);
+    let t = take!(Tpm::open());
     check!(std::env::var_os("TSS2_LOG").is_some_and(|v| v == "all+none"));
     check!(std::env::var_os("TSS2_LOGFILE").is_none());
-    Ok(())
+    Ok(t)
 }
 
 /// What the setup leaves the case: the register's policy branches, the
@@ -490,199 +483,177 @@ struct Keys {
     before: [u8; 32],
 }
 
-fn setup(t: &mut *mut Tpm, ak: &mut TpmKey, keys: &mut Keys, defined: &mut bool) -> Result<(), ()> {
+impl Keys {
+    fn branches(&self) -> Branches<'_> {
+        Branches {
+            written: &self.branch_written,
+            init: &self.branch_init,
+        }
+    }
+}
+
+fn setup(t: &mut Option<Tpm>, keys: &mut Keys, defined: &mut bool) -> Result<(), ()> {
     let mut values = [0u8; 64];
-    let mut public = [0u8; NV_RSA_BYTES];
     let mut policy = [0u8; 32];
     let mut seed = [0u8; 32];
     seed[0] = 1;
-    let (mut reset, mut restart) = (0u32, 0u32);
-    let mut attestation = TpmAttestation::zeroed();
-    // SAFETY: a structure of numbers, for which zeros are a value.
-    let mut info: TpmNvInfo = unsafe { core::mem::zeroed() };
 
-    open_silenced(t)?;
-    // SAFETY: the fake, on this thread, and the connection.
-    unsafe {
-        let fake = FAKE.get();
-        tpm_ek_name(*t, fake.identity.ek_name.as_mut_ptr());
-        check!(fake.identity.ek_name[1] == ALG_SHA256);
-        tpm_close(*t);
-    }
-    *t = core::ptr::null_mut();
+    let first = open_silenced()?;
+    // SAFETY: the fake, on this thread.
+    let fake = unsafe { FAKE.get() };
+    fake.identity.ek_name = *first.ek_name();
+    check!(fake.identity.ek_name[1] == ALG_SHA256);
+    drop(first);
     ENFORCING.store(1, Ordering::Relaxed);
-    open_silenced(t)?;
-    let t = *t;
-    // SAFETY: the connection, its keys and rooms, all of this helper.
-    unsafe {
-        check!(tpm_boot_identity(t, &mut reset, &mut restart) == 0);
-        check!(tpm_pcr_read(t, 9, values.as_mut_ptr()) == 0);
-        check!(tpm_pcr_read(t, 11, values.as_mut_ptr().add(32)) == 0);
-        check!(tpm_ak_create(t, ak) == 0);
-        check!(tpm_quote(t, ak, keys.event.as_ptr(), 32, 1 << 9, &mut attestation) == 0);
-        activate(t, ak, false)?;
-        activate(t, ak, true)?;
-        tpm_key_flush(t, ak);
-        check!(tpm_writer_create(t, seed.as_ptr(), public.as_mut_ptr()) == 0);
-        check!(tpm_nv_set_writer(t, seed.as_ptr(), public.as_ptr()) == 0);
-        check!(
-            tpm_register_policy(
-                PCR_MASK,
-                values.as_ptr(),
-                2,
-                public.as_ptr(),
-                keys.branch_written.as_mut_ptr(),
-                keys.branch_init.as_mut_ptr(),
-                policy.as_mut_ptr()
-            ) == 0
-        );
-        check!(tpm_nv_info(t, TEST_INDEX, &mut info) == 0 && !info.defined);
-        check!(tpm_nv_define(t, TEST_INDEX, policy.as_ptr(), core::ptr::null(), 0) == 0);
-        *defined = true;
-        check!(
-            tpm_nv_extend_first(
-                t,
-                TEST_INDEX,
-                PCR_MASK,
-                keys.branch_written.as_ptr(),
-                keys.branch_init.as_ptr(),
-                keys.event.as_ptr()
-            ) == 0
-        );
-        check!(tpm_nv_read(t, TEST_INDEX, keys.before.as_mut_ptr()) == 0);
-        check!(tpm_ak_create(t, ak) == 0);
-        check!(tpm_nv_certify(t, ak, TEST_INDEX, keys.event.as_ptr(), 32, &mut attestation) == 0);
-        tpm_key_flush(t, ak);
-    }
+    let t = t.insert(open_silenced()?);
+    take!(t.boot_identity());
+    values[..32].copy_from_slice(&take!(t.pcr_read(9)));
+    values[32..].copy_from_slice(&take!(t.pcr_read(11)));
+    let ak = take!(t.ak_create());
+    take!(t.quote(&ak, &keys.event, 1 << 9));
+    activate(t, &ak, false)?;
+    activate(t, &ak, true)?;
+    drop(ak);
+    let public = take!(t.writer_create(&seed));
+    take!(t.set_writer(&seed, &public));
+    // SAFETY: the PCR values, the writer's key and rooms for the policy.
+    let ret = unsafe {
+        tpm_register_policy(
+            PCR_MASK,
+            values.as_ptr(),
+            2,
+            public.as_ptr(),
+            keys.branch_written.as_mut_ptr(),
+            keys.branch_init.as_mut_ptr(),
+            policy.as_mut_ptr(),
+        )
+    };
+    check!(ret == 0);
+    check!(t.nv_info(TEST_INDEX).is_ok_and(|info| !info.defined));
+    take!(t.nv_define(TEST_INDEX, &policy, &[]));
+    *defined = true;
+    take!(t.nv_extend_first(TEST_INDEX, PCR_MASK, &keys.branches(), &keys.event));
+    keys.before = take!(t.nv_read(TEST_INDEX));
+    let ak = take!(t.ak_create());
+    take!(t.nv_certify(&ak, TEST_INDEX, &keys.event));
+    drop(ak);
     out("authenticated TPM reads, writes, quote and certification succeeded\n");
     Ok(())
 }
 
-/// The case `how` on the connection at `*t`, which it may reopen.
-fn case(how: &[u8], t: &mut *mut Tpm, keys: &Keys) -> Result<(), ()> {
-    let (mut before, mut after) = (keys.before, [0u8; 32]);
-    let (bw, bi, ev) = (
-        keys.branch_written.as_ptr(),
-        keys.branch_init.as_ptr(),
-        keys.event.as_ptr(),
-    );
-    // SAFETY: the connection, open, and rooms of this helper; reopened
-    // where a case closes it.
-    unsafe {
-        let tr = &mut **t;
-        match how {
-            b"nv-extend" | b"nv-replay" | b"unsalted-control" => {
-                let unsalted = how == b"unsalted-control";
-                let salting_key = tr.session_key.handle;
-                if unsalted {
-                    tr.session_key.handle = ESYS_TR_NONE;
-                }
-                intercept(tr, CC_NV_EXTEND, Mode::Capture);
-                check!(tpm_nv_extend(*t, TEST_INDEX, bw, bi, ev) == 0);
-                check!(hit());
-                restore();
-                check!(tpm_nv_read(*t, TEST_INDEX, before.as_mut_ptr()) == 0);
-                intercept(
-                    tr,
-                    CC_NV_EXTEND,
-                    if how == b"nv-replay" {
-                        Mode::Replay
-                    } else {
-                        Mode::Forge
-                    },
-                );
-                if unsalted {
-                    check!(tpm_nv_extend(*t, TEST_INDEX, bw, bi, ev) == 0);
+/// The case `how` on the connection `t`, which it may reopen.
+fn case(how: &[u8], t: &mut Option<Tpm>, keys: &Keys) -> Result<(), ()> {
+    let (mut before, branches, ev) = (keys.before, keys.branches(), &keys.event);
+    let Some(tr) = t.as_mut() else {
+        return Err(());
+    };
+    match how {
+        b"nv-extend" | b"nv-replay" | b"unsalted-control" => {
+            let unsalted = how == b"unsalted-control";
+            let salting_key = if unsalted {
+                tr.replace_salt_key(ESYS_TR_NONE)
+            } else {
+                ESYS_TR_NONE
+            };
+            intercept(tr, CC_NV_EXTEND, Mode::Capture);
+            check!(tr.nv_extend(TEST_INDEX, &branches, ev).is_ok());
+            check!(hit());
+            restore();
+            before = take!(tr.nv_read(TEST_INDEX));
+            intercept(
+                tr,
+                CC_NV_EXTEND,
+                if how == b"nv-replay" {
+                    Mode::Replay
                 } else {
-                    check!(tpm_nv_extend(*t, TEST_INDEX, bw, bi, ev) < 0);
+                    Mode::Forge
+                },
+            );
+            if unsalted {
+                check!(tr.nv_extend(TEST_INDEX, &branches, ev).is_ok());
+            } else {
+                check!(tr.nv_extend(TEST_INDEX, &branches, ev).is_err());
+            }
+            check!(hit());
+            restore();
+            if unsalted {
+                tr.replace_salt_key(salting_key);
+            }
+            let tr = reopen(t)?;
+            check!(tr.nv_read(TEST_INDEX) == Ok(before));
+            out(if unsalted {
+                "negative control: unsalted session accepted suppressed NV_Extend\n"
+            } else {
+                "suppressed NV_Extend with forged or replayed success rejected; register unchanged\n"
+            });
+        }
+        b"pcr-extend" => {
+            intercept(tr, CC_PCR_EXTEND, Mode::Capture);
+            check!(tr.pcr_extend(23, ev).is_ok() && hit());
+            restore();
+            before = take!(tr.pcr_read(23));
+            intercept(tr, CC_PCR_EXTEND, Mode::Replay);
+            check!(tr.pcr_extend(23, ev).is_err() && hit());
+            restore();
+            let tr = reopen(t)?;
+            check!(tr.pcr_read(23) == Ok(before));
+            out("suppressed PCR_Extend with replayed success rejected; PCR unchanged\n");
+        }
+        b"nv-read" | b"pcr-read" | b"clock" | b"policy-digest" => {
+            match how {
+                b"policy-digest" => {
+                    intercept(tr, CC_POLICY_GET_DIGEST, Mode::CorruptHmac);
+                    check!(tr.nv_extend(TEST_INDEX, &branches, ev).is_err() && hit());
                 }
-                check!(hit());
-                restore();
-                tr.session_key.handle = salting_key;
-                reopen(t)?;
-                check!(tpm_nv_read(*t, TEST_INDEX, after.as_mut_ptr()) == 0 && before == after);
-                out(if unsalted {
-                    "negative control: unsalted session accepted suppressed NV_Extend\n"
-                } else {
-                    "suppressed NV_Extend with forged or replayed success rejected; register unchanged\n"
-                });
-            }
-            b"pcr-extend" => {
-                intercept(tr, CC_PCR_EXTEND, Mode::Capture);
-                check!(tpm_pcr_extend(*t, 23, ev) == 0 && hit());
-                restore();
-                check!(tpm_pcr_read(*t, 23, before.as_mut_ptr()) == 0);
-                intercept(tr, CC_PCR_EXTEND, Mode::Replay);
-                check!(tpm_pcr_extend(*t, 23, ev) < 0 && hit());
-                restore();
-                reopen(t)?;
-                check!(tpm_pcr_read(*t, 23, after.as_mut_ptr()) == 0 && before == after);
-                out("suppressed PCR_Extend with replayed success rejected; PCR unchanged\n");
-            }
-            b"nv-read" | b"pcr-read" | b"clock" | b"policy-digest" => {
-                let (mut reset, mut restart) = (0u32, 0u32);
-                match how {
-                    b"policy-digest" => {
-                        intercept(tr, CC_POLICY_GET_DIGEST, Mode::CorruptHmac);
-                        check!(tpm_nv_extend(*t, TEST_INDEX, bw, bi, ev) < 0 && hit());
-                    }
-                    b"nv-read" => {
-                        intercept(tr, CC_NV_READ, Mode::Corrupt);
-                        check!(tpm_nv_read(*t, TEST_INDEX, after.as_mut_ptr()) < 0 && hit());
-                    }
-                    b"pcr-read" => {
-                        intercept(tr, CC_PCR_READ, Mode::Corrupt);
-                        check!(tpm_pcr_read(*t, 9, after.as_mut_ptr()) < 0 && hit());
-                    }
-                    _ => {
-                        intercept(tr, CC_READ_CLOCK, Mode::Corrupt);
-                        check!(tpm_boot_identity(*t, &mut reset, &mut restart) < 0 && hit());
-                    }
+                b"nv-read" => {
+                    intercept(tr, CC_NV_READ, Mode::Corrupt);
+                    check!(tr.nv_read(TEST_INDEX).is_err() && hit());
                 }
-                restore();
-                reopen(t)?;
-                check!(tpm_nv_read(*t, TEST_INDEX, after.as_mut_ptr()) == 0 && before == after);
-                out("forged readback rejected; live register unchanged\n");
+                b"pcr-read" => {
+                    intercept(tr, CC_PCR_READ, Mode::Corrupt);
+                    check!(tr.pcr_read(9).is_err() && hit());
+                }
+                _ => {
+                    intercept(tr, CC_READ_CLOCK, Mode::Corrupt);
+                    check!(tr.boot_identity().is_err() && hit());
+                }
             }
-            _ => {
-                check!(how == b"identity");
-                tpm_close(*t);
-                *t = core::ptr::null_mut();
-                let fake = FAKE.get();
-                let mut other: *mut Tpm = core::ptr::null_mut();
-                fake.identity.ek_name[2] ^= 1;
-                check!(tpm_open(&mut other) == -EACCES && other.is_null());
-                fake.identity.ek_name[2] ^= 1;
-                fake.identity.ek_name[1] = 0;
-                check!(tpm_open(&mut other) == -EACCES && other.is_null());
-                fake.identity.ek_name[1] = ALG_SHA256;
-                fake.error = -ENOENT;
-                check!(tpm_open(&mut other) == -ENOENT && other.is_null());
-                fake.error = 0;
-                ENFORCING.store(-EIO, Ordering::Relaxed);
-                check!(tpm_open(&mut other) == -EIO && other.is_null());
-                ENFORCING.store(1, Ordering::Relaxed);
-                out("wrong, missing and unreadable session-key pins refused without fallback\n");
-            }
+            restore();
+            let tr = reopen(t)?;
+            check!(tr.nv_read(TEST_INDEX) == Ok(before));
+            out("forged readback rejected; live register unchanged\n");
+        }
+        _ => {
+            check!(how == b"identity");
+            *t = None;
+            // SAFETY: the fake, on this thread.
+            let fake = unsafe { FAKE.get() };
+            fake.identity.ek_name[2] ^= 1;
+            check!(Tpm::open().err() == Some(-EACCES));
+            fake.identity.ek_name[2] ^= 1;
+            fake.identity.ek_name[1] = 0;
+            check!(Tpm::open().err() == Some(-EACCES));
+            fake.identity.ek_name[1] = ALG_SHA256;
+            fake.error = -ENOENT;
+            check!(Tpm::open().err() == Some(-ENOENT));
+            fake.error = 0;
+            ENFORCING.store(-EIO, Ordering::Relaxed);
+            check!(Tpm::open().err() == Some(-EIO));
+            ENFORCING.store(1, Ordering::Relaxed);
+            out("wrong, missing and unreadable session-key pins refused without fallback\n");
         }
     }
     Ok(())
 }
 
 /// The connection closed and opened again.
-fn reopen(t: &mut *mut Tpm) -> Result<(), ()> {
-    // SAFETY: the connection, closed once, and room for the next.
-    unsafe {
-        tpm_close(*t);
-        *t = core::ptr::null_mut();
-        check!(tpm_open(t) == 0);
-    }
-    Ok(())
+fn reopen(t: &mut Option<Tpm>) -> Result<&Tpm, ()> {
+    *t = None;
+    Ok(t.insert(take!(Tpm::open())))
 }
 
 fn run(args: &[&CStr]) -> c_int {
-    let mut t: *mut Tpm = core::ptr::null_mut();
-    let mut ak = TpmKey::zeroed();
+    let mut t: Option<Tpm> = None;
     let mut keys = Keys {
         branch_written: [0; 32],
         branch_init: [0; 32],
@@ -695,27 +666,23 @@ fn run(args: &[&CStr]) -> c_int {
     let result = (|| {
         check!(args.len() == 2);
         forge_reply_cases()?;
-        setup(&mut t, &mut ak, &mut keys, &mut defined)?;
+        setup(&mut t, &mut keys, &mut defined)?;
         case(args[1].to_bytes(), &mut t, &keys)
     })();
     let mut ret = c_int::from(result.is_err());
     restore();
-    // SAFETY: the connection or NULL, its AK, flushed and closed once; a
-    // connection of its own to remove the scratch index.
-    unsafe {
-        tpm_key_flush(t, &mut ak);
-        tpm_close(t);
-        ENFORCING.store(1, Ordering::Relaxed);
-        let fake = FAKE.get();
-        fake.error = 0;
-        fake.identity.ek_name[1] = ALG_SHA256;
-        if defined {
-            let mut t: *mut Tpm = core::ptr::null_mut();
-            if tpm_open(&mut t) != 0 || tpm_nv_undefine(t, TEST_INDEX, core::ptr::null(), 0) != 0 {
-                ret = 1;
-            }
-            tpm_close(t);
-        }
+    drop(t);
+    ENFORCING.store(1, Ordering::Relaxed);
+    // SAFETY: the fake, on this thread.
+    let fake = unsafe { FAKE.get() };
+    fake.error = 0;
+    fake.identity.ek_name[1] = ALG_SHA256;
+    if defined
+        && Tpm::open()
+            .and_then(|t| t.nv_undefine(TEST_INDEX, &[]))
+            .is_err()
+    {
+        ret = 1;
     }
     ret
 }

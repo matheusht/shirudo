@@ -11,17 +11,14 @@ use core::ffi::{CStr, c_int};
 
 use super::{err, helper_main, out, perror};
 use crate::sys::tss2::{
-    ALG_RSASSA, ALG_SHA256, CC_NV_EXTEND, ESYS_TR_NONE, ESYS_TR_PASSWORD, Esys_FlushContext,
-    Esys_Free, Esys_NV_Extend, Esys_NV_Read, Esys_Sign, Esys_TR_Close, Esys_TR_FromTPMPublic,
-    Esys_TR_GetName, Esys_TRSess_SetAttributes, EsysContext, EsysTr, RC_POLICY_FAIL, RC_SUCCESS,
-    RH_NULL, Rc, SE_POLICY, SESSION_CONTINUESESSION, ST_HASHCHECK, Signature, TkHashcheck,
-    Tpm2bDigest, Tpm2bMaxNvBuffer, Tpm2bName, Zeroed, sig_scheme,
+    ALG_RSASSA, ALG_SHA256, CC_NV_EXTEND, ESYS_TR_NONE, ESYS_TR_PASSWORD, Esys_Free,
+    Esys_NV_Extend, Esys_NV_Read, Esys_Sign, Esys_TR_Close, Esys_TR_FromTPMPublic, Esys_TR_GetName,
+    Esys_TRSess_SetAttributes, EsysContext, EsysTr, RC_POLICY_FAIL, RC_SUCCESS, RH_NULL, Rc,
+    SESSION_CONTINUESESSION, ST_HASHCHECK, Signature, TkHashcheck, Tpm2bDigest, Tpm2bMaxNvBuffer,
+    Tpm2bName, Zeroed, sig_scheme,
 };
 use crate::util::crypto_openssl::sha256;
-use crate::util::tpm::{
-    Tpm, WriterAuthorization, nv_define, nv_undefine, policy_session_finish, session_start,
-    tpm_close, tpm_open, tpm_writer_create, writer_authorize, writer_prepare, writer_primary,
-};
+use crate::util::tpm::{Handle, Tpm};
 use crate::util::tpm_wire::{NAME_LEN, NV_RSA_BYTES, policy_command_code, policy_signed};
 
 helper_main!(shirudo_helper_test_nv_cphash, run);
@@ -51,13 +48,12 @@ fn tpm_ok(ret: Rc, operation: &str) -> Step {
     Err(())
 }
 
-fn flush(esys: *mut EsysContext, session: &mut EsysTr) -> Step {
-    let handle = core::mem::replace(session, ESYS_TR_NONE);
-    if handle == ESYS_TR_NONE {
-        return Ok(());
+/// The key or session `held`, if any, flushed now.
+fn flush(held: &mut Option<Handle<'_>>) -> Step {
+    match held.take() {
+        Some(handle) => tpm_ok(handle.flush(), "FlushContext"),
+        None => Ok(()),
     }
-    // SAFETY: the context and a session of it.
-    tpm_ok(unsafe { Esys_FlushContext(esys, handle) }, "FlushContext")
 }
 
 fn read_value(esys: *mut EsysContext, nv: EsysTr) -> Result<[u8; 32], ()> {
@@ -150,33 +146,37 @@ fn sign_digest(
 /// the writer's signature, or with `saved` replayed, or corrupted;
 /// `saved` keeps a valid one.
 #[allow(clippy::too_many_arguments)]
-fn authorize(
-    t: &Tpm,
-    writer: EsysTr,
+fn authorize<'t>(
+    t: &'t Tpm,
+    writer: &Handle<'_>,
     nv: EsysTr,
     event: &[u8; 32],
     policy: &[u8; 32],
-    session: &mut EsysTr,
+    held: &mut Option<Handle<'t>>,
     saved: &mut [u8; NV_RSA_BYTES],
     fault: Fault,
 ) -> Step {
     let mut name: *mut Tpm2bName = core::ptr::null_mut();
     let ret = (|| {
-        if session_start(t, t.session_key.handle, SE_POLICY, session) != 0 {
+        let Ok(started) = t.start_policy_session() else {
             return Err(());
-        }
+        };
+        let session = held.insert(started);
         // SAFETY: the context, the session, and room for the index's name.
         unsafe {
             tpm_ok(
                 Esys_TRSess_SetAttributes(
-                    t.esys,
-                    *session,
+                    t.esys_context(),
+                    session.raw(),
                     SESSION_CONTINUESESSION,
                     SESSION_CONTINUESESSION,
                 ),
                 "TRSess_SetAttributes",
             )?;
-            tpm_ok(Esys_TR_GetName(t.esys, nv, &mut name), "TR_GetName")?;
+            tpm_ok(
+                Esys_TR_GetName(t.esys_context(), nv, &mut name),
+                "TR_GetName",
+            )?;
         }
         // SAFETY: the name ESYS gave, if any.
         let index_name: [u8; NAME_LEN] = match unsafe { name.as_ref() } {
@@ -188,22 +188,20 @@ fn authorize(
                 return Err(());
             }
         };
-        // SAFETY: an authorization of zeros, which the prepare fills.
-        let mut authorization: WriterAuthorization = unsafe { core::mem::zeroed() };
-        if writer_prepare(t, *session, &index_name, event, &mut authorization) != 0 {
+        let Ok(authorization) = t.writer_prepare(session, &index_name, event) else {
             return Err(());
-        }
+        };
         let signature = match fault {
             Fault::Replay => *saved,
             _ => {
-                let mut s = sign_digest(t.esys, writer, &authorization.digest)?;
+                let mut s = sign_digest(t.esys_context(), writer.raw(), &authorization.digest)?;
                 if fault == Fault::Corrupt {
                     s[0] ^= 1;
                 }
                 s
             }
         };
-        let trc = writer_authorize(t, writer, *session, &authorization, &signature);
+        let trc = t.writer_authorize(writer, session, &authorization, &signature);
         if fault != Fault::Valid {
             if trc != RC_BAD_SIGNATURE {
                 err(&format!(
@@ -214,7 +212,7 @@ fn authorize(
             return Ok(());
         }
         tpm_ok(trc, "PolicySigned")?;
-        if policy_session_finish(t, *session, policy) != 0 {
+        if t.policy_session_finish(session, policy).is_err() {
             return Err(());
         }
         *saved = signature;
@@ -236,15 +234,17 @@ fn event_of(b: &Tpm2bMaxNvBuffer) -> [u8; 32] {
     b.buffer[..32].try_into().unwrap_or([0; 32])
 }
 
-struct State {
-    session: EsysTr,
-    writer: EsysTr,
+/// What a scenario leaves for the cleanup: the policy session and the
+/// writer key, until flushed, and the scratch index.
+struct State<'t> {
+    session: Option<Handle<'t>>,
+    writer: Option<Handle<'t>>,
     nv: EsysTr,
     defined: bool,
 }
 
-fn scenario(t: &Tpm, st: &mut State) -> Step {
-    let esys = t.esys;
+fn scenario<'t>(t: &'t Tpm, st: &mut State<'t>) -> Step {
+    let esys = t.esys_context();
     let (event_a, event_b, seed) = (buffer(1), buffer(2), buffer(0));
     let mut writer_seed = [0u8; 32];
     let got = loop {
@@ -258,19 +258,13 @@ fn scenario(t: &Tpm, st: &mut State) -> Step {
         perror("getrandom");
         return Err(());
     }
-    let mut writer_public = [0u8; NV_RSA_BYTES];
-    // SAFETY: the connection, the seed and room for the public key.
-    let e = unsafe {
-        tpm_writer_create(
-            (t as *const Tpm).cast_mut(),
-            writer_seed.as_ptr(),
-            writer_public.as_mut_ptr(),
-        )
+    let writer_public = match t.writer_create(&writer_seed) {
+        Ok(public) => public,
+        Err(e) => {
+            err(&format!("create TPM NV writer: {}\n", super::strerror(-e)));
+            return Err(());
+        }
     };
-    if e != 0 {
-        err(&format!("create TPM NV writer: {}\n", super::strerror(-e)));
-        return Err(());
-    }
     let mut policy = [0u8; 32];
     let mut signed = [0u8; 32];
     if policy_signed(&[0; 32], &writer_public, &mut signed) != 0
@@ -279,16 +273,11 @@ fn scenario(t: &Tpm, st: &mut State) -> Step {
         err("cannot construct the scratch NV writer policy\n");
         return Err(());
     }
-    let mut public = [0u8; NV_RSA_BYTES];
-    if writer_primary(
-        t,
-        &writer_seed,
-        Some(&writer_public),
-        &mut public,
-        &mut st.writer,
-    ) != 0
-        || nv_define(t, TEST_NV_INDEX, &policy, &[]) != 0
-    {
+    let Ok((writer, _)) = t.writer_primary(&writer_seed, Some(&writer_public)) else {
+        return Err(());
+    };
+    let writer = &*st.writer.insert(writer);
+    if t.nv_define(TEST_NV_INDEX, &policy, &[]).is_err() {
         return Err(());
     }
     st.defined = true;
@@ -316,7 +305,7 @@ fn scenario(t: &Tpm, st: &mut State) -> Step {
     from_public(&mut st.nv)?;
     authorize(
         t,
-        st.writer,
+        writer,
         st.nv,
         &event_of(&seed),
         &policy,
@@ -324,15 +313,15 @@ fn scenario(t: &Tpm, st: &mut State) -> Step {
         &mut signature,
         Fault::Valid,
     )?;
-    tpm_ok(extend(st.nv, st.session, &seed), "NV_Extend(seed)")?;
-    flush(esys, &mut st.session)?;
+    tpm_ok(extend(st.nv, raw(&st.session), &seed), "NV_Extend(seed)")?;
+    flush(&mut st.session)?;
     // SAFETY: the context and the index's handle, closed.
     tpm_ok(unsafe { Esys_TR_Close(esys, &mut st.nv) }, "TR_Close(NV)")?;
     from_public(&mut st.nv)?;
     let before = read_value(esys, st.nv)?;
     authorize(
         t,
-        st.writer,
+        writer,
         st.nv,
         &event_of(&event_a),
         &policy,
@@ -340,14 +329,14 @@ fn scenario(t: &Tpm, st: &mut State) -> Step {
         &mut signature,
         Fault::Valid,
     )?;
-    let trc = extend(st.nv, st.session, &event_b);
+    let trc = extend(st.nv, raw(&st.session), &event_b);
     if trc != RC_SESSION_POLICY_FAIL {
         err(&format!(
             "NV_Extend(B): expected session-1 policy failure, got 0x{trc:08x}\n"
         ));
         return Err(());
     }
-    flush(esys, &mut st.session)?;
+    flush(&mut st.session)?;
     if read_value(esys, st.nv)? != before {
         err("rejected NV_Extend changed the scratch value\n");
         return Err(());
@@ -355,7 +344,7 @@ fn scenario(t: &Tpm, st: &mut State) -> Step {
     for fault in [Fault::Replay, Fault::Corrupt] {
         authorize(
             t,
-            st.writer,
+            writer,
             st.nv,
             &event_of(&event_a),
             &policy,
@@ -363,7 +352,7 @@ fn scenario(t: &Tpm, st: &mut State) -> Step {
             &mut signature,
             fault,
         )?;
-        flush(esys, &mut st.session)?;
+        flush(&mut st.session)?;
     }
     if read_value(esys, st.nv)? != before {
         err("replayed or corrupt signature changed the scratch value\n");
@@ -371,7 +360,7 @@ fn scenario(t: &Tpm, st: &mut State) -> Step {
     }
     authorize(
         t,
-        st.writer,
+        writer,
         st.nv,
         &event_of(&event_a),
         &policy,
@@ -379,8 +368,8 @@ fn scenario(t: &Tpm, st: &mut State) -> Step {
         &mut signature,
         Fault::Valid,
     )?;
-    tpm_ok(extend(st.nv, st.session, &event_a), "NV_Extend(A)")?;
-    flush(esys, &mut st.session)?;
+    tpm_ok(extend(st.nv, raw(&st.session), &event_a), "NV_Extend(A)")?;
+    flush(&mut st.session)?;
     let after = read_value(esys, st.nv)?;
     let folded = [before, event_of(&event_a)].concat();
     if sha256(&folded).ok() != Some(after) {
@@ -390,30 +379,29 @@ fn scenario(t: &Tpm, st: &mut State) -> Step {
     Ok(())
 }
 
+/// The ESYS handle of the session `held`, ESYS_TR_NONE for none.
+fn raw(held: &Option<Handle<'_>>) -> EsysTr {
+    held.as_ref().map_or(ESYS_TR_NONE, Handle::raw)
+}
+
 fn run(_: &[&CStr]) -> c_int {
-    let mut t: *mut Tpm = core::ptr::null_mut();
-    // SAFETY: room for the connection, closed once at the end.
-    if unsafe { tpm_open(&mut t) } != 0 {
-        // SAFETY: as below.
-        unsafe { tpm_close(t) };
+    let Ok(t) = Tpm::open() else {
         return 1;
-    }
-    // SAFETY: the connection just opened.
-    let tr = unsafe { &*t };
+    };
     let mut st = State {
-        session: ESYS_TR_NONE,
-        writer: ESYS_TR_NONE,
+        session: None,
+        writer: None,
         nv: ESYS_TR_NONE,
         defined: false,
     };
-    let mut ok = scenario(tr, &mut st).is_ok();
-    ok &= flush(tr.esys, &mut st.session).is_ok();
-    if st.defined && nv_undefine(tr, TEST_NV_INDEX, &[]) != 0 {
+    let mut ok = scenario(&t, &mut st).is_ok();
+    ok &= flush(&mut st.session).is_ok();
+    if st.defined && t.nv_undefine(TEST_NV_INDEX, &[]).is_err() {
         ok = false;
     }
-    ok &= flush(tr.esys, &mut st.writer).is_ok();
-    // SAFETY: the connection, closed once.
-    unsafe { tpm_close(t) };
+    ok &= flush(&mut st.writer).is_ok();
+    drop(st);
+    drop(t);
     if ok {
         out("PolicySigned: replay and corruption rejected; value unchanged\n");
         out("cpHash: authorized A; rejected B unchanged; extended A; scratch index removed\n");
