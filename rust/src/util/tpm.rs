@@ -7,8 +7,9 @@
 //! command goes through a salted HMAC session bound to the endorsement
 //! key init froze.
 
-use core::ffi::{CStr, c_char, c_int, c_uint};
+use core::ffi::{CStr, c_int, c_uint};
 use core::ptr;
+use std::ffi::CString;
 
 use crate::errno::{
     E2BIG, EACCES, EINVAL, EIO, EKEYREJECTED, ENODATA, ENODEV, ENOENT, ENOMEM, EPROTO,
@@ -16,9 +17,9 @@ use crate::errno::{
 };
 use crate::heap::{xcalloc, xfree};
 use crate::sys::identity::Identity;
-use crate::sys::libc::{errno, explicit_bzero, getenv, setenv, unsetenv};
+use crate::sys::libc::{env, errno, explicit_bzero, setenv, unsetenv};
 use crate::sys::tss2::*;
-use crate::text::strscpy;
+use crate::text::cstr;
 use crate::util::config::{self, Scrubbed};
 use crate::util::identity;
 use crate::util::image_config;
@@ -40,7 +41,7 @@ pub(crate) const PUBLIC_MAX: usize = 512;
 pub(crate) const ATTEST_MAX: usize = 1024;
 pub(crate) const SIGNATURE_MAX: usize = 160;
 const PCR_SELECT_LEN: u8 = 3;
-/// The longest TCTI a config names.
+/// The longest TCTI a config names, with its NUL.
 const TCTI_MAX: usize = 256;
 
 /// The measurement register's NV attributes, the NV writer's object
@@ -237,44 +238,31 @@ fn session_setup(t: &mut Tpm, active: bool) -> c_int {
     ret
 }
 
-/// The TCTI into the `size` bytes at `buf`: SHIRUDO_TPM_TCTI or the
-/// configuration's before an authenticated image is active, so tests can
-/// pick a software TPM, and a device TCTI once one is. 0, -EACCES, or
-/// -E2BIG.
-///
-/// # Safety
-///
-/// `buf` is room for `size` bytes.
-unsafe fn tcti(buf: *mut u8, size: usize) -> c_int {
+/// The TCTI: SHIRUDO_TPM_TCTI or the configuration's before an
+/// authenticated image is active, so tests can pick a software TPM, and
+/// a device TCTI once one is. -EACCES for another, -E2BIG for one of
+/// TCTI_MAX bytes or more.
+pub(crate) fn tcti() -> Result<CString, c_int> {
+    let active = image_config::active();
     let mut cfg = Scrubbed::new();
-    let mut tcti: *const c_char = if image_config::active() {
-        ptr::null()
+    let named = if active {
+        None
     } else {
-        // SAFETY: a C string.
-        unsafe { getenv(c"SHIRUDO_TPM_TCTI".as_ptr()) }
+        env(c"SHIRUDO_TPM_TCTI").filter(|t| !t.is_empty())
     };
-    // SAFETY: tcti NULL or a C string the environment holds.
-    let empty = |t: *const c_char| t.is_null() || unsafe { *t } == 0;
+    let value = match named {
+        Some(t) => t.to_bytes(),
+        None if config::load(&mut cfg) == 0 && cfg.tpm_tcti[0] != 0 => cstr(&cfg.tpm_tcti),
+        None => b"device:/dev/tpmrm0",
+    };
 
-    if empty(tcti) && config::load(&mut cfg) == 0 && cfg.tpm_tcti[0] != 0 {
-        tcti = cfg.tpm_tcti.as_ptr().cast();
+    if active && !value.starts_with(b"device:") {
+        return Err(-EACCES);
     }
-    if empty(tcti) {
-        tcti = c"device:/dev/tpmrm0".as_ptr();
+    if value.len() >= TCTI_MAX {
+        return Err(-E2BIG);
     }
-    // SAFETY: a C string either way.
-    let value = unsafe { CStr::from_ptr(tcti) }.to_bytes();
-
-    if image_config::active() && !value.starts_with(b"device:") {
-        return -EACCES;
-    }
-    // SAFETY: the caller's room.
-    let out = unsafe { crate::ffi::bytes_mut(buf, size) };
-
-    match strscpy(out, value) {
-        Ok(_) => 0,
-        Err(e) => e,
-    }
+    CString::new(value).map_err(|_| -EINVAL)
 }
 
 /// Opens the TPM, its library logging off since that can expose session
@@ -284,7 +272,6 @@ unsafe fn tcti(buf: *mut u8, size: usize) -> c_int {
 ///
 /// `out` is room for a pointer.
 unsafe fn open_tpm(out: *mut *mut Tpm, quiet: bool) -> c_int {
-    let mut tcti_buf = [0u8; TCTI_MAX];
     let active = identity::enforcement_active();
 
     if active < 0 {
@@ -304,23 +291,19 @@ unsafe fn open_tpm(out: *mut *mut Tpm, quiet: bool) -> c_int {
         crate::log::err(format!("tpm: cannot disable library logging: {}", text(e)).as_bytes());
         return e;
     }
-    // SAFETY: the room above.
-    let e = unsafe { tcti(tcti_buf.as_mut_ptr(), tcti_buf.len()) };
-
-    if e != 0 {
-        if !quiet && e == -EACCES {
-            crate::log::err(b"tpm: authenticated runtime requires a device TCTI");
-        } else if !quiet {
-            crate::log::err(
-                format!(
-                    "tpm: the TCTI is longer than {} bytes",
-                    (TCTI_MAX - 1) as c_int
-                )
-                .as_bytes(),
-            );
+    let conf = match tcti() {
+        Ok(conf) => conf,
+        Err(e) => {
+            if !quiet && e == -EACCES {
+                crate::log::err(b"tpm: authenticated runtime requires a device TCTI");
+            } else if !quiet {
+                crate::log::err(
+                    format!("tpm: the TCTI is longer than {} bytes", TCTI_MAX - 1).as_bytes(),
+                );
+            }
+            return e;
         }
-        return e;
-    }
+    };
     // SAFETY: a count and a size.
     let t = unsafe { xcalloc(1, size_of::<Tpm>()) }.cast::<Tpm>();
 
@@ -334,14 +317,14 @@ unsafe fn open_tpm(out: *mut *mut Tpm, quiet: bool) -> c_int {
     tr.session = ESYS_TR_NONE;
     tr.session_key.handle = ESYS_TR_NONE;
     // SAFETY: the TCTI, a C string, and room for its context.
-    let ret = unsafe { Tss2_TctiLdr_Initialize(tcti_buf.as_ptr().cast(), &mut tr.tcti) };
+    let ret = unsafe { Tss2_TctiLdr_Initialize(conf.as_ptr(), &mut tr.tcti) };
 
     if ret != RC_SUCCESS {
         if !quiet {
             crate::log::err(
                 &[
                     &b"tpm: TctiLdr_Initialize("[..],
-                    crate::text::cstr(&tcti_buf),
+                    conf.to_bytes(),
                     b"): rc=0x",
                     format!("{ret:08x}").as_bytes(),
                 ]
@@ -2026,12 +2009,11 @@ pub(crate) use capi::{
     tpm_activate_credential, tpm_ak_create, tpm_boot_identity, tpm_close, tpm_ek_certificate,
     tpm_ek_create, tpm_ek_name, tpm_key_flush, tpm_nv_certify, tpm_nv_define, tpm_nv_extend,
     tpm_nv_extend_first, tpm_nv_info, tpm_nv_read, tpm_nv_set_writer, tpm_nv_undefine, tpm_open,
-    tpm_open_quiet, tpm_pcr_extend, tpm_pcr_read, tpm_quote, tpm_reset_count, tpm_tcti,
-    tpm_writer_create,
+    tpm_open_quiet, tpm_pcr_extend, tpm_pcr_read, tpm_quote, tpm_reset_count, tpm_writer_create,
 };
 
 mod capi {
-    use core::ffi::{c_char, c_int, c_void};
+    use core::ffi::{c_int, c_void};
 
     use super::{
         Branches, Credential, DIGEST_LEN, NAME_LEN, NV_RSA_BYTES, Tpm, TpmAttestation, TpmKey,
@@ -2059,14 +2041,6 @@ mod capi {
     unsafe fn arr_mut<'a, const N: usize>(p: *mut u8) -> &'a mut [u8; N] {
         // SAFETY: the caller's N bytes.
         unsafe { &mut *p.cast::<[u8; N]>() }
-    }
-
-    /// # Safety
-    ///
-    /// `buf` is room for `size` bytes.
-    pub unsafe extern "C" fn tpm_tcti(buf: *mut c_char, size: usize) -> c_int {
-        // SAFETY: the caller passes room.
-        unsafe { super::tcti(buf.cast(), size) }
     }
 
     /// # Safety

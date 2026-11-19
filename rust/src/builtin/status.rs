@@ -50,7 +50,7 @@ use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, Op
 use crate::util::otel::OtelOpts;
 use crate::util::sysinfo::{self, Sysinfo};
 use crate::util::tamper::{self, Counters, TamperCounts};
-use crate::util::tpm::tpm_tcti;
+use crate::util::tpm;
 use crate::util::upatch::name_from_pin;
 use crate::util::upatch_resolve;
 use crate::util::upatch_table::{self, UpatchTableRow};
@@ -68,7 +68,6 @@ const RUNTIME_CONF_PATH: &CStr = c"/run/shirudo/runtime/etc/shirudo/shirudo.conf
 const NV_INDEX: &CStr = c"0x01818E00";
 const CHAIN_PCR: u32 = 9;
 const CHAIN_PHASE_PCR: u32 = 11;
-const TCTI_MAX: usize = 256;
 const IDENTITY_KEYS_MAX: usize = 16;
 const UNMEASURED_NAMES: usize = 256;
 const SUBJECT_MAX: usize = 256;
@@ -1215,11 +1214,7 @@ impl Report {
             Vec::new()
         }]);
 
-        let mut tcti = [0u8; TCTI_MAX];
-        // SAFETY: room for the TCTI.
-        if unsafe { tpm_tcti(tcti.as_mut_ptr().cast(), tcti.len()) } != 0 {
-            tcti[..2].copy_from_slice(b"?\0");
-        }
+        let tcti = tpm::tcti().map_or_else(|_| b"?".to_vec(), CString::into_bytes);
         // SAFETY: an all-zero status is an empty one.
         let mut cst: ChainStatus = unsafe { mem::zeroed() };
         let mut chain_rc = chain::status(&mut cst);
@@ -1259,7 +1254,7 @@ impl Report {
             integrity,
             config_state,
             config_root,
-            tcti: cstr(&tcti).to_vec(),
+            tcti,
             cst,
             chain_rc,
             eventlog,
