@@ -8,9 +8,11 @@
 //! raise, and each Rust function Lua calls, is `C-unwind`. A Rust frame
 //! the unwind may cross holds nothing that must be dropped.
 
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{CStr, c_char, c_int, c_void};
 use core::marker::PhantomData;
 use core::ptr::{self, NonNull};
+
+use crate::ffi;
 
 /// `lua_State`.
 pub enum LuaState {}
@@ -30,6 +32,7 @@ pub type LuaHook = unsafe extern "C-unwind" fn(l: *mut LuaState, ar: *mut LuaDeb
 
 pub const LUA_REGISTRYINDEX: c_int = -10000;
 pub const LUA_GLOBALSINDEX: c_int = -10002;
+const LUA_TNONE: c_int = -1;
 pub const LUA_TNIL: c_int = 0;
 pub const LUA_TBOOLEAN: c_int = 1;
 pub const LUA_TNUMBER: c_int = 3;
@@ -91,8 +94,8 @@ unsafe extern "C-unwind" {
     pub fn lua_setmetatable(l: *mut LuaState, idx: c_int) -> c_int;
     pub fn lua_next(l: *mut LuaState, idx: c_int) -> c_int;
 
-    pub fn luaL_error(l: *mut LuaState, fmt: *const c_char, ...) -> c_int;
-    pub fn luaL_argerror(l: *mut LuaState, numarg: c_int, extramsg: *const c_char) -> c_int;
+    pub fn luaL_error(l: *mut LuaState, fmt: *const c_char, ...) -> !;
+    pub fn luaL_argerror(l: *mut LuaState, numarg: c_int, extramsg: *const c_char) -> !;
     pub fn luaL_checkinteger(l: *mut LuaState, narg: c_int) -> LuaInteger;
     pub fn luaL_checklstring(l: *mut LuaState, narg: c_int, len: *mut usize) -> *const c_char;
     pub fn luaL_checktype(l: *mut LuaState, narg: c_int, t: c_int);
@@ -170,6 +173,176 @@ impl Allocator<'_> {
         // SAFETY: the caller supplies the block as the Lua allocator requires.
         unsafe { (self.allocate)(self.context, block, old, new) }
     }
+}
+
+/// What a Lua value is, as lua_type() tells it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LuaType {
+    /// What an index that names no slot holds.
+    None,
+    Nil,
+    Boolean,
+    Number,
+    String,
+    Table,
+    Function,
+    /// A userdata, a thread, or what else LuaJIT has.
+    Other,
+}
+
+/// The stack of a live Lua state, in the frame of the C function or the
+/// hook LuaJIT called. An index counts up from 1 at the bottom of the
+/// frame or down from -1 at its top. What a read finds in a slot borrows
+/// the Stack, and what pops a slot takes it, so the one cannot outlive
+/// the other.
+///
+/// Any call may raise a Lua error, which unwinds to the lua_pcall() that
+/// catches it: when memory runs out, an argument check fails, or a call
+/// misuses the stack, with an index that names no slot or no table where
+/// one is needed, or a pop of more than the frame holds. LuaJIT does not
+/// check those, and the Stack does so that a misuse is not undefined.
+pub(crate) struct Stack<'s> {
+    l: *mut LuaState,
+    frame: PhantomData<&'s mut LuaState>,
+}
+
+impl Stack<'_> {
+    /// The stack of the frame LuaJIT runs `l` in.
+    ///
+    /// # Safety
+    ///
+    /// `l` is the live state LuaJIT called a C function or a hook with,
+    /// and the Stack is used only during that call, as the only one of
+    /// that frame.
+    pub(crate) unsafe fn from_raw(l: *mut LuaState) -> Self {
+        Self {
+            l,
+            frame: PhantomData,
+        }
+    }
+
+    /// How many values the frame holds.
+    pub(crate) fn top(&self) -> c_int {
+        // SAFETY: the state is live.
+        unsafe { lua_gettop(self.l) }
+    }
+
+    /// The slot `idx` names, counted from 1, if it names one.
+    pub(crate) fn abs_index(&self, idx: c_int) -> Option<c_int> {
+        let top = self.top();
+        let abs = if idx < 0 {
+            top.checked_add(idx)?.checked_add(1)?
+        } else {
+            idx
+        };
+        (1..=top).contains(&abs).then_some(abs)
+    }
+
+    /// `idx` as LuaJIT may take it: the slot it names, else the one past
+    /// the top, which LuaJIT reads as no value.
+    fn slot_or_none(&self, idx: c_int) -> c_int {
+        self.abs_index(idx)
+            .unwrap_or_else(|| self.top().saturating_add(1))
+    }
+
+    /// The slot of the table at `idx`.
+    fn table(&self, idx: c_int) -> c_int {
+        match self.abs_index(idx) {
+            Some(t) if self.type_of(t) == LuaType::Table => t,
+            _ => self.error(c"no table at the stack index"),
+        }
+    }
+
+    /// Raises an error unless the frame holds `n` values.
+    fn need(&self, n: c_int) {
+        if !(0..=self.top()).contains(&n) {
+            self.error(c"too few values on the stack");
+        }
+    }
+
+    pub(crate) fn type_of(&self, idx: c_int) -> LuaType {
+        // SAFETY: the state is live, and the index a slot of the frame or
+        // one LuaJIT reads as none.
+        match unsafe { lua_type(self.l, self.slot_or_none(idx)) } {
+            LUA_TNONE => LuaType::None,
+            LUA_TNIL => LuaType::Nil,
+            LUA_TBOOLEAN => LuaType::Boolean,
+            LUA_TNUMBER => LuaType::Number,
+            LUA_TSTRING => LuaType::String,
+            LUA_TTABLE => LuaType::Table,
+            LUA_TFUNCTION => LuaType::Function,
+            _ => LuaType::Other,
+        }
+    }
+
+    /// The number at `idx`, or a string that spells one; 0 for another
+    /// value.
+    pub(crate) fn to_number(&self, idx: c_int) -> f64 {
+        // SAFETY: as in type_of().
+        unsafe { lua_tonumber(self.l, self.slot_or_none(idx)) }
+    }
+
+    /// Whether the value at `idx` is true, as Lua tests it.
+    pub(crate) fn to_bool(&self, idx: c_int) -> bool {
+        // SAFETY: as in type_of().
+        unsafe { lua_toboolean(self.l, self.slot_or_none(idx)) != 0 }
+    }
+
+    /// The string at `idx`, or the number there, which LuaJIT makes a
+    /// string in its slot; none for another value.
+    pub(crate) fn to_bytes(&self, idx: c_int) -> Option<&[u8]> {
+        // SAFETY: as in type_of(); the text lives while the slot holds it,
+        // which the borrow of the Stack keeps.
+        unsafe { bytes_at(self.l, self.slot_or_none(idx)) }
+    }
+
+    pub(crate) fn push_nil(&mut self) {
+        // SAFETY: the state is live; LuaJIT grows the stack.
+        unsafe { lua_pushnil(self.l) };
+    }
+
+    /// Pushes element `n` of the table at `idx`, without metamethods.
+    pub(crate) fn raw_get_index(&mut self, idx: c_int, n: c_int) {
+        let table = self.table(idx);
+        // SAFETY: the state is live and the slot a table.
+        unsafe { lua_rawgeti(self.l, table, n) };
+    }
+
+    /// Replaces the key on top with the next key of the table at `idx`
+    /// and pushes its value; pops the key and is false after the last.
+    pub(crate) fn next(&mut self, idx: c_int) -> bool {
+        let table = self.table(idx);
+        self.need(1);
+        // SAFETY: the state is live, the slot a table and a key on top.
+        unsafe { lua_next(self.l, table) != 0 }
+    }
+
+    /// Pops `n` values.
+    pub(crate) fn pop(&mut self, n: c_int) {
+        self.need(n);
+        // SAFETY: the state is live and holds n values.
+        unsafe { lua_settop(self.l, -n - 1) };
+    }
+
+    /// Raises `msg` as a Lua error, after where the running function is.
+    pub(crate) fn error(&self, msg: &CStr) -> ! {
+        // SAFETY: the state is live; the format takes msg as its string.
+        unsafe { luaL_error(self.l, c"%s".as_ptr(), msg.as_ptr()) }
+    }
+}
+
+/// The string at `idx` of the state, or the number there made one.
+///
+/// # Safety
+///
+/// `l` is live and `idx` a slot of its frame or one LuaJIT reads as none,
+/// which holds the value for `'a`.
+unsafe fn bytes_at<'a>(l: *mut LuaState, idx: c_int) -> Option<&'a [u8]> {
+    let mut len = 0;
+    // SAFETY: the caller's state and index; room for the length.
+    let text = unsafe { lua_tolstring(l, idx, &mut len) };
+    // SAFETY: the string's len bytes, which live as its slot holds it.
+    (!text.is_null()).then(|| unsafe { ffi::slice(text.cast::<u8>(), len) })
 }
 
 /// lua_upvalueindex().

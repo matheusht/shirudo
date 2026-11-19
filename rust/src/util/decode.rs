@@ -19,16 +19,16 @@ use std::os::fd::AsRawFd;
 use crate::errno::{E2BIG, EINVAL, ENAMETOOLONG, ENODATA, ENOENT, ENOMEM, ERANGE, ESTALE, text};
 use crate::sys::libc::{explicit_bzero, snprintf};
 use crate::sys::luajit::{
-    Allocator, LUA_MASKCOUNT, LUA_REGISTRYINDEX, LUA_TBOOLEAN, LUA_TFUNCTION, LUA_TNIL,
-    LUA_TNUMBER, LUA_TSTRING, LUA_TTABLE, LUAJIT_MODE_ENGINE, LUAJIT_MODE_OFF, Lua, LuaDebug,
-    LuaState, lua_call, lua_getfield, lua_getglobal, lua_gettop, lua_newtable, lua_newuserdata,
-    lua_next, lua_objlen, lua_pcall, lua_pop, lua_pushboolean, lua_pushcclosure, lua_pushcfunction,
-    lua_pushinteger, lua_pushlightuserdata, lua_pushlstring, lua_pushnil, lua_pushnumber,
-    lua_pushstring, lua_pushvalue, lua_rawgeti, lua_rawseti, lua_remove, lua_setfield,
-    lua_setglobal, lua_sethook, lua_setmetatable, lua_toboolean, lua_tolstring, lua_tonumber,
-    lua_touserdata, lua_type, lua_upvalueindex, luaJIT_setmode, luaL_argerror, luaL_checkinteger,
-    luaL_checklstring, luaL_checktype, luaL_checkudata, luaL_error, luaL_loadbufferx,
-    luaL_newmetatable, luaL_openlibs, lual_getmetatable,
+    Allocator, LUA_MASKCOUNT, LUA_REGISTRYINDEX, LUA_TFUNCTION, LUA_TSTRING, LUA_TTABLE,
+    LUAJIT_MODE_ENGINE, LUAJIT_MODE_OFF, Lua, LuaDebug, LuaState, LuaType, Stack, lua_call,
+    lua_getfield, lua_getglobal, lua_gettop, lua_newtable, lua_newuserdata, lua_objlen, lua_pcall,
+    lua_pop, lua_pushboolean, lua_pushcclosure, lua_pushcfunction, lua_pushinteger,
+    lua_pushlightuserdata, lua_pushlstring, lua_pushnil, lua_pushnumber, lua_pushstring,
+    lua_pushvalue, lua_rawgeti, lua_rawseti, lua_remove, lua_setfield, lua_setglobal, lua_sethook,
+    lua_setmetatable, lua_tolstring, lua_tonumber, lua_touserdata, lua_type, lua_upvalueindex,
+    luaJIT_setmode, luaL_argerror, luaL_checkinteger, luaL_checklstring, luaL_checktype,
+    luaL_checkudata, luaL_error, luaL_loadbufferx, luaL_newmetatable, luaL_openlibs,
+    lual_getmetatable,
 };
 use crate::sys::upatch_maps::MapView;
 use crate::text::cstr;
@@ -167,254 +167,218 @@ unsafe extern "C" fn limited_alloc(
     next
 }
 
+/// Where a table key stands in an array: a whole number from 1 to the
+/// largest int.
+fn array_index(key: f64) -> Option<c_int> {
+    // `as` saturates, and only a whole number in range comes back equal.
+    let index = key as c_int;
+    (index >= 1 && f64::from(index) == key).then_some(index)
+}
+
 /// Whether the table at `idx` is an array, 1 to its length with no
 /// other key, and that length.
-///
-/// # Safety
-///
-/// `l` is a state with a table at `idx`.
-unsafe fn table_array_len(l: *mut LuaState, idx: c_int) -> Option<usize> {
-    // SAFETY: the caller's state and table, walked with lua_next().
-    unsafe {
-        let idx = absindex(l, idx);
-        let (mut count, mut max, mut array) = (0usize, 0usize, true);
-        lua_pushnil(l);
-        while lua_next(l, idx) != 0 {
-            if lua_type(l, -2) == LUA_TNUMBER {
-                let n = lua_tonumber(l, -2);
-                if !n.is_finite() || n < 1.0 || n > f64::from(c_int::MAX) {
-                    array = false;
-                } else {
-                    let k = n as usize;
-                    if k as f64 != n {
-                        array = false;
-                        lua_pop(l, 1);
-                        continue;
-                    }
-                    max = max.max(k);
-                    count += 1;
-                }
-            } else {
-                array = false;
+fn table_array_len(s: &mut Stack<'_>, idx: c_int) -> Option<c_int> {
+    let idx = s.abs_index(idx)?;
+    let (mut count, mut max, mut array) = (0, 0, true);
+    s.push_nil();
+    while s.next(idx) {
+        let index = (s.type_of(-2) == LuaType::Number)
+            .then(|| array_index(s.to_number(-2)))
+            .flatten();
+        match index {
+            Some(index) => {
+                max = max.max(index);
+                count += 1;
             }
-            lua_pop(l, 1);
+            None => array = false,
         }
-        (array && count == max).then_some(max)
+        s.pop(1);
     }
+    (array && count == max).then_some(max)
+}
+
+/// Whether a value of the type can be a key in the JSON.
+fn is_key(t: LuaType) -> bool {
+    matches!(t, LuaType::String | LuaType::Number | LuaType::Boolean)
 }
 
 /// A table key as text: a string as it is, a number and a boolean
 /// spelled out. A name the kernel hands over is raw bytes, cut at a
 /// fixed length mid-character as often as not, and one bad byte must
 /// not cost the whole snapshot: the lossy writers make it U+FFFD.
-///
-/// # Safety
-///
-/// `l` is a state with a value at `idx`.
-unsafe fn emit_key(l: *mut LuaState, idx: c_int, e: &mut JsonEmit, as_key: bool) {
-    // SAFETY: the caller's state.
-    let text: Vec<u8> = unsafe {
-        match lua_type(l, idx) {
-            LUA_TSTRING => to_bytes(l, idx).unwrap_or_default().to_vec(),
-            LUA_TNUMBER => printf_double(c"%.17g", lua_tonumber(l, idx)),
-            LUA_TBOOLEAN => {
-                if lua_toboolean(l, idx) != 0 {
-                    b"true".to_vec()
-                } else {
-                    b"false".to_vec()
-                }
-            }
-            _ => b"unsupported_key".to_vec(),
+fn emit_key(s: &Stack<'_>, idx: c_int, e: &mut JsonEmit, as_key: bool) {
+    let number;
+    let text: &[u8] = match s.type_of(idx) {
+        LuaType::String => s.to_bytes(idx).unwrap_or_default(),
+        LuaType::Number => {
+            number = printf_double(c"%.17g", s.to_number(idx));
+            &number
         }
+        LuaType::Boolean if s.to_bool(idx) => b"true",
+        LuaType::Boolean => b"false",
+        _ => b"unsupported_key",
     };
     if as_key {
-        e.key_lossy(&text)
+        e.key_lossy(text)
     } else {
-        e.str_lossy(&text)
+        e.str_lossy(text)
     }
 }
 
-/// The Lua value at `idx` as JSON.
-///
-/// # Safety
-///
-/// `l` is a state with a value at `idx`.
-unsafe fn json_value(l: *mut LuaState, idx: c_int, e: &mut JsonEmit, depth: c_int) -> c_int {
+/// The Lua value at `idx` as JSON, into `e`, whose error says whether it
+/// could be.
+fn json_value(s: &mut Stack<'_>, idx: c_int, e: &mut JsonEmit, depth: c_int) {
     if depth > JSON_MAX_DEPTH {
         e.set_err(-E2BIG);
-        return e.err();
+        return;
     }
-    // SAFETY: the caller's state.
-    unsafe {
-        match lua_type(l, idx) {
-            LUA_TNIL => e.raw_value(b"null"),
-            LUA_TBOOLEAN => e.raw_value(if lua_toboolean(l, idx) != 0 {
-                b"true"
+    match s.type_of(idx) {
+        LuaType::Nil => e.raw_value(b"null"),
+        LuaType::Boolean if s.to_bool(idx) => e.raw_value(b"true"),
+        LuaType::Boolean => e.raw_value(b"false"),
+        LuaType::Number => {
+            let v = s.to_number(idx);
+            if !v.is_finite() {
+                e.set_err(-EINVAL);
             } else {
-                b"false"
-            }),
-            LUA_TNUMBER => {
-                let v = lua_tonumber(l, idx);
-                if !v.is_finite() {
-                    e.set_err(-EINVAL);
-                } else {
-                    e.raw_value(&printf_double(c"%.17g", v));
-                }
+                e.raw_value(&printf_double(c"%.17g", v));
             }
-            LUA_TSTRING => e.str_lossy(to_bytes(l, idx).unwrap_or_default()),
-            LUA_TTABLE => {
-                json_table(l, idx, e, depth);
-            }
-            _ => e.set_err(-EINVAL),
         }
+        LuaType::String => e.str_lossy(s.to_bytes(idx).unwrap_or_default()),
+        LuaType::Table => json_table(s, idx, e, depth),
+        _ => e.set_err(-EINVAL),
     }
-    e.err()
 }
 
-/// # Safety
-///
-/// `l` is a state with a table at `idx`.
-unsafe fn json_table(l: *mut LuaState, idx: c_int, e: &mut JsonEmit, depth: c_int) -> c_int {
-    // SAFETY: the caller's state and table.
-    unsafe {
-        let idx = absindex(l, idx);
-        if let Some(len) = table_array_len(l, idx) {
-            e.arr_open_value();
-            let mut i = 1;
-            while i <= len && e.err() == 0 {
-                lua_rawgeti(l, idx, i as c_int);
-                json_value(l, -1, e, depth + 1);
-                lua_pop(l, 1);
-                i += 1;
-            }
-            e.arr_close();
-            return e.err();
-        }
-        e.obj_value_open();
-        lua_pushnil(l);
-        while lua_next(l, idx) != 0 {
-            if !matches!(lua_type(l, -2), LUA_TSTRING | LUA_TNUMBER | LUA_TBOOLEAN) {
-                e.set_err(-EINVAL);
-                lua_pop(l, 2);
-                break;
-            }
-            emit_key(l, -2, e, true);
-            json_value(l, -1, e, depth + 1);
-            lua_pop(l, 1);
+fn json_table(s: &mut Stack<'_>, idx: c_int, e: &mut JsonEmit, depth: c_int) {
+    let Some(idx) = s.abs_index(idx) else {
+        e.set_err(-EINVAL);
+        return;
+    };
+    if let Some(len) = table_array_len(s, idx) {
+        e.arr_open_value();
+        for i in 1..=len {
             if e.err() != 0 {
-                lua_pop(l, 1);
                 break;
             }
+            s.raw_get_index(idx, i);
+            json_value(s, -1, e, depth + 1);
+            s.pop(1);
         }
-        e.obj_close();
+        e.arr_close();
+        return;
     }
-    e.err()
+    e.obj_value_open();
+    s.push_nil();
+    while s.next(idx) {
+        if !is_key(s.type_of(-2)) {
+            e.set_err(-EINVAL);
+            s.pop(2);
+            break;
+        }
+        emit_key(s, -2, e, true);
+        json_value(s, -1, e, depth + 1);
+        s.pop(1);
+        if e.err() != 0 {
+            s.pop(1);
+            break;
+        }
+    }
+    e.obj_close();
 }
 
-/// The Lua value at `idx` as the OTLP JSON form of an AnyValue.
-///
-/// # Safety
-///
-/// `l` is a state with a value at `idx`.
-unsafe fn otel_value(l: *mut LuaState, idx: c_int, e: &mut JsonEmit, depth: c_int) -> c_int {
+/// The Lua value at `idx` as the OTLP JSON form of an AnyValue, into
+/// `e`, whose error says whether it could be.
+fn otel_value(s: &mut Stack<'_>, idx: c_int, e: &mut JsonEmit, depth: c_int) {
     if depth > JSON_MAX_DEPTH {
         e.set_err(-E2BIG);
-        return e.err();
+        return;
     }
-    // SAFETY: the caller's state.
-    unsafe {
-        match lua_type(l, idx) {
-            // An empty AnyValue is the OTLP form of nil.
-            LUA_TNIL => {
-                e.obj_value_open();
-                e.obj_close();
-            }
-            LUA_TBOOLEAN => {
-                e.obj_value_open();
-                e.kv_bool(b"boolValue", lua_toboolean(l, idx) != 0);
-                e.obj_close();
-            }
-            LUA_TNUMBER => {
-                let v = lua_tonumber(l, idx);
-                if !v.is_finite() {
-                    e.set_err(-EINVAL);
-                } else {
-                    e.obj_value_open();
-                    if v.trunc() == v && v.abs() <= MAX_EXACT {
-                        e.kv_string(
-                            b"intValue",
-                            &printf_double(c"%.0f", if v == 0.0 { 0.0 } else { v }),
-                        );
-                    } else {
-                        e.kv_raw(b"doubleValue", &printf_double(c"%.17g", v));
-                    }
-                    e.obj_close();
-                }
-            }
-            LUA_TSTRING => {
-                e.obj_value_open();
-                e.key(b"stringValue");
-                e.str_lossy(to_bytes(l, idx).unwrap_or_default());
-                e.obj_close();
-            }
-            LUA_TTABLE => {
-                otel_table(l, idx, e, depth);
-            }
-            _ => e.set_err(-EINVAL),
+    match s.type_of(idx) {
+        // An empty AnyValue is the OTLP form of nil.
+        LuaType::Nil => {
+            e.obj_value_open();
+            e.obj_close();
         }
+        LuaType::Boolean => {
+            e.obj_value_open();
+            e.kv_bool(b"boolValue", s.to_bool(idx));
+            e.obj_close();
+        }
+        LuaType::Number => {
+            let v = s.to_number(idx);
+            if !v.is_finite() {
+                e.set_err(-EINVAL);
+            } else {
+                e.obj_value_open();
+                if v.trunc() == v && v.abs() <= MAX_EXACT {
+                    e.kv_string(
+                        b"intValue",
+                        &printf_double(c"%.0f", if v == 0.0 { 0.0 } else { v }),
+                    );
+                } else {
+                    e.kv_raw(b"doubleValue", &printf_double(c"%.17g", v));
+                }
+                e.obj_close();
+            }
+        }
+        LuaType::String => {
+            e.obj_value_open();
+            e.key(b"stringValue");
+            e.str_lossy(s.to_bytes(idx).unwrap_or_default());
+            e.obj_close();
+        }
+        LuaType::Table => otel_table(s, idx, e, depth),
+        _ => e.set_err(-EINVAL),
     }
-    e.err()
 }
 
-/// # Safety
-///
-/// `l` is a state with a table at `idx`.
-unsafe fn otel_table(l: *mut LuaState, idx: c_int, e: &mut JsonEmit, depth: c_int) -> c_int {
-    // SAFETY: the caller's state and table.
-    unsafe {
-        let idx = absindex(l, idx);
-        e.obj_value_open();
-        if let Some(len) = table_array_len(l, idx) {
-            e.obj_open_key(b"arrayValue");
-            e.arr_open(b"values");
-            let mut i = 1;
-            while i <= len && e.err() == 0 {
-                lua_rawgeti(l, idx, i as c_int);
-                otel_value(l, -1, e, depth + 1);
-                lua_pop(l, 1);
-                i += 1;
-            }
-            e.arr_close();
-            e.obj_close();
-            e.obj_close();
-            return e.err();
-        }
-        e.obj_open_key(b"kvlistValue");
+fn otel_table(s: &mut Stack<'_>, idx: c_int, e: &mut JsonEmit, depth: c_int) {
+    let Some(idx) = s.abs_index(idx) else {
+        e.set_err(-EINVAL);
+        return;
+    };
+    e.obj_value_open();
+    if let Some(len) = table_array_len(s, idx) {
+        e.obj_open_key(b"arrayValue");
         e.arr_open(b"values");
-        lua_pushnil(l);
-        while lua_next(l, idx) != 0 {
-            if !matches!(lua_type(l, -2), LUA_TSTRING | LUA_TNUMBER | LUA_TBOOLEAN) {
-                e.set_err(-EINVAL);
-                lua_pop(l, 2);
-                break;
-            }
-            e.obj_value_open();
-            e.key(b"key");
-            emit_key(l, -2, e, false);
-            e.key(b"value");
-            otel_value(l, -1, e, depth + 1);
-            e.obj_close();
-            lua_pop(l, 1);
+        for i in 1..=len {
             if e.err() != 0 {
-                lua_pop(l, 1);
                 break;
             }
+            s.raw_get_index(idx, i);
+            otel_value(s, -1, e, depth + 1);
+            s.pop(1);
         }
         e.arr_close();
         e.obj_close();
         e.obj_close();
+        return;
     }
-    e.err()
+    e.obj_open_key(b"kvlistValue");
+    e.arr_open(b"values");
+    s.push_nil();
+    while s.next(idx) {
+        if !is_key(s.type_of(-2)) {
+            e.set_err(-EINVAL);
+            s.pop(2);
+            break;
+        }
+        e.obj_value_open();
+        e.key(b"key");
+        emit_key(s, -2, e, false);
+        e.key(b"value");
+        otel_value(s, -1, e, depth + 1);
+        e.obj_close();
+        s.pop(1);
+        if e.err() != 0 {
+            s.pop(1);
+            break;
+        }
+    }
+    e.arr_close();
+    e.obj_close();
+    e.obj_close();
 }
 
 /// The hex at `hex` decoded into a userdata pushed on the stack, which
@@ -504,7 +468,7 @@ unsafe fn check_c_int(l: *mut LuaState, arg: c_int) -> c_int {
     let v = unsafe { luaL_checkinteger(l, arg) };
     if v < c_int::MIN as isize || v > c_int::MAX as isize {
         // SAFETY: as above; this raises.
-        return unsafe { luaL_argerror(l, arg, c"integer out of range".as_ptr()) };
+        unsafe { luaL_argerror(l, arg, c"integer out of range".as_ptr()) }
     }
     v as c_int
 }
@@ -626,7 +590,6 @@ unsafe fn store_slot(l: *mut LuaState, slots: c_int, abs: u64, data: *const u8, 
     unsafe {
         if abs >= c_int::MAX as u64 {
             luaL_error(l, c"slot index too large".as_ptr());
-            return;
         }
         push_slot(l, data, size);
         lua_rawseti(l, slots, abs as c_int + 1);
@@ -698,7 +661,7 @@ unsafe extern "C-unwind" fn page_slots(l: *mut LuaState) -> c_int {
         luaL_checktype(l, 1, LUA_TTABLE);
         let size = check_c_int(l, 2);
         if size <= 0 || size as usize > CHUNK_PAYLOAD {
-            return luaL_error(l, c"invalid slot size".as_ptr());
+            luaL_error(l, c"invalid slot size".as_ptr());
         }
         let size = size as usize;
         let chunks = page_u64(l, 1, c"chunks");
@@ -709,7 +672,7 @@ unsafe extern "C-unwind" fn page_slots(l: *mut LuaState) -> c_int {
             return 1;
         };
         let Some((data, len)) = hex_decode_push(l, hex) else {
-            return luaL_error(l, c"invalid page data_hex".as_ptr());
+            luaL_error(l, c"invalid page data_hex".as_ptr());
         };
         let per_chunk = CHUNK_PAYLOAD / size;
         lua_newtable(l);
@@ -750,12 +713,10 @@ unsafe fn check_u64_string(l: *mut LuaState, arg: c_int) -> u64 {
         Ok(v) => v,
         // SAFETY: as above; these raise.
         Err(err) if err == -ERANGE => unsafe {
-            luaL_argerror(l, arg, c"u64 string out of range".as_ptr()) as u64
+            luaL_argerror(l, arg, c"u64 string out of range".as_ptr())
         },
         // SAFETY: as above.
-        Err(_) => unsafe {
-            luaL_argerror(l, arg, c"expected a decimal u64 string".as_ptr()) as u64
-        },
+        Err(_) => unsafe { luaL_argerror(l, arg, c"expected a decimal u64 string".as_ptr()) },
     }
 }
 
@@ -819,7 +780,7 @@ unsafe extern "C-unwind" fn fixed_records(l: *mut LuaState) -> c_int {
         luaL_checktype(l, 1, LUA_TTABLE);
         let size = check_c_int(l, 2);
         if size <= 0 {
-            return luaL_error(l, c"invalid slot size".as_ptr());
+            luaL_error(l, c"invalid slot size".as_ptr());
         }
         let pages = absindex(l, 1);
         lua_newtable(l);
@@ -840,7 +801,7 @@ unsafe extern "C-unwind" fn fixed_records(l: *mut LuaState) -> c_int {
             };
             let Some((data, len)) = hex_decode_push(l, hex) else {
                 lua_pop(l, 2);
-                return luaL_error(l, c"invalid page data_hex".as_ptr());
+                luaL_error(l, c"invalid page data_hex".as_ptr());
             };
             split_page_slots(l, slots, data, len, cursor, chunks, size as usize);
             lua_pop(l, 3);
@@ -1036,17 +997,22 @@ struct Call<'a, 'b> {
 unsafe extern "C-unwind" fn call_decoder(l: *mut LuaState) -> c_int {
     // SAFETY: the closure's state and upvalues, the call live across the
     // pcall that runs this.
-    unsafe {
+    let call = unsafe {
         let call = &mut *lua_touserdata(l, lua_upvalueindex(1)).cast::<Call<'_, '_>>();
         lua_pushvalue(l, lua_upvalueindex(2));
         push_map_input(l, call.view);
         lua_call(l, 1, 1);
-        call.ret = if call.otel {
-            otel_value(l, -1, call.e, 0)
-        } else {
-            json_value(l, -1, call.e, 0)
-        };
+        call
+    };
+    // SAFETY: LuaJIT called this C function with the state, and this is
+    // the one Stack of its frame.
+    let mut s = unsafe { Stack::from_raw(l) };
+    if call.otel {
+        otel_value(&mut s, -1, call.e, 0);
+    } else {
+        json_value(&mut s, -1, call.e, 0);
     }
+    call.ret = call.e.err();
     0
 }
 
