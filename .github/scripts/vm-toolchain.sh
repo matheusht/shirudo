@@ -4,8 +4,8 @@
 #
 # .github/scripts/vm-toolchain.sh -- prepare the LVH guest a workflow builds
 # in, or the runner itself: check that the kernel the BPF objects are
-# built for takes signed BPF, install clang 23 with install-clang.sh and the
-# build dependencies, build or reuse an OpenSSL 3.5 toolchain since the
+# built for takes signed BPF, install clang 23 with install-clang.sh, Rust
+# with install-rust.sh and the build dependencies, build or reuse an OpenSSL 3.5 toolchain since the
 # distribution's predates ML-DSA, and build or reuse a libtpms with
 # install-libtpms.sh since the distribution's segfaults under the
 # functional TPM tests' load (see that script for why). The environment
@@ -53,6 +53,7 @@ grep -aq 'signature_size' "$btf" || {
 }
 
 sh "$root/.github/scripts/install-clang.sh"
+sh "$root/.github/scripts/install-rust.sh"
 apt-get update
 apt-get install -y --no-install-recommends \
 	build-essential \

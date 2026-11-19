@@ -12,6 +12,7 @@ grep -aq 'signature_size' /sys/kernel/btf/vmlinux || {
 
 cd /host
 sh .github/scripts/install-clang.sh
+sh .github/scripts/install-rust.sh
 apt-get update
 apt-get install -y --no-install-recommends \
 	build-essential \

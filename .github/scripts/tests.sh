@@ -157,7 +157,12 @@ sudo prlimit --pid "$$" --memlock=unlimited:unlimited
 # sudo drops LD_LIBRARY_PATH even with -E and replaces PATH with its
 # secure_path, and the OpenSSL 3.5 build needs both: for the openssl the
 # config probes run and for every shirudo binary the tests run here.
+# The runner's rustup comes first in PATH and has no toolchain for root,
+# so its directory is left out and root runs the rustc and cargo
+# install-rust.sh installed.
+path=$(printf '%s\n' "$PATH" | tr : '\n' |
+	grep -vxF "${CARGO_HOME:-$HOME/.cargo}/bin" | paste -sd: -)
 # shellcheck disable=SC2086
-sudo -E env PATH="$PATH" LD_LIBRARY_PATH="$LD_LIBRARY_PATH" \
+sudo -E env PATH="$path" LD_LIBRARY_PATH="$LD_LIBRARY_PATH" \
 	COVERAGE="${COVERAGE:-0}" SHIRUDO_SKIP_TREE_CHECKS="${SHIRUDO_SKIP_TREE_CHECKS:-0}" \
 	make VM="${VM:-1}" $goals

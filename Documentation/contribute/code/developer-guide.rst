@@ -592,6 +592,12 @@ the commit at ``HEAD`` alone without them.
        ``llvm-objcopy`` and ``llvm-symbolizer`` in ``/usr/bin`` at them.
        Every CI job that compiles runs it. It installs packages as root,
        so run it only in a throwaway container or VM.
+   * - ``install-rust.sh``
+     - Installs the distribution's ``rustc`` and ``cargo``, 1.88 or
+       newer, and on Ubuntu 24.04, whose ``rustc`` is older, the newest
+       versioned ``rustc-1.<n>``, with ``rustc`` and ``cargo`` in
+       ``/usr/bin`` naming it. Every CI job that compiles runs it, as
+       root, so run it only in a throwaway container or VM.
    * - ``build-debian.sh <btf>``
      - Installs Debian testing's compiler and libraries and clang 23
        from unstable, builds the

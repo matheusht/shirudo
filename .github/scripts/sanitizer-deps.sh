@@ -36,3 +36,4 @@ apt-get install -y --no-install-recommends \
 	libtss2-dev \
 	zlib1g-dev
 sh .github/scripts/install-clang.sh libclang-rt-23-dev
+sh .github/scripts/install-rust.sh

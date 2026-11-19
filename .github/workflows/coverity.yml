@@ -79,6 +79,7 @@ jobs:
               libtss2-dev \
               zlib1g-dev
             sh .github/scripts/install-clang.sh
+            sh .github/scripts/install-rust.sh
 
             git config --global --add safe.directory /host
 
