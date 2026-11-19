@@ -98,7 +98,7 @@ fn base64_encode(data: &[u8]) -> Vec<u8> {
 /// nothing else, the encoding of what it decodes to and of at most
 /// `cap` bytes; a backend's row admits no other spelling of a field.
 fn base64_field(text: &[u8], cap: usize) -> Option<Vec<u8>> {
-    if text.len() > base64_len(cap) || text.len() % 4 != 0 {
+    if text.len() > base64_len(cap) || !text.len().is_multiple_of(4) {
         return None;
     }
     let value = |c: u8| BASE64.iter().position(|&b| b == c).map(|v| v as u32);

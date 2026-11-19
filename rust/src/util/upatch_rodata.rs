@@ -291,7 +291,10 @@ fn find_rodata_data(l: &Loader<'_>, btf: &Btf, datasec_id: u32, view: &mut View)
     let mut maps = [(0u32, false); MAPS_MAX];
     let count = l.count();
 
-    if !btf.has(datasec_id) || btf.kind(datasec_id) != KIND_DATASEC || l.insns.len() % 8 != 0 {
+    if !btf.has(datasec_id)
+        || btf.kind(datasec_id) != KIND_DATASEC
+        || !l.insns.len().is_multiple_of(8)
+    {
         return -EINVAL;
     }
     let sec_size = btf.size_or_type(datasec_id);
@@ -350,7 +353,7 @@ fn loader_btf(l: &Loader<'_>) -> Result<(u32, u32), c_int> {
     if l.data.is_empty() {
         return Err(-ENOENT);
     }
-    if l.insns.len() % 8 != 0 {
+    if !l.insns.len().is_multiple_of(8) {
         return Err(-EINVAL);
     }
     for i in 4..l.count() {

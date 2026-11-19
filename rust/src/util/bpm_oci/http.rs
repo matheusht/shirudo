@@ -348,10 +348,10 @@ fn curl_once(
         log_failure(req.url, &errbuf, cc);
         status = -1;
     }
-    if let Some(f) = file {
-        if cc == CURLE_FILESIZE_EXCEEDED {
-            f.overflow = true;
-        }
+    if let Some(f) = file
+        && cc == CURLE_FILESIZE_EXCEEDED
+    {
+        f.overflow = true;
     }
     if status < 0 { -EHOSTUNREACH } else { 0 }
 }

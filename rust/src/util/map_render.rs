@@ -257,7 +257,7 @@ pub(crate) fn print_detail(v: &MapView) {
                         t.push(b'\n');
                     }
                 }
-                if v.n_cpus % 4 != 0 {
+                if !v.n_cpus.is_multiple_of(4) {
                     t.push(b'\n');
                 }
             }

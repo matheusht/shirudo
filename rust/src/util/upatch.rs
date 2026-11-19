@@ -338,8 +338,8 @@ fn validate_bounds(h: &UpatchHostHeader, n: usize) -> Result<(), c_int> {
         return Err(-EINVAL);
     }
     if (h.loader_insns_off as usize) < HEADER_SIZE
-        || h.loader_insns_off % 8 != 0
-        || h.loader_insns_len % 8 != 0
+        || !h.loader_insns_off.is_multiple_of(8)
+        || !h.loader_insns_len.is_multiple_of(8)
         || !section_inside(h.loader_insns_off, h.loader_insns_len, n)
     {
         return Err(-EINVAL);

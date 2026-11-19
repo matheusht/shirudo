@@ -45,7 +45,7 @@ fn fixed<const N: usize>(hex: &CStr) -> Result<[u8; N], Fail> {
 /// `hex` of an even length and at most `cap` bytes, decoded.
 fn bytes(hex: &CStr, cap: usize) -> Result<Vec<u8>, Fail> {
     let h = hex.to_bytes();
-    if h.len() % 2 != 0 || h.len() / 2 > cap {
+    if !h.len().is_multiple_of(2) || h.len() / 2 > cap {
         return Err(Fail::Input);
     }
     let mut b = vec![0u8; h.len() / 2];

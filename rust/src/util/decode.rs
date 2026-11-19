@@ -535,7 +535,7 @@ fn split_page_slots(
     size: usize,
 ) {
     let per_chunk = CHUNK_PAYLOAD / size;
-    if chunks > 1 && per_chunk > 0 && CHUNK_PAYLOAD % size != 0 {
+    if chunks > 1 && per_chunk > 0 && !CHUNK_PAYLOAD.is_multiple_of(size) {
         for (chunk, bytes) in (0..chunks).zip(data.chunks(CHUNK_PAYLOAD)) {
             for (i, record) in (0..).zip(bytes.chunks_exact(size).take(per_chunk)) {
                 let page_slot = chunk * per_chunk as u64 + i;

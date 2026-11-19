@@ -87,10 +87,10 @@ fn copy_member(package: &CStr, member: &[u8], output: &[u8]) -> Result<(), c_int
             .chain([parent.len()]);
         for end in ends {
             let dir = &parent[..end];
-            if let Err(e) = builder.create(path(dir)) {
-                if e.kind() != std::io::ErrorKind::AlreadyExists {
-                    return Err(-e.raw_os_error().unwrap_or(EIO));
-                }
+            if let Err(e) = builder.create(path(dir))
+                && e.kind() != std::io::ErrorKind::AlreadyExists
+            {
+                return Err(-e.raw_os_error().unwrap_or(EIO));
             }
             match std::fs::symlink_metadata(path(dir)) {
                 Ok(m) if m.is_dir() => {}

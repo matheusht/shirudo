@@ -557,7 +557,7 @@ impl Dump<'_> {
     /// multiple of the type's alignment.
     fn aligned(&self, t: &Typed<'_>, id: u32, pos: usize) -> bool {
         match self.btf.align_of(id) {
-            Ok(a) if a != 0 => t.base.wrapping_add(pos) % a as usize == 0,
+            Ok(a) if a != 0 => t.base.wrapping_add(pos).is_multiple_of(a as usize),
             _ => false,
         }
     }

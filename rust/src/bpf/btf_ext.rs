@@ -47,12 +47,12 @@ fn parse_info<'a>(
         return Ok(Info::default());
     }
     let left = data.len() - hdr_len;
-    if off % 4 != 0 || off > left || len > left - off || len < 4 {
+    if !off.is_multiple_of(4) || off > left || len > left - off || len < 4 {
         return bad;
     }
     let info = &data[hdr_len + off..hdr_len + off + len];
     let rec_size = le32(info, 0).ok_or(-EINVAL)? as usize;
-    if rec_size < min || rec_size % 4 != 0 || len == 4 {
+    if rec_size < min || !rec_size.is_multiple_of(4) || len == 4 {
         return bad;
     }
     let mut groups = Vec::new();

@@ -472,10 +472,10 @@ fn make_dir(gz: &mut Gz, path: &[u8; PATH_MAX], size: u64, buf: &mut [u8]) -> c_
 fn write_file(gz: &mut Gz, path: &[u8; PATH_MAX], size: u64, buf: &mut [u8]) -> c_int {
     let file = cstr(path);
 
-    if let Some(slash) = file.iter().rposition(|&c| c == b'/') {
-        if let Err(ret) = seal::mkdir_p(&file[..slash], 0o700) {
-            return ret;
-        }
+    if let Some(slash) = file.iter().rposition(|&c| c == b'/')
+        && let Err(ret) = seal::mkdir_p(&file[..slash], 0o700)
+    {
+        return ret;
     }
     let mut out = match seal::open(file, O_WRONLY | O_CREAT | O_EXCL, 0o644) {
         Ok(fd) => std::fs::File::from(fd),

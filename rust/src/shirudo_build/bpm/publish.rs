@@ -555,10 +555,10 @@ pub(super) fn run(args: &[&CStr]) -> c_int {
         return EXIT_USAGE;
     }
     let keys = index_key.zip(index_cert);
-    if let Some((k, c)) = keys {
-        if check_keys(k, c) != 0 {
-            return 1;
-        }
+    if let Some((k, c)) = keys
+        && check_keys(k, c) != 0
+    {
+        return 1;
     }
     let Ok(curl) = super::Curl::init() else {
         return fail("initialize curl", -EIO);

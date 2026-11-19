@@ -67,7 +67,7 @@ fn render(directory: &CStr, nonce_hex: &CStr) -> c_int {
     let hex = nonce_hex.to_bytes();
     let mut nonce = [0u8; NONCE_MAX];
     let n = hex.len() / 2;
-    if hex.len() % 2 != 0
+    if !hex.len().is_multiple_of(2)
         || n > NONCE_MAX
         || crate::util::hex::decode(hex, &mut nonce[..n]).is_err()
     {

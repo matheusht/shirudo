@@ -455,11 +455,11 @@ pub(super) fn run(args: &[&CStr]) -> c_int {
             log_err(b"upatch map: invalid map_export configuration");
             return 2;
         }
-        if !a.json {
-            if let Some(p) = configured(&c.map_export_json_path) {
-                a.json_path = Some(p);
-                a.json = true;
-            }
+        if !a.json
+            && let Some(p) = configured(&c.map_export_json_path)
+        {
+            a.json_path = Some(p);
+            a.json = true;
         }
         a.otel |= configured(&c.map_export_otel_endpoint).is_some();
         if a.otel {
@@ -495,11 +495,11 @@ pub(super) fn run(args: &[&CStr]) -> c_int {
         return EXIT_USAGE;
     }
     let detail = !a.json && !a.otel;
-    if let Some(u) = a.upatch {
-        if !name_valid(Some(u.to_bytes())) {
-            p.usage(&[b"invalid upatch name '", u.to_bytes(), b"'"].concat());
-            return EXIT_USAGE;
-        }
+    if let Some(u) = a.upatch
+        && !name_valid(Some(u.to_bytes()))
+    {
+        p.usage(&[b"invalid upatch name '", u.to_bytes(), b"'"].concat());
+        return EXIT_USAGE;
     }
     if let (Some(u), Some(m)) = (a.upatch, a.map) {
         return export(u, m, &a, &opts, detail);

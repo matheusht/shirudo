@@ -111,7 +111,7 @@ impl<'a> Lskel<'a> {
         if nr_maps > MAX_ENTRIES
             || nr_progs > MAX_ENTRIES
             || reuse_map_mask.checked_shr(nr_maps as u32).unwrap_or(0) != 0
-            || (HEADER + names_len) % INSN != 0
+            || !(HEADER + names_len).is_multiple_of(INSN)
             || insns_len == 0
             || insns_len % INSN != 0
             || HEADER + names_len + insns_len + data_len != b.len()

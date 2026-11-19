@@ -271,10 +271,10 @@ pub(super) fn unregister(name: &[u8]) -> c_int {
         return 2;
     };
 
-    if let Ok(s) = load(name) {
-        if s.key_file[0] != 0 {
-            remove(&super::message(&[s.key_file()]));
-        }
+    if let Ok(s) = load(name)
+        && s.key_file[0] != 0
+    {
+        remove(&super::message(&[s.key_file()]));
     }
     // SAFETY: a C string.
     if unsafe { crate::sys::libc::unlink(file.as_ptr()) } != 0

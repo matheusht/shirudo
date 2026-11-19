@@ -49,7 +49,7 @@ pub(crate) fn decode(hex: &[u8], out: &mut [u8]) -> Result<(), c_int> {
 /// bytes spells, into the start of `out`: how many, or -EINVAL.
 pub(crate) fn decode_max(hex: &[u8], out: &mut [u8]) -> Result<usize, c_int> {
     let n = hex.len() / 2;
-    let Some(room) = out.get_mut(..n).filter(|_| hex.len() % 2 == 0) else {
+    let Some(room) = out.get_mut(..n).filter(|_| hex.len().is_multiple_of(2)) else {
         return Err(-EINVAL);
     };
 

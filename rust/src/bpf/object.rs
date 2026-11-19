@@ -1397,7 +1397,7 @@ impl Object {
                     format!("prog '{pname}': incorrect bpf_call opcode"),
                 );
             }
-            if shndx == 0 || shndx != self.text_shndx || sym.value % INSN_SZ as u64 != 0 {
+            if shndx == 0 || shndx != self.text_shndx || !sym.value.is_multiple_of(INSN_SZ as u64) {
                 return fail(-EINVAL, format!("prog '{pname}': bad call relo"));
             }
             return Ok(Relo {
@@ -1412,7 +1412,7 @@ impl Object {
             );
         }
         if sym_is_subprog(sym, self.text_shndx) {
-            if sym.value % INSN_SZ as u64 != 0 || insn.imm % INSN_SZ as i32 != 0 {
+            if !sym.value.is_multiple_of(INSN_SZ as u64) || insn.imm % INSN_SZ as i32 != 0 {
                 return fail(-EINVAL, format!("prog '{pname}': bad subprog addr relo"));
             }
             return Ok(Relo {
@@ -1482,7 +1482,7 @@ impl Object {
         for (sec_idx, recs) in &core.groups {
             for rec in core.records(recs) {
                 let insn_off = le32(rec) as usize;
-                if insn_off % INSN_SZ != 0 {
+                if !insn_off.is_multiple_of(INSN_SZ) {
                     return Err(-EINVAL);
                 }
                 let insn_idx = insn_off / INSN_SZ;

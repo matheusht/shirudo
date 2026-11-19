@@ -551,7 +551,7 @@ impl Btf {
                         return Ok(1);
                     }
                 }
-                if self.size_or_type(id) % max_align != 0 {
+                if !self.size_or_type(id).is_multiple_of(max_align) {
                     return Ok(1);
                 }
                 Ok(max_align)

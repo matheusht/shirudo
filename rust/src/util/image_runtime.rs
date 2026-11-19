@@ -476,12 +476,11 @@ fn mount_runtime(s: &mut State, trusted_boot: bool) -> c_int {
     if !s.loaded {
         return -EINVAL;
     }
-    if !trusted_boot {
-        if let Ok(dev) = runtime_device() {
-            if device_observed(dev, Some(&s.bootstrap.runtime_root), DEVICE_RUNTIME) == 0 {
-                return load_runtime_config(s, trusted_boot);
-            }
-        }
+    if !trusted_boot
+        && let Ok(dev) = runtime_device()
+        && device_observed(dev, Some(&s.bootstrap.runtime_root), DEVICE_RUNTIME) == 0
+    {
+        return load_runtime_config(s, trusted_boot);
     }
     let mut opened = ConfigImageOpen::closed();
     let mut device = DmVerity::empty();

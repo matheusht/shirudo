@@ -35,7 +35,7 @@ fn digest(op: &TreeOperation) -> Result<Vec<u8>, c_int> {
 
 /// The fixes a publisher adds to every other operation.
 fn emit_fixes(e: &mut JsonEmit, index: usize, p: &TreePublication) -> c_int {
-    if index % 2 == 0 {
+    if index.is_multiple_of(2) {
         e.arr_open(b"fixes");
         e.str(b"EXAMPLE-0101");
         e.str(cstr(&p.tree_id));

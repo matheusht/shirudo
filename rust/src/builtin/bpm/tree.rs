@@ -184,10 +184,10 @@ fn status_write(id: &[u8], text: &[u8]) -> Result {
 }
 
 fn status_clear(id: &[u8]) {
-    if upatch::name_valid(Some(id)) {
-        if let Ok(p) = path(&[TREE_STATUS_DIR.as_bytes(), b"/", id]) {
-            remove(&p);
-        }
+    if upatch::name_valid(Some(id))
+        && let Ok(p) = path(&[TREE_STATUS_DIR.as_bytes(), b"/", id])
+    {
+        remove(&p);
     }
 }
 

@@ -742,12 +742,12 @@ pub(crate) fn read(upatch: &[u8], map: &[u8], cap: u32, flags: u32) -> Result<Ma
     out.max_entries = info.u32_at(MAP_MAX_ENTRIES);
     out.n_cpus = if is_percpu(ty) { nproc_possible()? } else { 1 };
     resolve_location(kernel_btf::vmlinux(), upatch, &mut out.location);
-    if let Ok(dir) = pin_path(upatch, &[]) {
-        if let Ok(st) = fs::metadata(os(dir.as_bytes())) {
-            out.lifetime_start_ns = (st.ctime() as u64)
-                .wrapping_mul(1_000_000_000)
-                .wrapping_add(st.ctime_nsec() as u64);
-        }
+    if let Ok(dir) = pin_path(upatch, &[])
+        && let Ok(st) = fs::metadata(os(dir.as_bytes()))
+    {
+        out.lifetime_start_ns = (st.ctime() as u64)
+            .wrapping_mul(1_000_000_000)
+            .wrapping_add(st.ctime_nsec() as u64);
     }
     // What a decoder export checks the archive against.
     if let Ok(payload) = pin_payload(upatch) {

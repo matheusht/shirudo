@@ -23,7 +23,7 @@ Before you begin
   ``llvm`` 23 with the BPF target, the release CI builds and tests with.
   :src:`.github/scripts/install-clang.sh` installs them on Debian, Ubuntu
   and Fedora.
-- Rust 1.85 or newer, with ``cargo``, and ``rustfmt`` and ``clippy`` for
+- Rust 1.88 or newer, with ``cargo``, and ``rustfmt`` and ``clippy`` for
   the checks. The userspace is the library under ``rust/``, and every
   binary links it. It takes Rust's standard library, and any crate it
   takes is vendored, so cargo builds it offline.

@@ -374,7 +374,7 @@ one usually still compiles and passes tests.
   and `make target` the fully static PIE target profile (`make target-deps`
   builds OpenSSL, libcurl and tpm2-tss from source first). Each builds
   the Rust library with cargo first, offline, into `build/rust/`; it
-  takes Rust 1.85 or newer. A checkout used in place of an installed
+  takes Rust 1.88 or newer. A checkout used in place of an installed
   operator package names the helper with `SHIRUDO_BUILD=<path>`.
 - A compiler warning fails every build; fix it rather than silence it.
   Validate C changes, test code included, with GCC and with clang 23,

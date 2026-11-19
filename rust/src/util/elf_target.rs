@@ -90,14 +90,14 @@ fn table_offsets(elf: &ElfFile<'_>, sh_type: u32, pattern: &[u8], offsets: &mut 
     let nr = syms.bytes.len() as u64 / entsize;
     // Versions are a dynamic symbol table's alone.
     let mut versyms: Option<Data> = None;
-    if sh_type == SHT_DYNSYM {
-        if let Some((v, _)) = elf.section_of_type(SHT_GNU_VERSYM) {
-            versyms = elf.data(v);
-            if let Some((d, _)) = elf.section_of_type(SHT_GNU_VERDEF) {
-                if elf.data(d).is_none() {
-                    return -EINVAL;
-                }
-            }
+    if sh_type == SHT_DYNSYM
+        && let Some((v, _)) = elf.section_of_type(SHT_GNU_VERSYM)
+    {
+        versyms = elf.data(v);
+        if let Some((d, _)) = elf.section_of_type(SHT_GNU_VERDEF)
+            && elf.data(d).is_none()
+        {
+            return -EINVAL;
         }
     }
     let strings = elf.strings(link);
@@ -178,12 +178,12 @@ fn table_func_offset(
     let syms = elf.data(idx).ok_or(-EINVAL)?;
     let nr = syms.bytes.len() as u64 / entsize;
     let (mut versyms, mut verdefs) = (None, None);
-    if sh_type == SHT_DYNSYM {
-        if let Some((v, _)) = elf.section_of_type(SHT_GNU_VERSYM) {
-            versyms = elf.data(v);
-            if let Some((d, dsh)) = elf.section_of_type(SHT_GNU_VERDEF) {
-                verdefs = Some((elf.data(d).ok_or(-EINVAL)?, dsh.link as usize));
-            }
+    if sh_type == SHT_DYNSYM
+        && let Some((v, _)) = elf.section_of_type(SHT_GNU_VERSYM)
+    {
+        versyms = elf.data(v);
+        if let Some((d, dsh)) = elf.section_of_type(SHT_GNU_VERDEF) {
+            verdefs = Some((elf.data(d).ok_or(-EINVAL)?, dsh.link as usize));
         }
     }
     let strings = elf.strings(link);
@@ -325,10 +325,10 @@ fn elf_build_id(elf: &ElfFile<'_>) -> Result<Vec<u8>, c_int> {
         if sh.ty != SHT_NOTE {
             continue;
         }
-        if let Some(data) = elf.data(idx) {
-            if let Some(id) = note_build_id(elf, &data)? {
-                return Ok(id);
-            }
+        if let Some(data) = elf.data(idx)
+            && let Some(id) = note_build_id(elf, &data)?
+        {
+            return Ok(id);
         }
     }
     // Section headers can be stripped; fall back to PT_NOTE segments.

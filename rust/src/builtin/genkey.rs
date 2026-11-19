@@ -486,18 +486,19 @@ pub(super) fn cmd_genkey(args: &[&CStr]) -> c_int {
     if ensure_keys_dir(keys_dir).is_err() {
         return 1;
     }
-    if euid() != 0 && dir == KEYS_DIR.to_bytes() {
-        if let Err(ret) = check_user_keys_dir(dir) {
-            err(&[
-                b"genkey: default keys dir ",
-                KEYS_DIR.to_bytes(),
-                b" is not safe for user key generation: ",
-                text(ret).as_bytes(),
-            ]);
-            err(&[b"it must be owned by the current user and not writable by group or others"]);
-            err(&[b"rerun with sudo or pass --keys-dir <dir>"]);
-            return 1;
-        }
+    if euid() != 0
+        && dir == KEYS_DIR.to_bytes()
+        && let Err(ret) = check_user_keys_dir(dir)
+    {
+        err(&[
+            b"genkey: default keys dir ",
+            KEYS_DIR.to_bytes(),
+            b" is not safe for user key generation: ",
+            text(ret).as_bytes(),
+        ]);
+        err(&[b"it must be owned by the current user and not writable by group or others"]);
+        err(&[b"rerun with sudo or pass --keys-dir <dir>"]);
+        return 1;
     }
 
     if !force && (path_exists(&pkey_path) || path_exists(&cert_path)) {

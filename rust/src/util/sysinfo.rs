@@ -115,11 +115,11 @@ impl SysinfoImage {
 fn os_release_unquote(mut value: &[u8]) -> Option<Vec<u8>> {
     let mut double_quoted = false;
 
-    if let [q @ (b'"' | b'\''), .., last] = value {
-        if q == last {
-            double_quoted = *q == b'"';
-            value = &value[1..value.len() - 1];
-        }
+    if let [q @ (b'"' | b'\''), .., last] = value
+        && q == last
+    {
+        double_quoted = *q == b'"';
+        value = &value[1..value.len() - 1];
     }
     let mut out = Vec::new();
     let mut i = 0;

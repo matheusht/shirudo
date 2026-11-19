@@ -48,7 +48,7 @@ fn base64_digit(c: u8) -> Option<u8> {
 /// of four digits, padding at the end alone, and zero in the bits of the
 /// last digit that no byte takes.
 fn is_canonical_base64(s: &[u8]) -> bool {
-    if s.len() % 4 != 0 {
+    if !s.len().is_multiple_of(4) {
         return false;
     }
     let pad = s.iter().rev().take(2).take_while(|&&c| c == b'=').count();

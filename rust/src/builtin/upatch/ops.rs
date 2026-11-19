@@ -325,10 +325,10 @@ fn wipe(dir: &[u8]) -> c_int {
         Err(e) => return io_err(&e),
     };
     for e in entries.map_while(Result::ok) {
-        if let Err(e) = fs::remove_file(e.path()) {
-            if e.raw_os_error() != Some(ENOENT) {
-                return io_err(&e);
-            }
+        if let Err(e) = fs::remove_file(e.path())
+            && e.raw_os_error() != Some(ENOENT)
+        {
+            return io_err(&e);
         }
     }
     match fs::remove_dir(os(dir)) {
@@ -1236,18 +1236,18 @@ fn unload_steps(a: &OpArgs, file: &CStr, rep: &mut OpReport, name_out: &mut CStr
     }
 
     let unarchive = || {
-        if let Err(e) = fs::remove_file(os(archived.to_bytes())) {
-            if e.raw_os_error() != Some(ENOENT) {
-                log_warn(
-                    &[
-                        b"upatch unload: could not remove ",
-                        archived.to_bytes(),
-                        b": ",
-                        strerr(-io_err(&e)),
-                    ]
-                    .concat(),
-                );
-            }
+        if let Err(e) = fs::remove_file(os(archived.to_bytes()))
+            && e.raw_os_error() != Some(ENOENT)
+        {
+            log_warn(
+                &[
+                    b"upatch unload: could not remove ",
+                    archived.to_bytes(),
+                    b": ",
+                    strerr(-io_err(&e)),
+                ]
+                .concat(),
+            );
         }
     };
     // An archive with no pins is one init could not restore, or one an
@@ -1443,20 +1443,20 @@ fn purge_locked(name: &[u8], signer: *const Cert, reason: &[u8]) -> c_int {
             return ret;
         }
     }
-    if let Err(e) = fs::remove_file(os(archived.to_bytes())) {
-        if e.raw_os_error() != Some(ENOENT) {
-            let err = io_err(&e);
-            log_err(
-                &[
-                    b"upatch purge: could not remove ",
-                    archived.to_bytes(),
-                    b": ",
-                    strerr(-err),
-                ]
-                .concat(),
-            );
-            return err;
-        }
+    if let Err(e) = fs::remove_file(os(archived.to_bytes()))
+        && e.raw_os_error() != Some(ENOENT)
+    {
+        let err = io_err(&e);
+        log_err(
+            &[
+                b"upatch purge: could not remove ",
+                archived.to_bytes(),
+                b": ",
+                strerr(-err),
+            ]
+            .concat(),
+        );
+        return err;
     }
     let how: &[u8] = if loaded { b"detached" } else { b"archive_only" };
     log_audit(&[b"upatch purge: name=", name, b" reason=", reason, b" ", how].concat());
