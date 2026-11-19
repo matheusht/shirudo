@@ -140,13 +140,6 @@ fn truncate(fd: BorrowedFd<'_>) -> Result<(), c_int> {
     Ok(())
 }
 
-/// All of `bytes` to `fd`, through short writes and signals: -EIO for
-/// a write of nothing.
-fn write_all(fd: BorrowedFd<'_>, bytes: &[u8]) -> Result<(), c_int> {
-    // SAFETY: an open descriptor and the slice's bytes.
-    status(unsafe { write_complete(fd.as_raw_fd(), bytes.as_ptr().cast(), bytes.len()) })
-}
-
 fn stat(fd: BorrowedFd<'_>) -> Result<Statx, c_int> {
     let mut st = Statx::zeroed();
 
@@ -614,7 +607,8 @@ impl Output {
     /// otherwise point it at sealed state to remove.
     pub(crate) fn commit(self, doc: &[u8]) -> Result<(), c_int> {
         let Output { file, dir, name } = self;
-        let written = write_all(file.as_fd(), doc).and_then(|()| write_all(file.as_fd(), b"\n"));
+        let newline = |()| write_complete(file.as_fd(), b"\n");
+        let written = write_complete(file.as_fd(), doc).and_then(newline);
         let wrote = stat(file.as_fd()).ok();
         let committed = written.and(close_checked(file));
         if let (Err(_), Some(wrote)) = (committed, wrote) {
@@ -765,7 +759,7 @@ pub(crate) fn write_file(path: &[u8], data: &[u8], mode: u32) -> Result<(), c_in
         mode,
     )?;
     let written = inherit(dir.as_fd(), fd.as_fd())
-        .and_then(|()| write_all(fd.as_fd(), data))
+        .and_then(|()| write_complete(fd.as_fd(), data))
         .and_then(|()| sync(fd.as_fd()));
     let placed = written
         .and(close_checked(fd))

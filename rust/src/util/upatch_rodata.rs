@@ -8,6 +8,7 @@
 
 use core::ffi::{CStr, c_int};
 use core::ptr;
+use std::os::fd::AsFd;
 
 use crate::bpf::btf::{
     Btf, INT_BOOL, INT_SIGNED, KIND_ARRAY, KIND_CONST, KIND_DATASEC, KIND_ENUM, KIND_ENUM64,
@@ -18,7 +19,7 @@ use crate::bpf::btf_dump::Dump;
 use crate::errno::{E2BIG, EEXIST, EINVAL, ENODATA, ENOENT, ENOMEM, ENOSPC, EOPNOTSUPP};
 use crate::ffi;
 use crate::heap::{xfree, xmalloc};
-use crate::sys::libc::{STDOUT_FILENO, fwrite, printf, putchar, stdout};
+use crate::sys::libc::{fwrite, printf, putchar, stdout};
 use crate::text::strsprintf;
 use crate::util::io::write_complete;
 use crate::util::json::{JsonEmit, MAX_BYTES};
@@ -1203,8 +1204,8 @@ unsafe fn print_rodata_json(u: &Upatch, path: &CStr, view: &View) -> c_int {
     }
     if ret == 0 {
         let out = [e.output(), b"\n"].concat();
-        // SAFETY: the document's bytes and its newline.
-        ret = unsafe { write_complete(STDOUT_FILENO, out.as_ptr().cast(), out.len()) };
+        let written = write_complete(std::io::stdout().as_fd(), &out);
+        ret = written.err().unwrap_or(0);
     }
     if e.err() == -E2BIG {
         crate::log::err(format!("BTF JSON output exceeds {MAX_BYTES} bytes").as_bytes());

@@ -11,7 +11,7 @@
 
 use core::ffi::{CStr, c_int};
 use std::ffi::OsStr;
-use std::os::fd::BorrowedFd;
+use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 
@@ -78,10 +78,10 @@ fn render(directory: &CStr, nonce_hex: &CStr) -> c_int {
         Err(err) => return err,
     };
     match evidence_config(&nonce[..n], PCR_MASK, None, Some(&journal)) {
-        // SAFETY: the document's bytes, to standard output.
-        Ok(doc) => unsafe {
-            crate::util::io::write_complete(libc::STDOUT_FILENO, doc.as_ptr().cast(), doc.len())
-        },
+        Ok(doc) => {
+            let written = crate::util::io::write_complete(std::io::stdout().as_fd(), &doc);
+            written.err().unwrap_or(0)
+        }
         Err(err) => err,
     }
 }

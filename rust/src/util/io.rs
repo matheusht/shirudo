@@ -41,34 +41,27 @@ struct OpenHow {
     resolve: u64,
 }
 
-/// All `len` bytes at `buf` to `fd`, through short writes and signals:
-/// 0, -EIO for a write of nothing, or -errno.
-///
-/// # Safety
-///
-/// `buf` holds `len` bytes.
-pub(crate) unsafe fn write_complete(fd: c_int, buf: *const c_void, len: usize) -> c_int {
-    let mut p = buf.cast::<u8>();
-    let mut len = len;
+/// All of `buf` to `fd`, through short writes and signals: -EIO for a
+/// write of nothing, or -errno.
+pub(crate) fn write_complete(fd: BorrowedFd<'_>, buf: &[u8]) -> Result<(), c_int> {
+    let mut rest = buf;
 
-    while len != 0 {
-        // SAFETY: the caller's bytes, len of them left at p.
-        let n = unsafe { write(fd, p.cast(), len) };
+    while !rest.is_empty() {
+        // SAFETY: the caller's fd, and the bytes left of buf.
+        let n = unsafe { write(fd.as_raw_fd(), rest.as_ptr().cast(), rest.len()) };
 
         if n < 0 {
             if errno() == EINTR {
                 continue;
             }
-            return -errno();
+            return Err(-errno());
         }
         if n == 0 {
-            return -EIO;
+            return Err(-EIO);
         }
-        // SAFETY: within the caller's bytes.
-        p = unsafe { p.add(n as usize) };
-        len -= n as usize;
+        rest = rest.get(n as usize..).ok_or(-EIO)?;
     }
-    0
+    Ok(())
 }
 
 /// The offset after the last newline of the `size` bytes of `fd`, read
@@ -105,6 +98,15 @@ fn last_line_end(fd: BorrowedFd<'_>, size: i64) -> Result<i64, c_int> {
 fn truncate_to(fd: BorrowedFd<'_>, len: i64) -> Result<(), c_int> {
     // SAFETY: the caller's fd.
     if unsafe { ftruncate(fd.as_raw_fd(), len) } != 0 {
+        return Err(-errno());
+    }
+    Ok(())
+}
+
+/// fsync() of the file open on `fd`: -errno.
+fn sync(fd: BorrowedFd<'_>) -> Result<(), c_int> {
+    // SAFETY: the caller's fd.
+    if unsafe { fsync(fd.as_raw_fd()) } != 0 {
         return Err(-errno());
     }
     Ok(())
@@ -239,15 +241,10 @@ pub(crate) fn append_line(fd: BorrowedFd<'_>, path: &CStr, line: &[u8]) -> Resul
         );
     }
     let record = [text, b"\n"].concat();
-    // SAFETY: the caller's fd, and the record's bytes.
-    let mut ret = unsafe { write_complete(fd.as_raw_fd(), record.as_ptr().cast(), record.len()) };
-    // SAFETY: the caller's fd.
-    if ret == 0 && unsafe { fsync(fd.as_raw_fd()) } != 0 {
-        ret = -errno();
-    }
-    if ret == 0 {
+    let appended = write_complete(fd, &record).and_then(|()| sync(fd));
+    let Err(ret) = appended else {
         return Ok(());
-    }
+    };
     if let Err(err) = truncate_to(fd, end) {
         crate::log::warn(
             &[

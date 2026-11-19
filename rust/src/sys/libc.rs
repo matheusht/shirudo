@@ -10,15 +10,14 @@ use core::ffi::{CStr, c_char, c_int, c_long, c_ulong};
 #[cfg(not(miri))]
 pub use libc::explicit_bzero;
 pub use libc::{
-    _exit, access, calloc, close, closedir, execv, execvp, faccessat,
-    fclose, fcntl, fdopen, fdopendir, ferror, fgets, fgetxattr, fileno, flock,
-    fopen, fputc, fputs, free, fsetxattr, fstatfs, fstatvfs, fsync, ftruncate,
-    fwrite, getenv, geteuid, gethostname, getline, getrandom, getsockopt, getxattr, gmtime_r,
-    if_indextoname, ioctl, lgetxattr, link, lseek, lsetxattr, memfd_create, mkdirat, mkdtemp,
-    mknod, mkstemp, mkstemps, mlockall, mount, open, openat, opendir, openlog, personality,
-    posix_memalign, prctl, pread, printf, putchar, read, readdir, recvmsg, renameat, rmdir,
-    sendto, setenv, setitimer, setrlimit, setsockopt, setxattr, snprintf, socket, sscanf,
-    statfs, statvfs, statx, strcasecmp, strerror, strftime, strlen, strnlen,
+    _exit, access, calloc, close, closedir, execv, execvp, faccessat, fclose, fcntl, fdopen,
+    fdopendir, ferror, fgets, fgetxattr, fileno, flock, fopen, fputc, fputs, free, fsetxattr,
+    fstatfs, fstatvfs, fsync, ftruncate, fwrite, getenv, geteuid, gethostname, getline, getrandom,
+    getsockopt, getxattr, gmtime_r, if_indextoname, ioctl, lgetxattr, link, lseek, lsetxattr,
+    memfd_create, mkdirat, mkdtemp, mknod, mkstemp, mkstemps, mlockall, mount, open, openat,
+    opendir, openlog, personality, posix_memalign, prctl, pread, printf, putchar, read, readdir,
+    recvmsg, renameat, rmdir, sendto, setenv, setitimer, setrlimit, setsockopt, setxattr, snprintf,
+    socket, sscanf, statfs, statvfs, statx, strcasecmp, strerror, strftime, strlen, strnlen,
     strptime, syscall, sysconf, syslog, timegm, umount2, uname, unlink, unlinkat, unsetenv, write,
 };
 
@@ -42,7 +41,7 @@ pub use libc::{
     O_DIRECT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_NONBLOCK, O_PATH, O_RDONLY, O_RDWR, O_TRUNC,
     O_WRONLY, PR_SET_DUMPABLE, PR_SET_NO_NEW_PRIVS, PR_SET_PTRACER, R_OK, RLIM_INFINITY,
     RLIMIT_CORE, RLIMIT_CPU, RLIMIT_FSIZE, SEEK_SET, SO_RCVTIMEO, SOCK_CLOEXEC, SOCK_DGRAM,
-    SOCK_RAW, SOL_SOCKET, STATX_BASIC_STATS, STATX_SIZE, STATX_TYPE, STDOUT_FILENO, W_OK, X_OK,
+    SOCK_RAW, SOL_SOCKET, STATX_BASIC_STATS, STATX_SIZE, STATX_TYPE, W_OK, X_OK,
 };
 
 pub type Dir = libc::DIR;

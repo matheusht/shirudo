@@ -6,6 +6,7 @@
 
 use core::ffi::{CStr, c_char, c_int, c_long, c_void};
 use core::ptr;
+use std::os::fd::BorrowedFd;
 
 use super::auth::{encode_basic, parse_challenge, token_from_body};
 use super::refs::{upload_location, url};
@@ -129,7 +130,11 @@ unsafe extern "C" fn write_file(
     }
     s.room -= n as u64;
     // SAFETY: curl hands over n bytes at data.
-    s.err = unsafe { write_complete(s.fd, data.cast(), n) };
+    let data = unsafe { ffi::slice(data.cast::<u8>(), n) };
+    // SAFETY: the sink's fd, which get_file() checked and its caller
+    // holds open through the transfer.
+    let fd = unsafe { BorrowedFd::borrow_raw(s.fd) };
+    s.err = write_complete(fd, data).err().unwrap_or(0);
     if s.err != 0 { 0 } else { n }
 }
 

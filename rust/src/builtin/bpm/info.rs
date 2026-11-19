@@ -10,7 +10,6 @@ use std::os::fd::{AsFd, OwnedFd};
 
 use super::{Result, error, message, status};
 use crate::errno::{E2BIG, EINVAL, ENODATA, ENOENT, EOPNOTSUPP};
-use crate::sys::libc::STDOUT_FILENO;
 use crate::text::{cstr, sanitize};
 use crate::util::bpm_package::{
     Member, UpatchMember, archive_rel_ok, read_member_fd, upatch_member, visit_members_fd,
@@ -44,8 +43,7 @@ impl Archive {
 }
 
 fn stdout_write(bytes: &[u8]) -> Result {
-    // SAFETY: the bytes, to stdout.
-    status(unsafe { write_complete(STDOUT_FILENO, bytes.as_ptr().cast(), bytes.len()) })
+    write_complete(std::io::stdout().as_fd(), bytes)
 }
 
 pub(super) fn readme(source: &[u8]) -> Result {

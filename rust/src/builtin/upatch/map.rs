@@ -10,14 +10,12 @@
 use core::ffi::{CStr, c_int};
 use std::fs::File;
 use std::io::Write;
-use std::os::fd::{AsRawFd, IntoRawFd};
+use std::os::fd::{AsFd, AsRawFd, IntoRawFd};
 use std::os::unix::fs::FileExt;
 
 use super::{JSON_MAX, Summaries, log_err, log_warn, strerr, type_name};
 use crate::errno::{EINVAL, EIO, ENODATA};
-use crate::sys::libc::{
-    LOCK_UN, O_APPEND, O_CREAT, O_RDWR, STDOUT_FILENO, close, errno, ferror, flock, stdout,
-};
+use crate::sys::libc::{LOCK_UN, O_APPEND, O_CREAT, O_RDWR, close, errno, ferror, flock, stdout};
 use crate::text::cstr;
 use crate::util::config::{self, Scrubbed};
 use crate::util::decode;
@@ -303,14 +301,11 @@ fn emit_record(path: Option<&CStr>, json: &[u8]) -> c_int {
     match path {
         Some(p) => append_record(p, json),
         None => {
-            // SAFETY: the bytes, then a newline, to stdout.
-            let r = unsafe { write_complete(STDOUT_FILENO, json.as_ptr().cast(), json.len()) };
-            if r == 0 {
-                // SAFETY: as above.
-                unsafe { write_complete(STDOUT_FILENO, c"\n".as_ptr().cast(), 1) }
-            } else {
-                r
-            }
+            let out = std::io::stdout();
+            write_complete(out.as_fd(), json)
+                .and_then(|()| write_complete(out.as_fd(), b"\n"))
+                .err()
+                .unwrap_or(0)
         }
     }
 }

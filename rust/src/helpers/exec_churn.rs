@@ -8,6 +8,7 @@
 //!   test-exec-churn --duration <seconds> --workers <count>
 
 use core::ffi::{CStr, c_int};
+use std::os::fd::BorrowedFd;
 use std::time::{Duration, Instant};
 
 use super::{err, helper_main, out};
@@ -21,7 +22,7 @@ fn positive(text: &CStr) -> Option<u64> {
 
 /// /bin/true run until `deadline`, one exec at a time; how many exited
 /// 0 written to `fd`.
-fn worker(deadline: Instant, fd: c_int) -> bool {
+fn worker(deadline: Instant, fd: BorrowedFd<'_>) -> bool {
     let argv = [c"/bin/true".as_ptr(), core::ptr::null()];
     let mut completed: u64 = 0;
     while Instant::now() < deadline {
@@ -52,10 +53,7 @@ fn worker(deadline: Instant, fd: c_int) -> bool {
             completed += 1;
         }
     }
-    // SAFETY: the count's bytes to the pipe.
-    unsafe {
-        crate::util::io::write_complete(fd, (&raw const completed).cast(), size_of::<u64>()) == 0
-    }
+    crate::util::io::write_complete(fd, &completed.to_ne_bytes()).is_ok()
 }
 
 fn run(args: &[&CStr]) -> c_int {
@@ -99,11 +97,15 @@ fn run(args: &[&CStr]) -> c_int {
     for _ in 0..workers {
         // SAFETY: a fork of this process, one thread.
         match unsafe { libc::fork() } {
-            // SAFETY: the child's copy of the read end, closed, and its
-            // exit once the worker is done.
+            // SAFETY: the child's copy of the read end, closed, its write
+            // end, open until it exits, lent to the worker, and its exit
+            // once the worker is done.
             0 => unsafe {
                 libc::close(pipe[0]);
-                libc::_exit(c_int::from(!worker(deadline, pipe[1])));
+                libc::_exit(c_int::from(!worker(
+                    deadline,
+                    BorrowedFd::borrow_raw(pipe[1]),
+                )));
             },
             pid if pid < 0 => {
                 failed = true;

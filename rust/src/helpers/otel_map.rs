@@ -23,6 +23,7 @@
 use core::ffi::{CStr, c_int};
 use std::ffi::{CString, OsStr};
 use std::io::Read;
+use std::os::fd::BorrowedFd;
 use std::os::unix::ffi::OsStrExt;
 
 use super::{helper_main, out, out_bytes};
@@ -171,18 +172,15 @@ fn make_decoder(metric: bool, counter: bool, snapshot: bool) -> Result<Decoder, 
             .map_err(|_| -EINVAL)?
             .to_owned(),
     );
-    // SAFETY: the file mkstemp() made, written and closed once.
-    let ret = unsafe {
-        let ret = crate::util::io::write_complete(fd, f.as_ptr().cast(), f.len());
-        if libc::close(fd) != 0 && ret == 0 {
-            -std::io::Error::last_os_error()
-                .raw_os_error()
-                .unwrap_or(libc::EIO)
-        } else {
-            ret
-        }
-    };
-    if ret != 0 { Err(ret) } else { Ok(path) }
+    // SAFETY: the file mkstemp() made, open until it is closed below.
+    let written = crate::util::io::write_complete(unsafe { BorrowedFd::borrow_raw(fd) }, &f);
+    // SAFETY: the file mkstemp() made, closed once.
+    if unsafe { libc::close(fd) } != 0 && written.is_ok() {
+        return Err(-std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EIO));
+    }
+    written.map(|()| path)
 }
 
 /// A map of one entry, 5 and 7 on two CPUs with a poisoned pad between,

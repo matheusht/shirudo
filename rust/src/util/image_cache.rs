@@ -9,6 +9,7 @@
 use core::ffi::{CStr, c_char, c_int, c_void};
 use core::mem::MaybeUninit;
 use core::ptr;
+use std::os::fd::BorrowedFd;
 
 use crate::errno::{EEXIST, EFBIG, EINTR, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, text};
 use crate::sys::curl::{
@@ -65,10 +66,11 @@ fn download_write(data: &[u8], d: &mut Download) -> usize {
         d.err = -EFBIG;
         return 0;
     }
-    // SAFETY: the download's fd, and the bytes.
-    let ret = unsafe { write_complete(d.fd, data.as_ptr().cast(), bytes) };
-    if ret != 0 {
-        d.err = ret;
+    // SAFETY: the download's fd, which fetch_file() opened and holds
+    // open through the transfer.
+    let fd = unsafe { BorrowedFd::borrow_raw(d.fd) };
+    if let Err(err) = write_complete(fd, data) {
+        d.err = err;
         return 0;
     }
     d.written += bytes as u64;
