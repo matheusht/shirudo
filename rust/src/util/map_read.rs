@@ -7,11 +7,11 @@
 //! runs a page at a time, writing chunks to the upatch's output map. The
 //! maps of one upatch or of all are listed.
 
-use core::ffi::{CStr, c_int, c_long, c_void};
+use core::ffi::{CStr, c_int, c_long};
 use core::sync::atomic::{AtomicI32, Ordering};
 use std::ffi::OsStr;
 use std::fs;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 
@@ -172,32 +172,123 @@ fn open_serializer_pin(upatch: &[u8], map: &[u8]) -> Result<OwnedFd, c_int> {
     obj_get(&pin_path(upatch, &[b"serializers", map])?)
 }
 
-/// The output map of a serializer: an array of 4-byte keys and chunk
-/// values, of at most SERIAL_MAX_CHUNKS entries.
-fn validate_serial_map(info: &Info<MAP_INFO_SIZE>) -> Result<(), c_int> {
-    if info.u32_at(MAP_TYPE) != ARRAY
-        || info.u32_at(MAP_KEY_SIZE) != 4
-        || info.u32_at(MAP_VALUE_SIZE) as usize != size_of::<SerialChunk>()
-    {
-        return Err(-EINVAL);
+/// A map open for reads, and the sizes of its keys and of the values a
+/// lookup writes, which every call on it is held to.
+struct Map<'fd> {
+    fd: BorrowedFd<'fd>,
+    key_size: usize,
+    value_size: usize,
+}
+
+impl<'fd> Map<'fd> {
+    /// The map at `fd` as view `v` reads its entries: keys of the key
+    /// size, and values of the value stride for each of the n_cpus CPUs
+    /// of a per-CPU map, at least as many as a lookup fills.
+    fn entries_of(fd: BorrowedFd<'fd>, v: &MapView) -> Result<Self, c_int> {
+        let cpus = if is_percpu(v.ty) {
+            v.n_cpus as usize
+        } else {
+            1
+        };
+        Ok(Map {
+            fd,
+            key_size: v.key_size as usize,
+            value_size: (value_stride(v) as usize)
+                .checked_mul(cpus)
+                .ok_or(-EOVERFLOW)?,
+        })
     }
-    let max = info.u32_at(MAP_MAX_ENTRIES);
-    if max == 0 || max > SERIAL_MAX_CHUNKS {
-        return Err(-E2BIG);
+
+    /// The serializers' output map at `fd`, as its info must describe it:
+    /// an array of 4-byte keys and chunk values, of at most
+    /// SERIAL_MAX_CHUNKS entries.
+    fn serial_output(fd: BorrowedFd<'fd>, info: &Info<MAP_INFO_SIZE>) -> Result<Self, c_int> {
+        if info.u32_at(MAP_TYPE) != ARRAY
+            || info.u32_at(MAP_KEY_SIZE) != 4
+            || info.u32_at(MAP_VALUE_SIZE) as usize != size_of::<SerialChunk>()
+        {
+            return Err(-EINVAL);
+        }
+        let max = info.u32_at(MAP_MAX_ENTRIES);
+        if max == 0 || max > SERIAL_MAX_CHUNKS {
+            return Err(-E2BIG);
+        }
+        Ok(Map {
+            fd,
+            key_size: 4,
+            value_size: size_of::<SerialChunk>(),
+        })
     }
-    Ok(())
+
+    /// -EINVAL unless `key` and `value` are of the map's sizes.
+    fn sized(&self, key: &[u8], value: &[u8]) -> Result<(), c_int> {
+        if key.len() != self.key_size || value.len() != self.value_size {
+            return Err(-EINVAL);
+        }
+        Ok(())
+    }
+
+    /// The value of `key`, into `value`.
+    fn lookup(&self, key: &[u8], value: &mut [u8]) -> Result<(), c_int> {
+        self.sized(key, value)?;
+        // SAFETY: a key and room for a value of the sizes the map reads
+        // and writes.
+        match unsafe {
+            bpf_map_lookup_elem(
+                self.fd.as_raw_fd(),
+                key.as_ptr().cast(),
+                value.as_mut_ptr().cast(),
+            )
+        } {
+            0 => Ok(()),
+            e => Err(e),
+        }
+    }
+
+    /// Sets `key` to `value`.
+    fn update(&self, key: &[u8], value: &[u8]) -> Result<(), c_int> {
+        self.sized(key, value)?;
+        // SAFETY: a key and a value of the sizes the map reads.
+        match unsafe {
+            bpf_map_update_elem(
+                self.fd.as_raw_fd(),
+                key.as_ptr().cast(),
+                value.as_ptr().cast(),
+                BPF_ANY,
+            )
+        } {
+            0 => Ok(()),
+            e => Err(e),
+        }
+    }
+
+    /// Moves `key` on to the key after it, or to the first with `first`:
+    /// -ENOENT past the last.
+    fn next_key(&self, key: &mut [u8], first: bool) -> Result<(), c_int> {
+        if key.len() != self.key_size {
+            return Err(-EINVAL);
+        }
+        let next = key.as_mut_ptr();
+        let prev = if first {
+            core::ptr::null()
+        } else {
+            next.cast_const()
+        };
+        // SAFETY: the key before, or NULL for the first, and room for the
+        // next, of the map's key size; the kernel copies the key before in
+        // and only then writes the next.
+        match unsafe { bpf_map_get_next_key(self.fd.as_raw_fd(), prev.cast(), next.cast()) } {
+            0 => Ok(()),
+            e => Err(e),
+        }
+    }
 }
 
 /// Zeroes every chunk of the output map before a run.
-fn clear_serial_map(fd: c_int, max_entries: u32, value_size: u32) -> Result<(), c_int> {
-    let zero = vec![0u8; value_size as usize];
-    for i in 0..max_entries {
-        // SAFETY: the map, a key and a value of its sizes.
-        if unsafe { bpf_map_update_elem(fd, (&raw const i).cast(), zero.as_ptr().cast(), BPF_ANY) }
-            != 0
-        {
-            return Err(-errno());
-        }
+fn clear_serial_map(output: &Map<'_>, max_entries: u32) -> Result<(), c_int> {
+    let zero = vec![0u8; output.value_size];
+    for index in 0..max_entries {
+        output.update(&index.to_ne_bytes(), &zero)?;
     }
     Ok(())
 }
@@ -205,23 +296,14 @@ fn clear_serial_map(fd: c_int, max_entries: u32, value_size: u32) -> Result<(), 
 /// The page the serializer wrote: its chunks checked against each other
 /// and the request, their payloads joined.
 fn read_serial_page(
-    fd: c_int,
+    output: &Map<'_>,
     max_entries: u32,
     want_page: u32,
     want_cursor: u64,
     invocation_id: u64,
 ) -> Result<SerialPage, c_int> {
     let mut chunk = Box::new(SerialChunk::zeroed());
-    let lookup = |key: u32, chunk: &mut SerialChunk| -> Result<(), c_int> {
-        let value = chunk.bytes_mut();
-        // SAFETY: the map, a key and room for a chunk, its value size.
-        match unsafe { bpf_map_lookup_elem(fd, (&raw const key).cast(), value.as_mut_ptr().cast()) }
-        {
-            0 => Ok(()),
-            _ => Err(-errno()),
-        }
-    };
-    lookup(0, &mut chunk)?;
+    output.lookup(&0u32.to_ne_bytes(), chunk.bytes_mut())?;
     if chunk.magic != SERIAL_MAGIC
         || chunk.version != SERIAL_VERSION
         || chunk.invocation_id != invocation_id
@@ -252,7 +334,7 @@ fn read_serial_page(
     let mut data = Vec::with_capacity(bytes_total as usize);
     for key in 0..total {
         if key != 0 {
-            lookup(key, &mut chunk)?;
+            output.lookup(&key.to_ne_bytes(), chunk.bytes_mut())?;
         }
         chunk_validate(
             &chunk,
@@ -288,9 +370,8 @@ fn read_serial_page(
     })
 }
 
-/// `struct serialize_ctx` of bpf/lib/serializer.h.
-#[repr(C)]
-#[derive(Default)]
+/// `struct serialize_ctx` of bpf/lib/serializer.h, which a test run
+/// hands the serializer and the kernel writes back.
 struct SerializeCtx {
     magic: u32,
     version: u32,
@@ -302,7 +383,44 @@ struct SerializeCtx {
     invocation_id: u64,
 }
 
-const _: () = assert!(size_of::<SerializeCtx>() == 40);
+impl SerializeCtx {
+    /// The structure's bytes, its fields one after the other.
+    fn to_bytes(&self) -> Vec<u8> {
+        [
+            &self.magic.to_ne_bytes()[..],
+            &self.version.to_ne_bytes(),
+            &self.flags.to_ne_bytes(),
+            &self.max_chunks.to_ne_bytes(),
+            &self.chunk_payload_size.to_ne_bytes(),
+            &self.page_index.to_ne_bytes(),
+            &self.cursor.to_ne_bytes(),
+            &self.invocation_id.to_ne_bytes(),
+        ]
+        .concat()
+    }
+
+    /// The structure `bytes` hold, none when they are too few.
+    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let (magic, rest) = bytes.split_first_chunk()?;
+        let (version, rest) = rest.split_first_chunk()?;
+        let (flags, rest) = rest.split_first_chunk()?;
+        let (max_chunks, rest) = rest.split_first_chunk()?;
+        let (chunk_payload_size, rest) = rest.split_first_chunk()?;
+        let (page_index, rest) = rest.split_first_chunk()?;
+        let (cursor, rest) = rest.split_first_chunk()?;
+        let (invocation_id, _) = rest.split_first_chunk()?;
+        Some(SerializeCtx {
+            magic: u32::from_ne_bytes(*magic),
+            version: u32::from_ne_bytes(*version),
+            flags: u32::from_ne_bytes(*flags),
+            max_chunks: u32::from_ne_bytes(*max_chunks),
+            chunk_payload_size: u32::from_ne_bytes(*chunk_payload_size),
+            page_index: u32::from_ne_bytes(*page_index),
+            cursor: u64::from_ne_bytes(*cursor),
+            invocation_id: u64::from_ne_bytes(*invocation_id),
+        })
+    }
+}
 
 /// The map through the serializer upatch `upatch` pins for it, into
 /// `out` page by page until the serializer says it is done: whether the
@@ -322,7 +440,7 @@ fn read_serialized(
         Err(e) => return Err(e),
     };
     let (serial, info) = open_map_pin(upatch, SERIAL_MAP_NAME)?;
-    validate_serial_map(&info)?;
+    let output = Map::serial_output(serial.as_fd(), &info)?;
     // Clearing, running and reading are one transaction, under a lock
     // keyed by the output map's kernel ID: every process sharing the map
     // contends, and unrelated upatches stay independent.
@@ -331,7 +449,7 @@ fn read_serialized(
     let max = info.u32_at(MAP_MAX_ENTRIES);
     let (mut cursor, mut bytes_total) = (0u64, 0u64);
     for page_index in 0..SERIAL_MAX_PAGES {
-        clear_serial_map(serial.as_raw_fd(), max, info.u32_at(MAP_VALUE_SIZE))?;
+        clear_serial_map(&output, max)?;
         let mut ctx = SerializeCtx {
             magic: SERIAL_MAGIC,
             version: SERIAL_VERSION,
@@ -345,16 +463,15 @@ fn read_serialized(
             page_index,
             cursor,
             invocation_id,
-        };
-        // SAFETY: the context's bytes, a structure of integers the program
-        // reads and the kernel writes back whole.
-        let ctx_bytes = unsafe {
-            core::slice::from_raw_parts_mut((&raw mut ctx).cast::<u8>(), size_of::<SerializeCtx>())
-        };
-        let retval = prog_test_run(prog.as_raw_fd(), ctx_bytes)?;
-        if (retval as i32) < 0 {
-            return Err(retval as i32);
         }
+        .to_bytes();
+        let retval = prog_test_run(prog.as_raw_fd(), &mut ctx)?;
+        // The serializer's return value, a negative errno when it fails.
+        let retval = i32::from_ne_bytes(retval.to_ne_bytes());
+        if retval < 0 {
+            return Err(retval);
+        }
+        let ctx = SerializeCtx::from_bytes(&ctx).ok_or(-EBADMSG)?;
         if ctx.magic != SERIAL_MAGIC
             || ctx.version != SERIAL_VERSION
             || ctx.page_index != page_index
@@ -363,7 +480,7 @@ fn read_serialized(
         {
             return Err(-EBADMSG);
         }
-        let page = read_serial_page(serial.as_raw_fd(), max, page_index, cursor, invocation_id)?;
+        let page = read_serial_page(&output, max, page_index, cursor, invocation_id)?;
         if bytes_total + u64::from(page.bytes()) > SERIAL_MAX_TOTAL_BYTES {
             return Err(-E2BIG);
         }
@@ -397,23 +514,12 @@ fn zeroed(len: usize) -> Result<Vec<u8>, c_int> {
 
 /// The map's entries, at most `cap` of them or all for 0: an array by
 /// index, holes left out, a hash by its keys.
-fn read_entries(fd: c_int, v: &mut MapView, cap: u32) -> Result<(), c_int> {
-    let count = if is_percpu(v.ty) {
-        v.n_cpus as usize
-    } else {
-        1
-    };
-    let value_len = (value_stride(v) as usize)
-        .checked_mul(count)
-        .ok_or(-EOVERFLOW)?;
-    let key_len = v.key_size as usize;
-    v.entries = Vec::new();
-    v.truncated = false;
+fn read_entries(map: &Map<'_>, v: &mut MapView, cap: u32) -> Result<(), c_int> {
     v.n_truncated_at = cap;
     if is_array(v.ty) {
-        read_array(fd, v, cap, key_len, value_len)
+        read_array(map, v, cap)
     } else if is_hash(v.ty) {
-        read_hash(fd, v, cap, key_len, value_len)
+        read_hash(map, v, cap)
     } else {
         Err(-EOPNOTSUPP)
     }
@@ -421,13 +527,7 @@ fn read_entries(fd: c_int, v: &mut MapView, cap: u32) -> Result<(), c_int> {
 
 /// The array's entries by index, the first `cap` or all for 0: -ENOMEM
 /// when a buffer cannot be had.
-fn read_array(
-    fd: c_int,
-    v: &mut MapView,
-    cap: u32,
-    key_len: usize,
-    value_len: usize,
-) -> Result<(), c_int> {
+fn read_array(map: &Map<'_>, v: &mut MapView, cap: u32) -> Result<(), c_int> {
     let mut take = v.max_entries;
     if cap != 0 && take > cap {
         take = cap;
@@ -437,13 +537,12 @@ fn read_array(
         .try_reserve_exact(take as usize)
         .map_err(|_| -ENOMEM)?;
     for index in 0..take {
-        let mut key = zeroed(key_len)?;
-        let mut value = zeroed(value_len)?;
+        let mut key = zeroed(map.key_size)?;
+        let mut value = zeroed(map.value_size)?;
         key.iter_mut()
             .zip(index.to_ne_bytes())
             .for_each(|(k, b)| *k = b);
-        // SAFETY: the map, a key and room for a value of its sizes.
-        if unsafe { bpf_map_lookup_elem(fd, key.as_ptr().cast(), value.as_mut_ptr().cast()) } != 0 {
+        if map.lookup(&key, &mut value).is_err() {
             continue;
         }
         v.entries.push(MapEntry { key, value });
@@ -453,25 +552,16 @@ fn read_array(
 
 /// The hash's entries in the kernel's order, the first `cap` or all for
 /// 0; as many as fit when a buffer cannot be had.
-fn read_hash(
-    fd: c_int,
-    v: &mut MapView,
-    cap: u32,
-    key_len: usize,
-    value_len: usize,
-) -> Result<(), c_int> {
-    let mut next = zeroed(key_len)?;
-    let mut prev: *const c_void = core::ptr::null();
-    // SAFETY: the map, the key before the next or NULL for the first, and
-    // room for the next, of its key size.
-    while unsafe { bpf_map_get_next_key(fd, prev, next.as_mut_ptr().cast()) } == 0 {
-        prev = next.as_ptr().cast();
-        let (Ok(mut key), Ok(mut value)) = (zeroed(key_len), zeroed(value_len)) else {
+fn read_hash(map: &Map<'_>, v: &mut MapView, cap: u32) -> Result<(), c_int> {
+    let mut cursor = zeroed(map.key_size)?;
+    let mut first = true;
+    while map.next_key(&mut cursor, first).is_ok() {
+        first = false;
+        let (Ok(mut key), Ok(mut value)) = (zeroed(map.key_size), zeroed(map.value_size)) else {
             break;
         };
-        key.copy_from_slice(&next);
-        // SAFETY: the map, a key and room for a value of its sizes.
-        if unsafe { bpf_map_lookup_elem(fd, key.as_ptr().cast(), value.as_mut_ptr().cast()) } != 0 {
+        key.copy_from_slice(&cursor);
+        if map.lookup(&key, &mut value).is_err() {
             continue;
         }
         if v.entries.try_reserve(1).is_err() {
@@ -551,7 +641,7 @@ pub(crate) fn read(upatch: &[u8], map: &[u8], cap: u32, flags: u32) -> Result<Ma
         type_def(Some(btf), kid, &mut out.key_type_def);
         type_def(Some(btf), vid, &mut out.value_type_def);
     }
-    read_entries(fd.as_raw_fd(), &mut out, cap)?;
+    read_entries(&Map::entries_of(fd.as_fd(), &out)?, &mut out, cap)?;
     Ok(out)
 }
 

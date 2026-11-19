@@ -8,8 +8,9 @@
 
 use core::ffi::c_long;
 use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use std::os::fd::AsFd;
 
-use super::read_serial_page;
+use super::{Map, read_serial_page};
 use crate::fuzzing::fuzz_target;
 use crate::sys::libc::Zeroed;
 use crate::util::serializer::SerialChunk;
@@ -75,6 +76,18 @@ fuzz_target!(
             .iter_mut()
             .zip(data)
             .for_each(|(b, d)| *b = *d);
-        let _ = read_serial_page(0, 64, first.page_index, first.cursor, first.invocation_id);
+        let stdin = std::io::stdin();
+        let output = Map {
+            fd: stdin.as_fd(),
+            key_size: 4,
+            value_size: size_of::<SerialChunk>(),
+        };
+        let _ = read_serial_page(
+            &output,
+            64,
+            first.page_index,
+            first.cursor,
+            first.invocation_id,
+        );
     }
 );
