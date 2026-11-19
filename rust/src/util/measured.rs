@@ -6,18 +6,15 @@
 //! and archives that set does not account for.
 
 use core::ffi::{CStr, c_int};
-use core::mem::MaybeUninit;
 
 use crate::errno::{E2BIG, EEXIST, EINVAL, ENAMETOOLONG, ENOENT, ENOSPC};
 use crate::sys::libc::{PATH_MAX, getxattr};
 use crate::text::{at, cstr, strscpy, strsprintf};
 use crate::util::chain::MeasuredUpatch;
 use crate::util::eventlog::{self, UPATCH_INIT, UPATCH_UNLOAD};
-use crate::util::hex::hex_encode;
+use crate::util::hex::{self, hex_encode};
 use crate::util::seal;
-use crate::util::upatch::{
-    NAME_MAX, PAYLOAD_HASH_LEN, Upatch, member_valid, upatch_close, upatch_header_name, upatch_open,
-};
+use crate::util::upatch::{NAME_MAX, Opened, PAYLOAD_HASH_LEN, Upatch, header_name, member_valid};
 
 /// `MEASURED_MAX`: the most upatches a set holds.
 const MEASURED_MAX: usize = 4096;
@@ -107,21 +104,21 @@ impl MeasuredSet {
     }
 }
 
-/// The name and payload digest an init record lists for the upatch `u`.
-///
-/// # Safety
-///
-/// `e` is room for a member and `u` an open upatch.
-unsafe fn upatch_of(e: *mut MeasuredUpatch, u: *const Upatch) {
-    // SAFETY: the caller's room and upatch.
-    unsafe {
-        upatch_header_name(u, (&raw mut (*e).name).cast());
-        hex_encode(
-            (&raw const (*u).hdr.payload_sha256).cast(),
-            PAYLOAD_HASH_LEN,
-            (&raw mut (*e).payload_hex).cast(),
-        );
-    }
+/// A member of no name and no payload digest.
+const NO_MEMBER: MeasuredUpatch = MeasuredUpatch {
+    name: [0; NAME_MAX + 1],
+    payload_hex: [0; 2 * PAYLOAD_HASH_LEN + 1],
+};
+
+/// The member an init record lists for the upatch `u`: its header's name
+/// and its payload digest in hex.
+pub(crate) fn upatch_of(u: &Upatch) -> MeasuredUpatch {
+    let mut member = NO_MEMBER;
+    let payload_hex = hex::encode(&u.hdr.payload_sha256);
+
+    header_name(u, &mut member.name);
+    member.payload_hex[..payload_hex.len()].copy_from_slice(&payload_hex);
+    member
 }
 
 /// `name` with `payload_hex` added to `set`, which holds at most `max`:
@@ -142,10 +139,7 @@ pub(crate) fn set_add(
     if set.len() >= max {
         return Err(-E2BIG);
     }
-    let mut member = MeasuredUpatch {
-        name: [0; NAME_MAX + 1],
-        payload_hex: [0; 2 * PAYLOAD_HASH_LEN + 1],
-    };
+    let mut member = NO_MEMBER;
     if strscpy(&mut member.name, name).is_err()
         || strscpy(&mut member.payload_hex, payload_hex).is_err()
     {
@@ -255,27 +249,21 @@ impl MeasuredSet {
             Err(err) => return err,
         };
         for archive in &names {
-            // SAFETY: all of whose bits zeroed are a member, which
-            // upatch_of() fills.
-            let mut m: MeasuredUpatch = unsafe { core::mem::zeroed() };
             let mut path = [0u8; PATH_MAX];
-            let mut u = MaybeUninit::<Upatch>::uninit();
 
             if strsprintf(&mut path, &[UPATCHES_DIR.to_bytes(), b"/", archive]).is_err() {
                 continue;
             }
-            if !seal::owns(cstr(&path)) {
+            let Ok(path_c) = CStr::from_bytes_until_nul(&path) else {
+                continue;
+            };
+            if !seal::owns(path_c.to_bytes()) {
                 continue;
             }
-            // SAFETY: the archive's path, and room for the upatch.
-            if unsafe { upatch_open(path.as_ptr().cast(), u.as_mut_ptr()) } != 0 {
-                continue;
-            }
-            // SAFETY: the member's room and the upatch opened, closed once.
-            unsafe {
-                upatch_of(&mut m, u.as_ptr());
-                upatch_close(u.as_mut_ptr());
-            }
+            let m = match Opened::open(path_c) {
+                Ok(u) => upatch_of(&u),
+                Err(_) => continue,
+            };
             if self.holds(cstr(&m.name), cstr(&m.payload_hex)) {
                 continue;
             }
@@ -317,23 +305,8 @@ impl MeasuredSet {
     }
 }
 
-pub(crate) use capi::measured_upatch_of;
-
 #[cfg(test)]
 mod tests;
-
-mod capi {
-    use crate::util::chain::MeasuredUpatch;
-    use crate::util::upatch::Upatch;
-
-    /// # Safety
-    ///
-    /// `e` is room for a member and `u` an open upatch.
-    pub unsafe extern "C" fn measured_upatch_of(e: *mut MeasuredUpatch, u: *const Upatch) {
-        // SAFETY: the caller passes the room and the upatch.
-        unsafe { super::upatch_of(e, u) }
-    }
-}
 
 /// This boot's records as the TPM vouches for them.
 mod verified {

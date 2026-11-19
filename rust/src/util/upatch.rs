@@ -1140,8 +1140,8 @@ pub(crate) unsafe fn specs_parse(
 }
 
 pub(crate) use capi::{
-    upatch_close, upatch_data, upatch_header_name, upatch_loader, upatch_metadata, upatch_open,
-    upatch_open_fd, upatch_open_memory, upatch_signature,
+    upatch_close, upatch_data, upatch_loader, upatch_metadata, upatch_open, upatch_open_fd,
+    upatch_open_memory, upatch_signature,
 };
 
 #[cfg(test)]
@@ -1154,7 +1154,7 @@ mod capi {
     use core::ffi::{c_char, c_int, c_void};
     use core::ptr;
 
-    use super::{NAME_MAX, Upatch, at};
+    use super::{Upatch, at};
 
     /// # Safety
     ///
@@ -1191,14 +1191,6 @@ mod capi {
     pub unsafe extern "C" fn upatch_close(u: *mut Upatch) {
         // SAFETY: the caller passes a container.
         super::close_upatch(unsafe { &mut *u });
-    }
-
-    /// # Safety
-    ///
-    /// `u` is a container, and `out` room for NAME_MAX + 1 bytes.
-    pub unsafe extern "C" fn upatch_header_name(u: *const Upatch, out: *mut c_char) {
-        // SAFETY: the caller passes a container and the room.
-        unsafe { super::header_name(&*u, &mut *out.cast::<[u8; NAME_MAX + 1]>()) };
     }
 
     /// # Safety

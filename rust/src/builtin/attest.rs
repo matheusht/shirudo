@@ -32,14 +32,14 @@ use crate::util::image_runtime;
 use crate::util::io;
 use crate::util::json::{JsonEmit, MAX_BYTES};
 use crate::util::keys::{self, KEYS_MAX};
-use crate::util::measured::{measured_upatch_of, set_add};
+use crate::util::measured::{set_add, upatch_of};
 use crate::util::options::{
     EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OPT_REPEAT, OptParser, OptSpec,
 };
 use crate::util::seal;
 use crate::util::tpm::REGISTER_ATTRS;
 use crate::util::tpm_wire::{NAME_LEN, NV_RSA_BYTES, RegisterPolicy, nv_name, register_policy};
-use crate::util::upatch::{Upatch, upatch_close, upatch_open};
+use crate::util::upatch::Opened;
 
 const MEMBERS_MAX: usize = 256;
 const REPORT_MAX: usize = 8192;
@@ -480,23 +480,13 @@ impl Members {
     }
 
     fn add_file(&mut self, path: &[u8]) -> Result<(), c_int> {
-        // SAFETY: an all-zero container is a closed one.
-        let mut u: Upatch = unsafe { core::mem::zeroed() };
-        // SAFETY: an all-zero member is an empty one.
-        let mut e: MeasuredUpatch = unsafe { core::mem::zeroed() };
-        let p = message(&[path]);
-
-        // SAFETY: a C string and a container to fill.
-        let ret = unsafe { upatch_open(p.as_ptr(), &mut u) };
-        if ret != 0 {
-            error(&[b"attest: open ", path, b": ", strerr(-ret)]);
-            return Err(EXIT_USAGE);
-        }
-        // SAFETY: the member's room and the open container, then closed.
-        unsafe {
-            measured_upatch_of(&mut e, &u);
-            upatch_close(&mut u);
-        }
+        let e = match Opened::open(&message(&[path])) {
+            Ok(u) => upatch_of(&u),
+            Err(ret) => {
+                error(&[b"attest: open ", path, b": ", strerr(-ret)]);
+                return Err(EXIT_USAGE);
+            }
+        };
         if let Err(ret) = self.add(cstr(&e.name), cstr(&e.payload_hex)) {
             let why: &[u8] = if ret == -EEXIST {
                 b"a second upatch of that name"

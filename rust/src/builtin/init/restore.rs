@@ -20,9 +20,9 @@ use crate::util::config::{self, Config};
 use crate::util::eventlog;
 use crate::util::json::JsonEmit;
 use crate::util::keys;
-use crate::util::measured::{MeasuredSet, measured_upatch_of};
+use crate::util::measured::{MeasuredSet, upatch_of};
 use crate::util::seal;
-use crate::util::upatch::{Upatch, upatch_close, upatch_open};
+use crate::util::upatch::Opened;
 use crate::util::upatch_pins::loaded_pins;
 use crate::util::upatch_resolve;
 use crate::util::upatch_verify::links_complete;
@@ -85,23 +85,17 @@ fn restore_one(
         ));
         return Ok(None);
     }
-    // SAFETY: all-zero is a closed container and an empty member.
-    let (mut u, mut e): (Upatch, MeasuredUpatch) = unsafe { (mem::zeroed(), mem::zeroed()) };
-    // SAFETY: a C string and the container to fill.
-    if unsafe { upatch_open(file.as_ptr(), &mut u) } != 0 {
-        warn(&cat!(
-            "boot-restore: ",
-            name,
-            " is not an artifact shirudo archived (foreign entry); ignored"
-        ));
-        return Ok(None);
-    }
-    // SAFETY: the member to fill and the container opened above, then
-    // closed.
-    unsafe {
-        measured_upatch_of(&mut e, &u);
-        upatch_close(&mut u);
-    }
+    let e = match Opened::open(&file) {
+        Ok(u) => upatch_of(&u),
+        Err(_) => {
+            warn(&cat!(
+                "boot-restore: ",
+                name,
+                " is not an artifact shirudo archived (foreign entry); ignored"
+            ));
+            return Ok(None);
+        }
+    };
     let upatch = cstr(&e.name);
     if !measured.holds(cstr(&e.name), cstr(&e.payload_hex)) {
         warn(&cat!(
