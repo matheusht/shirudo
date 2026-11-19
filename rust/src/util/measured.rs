@@ -5,7 +5,7 @@
 //! records as loaded, each with the payload of its load, and the pins
 //! and archives that set does not account for.
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
 use core::mem::MaybeUninit;
 
 use crate::errno::{E2BIG, EEXIST, EINVAL, ENAMETOOLONG, ENOENT, ENOSPC};
@@ -39,25 +39,6 @@ struct Entry {
 #[derive(Default)]
 pub(crate) struct MeasuredSet {
     entries: Vec<Entry>,
-}
-
-/// strscpy() of the C string at `src` into `dst`, reading no more of it
-/// than the C's strnlen() bounded by the room did.
-///
-/// # Safety
-///
-/// `src` is a C string, or holds at least `dst.len()` bytes.
-unsafe fn strscpy_c(dst: &mut [u8], src: *const c_char) -> Result<usize, c_int> {
-    let src = src.cast::<u8>();
-    // SAFETY: the caller's string, read up to its NUL or the room's
-    // length, whichever comes first, as strnlen() read it.
-    let n = (0..dst.len())
-        .take_while(|&i| unsafe { *src.add(i) } != 0)
-        .count();
-    // SAFETY: the n bytes just read.
-    let src = unsafe { core::slice::from_raw_parts(src, n) };
-
-    strscpy(dst, src)
 }
 
 impl MeasuredSet {
@@ -143,50 +124,35 @@ unsafe fn upatch_of(e: *mut MeasuredUpatch, u: *const Upatch) {
     }
 }
 
-/// `name` with `payload_hex` added to the `*n` members of `set`, room for
-/// `max`: 0, -EINVAL for a member member_valid() refuses, -EEXIST
-/// for a name held, or -E2BIG when the set is full or a string too long.
-///
-/// # Safety
-///
-/// `set` has room for `max` members of which `*n` are held, and `name`
-/// and `payload_hex` are C strings.
-unsafe fn set_add(
-    set: *mut MeasuredUpatch,
-    n: *mut usize,
+/// `name` with `payload_hex` added to `set`, which holds at most `max`:
+/// -EINVAL for a member member_valid() refuses, -EEXIST for a name held,
+/// or -E2BIG when the set is full or a string too long.
+pub(crate) fn set_add(
+    set: &mut Vec<MeasuredUpatch>,
     max: usize,
-    name: *const c_char,
-    payload_hex: *const c_char,
-) -> c_int {
-    // SAFETY: the caller's C strings.
-    let (name_c, payload_c) = unsafe { (CStr::from_ptr(name), CStr::from_ptr(payload_hex)) };
-    if !member_valid(name_c.to_bytes(), payload_c.to_bytes()) {
-        return -EINVAL;
+    name: &[u8],
+    payload_hex: &[u8],
+) -> Result<(), c_int> {
+    if !member_valid(name, payload_hex) {
+        return Err(-EINVAL);
     }
-    // SAFETY: the caller's count.
-    let count = unsafe { *n };
-    for i in 0..count {
-        // SAFETY: a member held, its name terminated within its room.
-        let held = unsafe { &(*set.add(i)).name };
-        if crate::text::cstr(held) == name_c.to_bytes() {
-            return -EEXIST;
-        }
+    if set.iter().any(|held| cstr(&held.name) == name) {
+        return Err(-EEXIST);
     }
-    if count >= max {
-        return -E2BIG;
+    if set.len() >= max {
+        return Err(-E2BIG);
     }
-    // SAFETY: the room for the next member, and the caller's strings.
-    unsafe {
-        let e = &mut *set.add(count);
-
-        if strscpy_c(&mut e.name, name).is_err()
-            || strscpy_c(&mut e.payload_hex, payload_hex).is_err()
-        {
-            return -E2BIG;
-        }
-        *n = count + 1;
+    let mut member = MeasuredUpatch {
+        name: [0; NAME_MAX + 1],
+        payload_hex: [0; 2 * PAYLOAD_HASH_LEN + 1],
+    };
+    if strscpy(&mut member.name, name).is_err()
+        || strscpy(&mut member.payload_hex, payload_hex).is_err()
+    {
+        return Err(-E2BIG);
     }
-    0
+    set.push(member);
+    Ok(())
 }
 
 /// upatch_name_from_bpffs() of util/paths.h: the upatch name the pin
@@ -351,14 +317,12 @@ impl MeasuredSet {
     }
 }
 
-pub(crate) use capi::{measured_set_add, measured_upatch_of};
+pub(crate) use capi::measured_upatch_of;
 
 #[cfg(test)]
 mod tests;
 
 mod capi {
-    use core::ffi::{c_char, c_int};
-
     use crate::util::chain::MeasuredUpatch;
     use crate::util::upatch::Upatch;
 
@@ -368,21 +332,6 @@ mod capi {
     pub unsafe extern "C" fn measured_upatch_of(e: *mut MeasuredUpatch, u: *const Upatch) {
         // SAFETY: the caller passes the room and the upatch.
         unsafe { super::upatch_of(e, u) }
-    }
-
-    /// # Safety
-    ///
-    /// `set` has room for `max` members of which `*n` are held, and
-    /// `name` and `payload_hex` are C strings.
-    pub unsafe extern "C" fn measured_set_add(
-        set: *mut MeasuredUpatch,
-        n: *mut usize,
-        max: usize,
-        name: *const c_char,
-        payload_hex: *const c_char,
-    ) -> c_int {
-        // SAFETY: the caller passes the set, its count and two C strings.
-        unsafe { super::set_add(set, n, max, name, payload_hex) }
     }
 }
 
@@ -450,7 +399,6 @@ mod verified {
         payload_hex: [u8; 2 * PAYLOAD_HASH_LEN + 1],
         seq: i64,
         set: Vec<MeasuredUpatch>,
-        n: usize,
         init: bool,
         upatch: bool,
         key: bool,
@@ -458,23 +406,15 @@ mod verified {
     }
 
     fn set_entry(r: &mut Record) -> Result<(), c_int> {
-        // SAFETY: the record's set of MEASURED_MAX members, its count and
-        // two C strings.
-        let ret = unsafe {
-            set_add(
-                r.set.as_mut_ptr(),
-                &mut r.n,
-                MEASURED_MAX,
-                r.name.as_ptr().cast(),
-                r.payload_hex.as_ptr().cast(),
-            )
-        };
+        let added = set_add(
+            &mut r.set,
+            MEASURED_MAX,
+            cstr(&r.name),
+            cstr(&r.payload_hex),
+        );
         r.name[0] = 0;
         r.payload_hex[0] = 0;
-        match ret {
-            0 => Ok(()),
-            err => Err(err),
-        }
+        added
     }
 
     fn parse(line: &[u8], r: &mut Record) -> c_int {
@@ -537,7 +477,7 @@ mod verified {
                     chain_init_event(
                         cert.as_ptr(),
                         r.set.as_mut_ptr(),
-                        r.n,
+                        r.set.len(),
                         root.as_ptr(),
                         set_digest.as_mut_ptr(),
                         event.as_mut_ptr(),
@@ -590,8 +530,6 @@ mod verified {
     fn record_event(line: &[u8]) -> Result<([u8; 32], [u8; 32]), c_int> {
         let mut set = Vec::new();
         set.try_reserve_exact(MEASURED_MAX).map_err(|_| -ENOMEM)?;
-        // SAFETY: an all-zero member is an empty one.
-        set.resize_with(MEASURED_MAX, || unsafe { core::mem::zeroed() });
         let mut r = Box::new(Record {
             ty: [0; 32],
             digest_hex: [0; 65],
@@ -603,7 +541,6 @@ mod verified {
             payload_hex: [0; 2 * PAYLOAD_HASH_LEN + 1],
             seq: 0,
             set,
-            n: 0,
             init: false,
             upatch: false,
             key: false,

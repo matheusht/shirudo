@@ -32,7 +32,7 @@ use crate::util::image_runtime;
 use crate::util::io;
 use crate::util::json::{JsonEmit, MAX_BYTES};
 use crate::util::keys::{self, KEYS_MAX};
-use crate::util::measured::{measured_set_add, measured_upatch_of};
+use crate::util::measured::{measured_upatch_of, set_add};
 use crate::util::options::{
     EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OPT_REPEAT, OptParser, OptSpec,
 };
@@ -463,36 +463,20 @@ fn parse_hex32(what: &[u8], text: &[u8]) -> Result<[u8; 32], c_int> {
 }
 
 /// The upatches the init event counts, at most MEMBERS_MAX.
-struct Members {
-    set: Vec<MeasuredUpatch>,
-    n: usize,
-}
+struct Members(Vec<MeasuredUpatch>);
 
 impl Members {
     fn new() -> Self {
-        // SAFETY: an all-zero member is an empty one.
-        let set = (0..MEMBERS_MAX)
-            .map(|_| unsafe { core::mem::zeroed() })
-            .collect();
-        Members { set, n: 0 }
+        Members(Vec::with_capacity(MEMBERS_MAX))
     }
 
     /// The members added so far.
     fn members(&mut self) -> &mut [MeasuredUpatch] {
-        self.set.get_mut(..self.n).unwrap_or_default()
+        &mut self.0
     }
 
-    fn add(&mut self, name: &CStr, payload_hex: &CStr) -> c_int {
-        // SAFETY: the set's room, its count and two C strings.
-        unsafe {
-            measured_set_add(
-                self.set.as_mut_ptr(),
-                &mut self.n,
-                MEMBERS_MAX,
-                name.as_ptr(),
-                payload_hex.as_ptr(),
-            )
-        }
+    fn add(&mut self, name: &[u8], payload_hex: &[u8]) -> Result<(), c_int> {
+        set_add(&mut self.0, MEMBERS_MAX, name, payload_hex)
     }
 
     fn add_file(&mut self, path: &[u8]) -> Result<(), c_int> {
@@ -513,11 +497,7 @@ impl Members {
             measured_upatch_of(&mut e, &u);
             upatch_close(&mut u);
         }
-        let ret = self.add(
-            &message(&[cstr(&e.name)]),
-            &message(&[cstr(&e.payload_hex)]),
-        );
-        if ret != 0 {
+        if let Err(ret) = self.add(cstr(&e.name), cstr(&e.payload_hex)) {
             let why: &[u8] = if ret == -EEXIST {
                 b"a second upatch of that name"
             } else {
@@ -530,11 +510,9 @@ impl Members {
     }
 
     fn add_spec(&mut self, spec: &[u8]) -> Result<(), c_int> {
-        let ret = match parse_name_digest(spec) {
-            Ok((name, payload)) => self.add(&message(&[name]), &message(&[&hex::encode(&payload)])),
-            Err(err) => err,
-        };
-        if ret != 0 {
+        let added = parse_name_digest(spec)
+            .and_then(|(name, payload)| self.add(name, &hex::encode(&payload)));
+        if let Err(ret) = added {
             let why: &[u8] = if ret == -EEXIST {
                 b"a second upatch of that name"
             } else if ret == -EINVAL {
@@ -953,7 +931,7 @@ fn verify_against(args: &[&CStr], x: &mut AttestExpect) -> Result<c_int, c_int> 
     let Some(evidence_path) = evidence_path.filter(|_| nonce_len > 0) else {
         return Err(usage(&p, "--evidence and --nonce are required"));
     };
-    if certs.is_empty() && (m.n != 0 || have_tree_root) {
+    if certs.is_empty() && (!m.0.is_empty() || have_tree_root) {
         return Err(usage(
             &p,
             "--upatch, --expect and --tree-root describe the init event and need --cert",

@@ -9,24 +9,20 @@ const PAYLOAD: &CStr = c"00112233445566778899aabbccddeeff00112233445566778899aab
 /// An init event lists each upatch once, by a name an upatch can have.
 #[test]
 fn set_takes_each_upatch_once() {
-    // SAFETY: two members of byte arrays, for which zeros are a value.
-    let mut set: [MeasuredUpatch; 2] = unsafe { core::mem::zeroed() };
-    let mut n = 0;
-    let mut add = |name: &CStr, payload: &CStr| {
-        // SAFETY: room for two members, their count, and two C strings.
-        unsafe { set_add(set.as_mut_ptr(), &mut n, 2, name.as_ptr(), payload.as_ptr()) }
-    };
-    let crafted = std::ffi::CString::new(format!("a\n{} b", PAYLOAD.to_str().unwrap())).unwrap();
+    let p = PAYLOAD.to_bytes();
+    let mut set = Vec::new();
+    let mut add = |name: &[u8], payload: &[u8]| set_add(&mut set, 2, name, payload);
+    let crafted = [&b"a\n"[..], p, b" b"].concat();
 
-    assert_eq!(add(c"a", PAYLOAD), 0);
-    assert_eq!(add(c"a", PAYLOAD), -EEXIST);
-    assert_eq!(add(&crafted, PAYLOAD), -EINVAL);
-    assert_eq!(add(c"b", c"00"), -EINVAL);
-    assert_eq!(add(c"b", PAYLOAD), 0);
-    assert_eq!(add(c"c", PAYLOAD), -E2BIG);
-    assert_eq!(n, 2);
+    assert_eq!(add(b"a", p), Ok(()));
+    assert_eq!(add(b"a", p), Err(-EEXIST));
+    assert_eq!(add(&crafted, p), Err(-EINVAL));
+    assert_eq!(add(b"b", b"00"), Err(-EINVAL));
+    assert_eq!(add(b"b", p), Ok(()));
+    assert_eq!(add(b"c", p), Err(-E2BIG));
+    assert_eq!(set.len(), 2);
     assert_eq!(cstr(&set[0].name), b"a");
-    assert_eq!(cstr(&set[1].payload_hex), PAYLOAD.to_bytes());
+    assert_eq!(cstr(&set[1].payload_hex), p);
 }
 
 #[test]
