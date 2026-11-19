@@ -167,22 +167,14 @@ pub(super) fn map_attributes(e: &mut JsonEmit, v: &MapView) {
     kv_string(e, b"shirudo.map.name", cstr(&v.name));
     kv_string(e, b"shirudo.map.type", name_or_empty(v.type_name));
     kv_int(e, b"shirudo.map.max_entries", i64::from(v.max_entries));
-    kv_int(e, b"shirudo.map.n_entries", i64::from(v.n_entries));
+    kv_int(e, b"shirudo.map.n_entries", i64::from(v.n_entries()));
     kv_int(e, b"shirudo.map.n_cpus", i64::from(v.n_cpus));
     kv_bool(e, b"shirudo.map.serialized", v.serialized);
     kv_bool(e, b"shirudo.map.truncated", v.truncated);
 }
 
 /// One cell as the map's BTF spells it, empty when it cannot.
-fn cell(
-    v: &MapView,
-    type_id: u32,
-    value: *const core::ffi::c_void,
-    size: u32,
-    btf_type: &[u8; 64],
-) -> Vec<u8> {
-    // SAFETY: a value of the view of `size` bytes.
-    let value = unsafe { crate::ffi::slice(value.cast::<u8>(), size as usize) };
+fn cell(v: &MapView, type_id: u32, value: &[u8], btf_type: &[u8; 64]) -> Vec<u8> {
     map_format::format_cell(v, type_id, value, cstr(btf_type))
 }
 
@@ -193,24 +185,16 @@ fn log_map_data(e: &mut JsonEmit, v: &MapView) {
     kv_string(e, b"name", cstr(&v.name));
     kv_string(e, b"type", name_or_empty(v.type_name));
     kv_int(e, b"max_entries", i64::from(v.max_entries));
-    kv_int(e, b"n_entries", i64::from(v.n_entries));
+    kv_int(e, b"n_entries", i64::from(v.n_entries()));
     if percpu {
         kv_int(e, b"n_cpus", i64::from(v.n_cpus));
     }
     if v.serialized {
         kv_bool(e, b"serialized", true);
-        kv_int(e, b"serialized_pages", i64::from(v.n_serial_pages));
+        kv_int(e, b"serialized_pages", i64::from(v.n_serial_pages()));
         kv_int(e, b"serialized_bytes", v.serial_bytes_total as i64);
         list_begin(e, b"pages", b"arrayValue");
-        for p in 0..v.n_serial_pages as usize {
-            // SAFETY: one of the view's n_serial_pages pages.
-            let page = unsafe { &*v.serial_pages.add(p) };
-            let data = if page.data.is_null() || page.bytes == 0 {
-                &[][..]
-            } else {
-                // SAFETY: the page's bytes.
-                unsafe { crate::ffi::slice(page.data.cast::<u8>(), page.bytes as usize) }
-            };
+        for page in &v.serial_pages {
             array_kvlist_begin(e);
             kv_int(e, b"page_index", i64::from(page.page_index));
             kv_int(e, b"cursor", page.cursor as i64);
@@ -218,8 +202,8 @@ fn log_map_data(e: &mut JsonEmit, v: &MapView) {
             kv_bool(e, b"done", page.done);
             kv_int(e, b"flags", i64::from(page.flags));
             kv_int(e, b"chunks", i64::from(page.chunks));
-            kv_int(e, b"bytes", i64::from(page.bytes));
-            kv_string(e, b"data_hex", &hex_lower(data));
+            kv_int(e, b"bytes", i64::from(page.bytes()));
+            kv_string(e, b"data_hex", &hex_lower(&page.data));
             array_kvlist_end(e);
         }
         list_end(e);
@@ -247,42 +231,21 @@ fn log_map_data(e: &mut JsonEmit, v: &MapView) {
         list_end(e);
     }
     list_begin(e, b"entries", b"arrayValue");
-    for i in 0..v.n_entries as usize {
-        // SAFETY: one of the view's n_entries entries.
-        let en = unsafe { &*v.entries.add(i) };
-        let key = cell(v, v.key_type_id, en.key, v.key_size, &v.btf_key_type);
+    for en in &v.entries {
+        let key = cell(v, v.key_type_id, &en.key, &v.btf_key_type);
 
         array_kvlist_begin(e);
         kv_string(e, b"key", &key);
         if percpu {
-            let stride = map_format::value_stride(v) as usize;
-            // SAFETY: the entry's values, one per CPU.
-            let values =
-                unsafe { crate::ffi::slice(en.value.cast::<u8>(), stride * v.n_cpus as usize) };
-            let sum = map_format::percpu_sum(v, values);
+            let sum = map_format::percpu_sum(v, &en.value);
             list_begin(e, b"values_per_cpu", b"arrayValue");
-            for cpu in 0..v.n_cpus as usize {
-                // SAFETY: the value of one CPU, within the entry's values.
-                let one = unsafe { en.value.cast::<u8>().add(cpu * stride) };
-                let text = cell(
-                    v,
-                    v.value_type_id,
-                    one.cast(),
-                    v.value_size,
-                    &v.btf_value_type,
-                );
-                array_string(e, &text);
+            for one in map_format::cpu_values(v, &en.value) {
+                array_string(e, &cell(v, v.value_type_id, one, &v.btf_value_type));
             }
             list_end(e);
             kv_string(e, b"sum", &sum);
         } else {
-            let value = cell(
-                v,
-                v.value_type_id,
-                en.value,
-                v.value_size,
-                &v.btf_value_type,
-            );
+            let value = cell(v, v.value_type_id, &en.value, &v.btf_value_type);
             kv_string(e, b"value", &value);
         }
         array_kvlist_end(e);

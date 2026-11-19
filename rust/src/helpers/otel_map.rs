@@ -20,7 +20,7 @@
 //!
 //! make links it with testing/helper/version.rs for the version "test-1".
 
-use core::ffi::{CStr, c_int, c_void};
+use core::ffi::{CStr, c_int};
 use std::ffi::{CString, OsStr};
 use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
@@ -190,48 +190,37 @@ fn make_decoder(metric: bool, counter: bool, snapshot: bool) -> Result<Decoder, 
 /// and its BTF when asked.
 struct Fixture {
     view: MapView,
-    entry: MapEntry,
     btf: Option<Box<Btf>>,
-    key: u32,
-    values: [u8; 16],
-    pages: Vec<SerialPage>,
-    page_data: Vec<Vec<u8>>,
 }
 
 fn fixture(map_type: u32, is_signed: bool, with_btf: bool) -> Option<Box<Fixture>> {
+    let array = map_type == BPF_MAP_TYPE_ARRAY;
+    let (value_stride, n_cpus) = if array { (4, 1) } else { (8, 2) };
+    let mut values = [0u8; 16];
+    values[..4].copy_from_slice(&5u32.to_ne_bytes());
+    values[4..8].copy_from_slice(&0xdead_beef_u32.to_ne_bytes());
+    values[8..12].copy_from_slice(&7u32.to_ne_bytes());
     let mut f = Box::new(Fixture {
-        // SAFETY: a view of nothing, for which zeros are the value.
-        view: unsafe { core::mem::zeroed() },
-        entry: MapEntry {
-            key: core::ptr::null_mut(),
-            value: core::ptr::null_mut(),
+        view: MapView {
+            ty: map_type,
+            type_name: Some(if array { c"array" } else { c"percpu_array" }),
+            key_size: 4,
+            value_size: 4,
+            value_stride,
+            max_entries: 1,
+            n_cpus,
+            lifetime_start_ns: 1_544_712_660_300_000_000,
+            entries: vec![MapEntry {
+                key: 0u32.to_ne_bytes().to_vec(),
+                value: values[..(value_stride * n_cpus) as usize].to_vec(),
+            }],
+            ..MapView::default()
         },
         btf: None,
-        key: 0,
-        values: [0; 16],
-        pages: Vec::new(),
-        page_data: Vec::new(),
     });
-    let array = map_type == BPF_MAP_TYPE_ARRAY;
     put_str(&mut f.view.upatch, "test-upatch");
     put_str(&mut f.view.name, "hits_total");
     put_str(&mut f.view.location, "fentry/test_hook");
-    f.view.ty = map_type;
-    f.view.type_name = Some(if array { c"array" } else { c"percpu_array" });
-    f.view.key_size = 4;
-    f.view.value_size = 4;
-    f.view.value_stride = if array { 4 } else { 8 };
-    f.view.max_entries = 1;
-    f.view.n_entries = 1;
-    f.view.n_cpus = if array { 1 } else { 2 };
-    f.view.lifetime_start_ns = 1_544_712_660_300_000_000;
-    f.values[..4].copy_from_slice(&5u32.to_ne_bytes());
-    f.values[4..8].copy_from_slice(&0xdead_beef_u32.to_ne_bytes());
-    f.values[8..12].copy_from_slice(&7u32.to_ne_bytes());
-    // The view points into the box, which does not move from here.
-    f.entry.key = (&raw mut f.key).cast::<c_void>();
-    f.entry.value = f.values.as_mut_ptr().cast();
-    f.view.entries = &raw mut f.entry;
     if !with_btf {
         return Some(f);
     }
@@ -262,21 +251,17 @@ fn fixture(map_type: u32, is_signed: bool, with_btf: bool) -> Option<Box<Fixture
 fn large_serialized(f: &mut Fixture) {
     const BYTES: u32 = 1024;
     f.view.serialized = true;
-    f.view.n_entries = 0;
-    f.page_data = vec![vec![b'A'; BYTES as usize]];
-    f.pages = vec![SerialPage {
+    f.view.entries.clear();
+    f.view.serial_pages = vec![SerialPage {
         page_index: 0,
         cursor: 0,
         next_cursor: 1,
         flags: 1,
         chunks: 128,
-        bytes: BYTES,
         done: true,
-        data: f.page_data[0].as_mut_ptr().cast(),
+        data: vec![b'A'; BYTES as usize],
     }];
-    f.view.n_serial_pages = 1;
     f.view.serial_bytes_total = u64::from(BYTES);
-    f.view.serial_pages = f.pages.as_mut_ptr();
 }
 
 fn opts() -> OtelOpts {

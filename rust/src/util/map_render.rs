@@ -9,10 +9,10 @@ use core::ffi::CStr;
 
 use crate::sys::libc::{fwrite, stdout};
 use crate::sys::upatch::MapSummary;
-use crate::sys::upatch_maps::{MapEntry, MapView, SerialPage};
+use crate::sys::upatch_maps::{MapEntry, MapView};
 use crate::text::cstr;
 use crate::util::json::JsonEmit;
-use crate::util::map_format::{format_cell, is_percpu, percpu_sum, value_stride};
+use crate::util::map_format::{cpu_values, format_cell, is_percpu, percpu_sum};
 
 /// Text to the C library's stdout, where the rest of a report goes.
 fn out(text: &[u8]) {
@@ -37,21 +37,6 @@ fn c_or_null(s: Option<&'static CStr>) -> &'static [u8] {
     s.map_or(b"(null)", CStr::to_bytes)
 }
 
-fn entries(v: &MapView) -> &[MapEntry] {
-    // SAFETY: the view's n_entries entries.
-    unsafe { crate::ffi::slice(v.entries, v.n_entries as usize) }
-}
-
-fn pages(v: &MapView) -> &[SerialPage] {
-    // SAFETY: the view's n_serial_pages pages.
-    unsafe { crate::ffi::slice(v.serial_pages, v.n_serial_pages as usize) }
-}
-
-fn page_data(p: &SerialPage) -> &[u8] {
-    // SAFETY: the page's bytes.
-    unsafe { crate::ffi::slice(p.data.cast::<u8>(), p.bytes as usize) }
-}
-
 /// The key of entry `en`, its value or each CPU's, and the per-CPU sum.
 struct Cells {
     key: Vec<u8>,
@@ -61,38 +46,24 @@ struct Cells {
 }
 
 fn cells(v: &MapView, en: &MapEntry) -> Cells {
-    // SAFETY: the entry's key, of the view's key size.
-    let key = unsafe { crate::ffi::slice(en.key.cast::<u8>(), v.key_size as usize) };
-    let key = format_cell(v, v.key_type_id, key, cstr(&v.btf_key_type));
+    let key = format_cell(v, v.key_type_id, &en.key, cstr(&v.btf_key_type));
     let vtype = cstr(&v.btf_value_type);
     if !is_percpu(v.ty) {
-        // SAFETY: the entry's value, of the view's value size.
-        let value = unsafe { crate::ffi::slice(en.value.cast::<u8>(), v.value_size as usize) };
         return Cells {
             key,
-            value: Some(format_cell(v, v.value_type_id, value, vtype)),
+            value: Some(format_cell(v, v.value_type_id, &en.value, vtype)),
             per_cpu: Vec::new(),
             sum: Vec::new(),
         };
     }
-    let stride = value_stride(v) as usize;
-    // SAFETY: the entry's values, one of each CPU's stride.
-    let all = unsafe { crate::ffi::slice(en.value.cast::<u8>(), stride * v.n_cpus as usize) };
-    let per_cpu = (0..v.n_cpus as usize)
-        .map(|cpu| {
-            format_cell(
-                v,
-                v.value_type_id,
-                &all[cpu * stride..cpu * stride + v.value_size as usize],
-                vtype,
-            )
-        })
+    let per_cpu = cpu_values(v, &en.value)
+        .map(|one| format_cell(v, v.value_type_id, one, vtype))
         .collect();
     Cells {
         key,
         value: None,
         per_cpu,
-        sum: percpu_sum(v, all),
+        sum: percpu_sum(v, &en.value),
     }
 }
 
@@ -198,13 +169,13 @@ pub(crate) fn print_detail(v: &MapView) {
         t.extend(field(b"Status:", b"serialized"));
         t.extend(field(
             b"Serialized pages:",
-            v.n_serial_pages.to_string().as_bytes(),
+            v.n_serial_pages().to_string().as_bytes(),
         ));
         t.extend(field(
             b"Serialized bytes:",
             v.serial_bytes_total.to_string().as_bytes(),
         ));
-        for page in pages(v) {
+        for page in &v.serial_pages {
             let sub = |label: &[u8], value: &[u8]| [&b"  "[..], &field(label, value)].concat();
             t.extend(format!("\nPage {}:\n", page.page_index).as_bytes());
             t.extend(sub(b"Cursor:", page.cursor.to_string().as_bytes()));
@@ -215,10 +186,10 @@ pub(crate) fn print_detail(v: &MapView) {
             t.extend(sub(b"Done:", if page.done { b"true" } else { b"false" }));
             t.extend(sub(b"Flags:", format!("0x{:x}", page.flags).as_bytes()));
             t.extend(sub(b"Chunks:", page.chunks.to_string().as_bytes()));
-            t.extend(sub(b"Bytes:", page.bytes.to_string().as_bytes()));
-            if page.bytes != 0 {
+            t.extend(sub(b"Bytes:", page.bytes().to_string().as_bytes()));
+            if !page.data.is_empty() {
                 t.extend_from_slice(b"\n  Data (hex):\n");
-                t.extend(hex_dump(page_data(page)));
+                t.extend(hex_dump(&page.data));
             }
         }
         out(&t);
@@ -232,7 +203,7 @@ pub(crate) fn print_detail(v: &MapView) {
     t.extend(field(
         b"Entries:",
         &[
-            format!("{} of {}", v.n_entries, v.max_entries).as_bytes(),
+            format!("{} of {}", v.n_entries(), v.max_entries).as_bytes(),
             truncated,
         ]
         .concat(),
@@ -265,12 +236,12 @@ pub(crate) fn print_detail(v: &MapView) {
             format!("{} B  (no BTF)", v.value_size).as_bytes(),
         ));
     }
-    if v.n_entries == 0 {
+    if v.entries.is_empty() {
         out(&t);
         return;
     }
     t.extend_from_slice(b"\nContents:\n");
-    for en in entries(v) {
+    for en in &v.entries {
         let c = cells(v, en);
         match c.value {
             Some(value) => {
@@ -308,16 +279,16 @@ pub(crate) fn emit_json_fields(e: &mut JsonEmit, v: &MapView) {
     e.kv_string(b"name", cstr(&v.name));
     e.kv_string(b"type", c_or_null(v.type_name));
     e.kv_int(b"max_entries", i64::from(v.max_entries));
-    e.kv_int(b"n_entries", i64::from(v.n_entries));
+    e.kv_int(b"n_entries", i64::from(v.n_entries()));
     if is_percpu(v.ty) {
         e.kv_int(b"n_cpus", i64::from(v.n_cpus));
     }
     if v.serialized {
         e.kv_bool(b"serialized", true);
-        e.kv_int(b"serialized_pages", i64::from(v.n_serial_pages));
+        e.kv_int(b"serialized_pages", i64::from(v.n_serial_pages()));
         e.kv_int(b"serialized_bytes", v.serial_bytes_total as i64);
         e.arr_open(b"pages");
-        for page in pages(v) {
+        for page in &v.serial_pages {
             e.obj_open();
             e.kv_int(b"page_index", i64::from(page.page_index));
             e.kv_int(b"cursor", page.cursor as i64);
@@ -325,8 +296,8 @@ pub(crate) fn emit_json_fields(e: &mut JsonEmit, v: &MapView) {
             e.kv_bool(b"done", page.done);
             e.kv_int(b"flags", i64::from(page.flags));
             e.kv_int(b"chunks", i64::from(page.chunks));
-            e.kv_int(b"bytes", i64::from(page.bytes));
-            e.kv_string(b"data_hex", &hex(page_data(page)));
+            e.kv_int(b"bytes", i64::from(page.bytes()));
+            e.kv_string(b"data_hex", &hex(&page.data));
             e.obj_close();
         }
         e.arr_close();
@@ -361,7 +332,7 @@ pub(crate) fn emit_json_fields(e: &mut JsonEmit, v: &MapView) {
         e.obj_close();
     }
     e.arr_open(b"entries");
-    for en in entries(v) {
+    for en in &v.entries {
         let c = cells(v, en);
         e.obj_open();
         e.kv_string(b"key", &c.key);

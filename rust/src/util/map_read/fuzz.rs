@@ -11,7 +11,6 @@ use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
 use super::read_serial_page;
 use crate::fuzzing::fuzz_target;
-use crate::heap::xfree;
 use crate::util::serializer::SerialChunk;
 
 const BPF_MAP_LOOKUP_ELEM: c_long = 1;
@@ -80,11 +79,6 @@ fuzz_target!(
             );
             first
         };
-        if let Ok(page) =
-            read_serial_page(0, 64, first.page_index, first.cursor, first.invocation_id)
-        {
-            // SAFETY: the page's data, freed once.
-            unsafe { xfree(page.data, page.bytes as usize) };
-        }
+        let _ = read_serial_page(0, 64, first.page_index, first.cursor, first.invocation_id);
     }
 );

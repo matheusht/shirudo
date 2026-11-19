@@ -34,6 +34,17 @@ pub(crate) fn value_stride(v: &MapView) -> u32 {
     }
 }
 
+/// Each CPU's value of a per-CPU entry's `values`: value_size bytes a
+/// stride apart, and none for a CPU past their end.
+pub(crate) fn cpu_values<'a>(v: &MapView, values: &'a [u8]) -> impl Iterator<Item = &'a [u8]> {
+    let (stride, size) = (value_stride(v) as usize, v.value_size as usize);
+    (0..v.n_cpus as usize).map(move |cpu| {
+        cpu.checked_mul(stride)
+            .and_then(|at| values.get(at..)?.get(..size))
+            .unwrap_or_default()
+    })
+}
+
 /// Type `id` of `btf`, void included, or none past its types.
 fn type_of(btf: &Btf, id: u32) -> Option<u32> {
     btf.has(id).then_some(id)
@@ -429,9 +440,8 @@ pub(crate) fn percpu_sum(v: &MapView, values: &[u8]) -> Vec<u8> {
             && type_of(btf, unwrap(btf, v.value_type_id))
                 .is_some_and(|t| btf.kind(t) == KIND_INT && btf.int_encoding(t) & INT_SIGNED != 0)
     });
-    let stride = value_stride(v) as usize;
-    let sum = (0..v.n_cpus as usize).fold(0u64, |sum, cpu| {
-        let one = le(&values[cpu * stride..cpu * stride + width]);
+    let sum = cpu_values(v, values).fold(0u64, |sum, one| {
+        let one = le(one);
         sum.wrapping_add(if signed { sign_extend(one, bits) } else { one })
     });
     number(sum, signed)

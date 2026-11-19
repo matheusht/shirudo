@@ -79,13 +79,13 @@ fn run(args: &[&CStr]) -> c_int {
             return 2;
         }
     };
-    // SAFETY: a view of no map, for which zeros are the value, filled as
-    // the test decoder expects.
-    let mut view: Box<MapView> = Box::new(unsafe { core::mem::zeroed() });
-    view.serialized = true;
-    view.max_entries = 1;
-    view.type_name = Some(c"array");
-    view.serial_bytes_total = serial_bytes_total;
+    let mut view = MapView {
+        serialized: true,
+        max_entries: 1,
+        type_name: Some(c"array"),
+        serial_bytes_total,
+        ..MapView::default()
+    };
     view.upatch[..5].copy_from_slice(b"t3002");
     view.name[..9].copy_from_slice(b"t0005_map");
 

@@ -6,9 +6,6 @@
 //! upatch pins beside it. A serializer is a BPF program that BPF_PROG_TEST_RUN
 //! runs a page at a time, writing chunks to the upatch's output map. The
 //! maps of one upatch or of all are listed.
-//!
-//! A view keeps the C's allocations, xmalloc()'d and freed by size, so
-//! that map_view_free() frees a view whoever filled it.
 
 use core::ffi::{CStr, c_int, c_long, c_void};
 use core::sync::atomic::{AtomicI32, Ordering};
@@ -21,7 +18,6 @@ use std::os::unix::fs::MetadataExt;
 use crate::errno::{
     E2BIG, EBADMSG, EINVAL, EIO, ENAMETOOLONG, ENOENT, ENOMEM, EOPNOTSUPP, EOVERFLOW,
 };
-use crate::heap::{xcalloc, xfree, xmalloc, xreallocarray};
 use crate::sys::libc::{errno, syscall};
 use crate::sys::upatch::MapSummary;
 use crate::sys::upatch_maps::{MAP_READ_PEEK, MapEntry, MapView, SerialPage};
@@ -207,7 +203,7 @@ fn clear_serial_map(fd: c_int, max_entries: u32, value_size: u32) -> c_int {
 }
 
 /// The page the serializer wrote: its chunks checked against each other
-/// and the request, their payloads joined into an xmalloc()'d buffer.
+/// and the request, their payloads joined.
 fn read_serial_page(
     fd: c_int,
     max_entries: u32,
@@ -289,67 +285,15 @@ fn read_serial_page(
     if data.len() != bytes_total as usize {
         return Err(-EBADMSG);
     }
-    let buf = if bytes_total == 0 {
-        core::ptr::null_mut()
-    } else {
-        // SAFETY: a size alone.
-        let p = unsafe { xmalloc(bytes_total as usize) }.cast::<u8>();
-        if p.is_null() {
-            return Err(-ENOMEM);
-        }
-        // SAFETY: the allocation, of the page's bytes.
-        unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), p, data.len()) };
-        p.cast()
-    };
     Ok(SerialPage {
         page_index,
         cursor,
         next_cursor,
         flags,
         chunks: total,
-        bytes: bytes_total,
         done: flags & SERIAL_F_DONE != 0,
-        data: buf,
+        data,
     })
-}
-
-/// Appends `page` to the view's pages, which own its data.
-fn append_serial_page(out: &mut MapView, page: SerialPage) -> Result<(), SerialPage> {
-    let n = out.n_serial_pages as usize;
-    // SAFETY: the view's pages, grown by one.
-    let p = unsafe { xreallocarray(out.serial_pages.cast(), n, n + 1, size_of::<SerialPage>()) }
-        .cast::<SerialPage>();
-    if p.is_null() {
-        return Err(page);
-    }
-    // SAFETY: the slot just made.
-    unsafe { p.add(n).write(page) };
-    out.serial_pages = p;
-    out.n_serial_pages += 1;
-    Ok(())
-}
-
-fn free_pages(out: &mut MapView) {
-    if out.serial_pages.is_null() {
-        return;
-    }
-    for i in 0..out.n_serial_pages as usize {
-        // SAFETY: the view's pages, each its data's owner.
-        unsafe {
-            let page = &*out.serial_pages.add(i);
-            xfree(page.data, page.bytes as usize);
-        }
-    }
-    // SAFETY: the pages, by their count.
-    unsafe {
-        xfree(
-            out.serial_pages.cast(),
-            out.n_serial_pages as usize * size_of::<SerialPage>(),
-        )
-    };
-    out.serial_pages = core::ptr::null_mut();
-    out.n_serial_pages = 0;
-    out.serial_bytes_total = 0;
 }
 
 /// `struct serialize_ctx` of bpf/lib/serializer.h.
@@ -374,7 +318,8 @@ const _: () = assert!(size_of::<SerializeCtx>() == 40);
 fn try_read_serialized(upatch: &[u8], map: &[u8], flags: u32, out: &mut MapView) -> c_int {
     let ret = read_serialized(upatch, map, flags, out);
     if ret < 0 {
-        free_pages(out);
+        out.serial_pages = Vec::new();
+        out.serial_bytes_total = 0;
     }
     ret
 }
@@ -454,18 +399,15 @@ fn read_serialized(upatch: &[u8], map: &[u8], flags: u32, out: &mut MapView) -> 
                 Ok(p) => p,
                 Err(e) => return e,
             };
-        if bytes_total + u64::from(page.bytes) > SERIAL_MAX_TOTAL_BYTES {
-            // SAFETY: the page's data, freed once.
-            unsafe { xfree(page.data, page.bytes as usize) };
+        if bytes_total + u64::from(page.bytes()) > SERIAL_MAX_TOTAL_BYTES {
             return -E2BIG;
         }
-        bytes_total += u64::from(page.bytes);
+        bytes_total += u64::from(page.bytes());
         let (done, next) = (page.done, page.next_cursor);
-        if let Err(page) = append_serial_page(out, page) {
-            // SAFETY: as above.
-            unsafe { xfree(page.data, page.bytes as usize) };
+        if out.serial_pages.try_reserve(1).is_err() {
             return -ENOMEM;
         }
+        out.serial_pages.push(page);
         if done {
             break;
         }
@@ -474,10 +416,7 @@ fn read_serialized(upatch: &[u8], map: &[u8], flags: u32, out: &mut MapView) -> 
         }
         cursor = next;
     }
-    // SAFETY: the view's pages, its last when there is one.
-    let last_done = out.n_serial_pages != 0
-        && unsafe { (*out.serial_pages.add(out.n_serial_pages as usize - 1)).done };
-    if !last_done {
+    if !out.serial_pages.last().is_some_and(|page| page.done) {
         return -E2BIG;
     }
     out.serialized = true;
@@ -485,166 +424,112 @@ fn read_serialized(upatch: &[u8], map: &[u8], flags: u32, out: &mut MapView) -> 
     1
 }
 
+/// `len` zero bytes, or -ENOMEM.
+fn zeroed(len: usize) -> Result<Vec<u8>, c_int> {
+    let mut buf = Vec::new();
+    buf.try_reserve_exact(len).map_err(|_| -ENOMEM)?;
+    buf.resize(len, 0);
+    Ok(buf)
+}
+
 /// The map's entries, at most `cap` of them or all for 0: an array by
 /// index, holes left out, a hash by its keys.
-fn read_entries(fd: c_int, v: &mut MapView, cap: u32) -> c_int {
+fn read_entries(fd: c_int, v: &mut MapView, cap: u32) -> Result<(), c_int> {
     let count = if is_percpu(v.ty) {
         v.n_cpus as usize
     } else {
         1
     };
-    let Some(value_alloc) = (value_stride(v) as usize).checked_mul(count) else {
-        return -EOVERFLOW;
-    };
-    let key_size = v.key_size as usize;
-    v.entries = core::ptr::null_mut();
-    v.n_entries = 0;
+    let value_len = (value_stride(v) as usize)
+        .checked_mul(count)
+        .ok_or(-EOVERFLOW)?;
+    let key_len = v.key_size as usize;
+    v.entries = Vec::new();
     v.truncated = false;
     v.n_truncated_at = cap;
-
-    // SAFETY: sizes alone, and buffers freed by them.
-    let alloc = |n: usize| unsafe { xmalloc(n) };
-    // SAFETY: as above.
-    let free = |p: *mut c_void, n: usize| unsafe { xfree(p, n) };
-    let push = |v: &mut MapView, key: *mut c_void, value: *mut c_void| {
-        // SAFETY: a slot below entries_cap.
-        unsafe {
-            v.entries
-                .add(v.n_entries as usize)
-                .write(MapEntry { key, value })
-        };
-        v.n_entries += 1;
-    };
-
     if is_array(v.ty) {
-        let mut take = v.max_entries;
-        if cap != 0 && take > cap {
-            take = cap;
-            v.truncated = v.max_entries > cap;
-        }
-        if take == 0 {
-            return 0;
-        }
-        // SAFETY: a count and a size.
-        v.entries = unsafe { xcalloc(take as usize, size_of::<MapEntry>()) }.cast();
-        v.entries_cap = take as usize;
-        if v.entries.is_null() {
-            return -ENOMEM;
-        }
-        for i in 0..take {
-            let (key, value) = (alloc(key_size), alloc(value_alloc));
-            if key.is_null() || value.is_null() {
-                free(key, key_size);
-                free(value, value_alloc);
-                return -ENOMEM;
-            }
-            let idx = i.to_ne_bytes();
-            // SAFETY: the key's bytes, the index and zeros after it.
-            unsafe {
-                let n = key_size.min(4);
-                core::ptr::copy_nonoverlapping(idx.as_ptr(), key.cast::<u8>(), n);
-                if key_size > 4 {
-                    core::ptr::write_bytes(key.cast::<u8>().add(4), 0, key_size - 4);
-                }
-            }
-            // SAFETY: the map, a key and room for a value of its sizes.
-            if unsafe { bpf_map_lookup_elem(fd, key, value) } != 0 {
-                free(key, key_size);
-                free(value, value_alloc);
-                continue;
-            }
-            push(v, key, value);
-        }
-        return 0;
+        read_array(fd, v, cap, key_len, value_len)
+    } else if is_hash(v.ty) {
+        read_hash(fd, v, cap, key_len, value_len)
+    } else {
+        Err(-EOPNOTSUPP)
     }
-    if !is_hash(v.ty) {
-        return -EOPNOTSUPP;
+}
+
+/// The array's entries by index, the first `cap` or all for 0: -ENOMEM
+/// when a buffer cannot be had.
+fn read_array(
+    fd: c_int,
+    v: &mut MapView,
+    cap: u32,
+    key_len: usize,
+    value_len: usize,
+) -> Result<(), c_int> {
+    let mut take = v.max_entries;
+    if cap != 0 && take > cap {
+        take = cap;
+        v.truncated = true;
     }
-    v.entries_cap = 32;
-    // SAFETY: a count and a size.
-    v.entries = unsafe { xcalloc(v.entries_cap, size_of::<MapEntry>()) }.cast();
-    if v.entries.is_null() {
-        return -ENOMEM;
-    }
-    let next = alloc(key_size);
-    if next.is_null() {
-        return -ENOMEM;
-    }
-    let mut prev: *const c_void = core::ptr::null();
-    // SAFETY: the map, the previous key or NULL, and room for the next.
-    while unsafe { bpf_map_get_next_key(fd, prev, next) } == 0 {
-        let (key, value) = (alloc(key_size), alloc(value_alloc));
-        if key.is_null() || value.is_null() {
-            free(key, key_size);
-            free(value, value_alloc);
-            break;
-        }
-        // SAFETY: two buffers of the key's size.
-        unsafe { core::ptr::copy_nonoverlapping(next.cast::<u8>(), key.cast::<u8>(), key_size) };
+    v.entries
+        .try_reserve_exact(take as usize)
+        .map_err(|_| -ENOMEM)?;
+    for index in 0..take {
+        let mut key = zeroed(key_len)?;
+        let mut value = zeroed(value_len)?;
+        key.iter_mut()
+            .zip(index.to_ne_bytes())
+            .for_each(|(k, b)| *k = b);
         // SAFETY: the map, a key and room for a value of its sizes.
-        if unsafe { bpf_map_lookup_elem(fd, key, value) } != 0 {
-            free(key, key_size);
-            free(value, value_alloc);
-            prev = next;
+        if unsafe { bpf_map_lookup_elem(fd, key.as_ptr().cast(), value.as_mut_ptr().cast()) } != 0 {
             continue;
         }
-        if v.n_entries as usize == v.entries_cap {
-            let cap2 = v.entries_cap * 2;
-            // SAFETY: the entries, grown, and the new half zeroed.
-            let p = unsafe {
-                xreallocarray(v.entries.cast(), v.entries_cap, cap2, size_of::<MapEntry>())
-            }
-            .cast::<MapEntry>();
-            if p.is_null() {
-                free(key, key_size);
-                free(value, value_alloc);
-                break;
-            }
-            // SAFETY: as above.
-            unsafe { core::ptr::write_bytes(p.add(v.entries_cap), 0, v.entries_cap) };
-            v.entries = p;
-            v.entries_cap = cap2;
+        v.entries.push(MapEntry { key, value });
+    }
+    Ok(())
+}
+
+/// The hash's entries in the kernel's order, the first `cap` or all for
+/// 0; as many as fit when a buffer cannot be had.
+fn read_hash(
+    fd: c_int,
+    v: &mut MapView,
+    cap: u32,
+    key_len: usize,
+    value_len: usize,
+) -> Result<(), c_int> {
+    let mut next = zeroed(key_len)?;
+    let mut prev: *const c_void = core::ptr::null();
+    // SAFETY: the map, the key before the next or NULL for the first, and
+    // room for the next, of its key size.
+    while unsafe { bpf_map_get_next_key(fd, prev, next.as_mut_ptr().cast()) } == 0 {
+        prev = next.as_ptr().cast();
+        let (Ok(mut key), Ok(mut value)) = (zeroed(key_len), zeroed(value_len)) else {
+            break;
+        };
+        key.copy_from_slice(&next);
+        // SAFETY: the map, a key and room for a value of its sizes.
+        if unsafe { bpf_map_lookup_elem(fd, key.as_ptr().cast(), value.as_mut_ptr().cast()) } != 0 {
+            continue;
         }
-        push(v, key, value);
-        if cap != 0 && v.n_entries >= cap {
+        if v.entries.try_reserve(1).is_err() {
+            break;
+        }
+        v.entries.push(MapEntry { key, value });
+        if cap != 0 && v.n_entries() >= cap {
             v.truncated = true;
             break;
         }
-        prev = next;
     }
-    free(next, key_size);
-    0
+    Ok(())
 }
 
-/// Frees what a read put in `v`: entries, BTF and serialized pages.
+/// Frees the BTF a read put in `v`.
 pub(crate) fn view_free(v: &mut MapView) {
-    if !v.entries.is_null() {
-        let count = if is_percpu(v.ty) {
-            v.n_cpus as usize
-        } else {
-            1
-        };
-        let value_alloc = value_stride(v) as usize * count;
-        for i in 0..v.n_entries as usize {
-            // SAFETY: the view's entries, each its key's and value's owner.
-            unsafe {
-                let en = &*v.entries.add(i);
-                xfree(en.key, v.key_size as usize);
-                xfree(en.value, value_alloc);
-            }
-        }
-        // SAFETY: the entries, by their capacity.
-        unsafe { xfree(v.entries.cast(), v.entries_cap * size_of::<MapEntry>()) };
-        v.entries = core::ptr::null_mut();
-        v.entries_cap = 0;
-        v.n_entries = 0;
-    }
     if !v.btf.is_null() {
         // SAFETY: the view's BTF, boxed by read(), freed once.
         drop(unsafe { Box::from_raw(v.btf) });
         v.btf = core::ptr::null_mut();
     }
-    free_pages(v);
 }
 
 fn fill(dst: &mut [u8], src: &[u8]) -> Result<(), c_int> {
@@ -656,8 +541,7 @@ fn fill(dst: &mut [u8], src: &[u8]) -> Result<(), c_int> {
 /// MAP_READ_PEEK in `flags` to leave the serializer's interval to the
 /// exporter. 0 or -errno; view_free() frees what it holds either way.
 pub(crate) fn read(upatch: &[u8], map: &[u8], cap: u32, flags: u32, out: &mut MapView) -> c_int {
-    // SAFETY: an all-zero view is an empty one.
-    *out = unsafe { core::mem::zeroed() };
+    *out = MapView::default();
     if fill(&mut out.upatch, upatch).is_err() || fill(&mut out.name, map).is_err() {
         return -ENAMETOOLONG;
     }
@@ -721,7 +605,10 @@ pub(crate) fn read(upatch: &[u8], map: &[u8], cap: u32, flags: u32, out: &mut Ma
         type_def(Some(btf), vid, &mut out.value_type_def);
     }
     out.btf = btf.map_or(core::ptr::null_mut(), |b| Box::into_raw(Box::new(b)));
-    read_entries(fd.as_raw_fd(), out, cap)
+    match read_entries(fd.as_raw_fd(), out, cap) {
+        Ok(()) => 0,
+        Err(e) => e,
+    }
 }
 
 /// The maps upatch `upatch` pins, onto `list`, in directory order: each

@@ -355,8 +355,7 @@ fn export(upatch: &CStr, map: &CStr, a: &Args, opts: &OtelOpts, detail: bool) ->
     } else {
         MAP_ENTRIES_DEFAULT
     };
-    // SAFETY: an all-zero view is an empty one.
-    let mut v: Box<MapView> = Box::new(unsafe { core::mem::zeroed() });
+    let mut v: Box<MapView> = Box::default();
     let (u, m) = (upatch.to_bytes(), map.to_bytes());
     let r = map_read::read(u, m, cap, if a.peek { MAP_READ_PEEK } else { 0 }, &mut v);
     let mut ret = 0;

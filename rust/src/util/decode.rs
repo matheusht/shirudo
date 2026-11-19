@@ -782,9 +782,9 @@ fn push_map_data(s: &mut Stack<'_>, v: &MapView) {
     s.push_bytes(v.type_name.unwrap_or(c"").to_bytes());
     s.set_field(-2, c"type");
     set_number(s, c"max_entries", f64::from(v.max_entries));
-    set_number(s, c"n_entries", f64::from(v.n_entries));
+    set_number(s, c"n_entries", f64::from(v.n_entries()));
     set_bool(s, c"serialized", v.serialized);
-    set_number(s, c"serialized_pages", f64::from(v.n_serial_pages));
+    set_number(s, c"serialized_pages", f64::from(v.n_serial_pages()));
     set_number(s, c"serialized_bytes", v.serial_bytes_total as f64);
     set_number(s, c"key_size", f64::from(v.key_size));
     set_number(s, c"value_size", f64::from(v.value_size));
@@ -804,22 +804,12 @@ fn view_len(n: u64) -> usize {
 /// The entries of the view, each its key and its value on every CPU as
 /// hex.
 fn push_entries(s: &mut Stack<'_>, v: &MapView) {
-    let key_len = view_len(u64::from(v.key_size));
-    let value_len = view_len(u64::from(v.value_stride) * u64::from(v.n_cpus));
-    // SAFETY: map_read() points the view's entries at n_entries of them,
-    // which live as it does.
-    let entries = unsafe { ffi::slice(v.entries, view_len(u64::from(v.n_entries))) };
     s.new_table();
-    for (n, entry) in (1..=c_int::MAX).zip(entries) {
+    for (n, entry) in (1..=c_int::MAX).zip(&v.entries) {
         s.new_table();
-        // SAFETY: map_read() points an entry's key at key_size bytes,
-        // which live as the view does.
-        push_hex(s, unsafe { ffi::slice(entry.key.cast::<u8>(), key_len) });
+        push_hex(s, &entry.key);
         s.set_field(-2, c"key_hex");
-        // SAFETY: and its value at value_stride bytes for each CPU.
-        push_hex(s, unsafe {
-            ffi::slice(entry.value.cast::<u8>(), value_len)
-        });
+        push_hex(s, &entry.value);
         s.set_field(-2, c"value_hex");
         s.raw_set_index(-2, n);
     }
@@ -828,11 +818,8 @@ fn push_entries(s: &mut Stack<'_>, v: &MapView) {
 /// The serialized pages of the view, each its place, its cursors and
 /// flags, and its bytes as hex.
 fn push_pages(s: &mut Stack<'_>, v: &MapView) {
-    // SAFETY: map_read() points the view's pages at n_serial_pages of
-    // them, which live as it does.
-    let pages = unsafe { ffi::slice(v.serial_pages, view_len(u64::from(v.n_serial_pages))) };
     s.new_table();
-    for (n, page) in (1..=c_int::MAX).zip(pages) {
+    for (n, page) in (1..=c_int::MAX).zip(&v.serial_pages) {
         s.new_table();
         set_number(s, c"page_index", f64::from(page.page_index));
         set_number(s, c"cursor", page.cursor as f64);
@@ -840,12 +827,8 @@ fn push_pages(s: &mut Stack<'_>, v: &MapView) {
         set_bool(s, c"done", page.done);
         set_number(s, c"flags", f64::from(page.flags));
         set_number(s, c"chunks", f64::from(page.chunks));
-        set_number(s, c"bytes", f64::from(page.bytes));
-        // SAFETY: map_read() points a page's data at its bytes, which live
-        // as the view does.
-        push_hex(s, unsafe {
-            ffi::slice(page.data.cast::<u8>(), view_len(u64::from(page.bytes)))
-        });
+        set_number(s, c"bytes", f64::from(page.bytes()));
+        push_hex(s, &page.data);
         s.set_field(-2, c"data_hex");
         s.raw_set_index(-2, n);
     }

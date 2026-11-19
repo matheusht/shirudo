@@ -77,13 +77,14 @@ fn container(source: &str) -> Vec<u8> {
 fn decoded(source: &str) -> Result<Vec<u8>, c_int> {
     let dir = TempDir::new();
     std::fs::write(dir.join("u"), container(source)).unwrap();
-    // SAFETY: a view of no entries, for which zeros are a value.
-    let mut view: MapView = unsafe { core::mem::zeroed() };
+    let mut view = MapView {
+        serialized: true,
+        max_entries: 1,
+        type_name: Some(c"array"),
+        ..MapView::default()
+    };
     put_str(&mut view.upatch, 0, "unit-decoder");
     put_str(&mut view.name, 0, "records");
-    view.serialized = true;
-    view.max_entries = 1;
-    view.type_name = Some(c"array");
     decode_map(&view, Some(&dir.cpath("u")), false, JSON_MAX)
 }
 

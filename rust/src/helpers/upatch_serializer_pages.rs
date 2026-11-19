@@ -9,7 +9,7 @@
 //! The BPF side's struct serialize_ctx, which the C helper sized, is
 //! checked where it is defined, by bpf/lib/serializer.h's BUILD_BUG_ON.
 
-use core::ffi::{CStr, c_int, c_void};
+use core::ffi::{CStr, c_int};
 use std::os::unix::ffi::OsStrExt;
 
 use super::{err, helper_main, out};
@@ -154,18 +154,15 @@ fn json(v: &MapView) -> Result<(), &'static str> {
 }
 
 fn run(_: &[&CStr]) -> c_int {
-    let mut page0 = [0xaa_u8, 0xbb];
-    let mut page1 = [0xcc_u8];
-    let mut pages = [
+    let pages = vec![
         SerialPage {
             page_index: 0,
             cursor: 0,
             next_cursor: 128,
             flags: 0,
             chunks: 1,
-            bytes: page0.len() as u32,
             done: false,
-            data: page0.as_mut_ptr().cast::<c_void>(),
+            data: vec![0xaa, 0xbb],
         },
         SerialPage {
             page_index: 1,
@@ -173,21 +170,19 @@ fn run(_: &[&CStr]) -> c_int {
             next_cursor: 129,
             flags: 1,
             chunks: 1,
-            bytes: page1.len() as u32,
             done: true,
-            data: page1.as_mut_ptr().cast::<c_void>(),
+            data: vec![0xcc],
         },
     ];
-    // SAFETY: a view of no map, for which zeros are the value, filled
-    // with the two pages.
-    let mut v: Box<MapView> = Box::new(unsafe { core::mem::zeroed() });
+    let mut v = MapView {
+        type_name: Some(c"arena"),
+        max_entries: 32,
+        serialized: true,
+        serial_bytes_total: pages.iter().map(|p| u64::from(p.bytes())).sum(),
+        serial_pages: pages,
+        ..MapView::default()
+    };
     v.name[..10].copy_from_slice(b"tree_arena");
-    v.type_name = Some(c"arena");
-    v.max_entries = 32;
-    v.serialized = true;
-    v.n_serial_pages = 2;
-    v.serial_bytes_total = (page0.len() + page1.len()) as u64;
-    v.serial_pages = pages.as_mut_ptr();
 
     match abi_and_nonce().and_then(|()| map_locks()) {
         Err(failure) => {

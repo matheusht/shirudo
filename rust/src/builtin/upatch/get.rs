@@ -158,8 +158,7 @@ fn age(ts: &[u8]) -> Vec<u8> {
 /// entries or all for 0, without draining a serializer: the view, or
 /// -errno.
 fn read_map(upatch: &CStr, m: &MapSummary, cap: u32, f: impl FnOnce(Result<&MapView, c_int>)) {
-    // SAFETY: an all-zero view is an empty one.
-    let mut v: Box<MapView> = Box::new(unsafe { core::mem::zeroed() });
+    let mut v: Box<MapView> = Box::default();
     let r = map_read::read(upatch.to_bytes(), cstr(&m.name), cap, MAP_READ_PEEK, &mut v);
     f(if r == 0 { Ok(&v) } else { Err(r) });
     map_read::view_free(&mut v);
