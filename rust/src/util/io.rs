@@ -112,7 +112,6 @@ fn sync(fd: BorrowedFd<'_>) -> Result<(), c_int> {
     Ok(())
 }
 
-/// The status of the open `fd`, as fstat() gave it: 0 or -errno.
 /// The names of the directory at `dir` that `keep` keeps, in the order
 /// alphasort() gives them in the C locale shirudo runs in: bytewise.
 /// "." and ".." are no entry. -errno when the directory cannot be read.
@@ -201,19 +200,22 @@ impl Drop for DirStream {
     }
 }
 
-pub(crate) fn stat_fd(fd: c_int, st: &mut Statx) -> c_int {
+/// The status of the open `fd`, as fstat() gives it: -errno.
+pub(crate) fn stat_fd(fd: BorrowedFd<'_>) -> Result<Statx, c_int> {
+    let mut st = Statx::zeroed();
+    let fd = fd.as_raw_fd();
+
     // SAFETY: the caller's fd, an empty path, and room for its status.
-    if unsafe { statx(fd, c"".as_ptr(), AT_EMPTY_PATH, STATX_BASIC_STATS, st) } != 0 {
-        return -errno();
+    if unsafe { statx(fd, c"".as_ptr(), AT_EMPTY_PATH, STATX_BASIC_STATS, &mut st) } != 0 {
+        return Err(-errno());
     }
-    0
+    Ok(st)
 }
 
 /// `line` and its newline appended to the log open on `fd` at `path`,
 /// after a torn tail is dropped; the log taken back to its last record
 /// when the append fails.
 pub(crate) fn append_line(fd: BorrowedFd<'_>, path: &CStr, line: &[u8]) -> Result<(), c_int> {
-    let mut st = Statx::zeroed();
     let mut text = line;
 
     if text.last() == Some(&b'\n') {
@@ -222,11 +224,7 @@ pub(crate) fn append_line(fd: BorrowedFd<'_>, path: &CStr, line: &[u8]) -> Resul
     if text.contains(&b'\n') || text.contains(&0) {
         return Err(-EINVAL);
     }
-    let ret = stat_fd(fd.as_raw_fd(), &mut st);
-    if ret != 0 {
-        return Err(ret);
-    }
-    let size = st.stx_size as i64;
+    let size = stat_fd(fd)?.stx_size as i64;
     let end = last_line_end(fd, size)?;
     if end != size {
         truncate_to(fd, end)?;
@@ -291,12 +289,8 @@ pub(crate) fn open_beneath(dirfd: c_int, rel: &CStr, flags: c_int) -> Result<Own
 /// The whole regular file behind `fd`, from its start, of at most `max`
 /// bytes, which may steer trust as `label` says.
 pub(crate) fn read_whole(fd: BorrowedFd<'_>, label: &CStr, max: usize) -> Result<Vec<u8>, c_int> {
-    let mut st = Statx::zeroed();
+    let st = stat_fd(fd)?;
 
-    let ret = stat_fd(fd.as_raw_fd(), &mut st);
-    if ret != 0 {
-        return Err(ret);
-    }
     if st.stx_mode & S_IFMT != S_IFREG {
         return Err(-EINVAL);
     }
@@ -447,15 +441,14 @@ fn trusted_owner(uid: u32) -> bool {
 /// for. 0, or -EPERM logged, or -errno.
 pub(crate) fn check_trusted(fd: BorrowedFd<'_>, path: &CStr, secret: bool) -> c_int {
     let path_text = path.to_bytes();
-    let mut st = Statx::zeroed();
 
     if !under_dir(path_text, ETC_DIR) && !under_dir(path_text, VAR_LIB) {
         return 0;
     }
-    let ret = stat_fd(fd.as_raw_fd(), &mut st);
-    if ret != 0 {
-        return ret;
-    }
+    let st = match stat_fd(fd) {
+        Ok(st) => st,
+        Err(err) => return err,
+    };
     if st.stx_mode & S_IFMT != S_IFREG
         || !trusted_owner(st.stx_uid)
         || st.stx_mode & if secret { 0o77 } else { 0o22 } != 0

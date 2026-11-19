@@ -140,12 +140,6 @@ fn truncate(fd: BorrowedFd<'_>) -> Result<(), c_int> {
     Ok(())
 }
 
-fn stat(fd: BorrowedFd<'_>) -> Result<Statx, c_int> {
-    let mut st = Statx::zeroed();
-
-    status(stat_fd(fd.as_raw_fd(), &mut st)).map(|()| st)
-}
-
 /// The status of `name` in `dir` itself, a symbolic link's own.
 fn stat_at(dir: BorrowedFd<'_>, name: &CStr) -> Result<Statx, c_int> {
     let mut st = Statx::zeroed();
@@ -512,7 +506,7 @@ fn open_parent(path: &[u8]) -> Result<(OwnedFd, &[u8]), c_int> {
 /// forever: the open does not wait, and what is not a regular file is
 /// refused.
 fn regular(fd: BorrowedFd<'_>) -> Result<(), c_int> {
-    if stat(fd)?.stx_mode & S_IFMT == S_IFREG {
+    if stat_fd(fd)?.stx_mode & S_IFMT == S_IFREG {
         Ok(())
     } else {
         Err(-EINVAL)
@@ -609,7 +603,7 @@ impl Output {
         let Output { file, dir, name } = self;
         let newline = |()| write_complete(file.as_fd(), b"\n");
         let written = write_complete(file.as_fd(), doc).and_then(newline);
-        let wrote = stat(file.as_fd()).ok();
+        let wrote = stat_fd(file.as_fd()).ok();
         let committed = written.and(close_checked(file));
         if let (Err(_), Some(wrote)) = (committed, wrote) {
             let inode = |st: &Statx| (st.stx_dev_major, st.stx_dev_minor, st.stx_ino);

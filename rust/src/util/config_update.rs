@@ -19,7 +19,6 @@ use crate::errno::{
     EBADMSG, EBUSY, EINPROGRESS, EINVAL, EIO, ENODATA, ENOENT, EOVERFLOW, EPERM, ESTALE, EUCLEAN,
     text,
 };
-use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     LOCK_EX, LOCK_NB, O_APPEND, O_CLOEXEC, O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_NONBLOCK,
     O_RDONLY, O_RDWR, O_WRONLY, S_IFMT, S_IFREG, Statx, close, errno, flock, fsync, ftruncate,
@@ -341,21 +340,11 @@ fn record_decode(data: &[u8], state: bool) -> Result<ConfigUpdateRecord, c_int> 
     Ok(record)
 }
 
-/// The status of `fd`, as fstat() gives it.
-fn status(fd: BorrowedFd<'_>) -> Result<Statx, c_int> {
-    let mut st = Statx::zeroed();
-
-    match stat_fd(fd.as_raw_fd(), &mut st) {
-        0 => Ok(st),
-        err => Err(err),
-    }
-}
-
 /// The status of `fd` when it is a regular file of one link, the
 /// effective user's, that no one else may read or write: -EPERM when it
 /// is not.
 fn regular_file(fd: BorrowedFd<'_>) -> Result<Statx, c_int> {
-    let st = status(fd)?;
+    let st = stat_fd(fd)?;
 
     if st.stx_mode & S_IFMT != S_IFREG || st.stx_nlink != 1 {
         return Err(-EPERM);
@@ -412,7 +401,7 @@ impl<'o> ConfigUpdate<'o> {
             .open(OsStr::from_bytes(directory.to_bytes()))
             .map_err(io_errno)?
             .into();
-        let st = status(dir.as_fd())?;
+        let st = stat_fd(dir.as_fd())?;
         if st.stx_uid != euid() || st.stx_mode & 0o22 != 0 {
             return Err(-EPERM);
         }

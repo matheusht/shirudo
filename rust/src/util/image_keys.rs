@@ -8,13 +8,12 @@
 
 use core::ffi::{CStr, c_int};
 use std::ffi::CString;
-use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
 
 use crate::errno::{EINVAL, EKEYREJECTED, ENOENT, ENOKEY, last_errno, text};
-use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
-    O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW, O_NONBLOCK, S_IFMT, S_IFREG, Statx, closedir, fdopendir,
-    openat, readdir, set_errno,
+    O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW, O_NONBLOCK, S_IFMT, S_IFREG, closedir, fdopendir, openat,
+    readdir, set_errno,
 };
 use crate::util::image_config;
 use crate::util::io::stat_fd;
@@ -92,11 +91,7 @@ fn revoked_cert(dir: c_int, name: &CStr, dev: (u32, u32)) -> Result<Vec<u8>, c_i
     }
     // SAFETY: the fd openat() just gave, owned from here.
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-    let mut st = Statx::zeroed();
-    let ret = stat_fd(fd.as_raw_fd(), &mut st);
-    if ret != 0 {
-        return Err(ret);
-    }
+    let st = stat_fd(fd.as_fd())?;
     if st.stx_mode & S_IFMT != S_IFREG
         || (st.stx_dev_major, st.stx_dev_minor) != dev
         || st.stx_size == 0
@@ -117,11 +112,12 @@ fn revoked_cert(dir: c_int, name: &CStr, dev: (u32, u32)) -> Result<Vec<u8>, c_i
 /// order, and with `apply` revokes each from the kernel: 0 or the first
 /// error. An image without keys/revoked/ revokes nothing.
 fn revocations(root_fd: c_int, apply: bool, boot: bool) -> c_int {
-    let mut root = Statx::zeroed();
-    let ret = stat_fd(root_fd, &mut root);
-    if ret != 0 {
-        return ret;
-    }
+    // SAFETY: the caller's root fd, open for the call, which
+    // validate_set() had image_config::validate() stat first.
+    let root = match stat_fd(unsafe { BorrowedFd::borrow_raw(root_fd) }) {
+        Ok(root) => root,
+        Err(err) => return err,
+    };
     let dev = (root.stx_dev_major, root.stx_dev_minor);
     let keys = match open_dir(root_fd, c"keys") {
         Ok(Some(fd)) => fd,

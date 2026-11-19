@@ -9,7 +9,7 @@ use core::ptr;
 use std::ffi::{CString, OsStr};
 use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
@@ -27,7 +27,7 @@ use crate::errno::{EINVAL, ENAMETOOLONG, EPERM, describe, last_errno, text};
 use crate::ffi::c_splice;
 use crate::log;
 use crate::sys::libc::{
-    O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW, O_RDONLY, PATH_MAX, Statx, Zeroed, geteuid, open, openat,
+    O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW, O_RDONLY, PATH_MAX, Statx, geteuid, open, openat,
 };
 use crate::util::crypto_openssl::{complain_stack, openssl_complain};
 use crate::util::help::{Help, HelpSection};
@@ -115,11 +115,8 @@ fn open_dir(dir: Option<&OwnedFd>, name: &[u8]) -> Result<(OwnedFd, Statx), c_in
     }
     // SAFETY: the fd just opened, owned from here.
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-    let mut st = Statx::zeroed();
-    match stat_fd(fd.as_raw_fd(), &mut st) {
-        0 => Ok((fd, st)),
-        r => Err(r),
-    }
+    let st = stat_fd(fd.as_fd())?;
+    Ok((fd, st))
 }
 
 /// Whether the default keys directory may take a user's key: every

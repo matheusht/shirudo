@@ -19,10 +19,9 @@ use openssl::x509::X509;
 use crate::errno::{
     E2BIG, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT, ENOKEY, ENOMEM, EPERM, text,
 };
-use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
-    F_OK, O_CLOEXEC, O_DIRECTORY, O_RDONLY, PATH_MAX, S_IFMT, S_IFREG, Statx, access, errno,
-    faccessat, open,
+    F_OK, O_CLOEXEC, O_DIRECTORY, O_RDONLY, PATH_MAX, S_IFMT, S_IFREG, access, errno, faccessat,
+    open,
 };
 use crate::text::name_has_suffix;
 use crate::util::crypto_openssl::{self, pubkey_digest, verify_detached_x509, x509_from_der};
@@ -154,12 +153,8 @@ pub(crate) fn read_der(path: &CStr) -> Result<Vec<u8>, c_int> {
 /// The size of `file`, a regular file of 1 to KEYS_DER_MAX bytes:
 /// -EINVAL for another, or what statx() failed with.
 fn der_size(file: &File) -> Result<usize, c_int> {
-    let mut st = Statx::zeroed();
-    let ret = stat_fd(file.as_raw_fd(), &mut st);
+    let st = stat_fd(file.as_fd())?;
 
-    if ret != 0 {
-        return Err(ret);
-    }
     if st.stx_mode & S_IFMT != S_IFREG {
         return Err(-EINVAL);
     }
