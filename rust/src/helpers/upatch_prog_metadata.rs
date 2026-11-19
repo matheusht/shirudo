@@ -18,11 +18,10 @@ use crate::text::{cstr, parse_u64};
 use crate::util::upatch::{
     ATTACH_CGROUP_SKB_EGRESS, ATTACH_CGROUP_SKB_INGRESS, ATTACH_FMOD_RET, ATTACH_KPROBE,
     ATTACH_NETFILTER_IPV6_PRE_ROUTING, ATTACH_UPROBE, ATTACH_UPROBE_MULTI, ATTACH_URETPROBE,
-    ATTACH_URETPROBE_MULTI, ATTACH_XDP, BUILD_ID_MAX, Opened, POLICY_LABEL_ENTRY,
-    POLICY_LABEL_HEADER, POLICY_LABELS_MAGIC, POLICY_LABELS_VERSION, PROG_ENTRY, PROG_MAGIC,
-    PROG_METADATA, PROG_VERSION, ProgSpec, ROLE_ATTACH, ROLE_SERIALIZER, UPROBE_TARGET,
-    UPROBE_TARGET_MAGIC, UPROBE_TARGET_VERSION, UPROBE_TARGETS, Upatch, XDP_ALL, specs_free,
-    specs_parse,
+    ATTACH_URETPROBE_MULTI, ATTACH_XDP, BUILD_ID_MAX, POLICY_LABEL_ENTRY, POLICY_LABEL_HEADER,
+    POLICY_LABELS_MAGIC, POLICY_LABELS_VERSION, PROG_ENTRY, PROG_MAGIC, PROG_METADATA,
+    PROG_VERSION, ProgSpec, ROLE_ATTACH, ROLE_SERIALIZER, UPROBE_TARGET, UPROBE_TARGET_MAGIC,
+    UPROBE_TARGET_VERSION, UPROBE_TARGETS, Upatch, XDP_ALL, specs_free, specs_parse,
 };
 
 helper_main!(shirudo_helper_test_upatch_prog_metadata, run);
@@ -82,7 +81,7 @@ fn header_ok(raw: &[u8], nr_progs: u32) -> bool {
     le32(raw, 0) == PROG_MAGIC && le32(raw, 4) == PROG_VERSION && le32(raw, 8) == nr_progs
 }
 
-fn signed_attach(u: &Upatch) -> &[u8] {
+fn signed_attach<'a>(u: &'a Upatch<'_>) -> &'a [u8] {
     u.signed_attach().unwrap_or_default()
 }
 
@@ -458,7 +457,7 @@ fn run(args: &[&CStr]) -> c_int {
     if !(2..=6).contains(&args.len()) {
         return fail("usage: test-upatch-prog-metadata <file.upatch> [mode [path pattern count]]");
     }
-    let Ok(u) = Opened::open(args[1]) else {
+    let Ok(u) = Upatch::open(args[1]) else {
         return fail("open upatch failed");
     };
     match check(&u, args) {

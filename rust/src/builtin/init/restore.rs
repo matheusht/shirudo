@@ -22,7 +22,7 @@ use crate::util::json::JsonEmit;
 use crate::util::keys;
 use crate::util::measured::{MeasuredSet, upatch_of};
 use crate::util::seal;
-use crate::util::upatch::Opened;
+use crate::util::upatch::Upatch;
 use crate::util::upatch_pins::loaded_pins;
 use crate::util::upatch_resolve;
 use crate::util::upatch_verify::links_complete;
@@ -85,7 +85,7 @@ fn restore_one(
         ));
         return Ok(None);
     }
-    let e = match Opened::open(&file) {
+    let e = match Upatch::open(&file) {
         Ok(u) => upatch_of(&u),
         Err(_) => {
             warn(&cat!(

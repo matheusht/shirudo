@@ -168,35 +168,6 @@ fn symbol_range(u: &Upatch, symbol: &CStr) -> Result<RodataRange, c_int> {
     }
 }
 
-/// Parsed sections borrow the artifact bytes for as long as they are used.
-pub(super) struct MemoryUpatch<'a> {
-    parsed: Upatch,
-    _bytes: &'a [u8],
-}
-
-impl<'a> MemoryUpatch<'a> {
-    pub(super) fn open(bytes: &'a [u8]) -> Result<Self, c_int> {
-        let mut parsed = std::mem::MaybeUninit::uninit();
-        // SAFETY: bytes outlives the returned view and parsed has room for Upatch.
-        let ret = unsafe {
-            upatch::upatch_open_memory(bytes.as_ptr().cast(), bytes.len(), parsed.as_mut_ptr())
-        };
-        if ret != 0 {
-            return Err(ret);
-        }
-        // SAFETY: the parser initialized the full container on success.
-        let parsed = unsafe { parsed.assume_init() };
-        Ok(Self {
-            parsed,
-            _bytes: bytes,
-        })
-    }
-
-    pub(super) fn parsed(&self) -> &Upatch {
-        &self.parsed
-    }
-}
-
 /// The CMS covers the loader and data. The payload digest in the
 /// unsigned header must also match those bytes.
 fn verify_payload(u: &Upatch, cert: &CStr) -> Result<(), c_int> {
@@ -339,7 +310,7 @@ pub(super) fn set_rodata(
     if let Some(i) = twice {
         return Err(SetFailed::Twice(i));
     }
-    let src = upatch::Opened::open(input).map_err(SetFailed::Package)?;
+    let src = upatch::Upatch::open(input).map_err(SetFailed::Package)?;
     if src.is_unload() {
         return Err(SetFailed::Package(-EINVAL));
     }
@@ -381,7 +352,7 @@ pub(super) fn patch_rodata(
 }
 
 pub(super) fn verify_package(input: &CStr, cert: &CStr) -> Result<(), c_int> {
-    let u = upatch::Opened::open(input)?;
+    let u = upatch::Upatch::open(input)?;
     if u.is_unload() {
         return Err(-EINVAL);
     }

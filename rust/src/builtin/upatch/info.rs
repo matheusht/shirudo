@@ -14,7 +14,7 @@ use crate::text::{cstr, sanitize};
 use crate::util::help::{Help, HelpSection};
 use crate::util::json::JsonEmit;
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
-use crate::util::upatch::{Opened, Upatch};
+use crate::util::upatch::Upatch;
 /// UPATCH_DECODER_LANG_LUA, _INPUT_MAP_V1, _EXPORT_LOG and _METRIC.
 const LANG_LUA: u32 = 1;
 const INPUT_MAP_V1: u32 = 1;
@@ -270,7 +270,7 @@ pub(super) fn run(args: &[&CStr]) -> c_int {
         p.usage(b"takes <file.upatch>");
         return EXIT_USAGE;
     };
-    let u = match Opened::open(&CString::new(path).unwrap_or_default()) {
+    let u = match Upatch::open(&CString::new(path).unwrap_or_default()) {
         Ok(u) => u,
         Err(e) => {
             log_err(&[b"upatch info: ", path, b": ", strerr(-e)].concat());

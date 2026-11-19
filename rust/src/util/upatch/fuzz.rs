@@ -43,7 +43,7 @@ fuzz_target!(shirudo_fuzz_upatch, shirudo_fuzz_upatch_init, |data| {
     let Some(input) = input_file(data) else {
         return;
     };
-    let Ok(u) = super::Opened::open(&input.path) else {
+    let Ok(u) = super::Upatch::open(&input.path) else {
         return;
     };
     if let Some(attach) = u.signed_attach() {

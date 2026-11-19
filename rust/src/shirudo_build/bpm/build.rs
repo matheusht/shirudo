@@ -533,7 +533,7 @@ pub(super) fn record_payload(
     update: bool,
 ) -> Result<(), c_int> {
     let p = cstring(load);
-    let Ok(u) = upatch::Opened::open(&p) else {
+    let Ok(u) = upatch::Upatch::open(&p) else {
         return Err(-EINVAL);
     };
     if u.is_unload() || (!update && u.hdr.name[0] == 0) {

@@ -39,7 +39,7 @@ use crate::util::options::{
 use crate::util::seal;
 use crate::util::tpm::REGISTER_ATTRS;
 use crate::util::tpm_wire::{NAME_LEN, NV_RSA_BYTES, RegisterPolicy, nv_name, register_policy};
-use crate::util::upatch::Opened;
+use crate::util::upatch::Upatch;
 
 const MEMBERS_MAX: usize = 256;
 const REPORT_MAX: usize = 8192;
@@ -480,7 +480,7 @@ impl Members {
     }
 
     fn add_file(&mut self, path: &[u8]) -> Result<(), c_int> {
-        let e = match Opened::open(&message(&[path])) {
+        let e = match Upatch::open(&message(&[path])) {
             Ok(u) => upatch_of(&u),
             Err(ret) => {
                 error(&[b"attest: open ", path, b": ", strerr(-ret)]);

@@ -29,7 +29,7 @@ use crate::util::crypto_openssl::{
 };
 use crate::util::io::{memfd, read_file};
 use crate::util::seal;
-use crate::util::upatch::{Upatch, upatch_close, upatch_open};
+use crate::util::upatch::Upatch;
 
 /// The most layers a package manifest names that bpm reads.
 const LAYERS_MAX: usize = 8;
@@ -393,24 +393,17 @@ pub(super) fn find_entry(
 /// That the upatch at `path` carries the expected payload digest, the
 /// operation's name when given and the kind it says.
 fn verify_upatch(path: &CStr, expected: &[u8], id: Option<&[u8]>, unload: bool) -> Result {
-    // SAFETY: an all-zero container is the closed one upatch_open() fills.
-    let mut u: Upatch = unsafe { core::mem::zeroed() };
+    let u = Upatch::open(path)?;
     let mut actual = [0; 65];
 
-    // SAFETY: a C string and a container to fill.
-    status(unsafe { upatch_open(path.as_ptr(), &mut u) })?;
     sha256_hex_of(&u.hdr.payload_sha256, &mut actual);
-    let ret = if !digest_matches(expected, cstr(&actual))
+    if !digest_matches(expected, cstr(&actual))
         || id.is_some_and(|id| u.name() != id)
         || u.is_unload() != unload
     {
-        Err(-EKEYREJECTED)
-    } else {
-        Ok(())
-    };
-    // SAFETY: the container opened above.
-    unsafe { upatch_close(&mut u) };
-    ret
+        return Err(-EKEYREJECTED);
+    }
+    Ok(())
 }
 
 /// The artifact of a tree operation: cached by the digest of the blob as

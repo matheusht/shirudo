@@ -15,7 +15,7 @@ use super::{JSON_MAX, hex, out, pad, print_json};
 use crate::util::help::{Help, HelpSection};
 use crate::util::json::JsonEmit;
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
-use crate::util::upatch::{Opened, name_from_pin, pin_name};
+use crate::util::upatch::{Upatch, name_from_pin, pin_name};
 use crate::util::upatch_pins::loaded_pins;
 
 pub(super) const UPATCHES_DIR: &str = "/var/lib/shirudo/upatches";
@@ -64,7 +64,7 @@ struct Archived {
 
 fn archived(file: &[u8]) -> Option<Archived> {
     let u =
-        Opened::open(&CString::new([UPATCHES_DIR.as_bytes(), b"/", file].concat()).ok()?).ok()?;
+        Upatch::open(&CString::new([UPATCHES_DIR.as_bytes(), b"/", file].concat()).ok()?).ok()?;
     let name = u.name().to_vec();
     Some(Archived {
         ty: if u.is_unload() { b"unload" } else { b"load" },

@@ -47,7 +47,7 @@ use crate::util::report::OpReport;
 use crate::util::upatch::{
     self, ATTACH_CGROUP_SKB_EGRESS, ATTACH_CGROUP_SKB_INGRESS, ATTACH_FMOD_RET, ATTACH_KPROBE,
     ATTACH_KRETPROBE, ATTACH_NETFILTER_IPV6_PRE_ROUTING, ATTACH_RAW_TRACEPOINT, ATTACH_UPROBE,
-    ATTACH_UPROBE_MULTI, ATTACH_URETPROBE, ATTACH_URETPROBE_MULTI, ATTACH_XDP, MAPS_MAX, Opened,
+    ATTACH_UPROBE_MULTI, ATTACH_URETPROBE, ATTACH_URETPROBE_MULTI, ATTACH_XDP, MAPS_MAX,
     POLICY_LABEL_ENTRY, POLICY_LABEL_HEADER, ProgSpec, ROLE_ATTACH, ROLE_SERIALIZER, ROLE_TEST_RUN,
     Upatch, kind_has_uprobe_target,
 };
@@ -1386,7 +1386,7 @@ pub(crate) fn apply_path(
     rep: Option<&mut OpReport>,
 ) -> Result<(), ()> {
     let mut rep = Rep(rep);
-    let u = match Opened::open(path) {
+    let u = match Upatch::open(path) {
         Ok(u) => u,
         Err(e) => {
             log_err(&[&b"open "[..], path.to_bytes(), b": ", strerr(-e)].concat());

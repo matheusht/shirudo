@@ -8,7 +8,8 @@
 
 use core::ffi::{CStr, c_int};
 use std::ffi::CString;
-use std::os::fd::{AsRawFd, BorrowedFd};
+use std::fs::File;
+use std::os::fd::BorrowedFd;
 use std::os::unix::ffi::OsStrExt;
 
 use crate::errno::{
@@ -16,10 +17,7 @@ use crate::errno::{
 };
 use crate::util::chain::{memneq_explicit, sha256_2};
 use crate::util::measured::MeasuredSet;
-use crate::util::upatch::{
-    ATTACH_XDP, ProgSpec, ROLE_ATTACH, Upatch, specs_free, specs_parse, upatch_close, upatch_open,
-    upatch_open_fd,
-};
+use crate::util::upatch::{ATTACH_XDP, ProgSpec, ROLE_ATTACH, Upatch, specs_free, specs_parse};
 use crate::util::upatch_pins::{
     PAYLOAD_HASH_LEN, Pins, each_pinned, pin_payload, xdp_prog_open, xdp_prog_pin,
 };
@@ -70,63 +68,38 @@ pub(crate) fn payload_digest(u: &Upatch) -> Result<[u8; PAYLOAD_HASH_LEN], c_int
     if ret != 0 { Err(ret) } else { Ok(out) }
 }
 
-/// The artifact open at `fd` into `out`, when its bytes are what
-/// `payload` names: -ESTALE when they are not, or another -errno when the
-/// check itself could not run. The bytes are hashed, not the header's
-/// claim about them; `out` is closed again on a failure.
-pub(crate) fn verify_fd(
-    fd: BorrowedFd<'_>,
+/// The artifact in `file`, when its bytes are what `payload` names:
+/// -ESTALE when they are not, or another -errno when the check itself
+/// could not run. The bytes are hashed, not the header's claim about
+/// them.
+pub(crate) fn verify_file(
+    file: &File,
     payload: &[u8; PAYLOAD_HASH_LEN],
-    out: &mut Upatch,
-) -> c_int {
-    // SAFETY: the caller's descriptor and container.
-    let ret = unsafe { upatch_open_fd(fd.as_raw_fd(), out) };
-    if ret != 0 {
-        return stale_unless_resources(ret);
+) -> Result<Upatch<'static>, c_int> {
+    let u = Upatch::read(file).map_err(stale_unless_resources)?;
+    let digest = payload_digest(&u)?;
+    if memneq_explicit(&digest, payload) || memneq_explicit(&u.hdr.payload_sha256, payload) {
+        return Err(-ESTALE);
     }
-    let ret = match payload_digest(out) {
-        Ok(digest)
-            if memneq_explicit(&digest, payload)
-                || memneq_explicit(&out.hdr.payload_sha256, payload) =>
-        {
-            -ESTALE
-        }
-        Ok(_) => 0,
-        Err(err) => err,
-    };
-    if ret != 0 {
-        // SAFETY: the container opened above.
-        unsafe { upatch_close(out) };
-    }
-    ret
+    Ok(u)
 }
 
-/// The archive of upatch `name` into `out` when it is the payload
-/// `payload` names, signed with that name.
+/// The archive of upatch `name` when it is the payload `payload` names,
+/// signed with that name.
 pub(crate) fn archive_verify(
     name: &[u8],
     payload: &[u8; PAYLOAD_HASH_LEN],
-    out: &mut Upatch,
-) -> c_int {
-    let path = match archive_path(name) {
-        Ok(p) => p,
-        Err(err) => return err,
-    };
-    let fd = match crate::util::seal::open_read(path.as_bytes()) {
-        Ok(fd) => fd,
-        Err(err) => return stale_unless_resources(err),
-    };
-    let ret = verify_fd(std::os::fd::AsFd::as_fd(&fd), payload, out);
-    drop(fd);
-    if ret != 0 {
-        return ret;
+) -> Result<Upatch<'static>, c_int> {
+    let path = archive_path(name)?;
+    let file = crate::util::seal::open_read(path.as_bytes())
+        .map(File::from)
+        .map_err(stale_unless_resources)?;
+    let u = verify_file(&file, payload)?;
+    drop(file);
+    if u.name() != name || !u.name_signed() {
+        return Err(-ESTALE);
     }
-    if out.name() != name || !out.name_signed() {
-        // SAFETY: the container opened above.
-        unsafe { upatch_close(out) };
-        return -ESTALE;
-    }
-    0
+    Ok(u)
 }
 
 /// The attach specs a container's signed metadata gives, freed when they
@@ -181,21 +154,10 @@ pub(crate) fn verified_specs(u: &Upatch) -> Result<Specs, c_int> {
     }
 }
 
-/// As [`archive_verify`], with the signed attach metadata of every
-/// program.
-pub(crate) fn archive_specs(
-    name: &[u8],
-    payload: &[u8; PAYLOAD_HASH_LEN],
-    u: &mut Upatch,
-) -> Result<Specs, c_int> {
-    match archive_verify(name, payload, u) {
-        0 => {}
-        err => return Err(err),
-    }
-    verified_specs(u).inspect_err(|_| {
-        // SAFETY: the container opened above.
-        unsafe { upatch_close(u) };
-    })
+/// The signed attach metadata of every program of the archive
+/// [`archive_verify`] verifies.
+pub(crate) fn archive_specs(name: &[u8], payload: &[u8; PAYLOAD_HASH_LEN]) -> Result<Specs, c_int> {
+    verified_specs(&archive_verify(name, payload)?)
 }
 
 /// XDP links come and go with devices, so their number says nothing.
@@ -254,20 +216,14 @@ fn links_complete_specs(name: &[u8], specs: &[ProgSpec]) -> c_int {
 /// is pinned for `name`, 0 when one is missing, -ESTALE when the archive
 /// is gone or unusable, or another -errno when that cannot be told.
 pub(crate) fn links_complete(name: &[u8], path: &CStr) -> c_int {
-    // SAFETY: an all-zero container is a closed one.
-    let mut u: Upatch = unsafe { core::mem::zeroed() };
-    // SAFETY: a C string and the container to fill.
-    let ret = unsafe { upatch_open(path.as_ptr(), &mut u) };
-    if ret != 0 {
-        return stale_unless_resources(ret);
-    }
-    let ret = match verified_specs(&u) {
+    let u = match Upatch::open(path) {
+        Ok(u) => u,
+        Err(err) => return stale_unless_resources(err),
+    };
+    match verified_specs(&u) {
         Ok(specs) => links_complete_specs(name, specs.as_slice()),
         Err(err) => stale_unless_resources(err),
-    };
-    // SAFETY: the container opened above.
-    unsafe { upatch_close(&mut u) };
-    ret
+    }
 }
 
 /// Calls `cb` for each device an XDP program of `name` selects and that
@@ -492,25 +448,25 @@ impl Walk<'_, '_> {
         if Pins::read(name).map_or(true, |p| p.nr_xdp_progs == 0) {
             return self.links_unverified(name);
         }
-        // SAFETY: an all-zero container is a closed one.
-        let mut u: Upatch = unsafe { core::mem::zeroed() };
-        let ret = archive_verify(name, &payload, &mut u);
-        if ret == -ESTALE {
-            let ret = self.changed(name);
-            return if ret != 0 {
-                ret
-            } else {
-                self.links_unverified(name)
-            };
-        }
-        if ret != 0 {
-            note_err(&mut self.c.check_err, ret);
-            note_err(&mut self.c.coverage_err, ret);
-            return self.links_unverified(name);
-        }
+        let u = match archive_verify(name, &payload) {
+            Ok(u) => u,
+            Err(err) if err == -ESTALE => {
+                let ret = self.changed(name);
+                return if ret != 0 {
+                    ret
+                } else {
+                    self.links_unverified(name)
+                };
+            }
+            Err(err) => {
+                note_err(&mut self.c.check_err, err);
+                note_err(&mut self.c.coverage_err, err);
+                return self.links_unverified(name);
+            }
+        };
         // The bytes are what was loaded; metadata it cannot parse is a
         // lost link.
-        let ret = match verified_specs(&u) {
+        match verified_specs(&u) {
             Err(err) if err != -ESTALE => {
                 note_err(&mut self.c.check_err, err);
                 note_err(&mut self.c.coverage_err, err);
@@ -524,10 +480,7 @@ impl Walk<'_, '_> {
                     ret => ret,
                 }
             }
-        };
-        // SAFETY: the container opened above.
-        unsafe { upatch_close(&mut u) };
-        ret
+        }
     }
 }
 

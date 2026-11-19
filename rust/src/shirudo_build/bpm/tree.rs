@@ -41,7 +41,7 @@ use crate::util::hex::{self, sha256_digest_encode};
 use crate::util::json::{JsonEmit, JsonField, parse_schema};
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptName, OptParser, OptSpec};
 use crate::util::paths::{key_file, keys_dir};
-use crate::util::upatch::{self, ProgSpec, specs_free, specs_parse, specs_xdp_classes};
+use crate::util::upatch::{self, ProgSpec, Upatch, specs_free, specs_parse, specs_xdp_classes};
 
 const TREE_MEDIA: &CStr = c"application/vnd.shirudo.upatch.tree.v1+json";
 const TREE_SIG_MEDIA: &CStr = c"application/vnd.shirudo.upatch.tree.signature.v1";
@@ -194,8 +194,7 @@ struct Specs {
 }
 
 impl Specs {
-    fn parse(parsed: &super::super::package::MemoryUpatch<'_>) -> Result<Self, c_int> {
-        let u = parsed.parsed();
+    fn parse(u: &Upatch) -> Result<Self, c_int> {
         let attach = u.signed_attach().unwrap_or_default();
         let len = u32::try_from(attach.len()).map_err(|_| -EINVAL)?;
         let mut programs = ptr::null_mut();
@@ -236,8 +235,7 @@ impl Drop for Specs {
 
 /// The classes of a load upatch, none for one without an XDP program.
 fn upatch_xdp_classes(body: &[u8]) -> Result<u32, c_int> {
-    let parsed = super::super::package::MemoryUpatch::open(body)?;
-    Specs::parse(&parsed)?.classes()
+    Specs::parse(&Upatch::from_bytes(body)?)?.classes()
 }
 
 /// The classes of the artifact of `op`, fetched from its repository,
@@ -979,13 +977,12 @@ impl Append<'_> {
     /// manifest its upload will put, once its bytes are checked to be the
     /// directive the operation claims: its name, and load or unload.
     fn describe_artifact(&mut self, body: Vec<u8>, id: &[u8]) -> Result<Upload, c_int> {
-        let parsed = super::super::package::MemoryUpatch::open(&body).inspect_err(|_| {
+        let u = Upatch::from_bytes(&body).inspect_err(|_| {
             err(format!(
                 "bpm tree append: {} is not a valid upatch",
                 lossy(id)
             ));
         })?;
-        let u = parsed.parsed();
         let name = u.name();
         let payload = u.hdr.payload_sha256;
         let is_unload = u.is_unload();

@@ -5,7 +5,6 @@ use super::*;
 use crate::testutil::{TempDir, testing_path};
 use crate::util::crypto_openssl::sha256;
 use std::fs::File;
-use std::os::fd::{AsFd, AsRawFd};
 
 const ABSENT: &[u8] = b"shirudo-unit-no-such-upatch";
 
@@ -19,26 +18,6 @@ fn file_of(dir: &TempDir, name: &str, bytes: &[u8]) -> File {
     File::open(dir.join(name)).unwrap()
 }
 
-/// The container in `f`, closed when it goes.
-struct Open(Upatch);
-
-impl Open {
-    fn new(f: &File) -> Self {
-        // SAFETY: an all-zero container is a closed one.
-        let mut u: Upatch = unsafe { core::mem::zeroed() };
-        // SAFETY: an open descriptor and the container to fill.
-        assert_eq!(unsafe { upatch_open_fd(f.as_raw_fd(), &mut u) }, 0);
-        Open(u)
-    }
-}
-
-impl Drop for Open {
-    fn drop(&mut self) {
-        // SAFETY: the container opened, closed once.
-        unsafe { upatch_close(&mut self.0) };
-    }
-}
-
 /// The bytes the header of `u` places at `off` for `len`.
 fn part(bytes: &[u8], off: u32, len: u32) -> &[u8] {
     &bytes[off as usize..(off + len) as usize]
@@ -47,8 +26,8 @@ fn part(bytes: &[u8], off: u32, len: u32) -> &[u8] {
 #[test]
 fn the_payload_digest_hashes_the_loader_then_the_data() {
     let (dir, bytes) = (TempDir::new(), fixture());
-    let u = Open::new(&file_of(&dir, "u", &bytes));
-    let h = &u.0.hdr;
+    let u = Upatch::read(&file_of(&dir, "u", &bytes)).unwrap();
+    let h = &u.hdr;
     let want = sha256(
         &[
             part(&bytes, h.loader_insns_off, h.loader_insns_len),
@@ -59,38 +38,34 @@ fn the_payload_digest_hashes_the_loader_then_the_data() {
     .unwrap();
 
     assert!(h.data_len > 0);
-    assert_eq!(payload_digest(&u.0), Ok(want));
+    assert_eq!(payload_digest(&u), Ok(want));
     assert_eq!(h.payload_sha256, want);
 }
 
 #[test]
 fn a_payload_without_data_hashes_the_loader_alone() {
     let (dir, bytes) = (TempDir::new(), fixture());
-    let mut u = Open::new(&file_of(&dir, "u", &bytes));
+    let mut u = Upatch::read(&file_of(&dir, "u", &bytes)).unwrap();
 
-    u.0.hdr.data_len = 0;
-    let h = &u.0.hdr;
+    u.hdr.data_len = 0;
+    let h = &u.hdr;
     let want = sha256(part(&bytes, h.loader_insns_off, h.loader_insns_len)).unwrap();
-    assert_eq!(payload_digest(&u.0), Ok(want));
+    assert_eq!(payload_digest(&u), Ok(want));
 }
 
-/// verify_fd() of `bytes` against `payload`, the container closed again.
+/// verify_file() of `bytes` against `payload`: 0 or -errno.
 fn verify(dir: &TempDir, bytes: &[u8], payload: &[u8; PAYLOAD_HASH_LEN]) -> c_int {
-    let f = file_of(dir, "v", bytes);
-    // SAFETY: an all-zero container is a closed one.
-    let mut u: Upatch = unsafe { core::mem::zeroed() };
-    let ret = verify_fd(f.as_fd(), payload, &mut u);
+    verify_file(&file_of(dir, "v", bytes), payload).map_or_else(|err| err, |_| 0)
+}
 
-    if ret == 0 {
-        // SAFETY: the container verify_fd() opened, closed once.
-        unsafe { upatch_close(&mut u) };
-    }
-    ret
+/// The container in the file `name` of `dir` that holds `bytes`.
+fn read(dir: &TempDir, name: &str, bytes: &[u8]) -> Upatch<'static> {
+    Upatch::read(&file_of(dir, name, bytes)).unwrap()
 }
 
 /// The payload the fixture's header names.
 fn payload_of(dir: &TempDir, bytes: &[u8]) -> [u8; PAYLOAD_HASH_LEN] {
-    Open::new(&file_of(dir, "p", bytes)).0.hdr.payload_sha256
+    read(dir, "p", bytes).hdr.payload_sha256
 }
 
 #[test]
@@ -114,7 +89,7 @@ fn another_payload_is_stale() {
 fn changed_data_under_an_intact_header_is_stale() {
     let (dir, mut bytes) = (TempDir::new(), fixture());
     let payload = payload_of(&dir, &bytes);
-    let off = Open::new(&file_of(&dir, "o", &bytes)).0.hdr.data_off as usize;
+    let off = read(&dir, "o", &bytes).hdr.data_off as usize;
 
     bytes[off] ^= 1;
     assert_eq!(verify(&dir, &bytes, &payload), -ESTALE);
@@ -129,12 +104,9 @@ fn a_truncated_file_is_stale() {
 
 #[test]
 fn a_missing_archive_is_stale() {
-    // SAFETY: an all-zero container is a closed one.
-    let mut u: Upatch = unsafe { core::mem::zeroed() };
-
     assert_eq!(
-        archive_verify(ABSENT, &[0; PAYLOAD_HASH_LEN], &mut u),
-        -ESTALE
+        archive_verify(ABSENT, &[0; PAYLOAD_HASH_LEN]).err(),
+        Some(-ESTALE)
     );
 }
 
@@ -148,11 +120,8 @@ fn links_of_a_missing_archive_are_stale() {
 
 #[test]
 fn specs_of_a_missing_archive_are_stale() {
-    // SAFETY: an all-zero container is a closed one.
-    let mut u: Upatch = unsafe { core::mem::zeroed() };
-
     assert_eq!(
-        archive_specs(ABSENT, &[0; PAYLOAD_HASH_LEN], &mut u).err(),
+        archive_specs(ABSENT, &[0; PAYLOAD_HASH_LEN]).err(),
         Some(-ESTALE)
     );
 }

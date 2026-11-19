@@ -17,7 +17,7 @@ use crate::util::bpm_package::{
 };
 use crate::util::io::write_complete;
 use crate::util::json::MAX_BYTES;
-use crate::util::upatch::{FILE_MAX as UPATCH_FILE_MAX, Upatch, upatch_close, upatch_open_memory};
+use crate::util::upatch::{FILE_MAX as UPATCH_FILE_MAX, Upatch};
 use crate::util::upatch_rodata;
 
 /// The most a Beefile takes.
@@ -169,17 +169,12 @@ pub(super) fn data(source: &[u8], member: &[u8], json: bool) -> Result {
         }
     };
     let member_path = message(&[member]);
-    // SAFETY: an all-zero container is a closed one.
-    let mut u: Upatch = unsafe { core::mem::zeroed() };
-    let data = bytes.bytes();
-    // SAFETY: the member's bytes, which outlive the container, and the
-    // container to fill.
-    let ret = match unsafe { upatch_open_memory(data.as_ptr().cast(), data.len(), &mut u) } {
-        0 if u.is_unload() => {
+    match Upatch::from_bytes(bytes.bytes()) {
+        Ok(u) if u.is_unload() => {
             error(&[b"bpm info data: ", member, b" is an unload directive"]);
             Err(-EINVAL)
         }
-        0 => {
+        Ok(u) => {
             let ret = upatch_rodata::print(&u, &member_path, json);
             match ret {
                 r if r == -ENODATA => error(&[
@@ -197,12 +192,9 @@ pub(super) fn data(source: &[u8], member: &[u8], json: bool) -> Result {
             }
             status(ret)
         }
-        err => {
+        Err(err) => {
             error(&[b"bpm info data: ", member, b" is not a valid upatch"]);
             Err(err)
         }
-    };
-    // SAFETY: the container, open or zeroed.
-    unsafe { upatch_close(&mut u) };
-    ret
+    }
 }

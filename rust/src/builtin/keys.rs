@@ -46,7 +46,7 @@ use crate::util::keys::{
 };
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::paths::{key_files, keys_dir, path_exists};
-use crate::util::upatch::{Upatch, upatch_close, upatch_open};
+use crate::util::upatch::Upatch;
 
 const KEYS_DIR: &CStr = c"/var/lib/shirudo/keys";
 const RUNTIME_KEYS_DIR: &CStr = c"/run/shirudo/runtime/keys";
@@ -1004,22 +1004,15 @@ fn purge_signed_by(der: &[u8]) -> c_int {
             continue;
         }
         let path = message(&[&path]);
-        // SAFETY: an all-zero container is a closed one.
-        let mut u: Upatch = unsafe { core::mem::zeroed() };
-        // SAFETY: a C string and a container to fill.
-        if unsafe { upatch_open(path.as_ptr(), &mut u) } != 0 {
+        let Ok(u) = Upatch::open(&path) else {
             continue;
-        }
+        };
         let sig = u.signature();
         // SAFETY: the open container's signature and the certificate.
-        let signed_by = unsafe { cms_signed_by(sig.as_ptr().cast(), sig.len(), &cert) };
-        let name = u.name().to_vec();
-        // SAFETY: the container opened above.
-        unsafe { upatch_close(&mut u) };
-        if signed_by != 1 {
+        if unsafe { cms_signed_by(sig.as_ptr().cast(), sig.len(), &cert) } != 1 {
             continue;
         }
-        let name = &name[..];
+        let name = u.name();
         let name_c = message(&[name]);
         let prc = crate::builtin::upatch::purge(&name_c, (&raw const cert).cast(), c"key_revoke");
         if prc == -ESTALE {

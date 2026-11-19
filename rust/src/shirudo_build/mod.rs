@@ -27,7 +27,7 @@ use crate::util::help::{Help, HelpSection};
 use crate::util::hex::decode;
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::paths::{key_file, key_files, keys_dir};
-use crate::util::upatch::Opened;
+use crate::util::upatch::Upatch;
 
 const SIGNING_KEY_PATH: &CStr = c"/var/lib/shirudo/keys/signing_key.pem";
 const CERT_PATH: &CStr = c"/var/lib/shirudo/keys/cert.der";
@@ -406,7 +406,7 @@ fn unload_digest(name: &CStr, given: Option<&CStr>) -> Result<[u8; 32], Option<c
         return Err(Some(1));
     }
     let path = CString::new(archive).unwrap_or_default();
-    let Ok(u) = Opened::open(&path) else {
+    let Ok(u) = Upatch::open(&path) else {
         error(
             &[
                 b"--payload-sha256 omitted and no archive at ",

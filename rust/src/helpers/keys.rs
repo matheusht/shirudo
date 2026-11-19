@@ -21,7 +21,7 @@ use crate::errno::{EFBIG, EINVAL, EIO};
 use crate::util::crypto_openssl::{Cert, cert_free, cert_read_file, cms_signed_by};
 use crate::util::hex::encode;
 use crate::util::keys::{TrustedSet, cert_path, load, load_image_at, members, verify_signature};
-use crate::util::upatch::Opened;
+use crate::util::upatch::Upatch;
 
 helper_main!(shirudo_helper_test_keys, run);
 
@@ -77,7 +77,7 @@ fn verify(dir: &CStr, payload: &CStr, signature: &CStr) -> c_int {
 
 /// Whether `cert` signed the upatch at `upatch`: yes, no or error.
 fn signer(upatch: &CStr, cert_file: &CStr) -> c_int {
-    let Ok(u) = Opened::open(upatch) else {
+    let Ok(u) = Upatch::open(upatch) else {
         err("usage: signer <upatch> <cert.der>\n");
         return 2;
     };

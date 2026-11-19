@@ -496,7 +496,7 @@ fn staged(
 /// The load artifact at `load` is a load directive named `expected`.
 fn name_matches(load: &[u8], expected: &[u8]) -> Result<(), c_int> {
     let p = cstring(load);
-    let u = upatch::Opened::open(&p)?;
+    let u = upatch::Upatch::open(&p)?;
     let name = &u.hdr.name;
     let n = expected.len().min(name.len());
     let same =

@@ -25,7 +25,7 @@ use crate::util::help::{Help, HelpSection};
 use crate::util::measured::MeasuredSet;
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::report::OpReport;
-use crate::util::upatch::{NAME_MAX, ProgSpec, Upatch, upatch_close};
+use crate::util::upatch::{NAME_MAX, ProgSpec};
 use crate::util::upatch_pins::{LINK_PIN_PREFIX, PAYLOAD_HASH_LEN, Pins, each_pinned, pin_payload};
 use crate::util::upatch_resolve::{each_link_info, pin_path};
 use crate::util::upatch_verify::{
@@ -65,12 +65,11 @@ fn num(n: u32) -> String {
     n.to_string()
 }
 
-/// A loaded XDP upatch: the payload its pins record, and its archive
-/// opened and checked against that payload, with its attach specs.
+/// A loaded XDP upatch: the payload its pins record, and the attach
+/// specs of its archive, checked against that payload.
 struct Work {
     name: Vec<u8>,
     payload: [u8; PAYLOAD_HASH_LEN],
-    u: Box<Upatch>,
     specs: Option<Specs>,
 }
 
@@ -79,8 +78,6 @@ impl Work {
         Work {
             name: name.to_vec(),
             payload: [0; PAYLOAD_HASH_LEN],
-            // SAFETY: an all-zero container is a closed one.
-            u: Box::new(unsafe { core::mem::zeroed() }),
             specs: None,
         }
     }
@@ -92,7 +89,7 @@ impl Work {
             return -ENODATA;
         };
         self.payload = payload;
-        match archive_specs(&self.name, &self.payload, &mut self.u) {
+        match archive_specs(&self.name, &self.payload) {
             Ok(specs) => {
                 self.specs = Some(specs);
                 0
@@ -103,16 +100,6 @@ impl Work {
 
     fn specs(&self) -> &[ProgSpec] {
         self.specs.as_ref().map_or(&[], Specs::as_slice)
-    }
-}
-
-impl Drop for Work {
-    fn drop(&mut self) {
-        // The specs go before the container they were read from.
-        if self.specs.take().is_some() {
-            // SAFETY: the container archive_specs() opened, closed once.
-            unsafe { upatch_close(&mut *self.u) };
-        }
     }
 }
 
@@ -445,17 +432,9 @@ fn apply(w: &Work, devices: &[XdpDevice], rep: &mut OpReport) -> Result<(), ()> 
     if memneq_explicit(&payload, &w.payload) {
         return Ok(());
     }
-    // SAFETY: an all-zero container is a closed one.
-    let mut again: Upatch = unsafe { core::mem::zeroed() };
-    match archive_verify(&w.name, &payload, &mut again) {
-        0 => {
-            // SAFETY: the container opened above.
-            unsafe { upatch_close(&mut again) };
-        }
-        err => {
-            fail_verify(&w.name, err, rep);
-            return Err(());
-        }
+    if let Err(err) = archive_verify(&w.name, &payload) {
+        fail_verify(&w.name, err, rep);
+        return Err(());
     }
     let mut scan = Scan::default();
     let ret = scan_links(&w.name, true, &mut scan);

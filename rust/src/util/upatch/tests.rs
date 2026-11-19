@@ -94,42 +94,125 @@ fn prog_specs_refuse_another_header_count() {
     }
 }
 
-/// A container of no bytes whose header names `name`.
-fn named(name: &[u8]) -> Upatch {
-    // SAFETY: a container of no bytes, for which zeros are a value.
-    let mut u: Upatch = unsafe { core::mem::zeroed() };
-    u.hdr.name[..name.len()].copy_from_slice(name);
-    u
+/// A container named `name` of an 8-byte loader and signature, whose
+/// data is the signed `sections`, each a tag and its bytes, then their
+/// directory and its trailer.
+fn container(name: &[u8], sections: &[(u32, &[u8])]) -> Vec<u8> {
+    let words = |w: &[u32]| w.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>();
+    let (mut data, mut dir) = (Vec::new(), Vec::new());
+
+    for &(tag, bytes) in sections {
+        dir.extend(words(&[tag, 0, data.len() as u32, bytes.len() as u32]));
+        data.extend_from_slice(bytes);
+    }
+    let dir_off = data.len() as u32;
+    data.extend(dir);
+    data.extend(words(&[
+        SIGNED_TRAILER_MAGIC,
+        SIGNED_VERSION,
+        dir_off,
+        sections.len() as u32,
+    ]));
+    let at = HEADER_SIZE as u32;
+    let mut c = [&MAGIC.to_le_bytes()[..], &words(&[VERSION, 0]), name].concat();
+    c.resize(304, 0);
+    c.extend(words(&[
+        at,
+        8,
+        at + 8,
+        8,
+        0,
+        0,
+        at + 16,
+        data.len() as u32,
+        0,
+        0,
+        0,
+        0,
+        TYPE_BPF,
+        0,
+    ]));
+    c.resize(HEADER_SIZE + 16, 0);
+    c.extend(data);
+    c
 }
 
 #[test]
 fn name_stops_at_its_nul() {
-    assert_eq!(named(b"kernel-obs").name(), b"kernel-obs");
-    assert_eq!(named(&[b'a'; NAME_MAX]).name().len(), NAME_MAX);
+    let c = container(b"kernel-obs", &[]);
+
+    assert_eq!(Upatch::from_bytes(&c).unwrap().name(), b"kernel-obs");
+}
+
+#[test]
+fn a_name_without_its_nul_is_refused() {
+    let c = container(&[b'a'; NAME_MAX], &[]);
+
+    assert_eq!(Upatch::from_bytes(&c).err(), Some(-EINVAL));
 }
 
 #[test]
 fn prog_name_is_what_the_kernel_takes() {
     let mut out = [0xffu8; 16];
 
-    named(b"fix-cve.2026").prog_name(&mut out);
+    let c = container(b"fix-cve.2026", &[]);
+    Upatch::from_bytes(&c).unwrap().prog_name(&mut out);
     assert_eq!(cstr(&out), b"fix_cve.2026");
-    named(&[b'a'; NAME_MAX]).prog_name(&mut out);
+    let c = container(&[b'a'; NAME_MAX - 1], &[]);
+    Upatch::from_bytes(&c).unwrap().prog_name(&mut out);
     assert_eq!(cstr(&out).len(), 15);
 }
 
 #[test]
 fn name_signed_is_the_header_name() {
     let mut signed = [0u8; NAME_MAX];
-    let mut u = named(b"fix");
+    let name_signed = |name: &[u8], sections: &[(u32, &[u8])]| {
+        Upatch::from_bytes(&container(name, sections))
+            .unwrap()
+            .name_signed()
+    };
 
     signed[..3].copy_from_slice(b"fix");
-    u.map = signed.as_ptr();
-    assert!(!u.name_signed());
-    u.signed_name = signed.as_ptr().cast();
-    assert!(u.name_signed());
-    u.hdr.name[2] = b'y';
-    assert!(!u.name_signed());
+    assert!(!name_signed(b"fix", &[]));
+    assert!(name_signed(b"fix", &[(SECTION_NAME, &signed)]));
+    assert!(!name_signed(b"fiy", &[(SECTION_NAME, &signed)]));
+}
+
+/// Each signed section is found where the directory places it, and a
+/// directory that names one twice is taken for none.
+#[test]
+fn signed_sections_are_once_each() {
+    let payload = [7u8; PAYLOAD_HASH_LEN];
+    let one = container(
+        b"fix",
+        &[(SECTION_ATTACH, b"meta"), (SECTION_UNLOAD, &payload)],
+    );
+    let twice = container(
+        b"fix",
+        &[
+            (SECTION_UNLOAD, &payload),
+            (SECTION_ATTACH, b"meta"),
+            (SECTION_UNLOAD, &payload),
+        ],
+    );
+
+    let u = Upatch::from_bytes(&one).unwrap();
+    assert_eq!(u.signed_attach(), Some(&b"meta"[..]));
+    assert_eq!(u.signed_unload_payload(), Some(&payload));
+    assert!(u.signed_name().is_none() && !u.has_decoders());
+    let u = Upatch::from_bytes(&twice).unwrap();
+    assert_eq!((u.signed_attach(), u.signed_unload_payload()), (None, None));
+}
+
+/// What does not fit the container, or is not one, is refused.
+#[test]
+fn a_cut_container_is_refused() {
+    let c = container(b"fix", &[(SECTION_ATTACH, b"meta")]);
+
+    assert!(Upatch::from_bytes(&c).is_ok());
+    for len in [0, 8, HEADER_SIZE, c.len() - 1] {
+        assert_eq!(Upatch::from_bytes(&c[..len]).err(), Some(-EINVAL), "{len}");
+    }
 }
 
 #[test]

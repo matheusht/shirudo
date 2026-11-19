@@ -19,7 +19,6 @@ use core::ffi::{CStr, c_char, c_int};
 use std::ffi::CString;
 use std::ffi::OsStr;
 use std::fs;
-use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 
 use super::list::{BPFFS_UPATCHES_DIR, UPATCHES_DIR};
@@ -46,7 +45,7 @@ use crate::util::measured::MeasuredSet;
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::report::{OpReport, report_emit};
 use crate::util::seal;
-use crate::util::upatch::{self, Opened, Upatch, name_valid, pin_name, upatch_open_memory};
+use crate::util::upatch::{Upatch, name_valid, pin_name};
 use crate::util::upatch_resolve::XATTR_PAYLOAD;
 use crate::util::upatch_verify::archive_verify;
 
@@ -853,49 +852,13 @@ fn chain_category(err: c_int, measured: bool) -> &'static CStr {
     }
 }
 
-/// The operator's file, read once into memory and parsed there: the name
-/// and payload measured, the program loaded and the copy archived all
-/// come from that one read. A copy on disk, under a name another command
-/// can take, or a file read again, could set them apart.
-struct Artifact {
-    u: Box<Upatch>,
-    // The bytes the container points into, which outlive it.
-    data: Vec<u8>,
-}
-
-impl Artifact {
-    fn read(src: &CStr) -> Result<Self, c_int> {
-        let data = read(src)?;
-        // SAFETY: an all-zero container is a closed one.
-        let mut u: Box<Upatch> = Box::new(unsafe { core::mem::zeroed() });
-        // SAFETY: the bytes, which the artifact keeps while the container
-        // is open, and the container to fill.
-        match unsafe { upatch_open_memory(data.as_ptr().cast(), data.len(), &mut *u) } {
-            0 => Ok(Artifact { u, data }),
-            err => Err(err),
-        }
-    }
-}
-
-impl core::ops::Deref for Artifact {
-    type Target = Upatch;
-
-    fn deref(&self) -> &Upatch {
-        &self.u
-    }
-}
-
-impl Drop for Artifact {
-    fn drop(&mut self) {
-        // SAFETY: the container read() opened, closed once, before the
-        // bytes it points into go.
-        unsafe { upatch::upatch_close(&mut *self.u) };
-    }
-}
-
-/// Reads `file` once, or reports why not.
-fn read_artifact(file: &CStr, rep: &mut OpReport, op: &[u8]) -> Result<Artifact, ()> {
-    Artifact::read(file).map_err(|err| {
+/// The operator's file, read once into memory and parsed there, or why
+/// not reported: the name and payload measured, the program loaded and
+/// the copy archived all come from that one read. A copy on disk, under
+/// a name another command can take, or a file read again, could set them
+/// apart.
+fn read_artifact(file: &CStr, rep: &mut OpReport, op: &[u8]) -> Result<Upatch<'static>, ()> {
+    read(file).and_then(Upatch::from_vec).map_err(|err| {
         log_err(
             &[
                 b"upatch ",
@@ -1030,7 +993,7 @@ fn load_steps(a: &OpArgs, file: &CStr, rep: &mut OpReport, name_out: &mut CStrin
     // is undone, pins and archive, so that no upatch runs unmeasured; a
     // caller who stops this process first gets the same from the next
     // upatch command, and from the next init.
-    let err = persist(&u.data, &name);
+    let err = persist(u.bytes(), &name);
     if err != 0 {
         log_err(
             &[
@@ -1291,15 +1254,9 @@ fn unload_steps(a: &OpArgs, file: &CStr, rep: &mut OpReport, name_out: &mut CStr
     // interrupted unload left: the directive removes it only when it is
     // the payload the directive names, as it would its pins.
     if !is_pinned(&name) {
-        // SAFETY: an all-zero container is a closed one.
-        let mut held: Upatch = unsafe { core::mem::zeroed() };
-        match archive_verify(&name, &payload, &mut held) {
-            0 => {
-                // SAFETY: the container archive_verify() opened.
-                unsafe { upatch::upatch_close(&mut held) };
-                unarchive();
-            }
-            err if err != -ESTALE || fs::metadata(os(archived.to_bytes())).is_ok() => {
+        match archive_verify(&name, &payload).map(drop) {
+            Ok(()) => unarchive(),
+            Err(err) if err != -ESTALE || fs::metadata(os(archived.to_bytes())).is_ok() => {
                 log_err(
                     &[
                         b"upatch unload: payload_mismatch, ",
@@ -1317,7 +1274,7 @@ fn unload_steps(a: &OpArgs, file: &CStr, rep: &mut OpReport, name_out: &mut CStr
                 );
                 return 1;
             }
-            _ => {}
+            Err(_) => {}
         }
         log_info(&[b"upatch unload: ", &name[..], b" already unloaded (no pin)"].concat());
         log_audit(&[b"upatch unload: name=", &name[..], b" already_unloaded"].concat());
@@ -1444,9 +1401,7 @@ fn purge_locked(name: &[u8], signer: *const Cert, reason: &[u8]) -> c_int {
         Ok(fd) => fd,
         Err(err) => return err,
     };
-    let u = Opened::open_fd(fd.as_raw_fd());
-    drop(fd);
-    let u = match u {
+    let u = match Upatch::read(&fs::File::from(fd)) {
         Ok(u) => u,
         Err(err) => return err,
     };

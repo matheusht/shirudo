@@ -14,7 +14,7 @@ use crate::util::chain::MeasuredUpatch;
 use crate::util::eventlog::{self, UPATCH_INIT, UPATCH_UNLOAD};
 use crate::util::hex::{self, hex_encode};
 use crate::util::seal;
-use crate::util::upatch::{NAME_MAX, Opened, PAYLOAD_HASH_LEN, Upatch, member_valid};
+use crate::util::upatch::{NAME_MAX, PAYLOAD_HASH_LEN, Upatch, member_valid};
 
 /// `MEASURED_MAX`: the most upatches a set holds.
 const MEASURED_MAX: usize = 4096;
@@ -260,7 +260,7 @@ impl MeasuredSet {
             if !seal::owns(path_c.to_bytes()) {
                 continue;
             }
-            let m = match Opened::open(path_c) {
+            let m = match Upatch::open(path_c) {
                 Ok(u) => upatch_of(&u),
                 Err(_) => continue,
             };

@@ -15,7 +15,7 @@ use core::ffi::{CStr, c_int, c_void};
 use core::ops::Range;
 use core::ptr;
 use std::ffi::CString;
-use std::os::fd::AsRawFd;
+use std::fs::File;
 
 use crate::errno::{E2BIG, EINVAL, ENAMETOOLONG, ENODATA, ENOENT, ERANGE, ESTALE, text};
 use crate::ffi;
@@ -28,7 +28,7 @@ use crate::text::cstr;
 use crate::util::chain::memneq_explicit;
 use crate::util::json::JsonEmit;
 use crate::util::seal;
-use crate::util::upatch::{self, DecoderView, Opened};
+use crate::util::upatch::{self, DecoderView, Upatch};
 use crate::util::upatch_verify::payload_digest;
 
 const INSN_LIMIT: c_int = 1_000_000;
@@ -1146,12 +1146,11 @@ fn matches(d: &DecoderView, v: &MapView) -> bool {
 /// is the archive's: an entry there that is not shirudo's own is refused
 /// rather than run, signed or not, and so is an archive whose bytes are
 /// not the payload the pin directory says was loaded.
-fn open_artifact(path: &CStr, archived: bool, v: &MapView) -> Result<Opened, c_int> {
+fn open_artifact(path: &CStr, archived: bool, v: &MapView) -> Result<Upatch<'static>, c_int> {
     let u = if archived {
-        let fd = seal::open_read(path.to_bytes())?;
-        Opened::open_fd(fd.as_raw_fd())?
+        Upatch::read(&File::from(seal::open_read(path.to_bytes())?))?
     } else {
-        Opened::open(path)?
+        Upatch::open(path)?
     };
     if archived {
         let loaded = payload_digest(&u).map(|digest| {
@@ -1176,7 +1175,7 @@ fn open_artifact(path: &CStr, archived: bool, v: &MapView) -> Result<Opened, c_i
 
 /// The decoders of the open artifact, each as a view, the bad ones left
 /// out.
-fn decoders(u: &Opened) -> impl Iterator<Item = DecoderView> + '_ {
+fn decoders<'a>(u: &'a Upatch<'_>) -> impl Iterator<Item = DecoderView> + 'a {
     u.decoders().filter_map(|d| DecoderView::of(&d))
 }
 

@@ -8,7 +8,7 @@
 use super::RodataRange;
 use super::{Loader, print, rodata_offset, symbol_range};
 use crate::fuzzing::fuzz_target;
-use crate::util::upatch::{Upatch, upatch_close, upatch_open_memory};
+use crate::util::upatch::Upatch;
 
 fn init() {
     // SAFETY: /dev/null put in place of stdout.
@@ -25,28 +25,23 @@ fuzz_target!(
     shirudo_fuzz_rodata,
     shirudo_fuzz_rodata_init,
     |data| {
-        // SAFETY: a container of nothing, which the open fills from the
-        // input, and closes after.
-        unsafe {
-            let mut u: Box<Upatch> = Box::new(core::mem::zeroed());
-            if upatch_open_memory(data.as_ptr().cast(), data.len(), &mut *u) != 0 {
-                return;
+        let Ok(u) = Upatch::from_bytes(data) else {
+            return;
+        };
+        if rodata_offset(&Loader::of(&u)).is_ok_and(|off| off != u.hdr.rodata_data_off) {
+            std::process::abort();
+        }
+        let mut range = RodataRange { offset: 0, size: 0 };
+        if symbol_range(&u, c"fuzz_limits", &mut range) == 0
+            && (range.offset > u.hdr.data_len || range.size > u.hdr.data_len - range.offset)
+        {
+            std::process::abort();
+        }
+        for json in [false, true] {
+            if print(&u, c"fuzz", json) == 0 {
+                // SAFETY: every stream of the C library flushed.
+                unsafe { libc::fflush(core::ptr::null_mut()) };
             }
-            if rodata_offset(&Loader::of(&u)).is_ok_and(|off| off != u.hdr.rodata_data_off) {
-                std::process::abort();
-            }
-            let mut range = RodataRange { offset: 0, size: 0 };
-            if symbol_range(&u, c"fuzz_limits", &mut range) == 0
-                && (range.offset > u.hdr.data_len || range.size > u.hdr.data_len - range.offset)
-            {
-                std::process::abort();
-            }
-            for json in [false, true] {
-                if print(&u, c"fuzz", json) == 0 {
-                    libc::fflush(core::ptr::null_mut());
-                }
-            }
-            upatch_close(&mut *u);
         }
     },
     init
