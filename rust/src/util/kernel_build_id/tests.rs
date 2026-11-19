@@ -3,7 +3,6 @@
 
 use super::*;
 use crate::errno::{EINVAL, ENOENT};
-use crate::text::cstr;
 
 /// One GNU build-id note with a four-byte descriptor: 01 23 45 67.
 const NOTES: [u8; 20] = [
@@ -12,10 +11,10 @@ const NOTES: [u8; 20] = [
 
 /// from_notes() of `notes`, and the ID it wrote.
 fn id(notes: &[u8]) -> (c_int, Vec<u8>) {
-    let mut out = [0u8; 2 * BUILD_ID_MAX + 1];
-    // SAFETY: room for the longest ID.
-    let ret = unsafe { from_notes(notes, out.as_mut_ptr().cast()) };
-    (ret, cstr(&out).to_vec())
+    match from_notes(notes) {
+        Ok(hex) => (0, hex),
+        Err(err) => (err, Vec::new()),
+    }
 }
 
 #[test]

@@ -446,8 +446,9 @@ fn fill(si: &mut Sysinfo) {
     set_field(&mut si.os_pretty, pretty.as_deref());
     read_first_line(c"/etc/machine-id", &mut si.machine_id);
     read_first_line(c"/proc/sys/kernel/random/boot_id", &mut si.boot_id);
-    // SAFETY: the room of the build ID string.
-    unsafe { read_build_id(si.kernel_build_id.as_mut_ptr().cast()) };
+    if let Ok(id) = read_build_id() {
+        let _ = strscpy(&mut si.kernel_build_id, &id);
+    }
     // SAFETY: a call that takes no pointer.
     si.nproc = unsafe { sysconf(SC_NPROCESSORS_ONLN) };
     read_mem(&mut si.mem_total_kb, &mut si.mem_avail_kb);

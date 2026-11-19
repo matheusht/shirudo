@@ -34,8 +34,6 @@ use crate::util::{gzip, upatch};
 const HASH_SIZE: usize = 128;
 /// The largest kernel config read: a distribution's is some 300 KiB.
 const KCONFIG_MAX: usize = 4 << 20;
-/// `KERNEL_BUILD_ID_STRING_MAX`: 2 * 64 hex digits and a NUL.
-const BUILD_ID_STRING_MAX: usize = 2 * 64 + 1;
 /// A line of a kernel config longer than this, with its newline, is
 /// skipped whole.
 const LINE_MAX: usize = 1024;
@@ -444,15 +442,12 @@ pub(crate) fn selector_matches(s: &TreeSelector) -> Result<bool, c_int> {
         return Ok(false);
     }
     if !s.kernel_build_id.is_empty() {
-        let mut build_id = [0u8; BUILD_ID_STRING_MAX];
-
         // A selector naming a build ID is fail-closed on a kernel that
         // publishes none.
-        // SAFETY: room for the hex digits of a build ID.
-        if unsafe { read_build_id(build_id.as_mut_ptr().cast()) } != 0 {
+        let Ok(build_id) = read_build_id() else {
             return Ok(false);
-        }
-        if !s.kernel_build_id.iter().any(|id| id == cstr(&build_id)) {
+        };
+        if !s.kernel_build_id.contains(&build_id) {
             return Ok(false);
         }
     }
