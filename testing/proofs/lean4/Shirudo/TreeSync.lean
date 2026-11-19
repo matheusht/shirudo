@@ -6,8 +6,8 @@ import Shirudo.Chain
 /-!
 `bpm tree sync`, `cmd_bpm_tree_sync()` of builtin-bpm.c. It reads the
 node's state, fetches a signed tree publication, refuses one that
-`tree_parse()`, `tree_publication_check()`, `tree_operation_validate()` or
-`tree_publication_follows()` refuses, cuts the outcomes record to the cursor,
+`TreePublication::parse()`, `publication_check()`, `operation_validate()` or
+`publication_follows()` refuses, cuts the outcomes record to the cursor,
 runs `tree_recover_pending()` and writes the state with the publication's
 generation, manifest digest and head. Then, for each operation past the
 cursor that its selector matches, it writes `pending.json`, installs the
@@ -52,20 +52,20 @@ pending operation when that is above the cursor, recovery refuses nothing
 publication's head as the cursor whatever the selector says
 (`sync_progress`).
 
-The generation rests on the generation check of `Follows`, on `tree_parse()`
+The generation rests on the generation check of `Follows`, on the parse
 refusing a negative generation, and on a manifest digest naming one
 publication. The cursor
 and the order rest on the loop's own cursor check and recovery's; that each
 operation is applied once rests on recovery's comparison of the replayed
-root and on its look at this boot's records, with the hash injective, an
-idealized hash (see `Assumptions`). The outcomes record rests on the order
-of the writes, a line before the state that covers it, on the cut at the
-start of a sync, on recovery writing the lines of the operations the
-stopped sync passed over, and on `tree_publication_check()` numbering the
+root and on its look at this boot's records, with the hash injective,
+an idealized hash (see `Assumptions`). The outcomes record rests on the
+order of the writes, a line before the state that covers it, on the cut
+at the start of a sync, on recovery writing the lines of the operations
+the stopped sync passed over, and on `publication_check()` numbering the
 operations without a gap;
 the head on the state written at acceptance and on the cursor check of
 `Follows`. The parent check of `Follows` is not needed by any of these
-theorems. `Assumptions` states what the C cannot show.
+theorems. `Assumptions` states what the code cannot show.
 
 The model also assumes what review of the C shows: only sync writes these
 files, which the seal ensures; a write is whole or absent, as
@@ -213,7 +213,7 @@ def cursor (n : Node T M I D) : Int :=
 
 /-! ### The checks before anything is applied -/
 
-/-- What `tree_parse()` and `tree_publication_check()` require of a
+/-- What `TreePublication::parse()` and `publication_check()` require of a
 publication's numbers: a generation of 0 or more, a base of 0 or more, and
 operations numbered from base + 1 to head without a gap. A segment past
 the first, base above 0, is one of these too; the keys that name its
@@ -228,10 +228,11 @@ def Checked (pub : Pub T M I D) : Prop :=
 instance (pub : Pub T M I D) : Decidable (Checked pub) := by
   unfold Checked; infer_instance
 
-/-- What the sync takes of `tree_publication_follows()`, a return of 0,
-as represented by `Follows` here. A publication that starts past the cursor, for which the function
-asks for a walk, is applied as the segments of the walk, each of which
-returns 0 in its turn; see `run`. Without a state, a base of 0; with
+/-- What the sync takes of `publication_follows()`, a return of 0,
+as represented by `Follows` here. A publication that starts past the cursor,
+for which the function asks for a walk, is applied as the segments of the
+walk, each of which returns 0 in its turn; see `run`. Without a state, a
+base of 0; with
 one, the same tree, a later generation unless it is the same manifest, the
 recorded manifest as parent when it is the next generation and names one,
 and the cursor between base and head. -/
@@ -564,7 +565,7 @@ def recover (n : Node T M I D) (pub : Pub T M I D) (st : State T M D) :
           else none
 
 /-- The loop of `cmd_bpm_tree_sync()` over the operations, with `sel` what
-`tree_selector_matches()` says of each: the writes and the state it ends
+`selector_matches()` says of each: the writes and the state it ends
 with. An operation at or below the cursor is passed over, one the selector
 does not match gets its outcome line and moves the cursor in memory, and one
 it does is applied, its outcome line written before its state. -/

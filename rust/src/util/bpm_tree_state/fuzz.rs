@@ -10,13 +10,11 @@ use std::os::fd::{AsFd, BorrowedFd};
 use std::sync::OnceLock;
 
 use super::{
-    OUTCOME_LINE_MAX, Outcomes, TreeState, event_replay, eventlog_matches_at, outcome_emit,
-    outcome_parse, outcome_valid, state_read,
+    OUTCOME_LINE_MAX, Outcomes, TreeState, event_replay, eventlog_matches_at, kconfig_read,
+    outcome_emit, outcome_parse, outcome_valid, state_read,
 };
 
-use crate::util::bpm_tree::{
-    MAX_KCONFIG, MAX_LABELS, STRING_MAX, TreeKv, TreeSelector, TreeSelectorKv,
-};
+use crate::util::bpm_tree::{MAX_LABELS, TreeKv, TreeSelector, TreeSelectorKv};
 
 use crate::fuzzing::{fuzz_target, input_file};
 
@@ -77,14 +75,7 @@ fuzz_target!(
 
 /// The selector of the kernel config keys the target reads, made once
 /// and kept for the process.
-struct Selector(Box<TreeSelector>);
-
-// SAFETY: made once, then only read, by the fuzzer's one thread.
-unsafe impl Sync for Selector {}
-// SAFETY: as Sync.
-unsafe impl Send for Selector {}
-
-static SELECTOR: OnceLock<Selector> = OnceLock::new();
+static SELECTOR: OnceLock<TreeSelector> = OnceLock::new();
 
 fn kconfig_init() {
     const KEYS: [&[u8]; 5] = [
@@ -94,18 +85,17 @@ fn kconfig_init() {
         b"CONFIG_LSM",
         b"CONFIG_MODULES",
     ];
-    let mut kvs = Vec::with_capacity(KEYS.len());
-    for key in KEYS {
-        // SAFETY: a pair of nothing, for which zeros are the value.
-        let mut kv: TreeSelectorKv = unsafe { core::mem::zeroed() };
-        kv.key[..key.len()].copy_from_slice(key);
-        kvs.push(kv);
-    }
-    // SAFETY: a selector of nothing, for which zeros are the value.
-    let mut sel: Box<TreeSelector> = Box::new(unsafe { core::mem::zeroed() });
-    sel.n_kconfig = kvs.len() as i32;
-    sel.kconfig = Box::leak(kvs.into_boxed_slice()).as_mut_ptr();
-    let _ = SELECTOR.set(Selector(sel));
+    let kconfig = KEYS
+        .iter()
+        .map(|key| TreeSelectorKv {
+            key: key.to_vec(),
+            values: Vec::new(),
+        })
+        .collect();
+    let _ = SELECTOR.set(TreeSelector {
+        kconfig,
+        ..TreeSelector::default()
+    });
 }
 
 fuzz_target!(
@@ -115,30 +105,15 @@ fuzz_target!(
         let (Some(sel), Some(input)) = (SELECTOR.get(), input_file(data)) else {
             return;
         };
-        let mut values = vec![[0u8; STRING_MAX]; MAX_KCONFIG];
-        let mut found = [false; MAX_KCONFIG];
         // SAFETY: labels of nothing, for which zeros are the value.
         let mut labels: Vec<TreeKv> = (0..MAX_LABELS)
             .map(|_| unsafe { core::mem::zeroed() })
             .collect();
         let mut n = 0;
-        // SAFETY: a C string, the selector, and rooms for the values, what
-        // was found, and the labels.
+        let _ = kconfig_read(&input.path, sel, false);
+        let _ = kconfig_read(&input.path, sel, true);
+        // SAFETY: a C string, and room for the labels.
         unsafe {
-            super::kconfig_read(
-                input.path.as_ptr(),
-                &*sel.0,
-                values.as_mut_ptr(),
-                found.as_mut_ptr(),
-                false,
-            );
-            super::kconfig_read(
-                input.path.as_ptr(),
-                &*sel.0,
-                values.as_mut_ptr(),
-                found.as_mut_ptr(),
-                true,
-            );
             super::read_config_file(
                 input.path.as_ptr(),
                 labels.as_mut_ptr(),

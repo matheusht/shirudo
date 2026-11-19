@@ -9,9 +9,8 @@
 use core::ffi::c_int;
 
 use super::{
-    Extra, MAX_BYTES, Publication, TreeOperation, TreePublication, emit_publication,
-    operation_digest, operation_validate, parse, publication_check, publication_verify,
-    segment_precedes,
+    Extra, MAX_BYTES, TreeOperation, TreePublication, emit_publication, operation_digest,
+    operation_validate, publication_check, publication_verify, segment_precedes,
 };
 use crate::fuzzing::fuzz_target;
 use crate::text::cstr;
@@ -22,29 +21,16 @@ fn abort() -> ! {
 }
 
 /// The publication `data` describes, read as a tree file is.
-fn parsed(data: &[u8]) -> Option<Publication> {
+fn parsed(data: &[u8]) -> Option<TreePublication> {
     if data.len() > MAX_BYTES {
         return None;
     }
-    let mut p = Publication::new();
-    // SAFETY: room for a publication, which the parse owns.
-    (unsafe { parse(data, p.get_mut()) } == 0).then_some(p)
-}
-
-fn operations(p: &TreePublication) -> &[TreeOperation] {
-    // SAFETY: a parsed publication's operations, of its count.
-    unsafe { p.operations() }
-}
-
-fn check(p: &TreePublication) -> c_int {
-    // SAFETY: a parsed publication.
-    unsafe { publication_check(p) }
+    TreePublication::parse(data).ok()
 }
 
 /// The digest of an operation, as text, or why not.
 fn digest(op: &TreeOperation) -> Result<Vec<u8>, c_int> {
-    // SAFETY: an operation of a parsed publication.
-    unsafe { operation_digest(op) }.map(|d| cstr(&d).to_vec())
+    operation_digest(op).map(|d| cstr(&d).to_vec())
 }
 
 /// The fixes a publisher adds to every other operation.
@@ -59,27 +45,24 @@ fn emit_fixes(e: &mut JsonEmit, index: usize, p: &TreePublication) -> c_int {
 }
 
 fn read_back(p: &TreePublication, extra: Option<Extra<'_>>) {
-    // SAFETY: a parsed publication.
-    let Ok(doc) = (unsafe { emit_publication(p, extra) }) else {
+    let Ok(doc) = emit_publication(p, extra) else {
         return;
     };
-    let again = parsed(&doc);
-    let Some(again) = again else {
+    let Some(again) = parsed(&doc) else {
         abort();
     };
-    let again = again.get();
-    if again.n_operations != p.n_operations
+    if again.operations.len() != p.operations.len()
         || cstr(&again.tree_id) != cstr(&p.tree_id)
         || again.generation != p.generation
         || again.base_seq != p.base_seq
         || cstr(&again.segment_manifest_digest) != cstr(&p.segment_manifest_digest)
         || cstr(&again.history_root) != cstr(&p.history_root)
         || again.head_seq != p.head_seq
-        || (check(again) == 0) != (check(p) == 0)
+        || publication_check(&again).is_ok() != publication_check(p).is_ok()
     {
         abort();
     }
-    for (a, b) in operations(p).iter().zip(operations(again)) {
+    for (a, b) in p.operations.iter().zip(&again.operations) {
         if digest(a) != digest(b) || cstr(&b.operation_digest) != cstr(&a.operation_digest) {
             abort();
         }
@@ -87,18 +70,16 @@ fn read_back(p: &TreePublication, extra: Option<Extra<'_>>) {
 }
 
 fn verify_names_its_failure(p: &TreePublication) {
-    // SAFETY: a parsed publication.
-    let (ret, bad) = match unsafe { publication_verify(p) } {
+    let (ret, bad) = match publication_verify(p) {
         Ok(()) => (0, None),
         Err((err, bad)) => (err, bad),
     };
-    let ops = operations(p);
     let fails_alike = |i: usize| {
-        // SAFETY: an operation of the publication's.
-        unsafe { operation_validate(&ops[i]) == ret }
+        p.operations
+            .get(i)
+            .is_some_and(|op| operation_validate(op) == Err(ret))
     };
-    if bad.is_some_and(|i| i >= ops.len())
-        || (ret == 0 && (bad.is_some() || check(p) != 0))
+    if (ret == 0 && (bad.is_some() || publication_check(p).is_err()))
         || bad.is_some_and(|i| !fails_alike(i))
     {
         abort();
@@ -109,21 +90,20 @@ fuzz_target!(shirudo_fuzz_tree, shirudo_fuzz_tree_init, |data| {
     let Some(p) = parsed(data) else {
         return;
     };
-    let p = p.get();
-    if check(p) == 0 {
+    if publication_check(&p).is_ok() {
         let empty = |s: &[u8]| s.first().is_none_or(|&c| c == 0);
         if empty(&p.segment_manifest_digest) != (p.base_seq == 0)
             || empty(&p.history_root) != (p.base_seq == 0)
-            || (p.base_seq != 0 && p.n_operations == 0)
-            || segment_precedes(p, cstr(&p.segment_manifest_digest), p) == 0
+            || (p.base_seq != 0 && p.operations.is_empty())
+            || segment_precedes(&p, cstr(&p.segment_manifest_digest), &p) == 0
         {
             abort();
         }
     }
-    verify_names_its_failure(p);
-    read_back(p, None);
+    verify_names_its_failure(&p);
+    read_back(&p, None);
     read_back(
-        p,
-        Some(&mut |e: &mut JsonEmit, index: usize| emit_fixes(e, index, p)),
+        &p,
+        Some(&mut |e: &mut JsonEmit, index: usize| emit_fixes(e, index, &p)),
     );
 });

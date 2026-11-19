@@ -3,10 +3,11 @@
 
 /-!
 Which operations of an upatch tree can meet on one node. `disjoint`,
-`covers` and `addLive` follow util/bpm_tree_overlap.c, `selectorMatches`
-follows `tree_selector_matches()` of util/bpm_tree_state.c, and the
-theorems show the first three sound for the fourth: both selectors are
-held against one node, whose two kernel configs agree.
+`covers` and `addLive` follow rust/src/util/bpm_tree_overlap.rs,
+`selectorMatches` follows `selector_matches()` of
+rust/src/util/bpm_tree_state.rs, and the theorems show the first three
+sound for the fourth: both selectors are held against one node, whose
+two kernel configs agree.
 -/
 
 namespace Shirudo.TreeOverlap
@@ -16,7 +17,7 @@ abbrev Str := List Nat
 
 /-! ### Lists of values -/
 
-/-- `list_holds()`, and the loops of `tree_selector_matches()` and
+/-- `list_holds()`, and the loops of `selector_matches()` and
 `selector_values_match()` that look for one string: `strcmp()` finds
 `value` in the list. -/
 def listHolds (list : List Str) (value : Str) : Bool :=
@@ -228,7 +229,7 @@ def covers (outer inner : Selector) : Bool :=
 
 /-! ### What a node takes a selector to mean -/
 
-/-- What `tree_selector_matches()` reads of the node it runs on: the
+/-- What `selector_matches()` reads of the node it runs on: the
 release and the machine of `uname()`, `none` when it fails, the build ID
 `kernel_build_id_read()` gives, `none` when it gives none, the value the
 kernel config has for an option, `none` for an option it does not name,
@@ -263,7 +264,7 @@ def wildcard (s : Selector) : Bool :=
   s.releasePrefix.isEmpty && s.buildId.isEmpty && s.architecture.isEmpty &&
     s.kconfig.isEmpty && s.labels.isEmpty
 
-/-- `tree_selector_matches()` after `uname()`: each list that names
+/-- `selector_matches()` after `uname()`: each list that names
 something takes the node's value, and each pair too. -/
 def matchesOn (release machine : Str) (n : Node) (s : Selector) : Bool :=
   (s.releasePrefix.isEmpty ||
@@ -273,7 +274,7 @@ def matchesOn (release machine : Str) (n : Node) (s : Selector) : Bool :=
     s.kconfig.all (pairHeld n.kconfig) &&
     s.labels.all (pairHeld (kvValue n.labels))
 
-/-- `tree_selector_matches()` returning 1: the wildcard matches before
+/-- `selector_matches()` returning true: the wildcard matches before
 the node is read, and nothing else matches where `uname()` fails. -/
 def selectorMatches (n : Node) (s : Selector) : Bool :=
   wildcard s ||

@@ -17,7 +17,6 @@ use crate::util::bpm_oci::{
     TREE_ARTIFACT, TREE_MEDIA, TREE_SIG_MEDIA, buffer_free, emit_descriptor, get_memory,
     get_signed, parse_manifest, sha256_hex, url,
 };
-use crate::util::bpm_tree::{TreePublication, tree_parse};
 use crate::util::crypto_openssl::{Cert, cert_free, cert_read_fd, cert_read_file, verify_detached};
 use crate::util::json::JsonEmit;
 use crate::util::keys::{TrustedSet, verify_signature};
@@ -280,33 +279,4 @@ fn fetch_checked(
             None => -EINVAL,
         },
     }
-}
-
-/// [`fetch_document`], parsed into `publication`.
-pub(crate) fn fetch_publication(
-    c: &mut OciClient,
-    repository: &[u8],
-    reference: &[u8],
-    cert_path: Option<&CStr>,
-    trusted: Option<&TrustedSet>,
-    publication: *mut TreePublication,
-    manifest_digest: &mut [u8],
-) -> c_int {
-    let mut payload = BpmBuffer::new();
-    let ret = fetch_document(
-        c,
-        repository,
-        reference,
-        cert_path,
-        trusted,
-        &mut payload,
-        manifest_digest,
-    );
-    if ret != 0 {
-        return ret;
-    }
-    // SAFETY: the payload's len bytes, and the caller's publication.
-    let ret = unsafe { tree_parse(payload.data.cast(), payload.len, publication) };
-    buffer_free(&mut payload);
-    ret
 }

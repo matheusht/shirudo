@@ -226,25 +226,19 @@ release that contains its signed-loader work, with the patches in
 A tree key the node never parses
 --------------------------------
 
-The node's parser of a tree publication, ``tree_parse()``, skips an
-operation's ``fixes``. ``bpm tree append`` carries each earlier
-operation's ``fixes`` into the next generation from a second read of
-its own over the previous publication's bytes, with the JSON reader of
-:src:`util/json.c`, in the operator's helper. The shared emitter,
-``tree_emit_publication()``, takes an optional callback that adds keys
-after an operation's ``artifact``, which the publisher passes and
-nothing else does.
+``bpm tree append`` preserves each operation's ``fixes`` by reading it
+from the previous publication with the JSON reader in
+:src:`rust/src/util/json/parse.rs`. The node's
+``TreePublication::parse()`` skips this field. The shared
+``emit_publication()`` accepts an optional callback, which the publisher
+uses to add ``fixes`` after an operation's ``artifact``.
 
-``tree_parse()`` is the node's parser of registry input. A key it reads
-is a key a malformed document can make the node refuse, and ``fixes`` is
-a convention of the keepalive backend that must never stop a node's
-sync (:doc:`/reference/formats/bpm-formats`). The cost is that the
-operator parses each previous publication twice. A single pass, in
-which ``tree_parse()`` takes an optional field and sink for extra
-operation keys that the publisher passes and the node leaves ``NULL``,
-would read it once, at the price of a change to the node's parser and
-to the ``bpm-tree-reader`` and ``bpm-tree-sync-model`` proofs that
-include it.
+A malformed registry document must not make the node refuse a valid
+publication because of a backend-specific ``fixes`` field. Keeping
+that field in the publisher means it reads the previous publication
+twice. The node still parses only the fields it needs for sync
+(:doc:`/reference/formats/bpm-formats`).
+
 
 A keepalive key for each run
 ----------------------------

@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::testutil::TempDir;
-use crate::util::bpm_tree::{tree_selector_free, tree_selector_kv_add};
+use crate::util::bpm_tree::SelectorMap;
 use crate::util::gzip::crc32;
 
 /// `text` as one gzip member of stored blocks, as gzip -0 writes it.
@@ -26,57 +26,26 @@ fn gzipped(text: &[u8]) -> Vec<u8> {
     out
 }
 
-/// A selector of the one kconfig pair CONFIG_MODULES, freed when it goes.
-struct Modules(Box<TreeSelector>);
+/// A selector of the one kconfig pair CONFIG_MODULES.
+struct Modules(TreeSelector);
 
 impl Modules {
     fn new() -> Self {
-        // SAFETY: a selector of no pairs, for which zeros are a value.
-        let mut s: Box<TreeSelector> = Box::new(unsafe { core::mem::zeroed() });
-        let mut kv = ptr::null_mut();
-        // SAFETY: the selector's pairs and their count, and room for the
-        // pair added.
-        unsafe {
-            assert_eq!(
-                tree_selector_kv_add(
-                    &mut s.kconfig,
-                    &mut s.n_kconfig,
-                    MAX_KCONFIG as c_int,
-                    &mut kv
-                ),
-                0
-            );
-            (&mut (*kv).key)[..14].copy_from_slice(b"CONFIG_MODULES");
-        }
+        let mut s = TreeSelector::default();
+
+        assert_eq!(
+            s.pair_add(SelectorMap::Kconfig, b"CONFIG_MODULES", Vec::new()),
+            Ok(())
+        );
         Modules(s)
     }
 
     /// kconfig_read() of the config at `path`: the value of
     /// CONFIG_MODULES, None where it is not set, or the error.
     fn read(&self, path: &CStr, gz: bool) -> Result<Option<Vec<u8>>, c_int> {
-        let mut values = vec![[0u8; STRING_MAX]; MAX_KCONFIG];
-        let mut found = [false; MAX_KCONFIG];
-        // SAFETY: a C string, the selector, and room for a value of each
-        // of its pairs.
-        match unsafe {
-            kconfig_read(
-                path.as_ptr(),
-                &*self.0,
-                values.as_mut_ptr(),
-                found.as_mut_ptr(),
-                gz,
-            )
-        } {
-            0 => Ok(found[0].then(|| cstr(&values[0]).to_vec())),
-            err => Err(err),
-        }
-    }
-}
+        let mut values = kconfig_read(path, &self.0, gz)?;
 
-impl Drop for Modules {
-    fn drop(&mut self) {
-        // SAFETY: the selector, whose pairs tree_selector_kv_add() made.
-        unsafe { tree_selector_free(&mut *self.0) };
+        Ok(values.swap_remove(0))
     }
 }
 

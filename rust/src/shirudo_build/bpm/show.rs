@@ -14,8 +14,7 @@ use crate::text::cstr;
 use crate::util::bpm_oci::Client;
 use crate::util::bpm_package::fetch_document;
 use crate::util::bpm_tree::{
-    MAX_JOIN_OPS, Publication, TreePublication, digest_bytes, publication_verify, segment_precedes,
-    tree_parse, walk_within,
+    MAX_JOIN_OPS, TreePublication, digest_bytes, publication_verify, segment_precedes, walk_within,
 };
 use crate::util::help::Help;
 use crate::util::hex::sha256_digest_encode;
@@ -86,30 +85,35 @@ pub(super) enum Signer<'a> {
     Set(&'a TrustedSet),
 }
 
-/// The publication at `reference`, a tag or a manifest digest, checked
-/// against the signer as tree sync checks it and parsed into `p`, with
-/// its manifest's digest and, when asked, its checked bytes.
+/// A publication fetched and checked against the signer as tree sync
+/// checks it: what it says, its manifest's digest and its document's
+/// bytes.
+pub(super) struct Checked {
+    pub(super) publication: TreePublication,
+    pub(super) digest: Vec<u8>,
+    document: Vec<u8>,
+}
+
+/// The publication at `reference`, a tag or a manifest digest.
 pub(super) fn fetch_checked(
     c: &mut Client,
     repository: &[u8],
     reference: &[u8],
     signer: Signer<'_>,
-    p: &mut TreePublication,
-    keep: bool,
-) -> Result<(Vec<u8>, Option<Vec<u8>>), c_int> {
+) -> Result<Checked, c_int> {
     let (cert, set) = match signer {
         Signer::Cert(c) => (Some(c), None),
         Signer::Set(s) => (None, Some(s)),
     };
     let (document, digest) = fetch_document(c, repository, reference, cert, set)?;
-    // SAFETY: the document's bytes, and the caller's publication.
-    match unsafe { tree_parse(document.as_ptr().cast(), document.len(), p) } {
-        0 => {}
-        err => return Err(err),
-    }
-    // SAFETY: the publication the parse filled.
-    unsafe { publication_verify(p) }.map_err(|(err, _)| err)?;
-    Ok((digest, keep.then_some(document)))
+    let publication = TreePublication::parse(&document)?;
+
+    publication_verify(&publication).map_err(|(err, _)| err)?;
+    Ok(Checked {
+        publication,
+        digest,
+        document,
+    })
 }
 
 /// The sealed segment `succ` names, as a node walking back fetches it:
@@ -119,18 +123,11 @@ pub(super) fn fetch_sealed(
     repository: &[u8],
     signer: Signer<'_>,
     succ: &TreePublication,
-    pred: &mut TreePublication,
-) -> Result<Vec<u8>, c_int> {
-    let (digest, _) = fetch_checked(
-        c,
-        repository,
-        cstr(&succ.segment_manifest_digest),
-        signer,
-        pred,
-        false,
-    )?;
-    match segment_precedes(pred, &digest, succ) {
-        0 => Ok(digest),
+) -> Result<Checked, c_int> {
+    let pred = fetch_checked(c, repository, cstr(&succ.segment_manifest_digest), signer)?;
+
+    match segment_precedes(&pred.publication, &pred.digest, succ) {
+        0 => Ok(pred),
         err => Err(err),
     }
 }
@@ -178,22 +175,21 @@ fn walk_back(
         return Err(within);
     }
     let mut digests = Vec::new();
-    let mut succ: Option<Publication> = None;
+    let mut succ: Option<TreePublication> = None;
     loop {
-        let s = succ.as_ref().map_or(tag, |p| p.get());
+        let s = succ.as_ref().unwrap_or(tag);
         if s.base_seq <= 0 {
             return Ok(digests);
         }
-        let mut pred = Publication::new();
-        let digest = fetch_sealed(c, repository, Signer::Set(set), s, pred.get_mut()).inspect_err(|_| {
+        let pred = fetch_sealed(c, repository, Signer::Set(set), s).inspect_err(|_| {
             error(format!(
                 "bpm tree show: the sealed segment {}, which ends at seq {}, cannot be fetched or does not verify",
                 String::from_utf8_lossy(cstr(&s.segment_manifest_digest)),
                 s.base_seq
             ));
         })?;
-        digests.push(digest_bytes(&digest).ok_or(-EINVAL)?);
-        succ = Some(pred);
+        digests.push(digest_bytes(&pred.digest).ok_or(-EINVAL)?);
+        succ = Some(pred.publication);
     }
 }
 
@@ -201,24 +197,15 @@ fn walk_back(
 fn show_sealed(c: &mut Client, repository: &[u8], set: &TrustedSet, digest: &[u8; 32]) -> c_int {
     let reference = sha256_digest_encode(digest);
     let reference = cstr(&reference);
-    let mut p = Publication::new();
-    let fetched = fetch_checked(
-        c,
-        repository,
-        reference,
-        Signer::Set(set),
-        p.get_mut(),
-        true,
-    )
-    .and_then(|(d, doc)| {
-        if d == reference {
-            Ok(doc)
+    let fetched = fetch_checked(c, repository, reference, Signer::Set(set)).and_then(|f| {
+        if f.digest == reference {
+            Ok(f.document)
         } else {
             Err(-EKEYREJECTED)
         }
     });
     match fetched {
-        Ok(doc) => print(reference, &doc.unwrap_or_default()),
+        Ok(doc) => print(reference, &doc),
         Err(err) => {
             error(format!(
                 "bpm tree show: the sealed segment {} cannot be fetched again or changed",
@@ -278,18 +265,10 @@ fn show(args: &[&CStr]) -> c_int {
             return ret;
         }
     };
-    let mut publ = Publication::new();
     let run = (|| {
-        let (digest, doc) = fetch_checked(
-            &mut c,
-            &repository,
-            reference,
-            Signer::Set(&set),
-            publ.get_mut(),
-            true,
-        )?;
+        let tag = fetch_checked(&mut c, &repository, reference, Signer::Set(&set))?;
         if walk {
-            for d in walk_back(&mut c, &repository, &set, publ.get())?
+            for d in walk_back(&mut c, &repository, &set, &tag.publication)?
                 .iter()
                 .rev()
             {
@@ -299,7 +278,7 @@ fn show(args: &[&CStr]) -> c_int {
                 }
             }
         }
-        match print(&digest, &doc.unwrap_or_default()) {
+        match print(&tag.digest, &tag.document) {
             0 => Ok(()),
             err => Err(err),
         }

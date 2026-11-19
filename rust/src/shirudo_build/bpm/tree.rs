@@ -22,7 +22,7 @@ use super::publish::{
 use super::show::{self, Signer, fetch_sealed};
 use super::{error, print};
 use crate::errno::{
-    E2BIG, EACCES, EBUSY, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT, ENOMEM, EOVERFLOW,
+    E2BIG, EACCES, EBUSY, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT, EOVERFLOW,
 };
 use crate::shirudo_build::check_keys;
 use crate::text::cstr;
@@ -31,10 +31,9 @@ use crate::util::bpm_oci::{
 };
 use crate::util::bpm_package::{fetch_document, read_member_in, tree_manifest};
 use crate::util::bpm_tree::{
-    Extra, MAX_JOIN_OPS, MAX_OPS, MAX_VALUES, Publication, STRING_MAX, Text, TreeArtifact,
-    TreeOperation, TreePublication, TreeSelector, count, digest_bytes, emit_publication,
-    history_at, operation_digest, operation_validate, publication_verify, tree_parse,
-    tree_publication_append, tree_selector_copy, tree_selector_free, walk_within,
+    Extra, MAX_JOIN_OPS, MAX_OPS, STRING_MAX, TreeArtifact, TreeOperation, TreePublication,
+    TreeSelector, digest_bytes, emit_publication, history_at, operation_digest, operation_validate,
+    publication_verify, walk_within,
 };
 use crate::util::bpm_tree_overlap::{add_live, add_withdrawn, selectors_disjoint};
 use crate::util::help::{Help, HelpSection, is_help, print_help};
@@ -138,10 +137,6 @@ static APPEND_HELP: Help = Help::new(
 /// Indexed by what each stands for, so that a value names itself.
 static OPS: [OptName; 2] = [OptName::new(c"add", 0), OptName::new(c"delete", 1)];
 
-fn status(ret: c_int) -> Result<(), c_int> {
-    if ret == 0 { Ok(()) } else { Err(ret) }
-}
-
 fn err(msg: String) {
     error(msg.as_bytes());
 }
@@ -165,51 +160,11 @@ fn sha256_digest(data: &[u8]) -> Result<Vec<u8>, c_int> {
 
 /// Selector lists are sets: sorted, so equal Beefiles digest equally.
 fn canonicalize(s: &mut TreeSelector) {
-    let sort = |list: &mut [Text], n: c_int| {
-        let n = count(n, MAX_VALUES);
-        list[..n].sort_by(|a, b| cstr(a).cmp(cstr(b)));
-    };
-    sort(&mut s.kernel_release_prefix, s.n_kernel_release_prefix);
-    sort(&mut s.kernel_build_id, s.n_kernel_build_id);
-    sort(&mut s.architecture, s.n_architecture);
-    for (kvs, n, max) in [
-        (s.kconfig, s.n_kconfig, crate::util::bpm_tree::MAX_KCONFIG),
-        (s.labels, s.n_labels, crate::util::bpm_tree::MAX_LABELS),
-    ] {
-        if kvs.is_null() {
-            continue;
-        }
-        // SAFETY: the selector's pairs, which it alone holds and which
-        // nothing else reaches while they are sorted.
-        let kvs = unsafe { core::slice::from_raw_parts_mut(kvs, count(n, max)) };
-        for kv in kvs {
-            sort(&mut kv.values, kv.n_values);
-        }
-    }
-}
-
-/// An operation being made, its selector freed when it goes.
-struct Operation(Box<TreeOperation>);
-
-impl Operation {
-    fn new() -> Self {
-        // SAFETY: an all-zero operation is an empty one.
-        Operation(Box::new(unsafe { core::mem::zeroed() }))
-    }
-
-    fn reset(&mut self, seq: i64) {
-        // SAFETY: the operation's selector.
-        unsafe { tree_selector_free(&mut self.0.selector) };
-        // SAFETY: an all-zero operation is an empty one.
-        *self.0 = unsafe { core::mem::zeroed() };
-        self.0.seq = seq;
-    }
-}
-
-impl Drop for Operation {
-    fn drop(&mut self) {
-        // SAFETY: the operation's selector.
-        unsafe { tree_selector_free(&mut self.0.selector) };
+    s.kernel_release_prefix.sort();
+    s.kernel_build_id.sort();
+    s.architecture.sort();
+    for kv in s.kconfig.iter_mut().chain(&mut s.labels) {
+        kv.values.sort();
     }
 }
 
@@ -219,33 +174,16 @@ impl Drop for Operation {
 struct Later(Vec<TreeOperation>);
 
 impl Later {
-    fn take(&mut self, p: &TreePublication) -> Result<(), c_int> {
-        // SAFETY: the publication's operations.
-        for op in unsafe { p.operations() } {
-            if cstr(&op.op) != b"delete" {
-                continue;
-            }
-            // SAFETY: an all-zero operation is an empty one.
-            let mut d: TreeOperation = unsafe { core::mem::zeroed() };
-            d.seq = op.seq;
-            // SAFETY: the empty selector and the operation's.
-            if unsafe { tree_selector_copy(&mut d.selector, &op.selector) } != 0 {
-                return Err(-ENOMEM);
-            }
-            copy(&mut d.op, cstr(&op.op));
-            copy(&mut d.id, cstr(&op.id));
-            self.0.push(d);
-        }
-        Ok(())
-    }
-}
+    fn take(&mut self, p: &TreePublication) {
+        let deletes = p.operations.iter().filter(|op| cstr(&op.op) == b"delete");
 
-impl Drop for Later {
-    fn drop(&mut self) {
-        for d in &mut self.0 {
-            // SAFETY: the copy's selector, freed once.
-            unsafe { tree_selector_free(&mut d.selector) };
-        }
+        self.0.extend(deletes.map(|op| TreeOperation {
+            seq: op.seq,
+            op: op.op,
+            id: op.id,
+            selector: op.selector.clone(),
+            ..TreeOperation::default()
+        }));
     }
 }
 
@@ -363,19 +301,12 @@ fn refuse_shared_xdp_class(
     if classes == 0 {
         return Ok(());
     }
-    // SAFETY: the publication's operations.
-    let ops = unsafe { p.operations() };
-    for (i, other) in ops.iter().enumerate() {
+    for (i, other) in p.operations.iter().enumerate() {
         if cstr(&other.op) != b"add"
             || cstr(&other.id) == cstr(&op.id)
-            // SAFETY: i indexes the publication's operation slice.
-            || !unsafe { add_live(p, i) }
-            || later.is_some_and(|l| {
-                // SAFETY: other and the copied deletes own their selectors.
-                unsafe { add_withdrawn(other, &l.0) }
-            })
-            // SAFETY: both operations own their selectors.
-            || unsafe { selectors_disjoint(&other.selector, &op.selector) }
+            || !add_live(p, i)
+            || later.is_some_and(|l| add_withdrawn(other, &l.0))
+            || selectors_disjoint(&other.selector, &op.selector)
         {
             continue;
         }
@@ -435,7 +366,7 @@ fn refuse_sealed_xdp_class(
         return Err(within);
     }
     let mut later = Later::default();
-    later.take(cur)?;
+    later.take(cur);
     let mut succ = Segment::Borrowed(cur);
     let mut given = sealed;
     loop {
@@ -445,22 +376,17 @@ fn refuse_sealed_xdp_class(
                 if succ.get().base_seq == 0 {
                     break;
                 }
-                let mut pred = Publication::new();
-                if let Err(e) = fetch_sealed(
-                    c,
-                    repository,
-                    Signer::Cert(cert),
-                    succ.get(),
-                    pred.get_mut(),
-                ) {
-                    err(format!(
-                        "bpm tree append: the sealed segment {}, which ends at seq {}, does not verify",
-                        lossy(cstr(&succ.get().segment_manifest_digest)),
-                        succ.get().base_seq
-                    ));
-                    return Err(e);
+                match fetch_sealed(c, repository, Signer::Cert(cert), succ.get()) {
+                    Ok(pred) => Segment::Owned(Box::new(pred.publication)),
+                    Err(e) => {
+                        err(format!(
+                            "bpm tree append: the sealed segment {}, which ends at seq {}, does not verify",
+                            lossy(cstr(&succ.get().segment_manifest_digest)),
+                            succ.get().base_seq
+                        ));
+                        return Err(e);
+                    }
                 }
-                Segment::Owned(pred)
             }
         };
         let mut seen = Seen::new();
@@ -474,7 +400,7 @@ fn refuse_sealed_xdp_class(
             op,
             classes,
         )?;
-        later.take(segment.get())?;
+        later.take(segment.get());
         succ = segment;
     }
     Ok(())
@@ -483,14 +409,14 @@ fn refuse_sealed_xdp_class(
 /// A segment of a walk back: one the caller holds, or one fetched.
 enum Segment<'a> {
     Borrowed(&'a TreePublication),
-    Owned(Publication),
+    Owned(Box<TreePublication>),
 }
 
 impl Segment<'_> {
     fn get(&self) -> &TreePublication {
         match self {
             Segment::Borrowed(p) => p,
-            Segment::Owned(p) => p.get(),
+            Segment::Owned(p) => p,
         }
     }
 }
@@ -585,10 +511,7 @@ fn start_segment(
     p.head_seq = sealed.head_seq;
     copy(&mut p.tree_id, cstr(&sealed.tree_id));
     copy(&mut p.segment_manifest_digest, sealed_digest);
-    let mut root = [0u8; 32];
-    // SAFETY: the sealed publication's operations.
-    let ret = unsafe { history_at(sealed, sealed.head_seq, &mut root) };
-    status(ret)?;
+    let root = history_at(sealed, sealed.head_seq)?;
     copy(&mut p.history_root, &hex::encode(&root));
     Ok(())
 }
@@ -619,8 +542,8 @@ fn new_id(tree_id: Option<&[u8]>, package: &[u8], reference: &[u8]) -> Result<Ve
 }
 
 /// A tree's fixes as the previous publication carried them: each
-/// operation's sorted IDs, read back from its bytes, since tree_parse()
-/// is the node's parser and keeps no key a node does not use.
+/// operation's sorted IDs, read back from its bytes, since the parse of
+/// a publication is the node's and keeps no key a node does not use.
 struct FixesReader<'a> {
     ops: &'a [TreeOperation],
     fixes: Vec<Vec<Vec<u8>>>,
@@ -667,8 +590,7 @@ fn take_fixes_operation(
 /// The fixes of each operation of `p` from its document's bytes.
 fn read_fixes(document: &[u8], p: &TreePublication) -> Result<Vec<Vec<Vec<u8>>>, c_int> {
     let mut r = FixesReader {
-        // SAFETY: the publication's operations.
-        ops: unsafe { p.operations() },
+        ops: &p.operations,
         fixes: Vec::new(),
         seq: 0,
         ids: Vec::new(),
@@ -683,7 +605,7 @@ fn read_fixes(document: &[u8], p: &TreePublication) -> Result<Vec<Vec<Vec<u8>>>,
     let root = [JsonField::array(c"operations", &operation, &take_operation)];
 
     parse_schema(document, &root, &mut r)?;
-    if r.fixes.len() != p.n_operations as usize {
+    if r.fixes.len() != p.operations.len() {
         return Err(-EINVAL);
     }
     Ok(r.fixes)
@@ -710,10 +632,10 @@ struct Append<'a> {
     repository: Vec<u8>,
     previous: Option<Vec<u8>>,
     parent: Vec<u8>,
-    publication: Publication,
-    sealed: Option<Publication>,
+    publication: TreePublication,
+    sealed: Option<TreePublication>,
     fixes: Vec<Vec<Vec<u8>>>,
-    op: Operation,
+    op: TreeOperation,
     seen: Seen,
     uploads: Vec<Upload>,
     payload: Vec<u8>,
@@ -750,10 +672,10 @@ fn parse_options<'a>(args: &'a [&'a CStr]) -> Result<Append<'a>, c_int> {
         repository: Vec::new(),
         previous: None,
         parent: Vec::new(),
-        publication: Publication::new(),
+        publication: TreePublication::default(),
         sealed: None,
         fixes: Vec::new(),
-        op: Operation::new(),
+        op: TreeOperation::default(),
         seen: Seen::new(),
         uploads: Vec::new(),
         payload: Vec::new(),
@@ -875,11 +797,11 @@ impl Append<'_> {
     }
 
     fn seal_if_full(&mut self) -> Result<(), c_int> {
-        let n = self.publication.get().n_operations;
-        let count = usize::try_from(n).map_err(|_| -EOVERFLOW)?;
-        if i64::from(n) >= self.segment_ops || count + self.entries > MAX_OPS {
-            let sealed = core::mem::replace(&mut self.publication, Publication::new());
-            let ret = start_segment(sealed.get(), &self.parent, self.publication.get_mut());
+        let count = self.publication.operations.len();
+        let n = i64::try_from(count).map_err(|_| -EOVERFLOW)?;
+        if n >= self.segment_ops || count + self.entries > MAX_OPS {
+            let sealed = core::mem::take(&mut self.publication);
+            let ret = start_segment(&sealed, &self.parent, &mut self.publication);
             self.sealed = Some(sealed);
             return ret;
         }
@@ -887,7 +809,7 @@ impl Append<'_> {
     }
 
     fn extend(&mut self) -> Result<(), c_int> {
-        let pub_id = lossy(cstr(&self.publication.get().tree_id));
+        let pub_id = lossy(cstr(&self.publication.tree_id));
         // The registry chooses what the reference holds, another tree the
         // key signs among it: only the operator can say which tree the
         // signature it is about to make belongs to.
@@ -899,7 +821,7 @@ impl Append<'_> {
             ));
             return Err(-EINVAL);
         };
-        if cstr(&self.publication.get().tree_id) != tree_id {
+        if cstr(&self.publication.tree_id) != tree_id {
             err(format!(
                 "bpm tree append: {}:{} holds tree {pub_id}, not {}; refusing to extend another tree",
                 lossy(&self.repo_ref),
@@ -908,8 +830,7 @@ impl Append<'_> {
             ));
             return Err(-EINVAL);
         }
-        // SAFETY: the publication the parse filled.
-        if let Err((e, _)) = unsafe { publication_verify(self.publication.get()) } {
+        if let Err((e, _)) = publication_verify(&self.publication) {
             err(format!(
                 "bpm tree append: the publication at {}:{} does not verify",
                 lossy(&self.repo_ref),
@@ -918,7 +839,7 @@ impl Append<'_> {
             return Err(e);
         }
         self.seal_if_full()?;
-        let p = self.publication.get_mut();
+        let p = &mut self.publication;
         match p.generation.checked_add(1).filter(|&g| g != i64::MAX) {
             Some(g) => p.generation = g,
             None => {
@@ -945,17 +866,16 @@ impl Append<'_> {
         )
         .and_then(|(doc, digest)| {
             self.parent = digest;
-            // SAFETY: the document's bytes and the publication to fill.
-            let ret =
-                unsafe { tree_parse(doc.as_ptr().cast(), doc.len(), self.publication.get_mut()) };
+            let parsed = TreePublication::parse(&doc);
             self.previous = Some(doc);
-            status(ret)
+            self.publication = parsed?;
+            Ok(())
         });
         match read {
             Ok(()) => self.extend()?,
             Err(e) if e == -ENOENT => {
-                self.publication = Publication::new();
-                let p = self.publication.get_mut();
+                self.publication = TreePublication::default();
+                let p = &mut self.publication;
                 p.schema = 1;
                 p.generation = 1;
                 self.parent.clear();
@@ -971,14 +891,14 @@ impl Append<'_> {
                 return Err(e);
             }
         }
-        let p = self.publication.get_mut();
+        let p = &mut self.publication;
         p.schema = 1;
         copy(&mut p.parent_manifest_digest, &self.parent);
         Ok(())
     }
 
     fn carry_fixes(&mut self) -> Result<(), c_int> {
-        let count = usize::try_from(self.publication.get().n_operations).map_err(|_| -EOVERFLOW)?;
+        let count = self.publication.operations.len();
         let n = (count + self.spec.upatches.len()).clamp(1, MAX_OPS);
         self.fixes = vec![Vec::new(); n];
         if self.sealed.is_some() {
@@ -987,7 +907,7 @@ impl Append<'_> {
         let Some(doc) = &self.previous else {
             return Ok(());
         };
-        match read_fixes(doc, self.publication.get()) {
+        match read_fixes(doc, &self.publication) {
             Ok(carried) => {
                 for (slot, ids) in self.fixes.iter_mut().zip(carried) {
                     *slot = ids;
@@ -1005,18 +925,19 @@ impl Append<'_> {
         }
     }
 
-    fn operation_start(&mut self, u: &BuildUpatch, seq: i64) -> Result<(), c_int> {
-        self.op.reset(seq);
-        let op = &mut self.op.0;
+    fn operation_start(&mut self, u: &BuildUpatch, seq: i64) {
+        let op = &mut self.op;
+
+        *op = TreeOperation {
+            seq,
+            ..TreeOperation::default()
+        };
         copy(&mut op.op, if self.unload { b"delete" } else { b"add" });
         copy(&mut op.id, &u.tree.id);
         if let Some(sel) = &u.tree.selector {
-            // SAFETY: the operation's empty selector and the Beefile's.
-            let ret = unsafe { tree_selector_copy(&mut op.selector, &*sel.0) };
-            status(ret)?;
+            op.selector = sel.clone();
         }
         canonicalize(&mut op.selector);
-        Ok(())
     }
 
     fn refuse_xdp_classes(&mut self, id: &[u8], body: &[u8]) -> Result<u32, c_int> {
@@ -1030,10 +951,10 @@ impl Append<'_> {
             &mut self.c,
             &self.repository,
             &self.repo_ref,
-            self.publication.get(),
+            &self.publication,
             None,
             &mut self.seen,
-            &self.op.0,
+            &self.op,
             classes,
         )?;
         if classes != 0 {
@@ -1043,9 +964,9 @@ impl Append<'_> {
                 &self.repository,
                 &self.repo_ref,
                 cert.as_c_str(),
-                self.publication.get(),
-                self.sealed.as_ref().map(Publication::get),
-                &self.op.0,
+                &self.publication,
+                self.sealed.as_ref(),
+                &self.op,
                 classes,
             )?;
         }
@@ -1108,7 +1029,7 @@ impl Append<'_> {
         }
         let n = e.written();
         buf.truncate(n);
-        let a: &mut TreeArtifact = &mut self.op.0.artifact;
+        let a: &mut TreeArtifact = &mut self.op.artifact;
         copy(&mut a.manifest_digest, &sha256_digest(&buf)?);
         copy(&mut a.payload_sha256, cstr(&sha256_digest_encode(&payload)));
         copy(&mut a.repository, &self.repo_ref);
@@ -1121,14 +1042,11 @@ impl Append<'_> {
     }
 
     fn commit(&mut self, u: &BuildUpatch, classes: u32) -> Result<(), c_int> {
-        let op = &mut self.op.0;
-        // SAFETY: op holds its selector and its counts match the arrays.
-        let digest = unsafe { operation_digest(op) };
-        digest
+        let op = &mut self.op;
+        operation_digest(op)
             .and_then(|digest| {
                 copy(&mut op.operation_digest, cstr(&digest));
-                // SAFETY: op holds its selector and its counts match the arrays.
-                status(unsafe { operation_validate(op) })
+                operation_validate(op)
             })
             .inspect_err(|_| {
                 err(format!(
@@ -1136,23 +1054,20 @@ impl Append<'_> {
                     lossy(&u.tree.id)
                 ));
             })?;
-        let p = self.publication.get_mut();
-        // SAFETY: p is a live publication and op holds the selector it copies.
-        let ret = unsafe { tree_publication_append(p, &*self.op.0) };
-        status(ret)?;
-        let n = usize::try_from(p.n_operations).map_err(|_| -EOVERFLOW)? - 1;
+        let p = &mut self.publication;
+        p.append(self.op.clone())?;
+        let n = p.operations.len() - 1;
         self.seen.0[n] = Some(classes);
         if !self.unload {
             self.fixes[n].clone_from(&u.tree.fixes);
         }
-        p.head_seq = self.op.0.seq;
+        p.head_seq = self.op.seq;
         Ok(())
     }
 
     fn entry(&mut self, u: &BuildUpatch) -> Result<(), c_int> {
         let Some(seq) = self
             .publication
-            .get()
             .head_seq
             .checked_add(1)
             .filter(|&s| s != i64::MAX)
@@ -1180,7 +1095,7 @@ impl Append<'_> {
         })?;
         let body = member_data.bytes().to_vec();
         drop(member_data);
-        self.operation_start(u, seq)?;
+        self.operation_start(u, seq);
         let classes = if self.unload {
             0
         } else {
@@ -1223,9 +1138,7 @@ impl Append<'_> {
             0
         };
         let extra: Extra<'_> = &mut emit_fixes;
-        // SAFETY: the publication, its operations and their pairs.
-        let emitted = unsafe { emit_publication(self.publication.get(), Some(extra)) };
-        self.payload = emitted?;
+        self.payload = emit_publication(&self.publication, Some(extra))?;
         self.sig = sign_detached(&self.payload, (self.key(), self.cert()))?;
         Ok(())
     }

@@ -7,12 +7,10 @@
 //! before it applies anything.
 
 use core::ffi::{CStr, c_int};
-use core::{mem, ptr};
+use core::mem;
 
 use crate::errno::{E2BIG, EINVAL, EIO, EKEYREJECTED, ENOMEM, ERANGE};
-use crate::ffi;
-use crate::heap::{xcalloc, xfree, xreallocarray};
-use crate::text::{cstr, strscpy};
+use crate::text::cstr;
 use crate::util::bpm_oci::package_name_ok;
 use crate::util::chain::history_step;
 use crate::util::crypto_openssl::sha256_into;
@@ -31,7 +29,7 @@ pub(crate) const MAX_VALUES: usize = 16;
 /// `TREE_STRING_MAX`.
 pub(crate) const STRING_MAX: usize = 256;
 
-/// A string of the tree, as C holds it: NUL-terminated in a fixed array.
+/// A string of the tree, NUL-terminated in a fixed array.
 pub(crate) type Text = [u8; STRING_MAX];
 
 /// The build's lowered limits, as the C's TREE_LIMIT_CFLAGS gave them:
@@ -85,48 +83,50 @@ pub(crate) const FOLLOWS_WALK: c_int = 1;
 /// The canonical operation an operation digest hashes takes at most this.
 const DIGEST_BODY_MAX: usize = 1024 * 1024;
 
-/// `struct tree_kv`.
-#[repr(C)]
-pub struct TreeKv {
-    pub(crate) key: Text,
-    pub(crate) value: Text,
+/// The nodes an operation applies to: any value of each list, and each
+/// pair of its maps. A list or a map that is empty constrains nothing.
+/// The parse and the Beefile reader hold a list to MAX_VALUES values
+/// and the maps to MAX_KCONFIG and MAX_LABELS pairs.
+#[derive(Clone, Default)]
+pub(crate) struct TreeSelector {
+    pub(crate) kernel_release_prefix: Vec<Vec<u8>>,
+    pub(crate) kernel_build_id: Vec<Vec<u8>>,
+    pub(crate) architecture: Vec<Vec<u8>>,
+    pub(crate) kconfig: Vec<TreeSelectorKv>,
+    pub(crate) labels: Vec<TreeSelectorKv>,
 }
 
-/// `struct tree_selector_kv`.
-#[repr(C)]
-pub struct TreeSelectorKv {
-    pub(crate) key: Text,
-    pub(crate) values: [Text; MAX_VALUES],
-    pub(crate) n_values: c_int,
+/// A key of a selector's map and the values the node may have for it.
+#[derive(Clone, Default)]
+pub(crate) struct TreeSelectorKv {
+    pub(crate) key: Vec<u8>,
+    pub(crate) values: Vec<Vec<u8>>,
 }
 
-/// `struct tree_selector`, whose pairs come from the xmalloc family.
-#[repr(C)]
-pub struct TreeSelector {
-    pub(crate) kernel_release_prefix: [Text; MAX_VALUES],
-    pub(crate) n_kernel_release_prefix: c_int,
-    pub(crate) kernel_build_id: [Text; MAX_VALUES],
-    pub(crate) n_kernel_build_id: c_int,
-    pub(crate) architecture: [Text; MAX_VALUES],
-    pub(crate) n_architecture: c_int,
-    pub(crate) kconfig: *mut TreeSelectorKv,
-    pub(crate) n_kconfig: c_int,
-    pub(crate) labels: *mut TreeSelectorKv,
-    pub(crate) n_labels: c_int,
+/// The two maps of a selector.
+#[derive(Clone, Copy)]
+pub(crate) enum SelectorMap {
+    Kconfig,
+    Labels,
 }
 
-/// `struct tree_artifact`.
-#[repr(C)]
-pub struct TreeArtifact {
+// The strings of the records below stay in fixed arrays, NUL-terminated:
+// they are the rooms the JSON reader decodes each into, and it refuses a
+// string too long for its room.
+
+/// The artifact an operation's upatch is published as.
+#[derive(Clone)]
+pub(crate) struct TreeArtifact {
     pub(crate) repository: [u8; 512],
     pub(crate) manifest_digest: [u8; 128],
     pub(crate) layer_digest: [u8; 128],
     pub(crate) payload_sha256: [u8; 128],
 }
 
-/// `struct tree_operation`.
-#[repr(C)]
-pub struct TreeOperation {
+/// An operation of the tree: the upatch it adds or deletes, and on which
+/// nodes.
+#[derive(Clone)]
+pub(crate) struct TreeOperation {
     pub(crate) seq: i64,
     pub(crate) op: [u8; 16],
     pub(crate) id: Text,
@@ -135,13 +135,10 @@ pub struct TreeOperation {
     pub(crate) operation_digest: [u8; 128],
 }
 
-/// `struct tree_publication`, whose operations come from the xmalloc
-/// family.
-#[repr(C)]
-pub struct TreePublication {
-    pub(crate) schema: c_int,
+/// A publication: one segment of the tree, its operations in order.
+pub(crate) struct TreePublication {
+    pub(crate) schema: i64,
     pub(crate) tree_id: Text,
-    _pad: [u8; 4],
     pub(crate) generation: i64,
     pub(crate) parent_manifest_digest: [u8; 128],
     pub(crate) base_seq: i64,
@@ -149,9 +146,7 @@ pub struct TreePublication {
     /// at the base.
     pub(crate) segment_manifest_digest: [u8; 128],
     pub(crate) history_root: [u8; 65],
-    pub(crate) operations: *mut TreeOperation,
-    pub(crate) operations_capacity: c_int,
-    pub(crate) n_operations: c_int,
+    pub(crate) operations: Vec<TreeOperation>,
     pub(crate) head_seq: i64,
 }
 
@@ -184,341 +179,145 @@ impl TreeState {
     }
 }
 
+/// `struct tree_kv`.
+#[repr(C)]
+pub struct TreeKv {
+    pub(crate) key: Text,
+    pub(crate) value: Text,
+}
+
+const _: () = assert!(size_of::<TreeKv>() == 512);
+const _: () = assert!(size_of::<TreePending>() == 392);
+const _: () = assert!(size_of::<TreeState>() == 560);
+
 /// What a publisher adds to the operation of an index, into its open
 /// object: the fixes, which no node reads.
 pub(crate) type Extra<'a> = &'a mut dyn FnMut(&mut JsonEmit, usize) -> c_int;
 
-const _: () = assert!(size_of::<TreeKv>() == 512);
-const _: () = assert!(size_of::<TreeSelectorKv>() == 4356);
-const _: () = assert!(size_of::<TreeSelector>() == 12336);
-const _: () = assert!(size_of::<TreeOperation>() == 13640);
-const _: () = assert!(size_of::<TreePublication>() == 632);
-const _: () = assert!(size_of::<TreePending>() == 392);
-const _: () = assert!(size_of::<TreeState>() == 560);
-
-/// How many of the `cap` entries of a selector array its count `n`
-/// stands for: none below one, and no more than the array holds.
-pub(crate) fn count(n: c_int, cap: usize) -> usize {
-    usize::try_from(n).map_or(0, |n| n.min(cap))
-}
-
-/// The pairs a selector holds at `kvs`, as many as its count `n` says up
-/// to `cap`.
-///
-/// # Safety
-///
-/// `kvs` is NULL or points to the pairs of a live selector, at least as
-/// many as `n` and `cap` allow.
-pub(crate) unsafe fn pairs<'a>(
-    kvs: *const TreeSelectorKv,
-    n: c_int,
-    cap: usize,
-) -> &'a [TreeSelectorKv] {
-    if kvs.is_null() {
-        return &[];
+/// `item` added to `v` of at most `max`: -E2BIG for a full one, or
+/// -ENOMEM.
+fn push_within<T>(v: &mut Vec<T>, item: T, max: usize) -> Result<(), c_int> {
+    if v.len() >= max {
+        return Err(-E2BIG);
     }
-    // SAFETY: the caller's pairs.
-    unsafe { ffi::slice(kvs, count(n, cap)) }
-}
-
-/// The values a list holds, as many as its count says.
-fn listed(values: &[Text], n: c_int) -> impl Iterator<Item = &[u8]> {
-    values[..count(n, values.len())].iter().map(|v| cstr(v))
+    v.try_reserve(1).map_err(|_| -ENOMEM)?;
+    v.push(item);
+    Ok(())
 }
 
 impl TreeSelector {
     /// The three lists in the canonical form's order, with their keys.
-    fn lists(&self) -> [(&'static [u8], &[Text], c_int); 3] {
+    fn lists(&self) -> [(&'static [u8], &[Vec<u8>]); 3] {
         [
-            (b"architecture", &self.architecture, self.n_architecture),
-            (
-                b"kernel_build_id",
-                &self.kernel_build_id,
-                self.n_kernel_build_id,
-            ),
-            (
-                b"kernel_release_prefix",
-                &self.kernel_release_prefix,
-                self.n_kernel_release_prefix,
-            ),
+            (b"architecture", &self.architecture),
+            (b"kernel_build_id", &self.kernel_build_id),
+            (b"kernel_release_prefix", &self.kernel_release_prefix),
         ]
     }
 
-    /// # Safety
-    ///
-    /// The selector's pairs are as its counts say.
-    unsafe fn kconfig(&self) -> &[TreeSelectorKv] {
-        // SAFETY: the caller's selector.
-        unsafe { pairs(self.kconfig, self.n_kconfig, usize::MAX) }
+    /// Whether it names nothing: the tree's explicit wildcard.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.kernel_release_prefix.is_empty()
+            && self.kernel_build_id.is_empty()
+            && self.architecture.is_empty()
+            && self.kconfig.is_empty()
+            && self.labels.is_empty()
     }
 
-    /// # Safety
-    ///
-    /// The selector's pairs are as its counts say.
-    unsafe fn labels(&self) -> &[TreeSelectorKv] {
-        // SAFETY: the caller's selector.
-        unsafe { pairs(self.labels, self.n_labels, usize::MAX) }
+    /// The pair of `key`, up to its NUL, and `values` added to the map
+    /// `map`: -EINVAL for a key it holds, -E2BIG past the most pairs it
+    /// takes, or -ENOMEM.
+    pub(crate) fn pair_add(
+        &mut self,
+        map: SelectorMap,
+        key: &[u8],
+        values: Vec<Vec<u8>>,
+    ) -> Result<(), c_int> {
+        let (pairs, max) = match map {
+            SelectorMap::Kconfig => (&mut self.kconfig, MAX_KCONFIG),
+            SelectorMap::Labels => (&mut self.labels, MAX_LABELS),
+        };
+
+        if pairs.iter().any(|kv| kv.key == key) {
+            return Err(-EINVAL);
+        }
+        let key = cstr(key).to_vec();
+        push_within(pairs, TreeSelectorKv { key, values }, max)
+    }
+}
+
+impl Default for TreeArtifact {
+    fn default() -> Self {
+        TreeArtifact {
+            repository: [0; 512],
+            manifest_digest: [0; 128],
+            layer_digest: [0; 128],
+            payload_sha256: [0; 128],
+        }
+    }
+}
+
+impl Default for TreeOperation {
+    fn default() -> Self {
+        TreeOperation {
+            seq: 0,
+            op: [0; 16],
+            id: [0; STRING_MAX],
+            selector: TreeSelector::default(),
+            artifact: TreeArtifact::default(),
+            operation_digest: [0; 128],
+        }
+    }
+}
+
+impl Default for TreePublication {
+    fn default() -> Self {
+        TreePublication {
+            schema: 0,
+            tree_id: [0; STRING_MAX],
+            generation: 0,
+            parent_manifest_digest: [0; 128],
+            base_seq: 0,
+            segment_manifest_digest: [0; 128],
+            history_root: [0; 65],
+            operations: Vec::new(),
+            head_seq: 0,
+        }
     }
 }
 
 impl TreePublication {
-    /// # Safety
-    ///
-    /// The publication holds the operations its count says.
-    pub(crate) unsafe fn operations(&self) -> &[TreeOperation] {
-        if self.operations.is_null() {
-            return &[];
-        }
-        // SAFETY: the caller's publication.
-        unsafe { ffi::slice(self.operations, count(self.n_operations, usize::MAX)) }
+    /// `op` appended: -E2BIG past MAX_OPS operations, or -ENOMEM.
+    pub(crate) fn append(&mut self, op: TreeOperation) -> Result<(), c_int> {
+        push_within(&mut self.operations, op, MAX_OPS)
     }
 }
 
-/// A new zeroed pair after the `n` at `kvs`, of at most `max`: the pair,
-/// or -E2BIG or -ENOMEM.
-///
-/// # Safety
-///
-/// `kvs` and `n` are a selector's pairs from the xmalloc family.
-unsafe fn kv_add(
-    kvs: *mut *mut TreeSelectorKv,
-    n: *mut c_int,
-    max: c_int,
-) -> Result<*mut TreeSelectorKv, c_int> {
-    // SAFETY: the caller's pairs.
-    let (old, held) = unsafe { (*kvs, *n) };
-
-    if held >= max {
-        return Err(-E2BIG);
-    }
-    let held = usize::try_from(held).map_err(|_| -ENOMEM)?;
-    // SAFETY: xreallocarray() hands back the held pairs and a zeroed one
-    // after them in a new block, scrubbing and freeing the old one.
-    let grown: *mut TreeSelectorKv =
-        unsafe { xreallocarray(old.cast(), held, held + 1, size_of::<TreeSelectorKv>()) }.cast();
-    if grown.is_null() {
-        return Err(-ENOMEM);
-    }
-    // SAFETY: the caller's pairs, now one more, the last of them zeroed.
-    unsafe {
-        *kvs = grown;
-        *n += 1;
-        Ok(grown.add(held))
-    }
-}
-
-/// A copy of the `n` pairs at `src`, or NULL for none.
-///
-/// # Safety
-///
-/// `src` holds `n` pairs.
-unsafe fn pairs_dup(src: *const TreeSelectorKv, n: c_int) -> Result<*mut TreeSelectorKv, c_int> {
-    if n == 0 {
-        return Ok(ptr::null_mut());
-    }
-    let n = usize::try_from(n).map_err(|_| -ENOMEM)?;
-    // SAFETY: xcalloc() takes any count.
-    let dst: *mut TreeSelectorKv = unsafe { xcalloc(n, size_of::<TreeSelectorKv>()) }.cast();
-    if dst.is_null() {
-        return Err(-ENOMEM);
-    }
-    // SAFETY: n pairs at src and room for them at dst.
-    unsafe { ptr::copy_nonoverlapping(src, dst, n) };
-    Ok(dst)
-}
-
-/// Releases a selector's pairs, leaving it with none.
-fn selector_free(s: &mut TreeSelector) {
-    // SAFETY: a selector's pairs come from the xmalloc family, as many as
-    // its counts say.
-    unsafe {
-        xfree(
-            s.kconfig.cast(),
-            count(s.n_kconfig, usize::MAX) * size_of::<TreeSelectorKv>(),
-        );
-        xfree(
-            s.labels.cast(),
-            count(s.n_labels, usize::MAX) * size_of::<TreeSelectorKv>(),
-        );
-    }
-    s.kconfig = ptr::null_mut();
-    s.labels = ptr::null_mut();
-    s.n_kconfig = 0;
-    s.n_labels = 0;
-}
-
-/// Fills `dst` with `src` and copies of its pairs; a copy that fails
-/// holds none, and `src` keeps its own.
-///
-/// # Safety
-///
-/// `src` is a selector whose pairs are as its counts say, and `dst` room
-/// for one, which may be `src` itself.
-unsafe fn selector_copy(dst: *mut TreeSelector, src: *const TreeSelector) -> c_int {
-    // SAFETY: the caller's selectors; src is read whole before dst is
-    // written, and dst gets no pair of src's before its own copies.
-    unsafe {
-        let (kconfig, n_kconfig) = ((*src).kconfig, (*src).n_kconfig);
-        let (labels, n_labels) = ((*src).labels, (*src).n_labels);
-
-        ptr::copy(src, dst, 1);
-        (*dst).kconfig = ptr::null_mut();
-        (*dst).labels = ptr::null_mut();
-        let copied = pairs_dup(kconfig, n_kconfig).and_then(|kvs| {
-            (*dst).kconfig = kvs;
-            pairs_dup(labels, n_labels).map(|kvs| (*dst).labels = kvs)
-        });
-        if copied.is_err() {
-            selector_free(&mut *dst);
-            return -ENOMEM;
-        }
-    }
-    0
-}
-
-pub(crate) fn publication_free(p: &mut TreePublication) {
-    let held = count(p.operations_capacity, usize::MAX);
-
-    if !p.operations.is_null() {
-        // A slot past n_operations may hold an operation that failed to
-        // parse.
-        for i in 0..held {
-            // SAFETY: the publication's slots, up to its capacity.
-            selector_free(unsafe { &mut (*p.operations.add(i)).selector });
-        }
-    }
-    // SAFETY: the operations come from the xmalloc family, as many as
-    // the capacity says.
-    unsafe { xfree(p.operations.cast(), held * size_of::<TreeOperation>()) };
-    // SAFETY: an all-zero publication holds nothing.
-    *p = unsafe { mem::zeroed() };
-}
-
-/// Room for one more operation: the slots double from 16 up to MAX_OPS.
-fn operations_reserve(p: &mut TreePublication) -> Result<(), c_int> {
-    let old = p.operations_capacity;
-
-    if p.n_operations >= MAX_OPS as c_int {
-        return Err(-E2BIG);
-    }
-    if p.n_operations < old {
-        return Ok(());
-    }
-    let new = if old != 0 { old.saturating_mul(2) } else { 16 }.min(MAX_OPS as c_int);
-    let (Ok(old_n), Ok(new_n)) = (usize::try_from(old), usize::try_from(new)) else {
-        return Err(-ENOMEM);
-    };
-    // SAFETY: the publication's slots from the xmalloc family, grown into
-    // a new zeroed block.
-    let grown = unsafe {
-        xreallocarray(
-            p.operations.cast(),
-            old_n,
-            new_n,
-            size_of::<TreeOperation>(),
-        )
-    };
-    if grown.is_null() {
-        return Err(-ENOMEM);
-    }
-    p.operations = grown.cast();
-    p.operations_capacity = new;
-    Ok(())
-}
-
-/// Appends a copy of `op`, its pairs included.
-///
-/// # Safety
-///
-/// `op` is an operation whose selector's pairs are as its counts say.
-unsafe fn publication_append(p: &mut TreePublication, op: *const TreeOperation) -> c_int {
-    if let Err(err) = operations_reserve(p) {
-        return err;
-    }
-    let slot = count(p.n_operations, usize::MAX);
-    // SAFETY: room for the slot past the operations, and the caller's
-    // operation; the selector copy owns its pairs or is zeroed whole.
-    unsafe {
-        let dst = p.operations.add(slot);
-
-        ptr::copy_nonoverlapping(op, dst, 1);
-        let ret = selector_copy(&raw mut (*dst).selector, &raw const (*op).selector);
-        if ret != 0 {
-            ptr::write_bytes(dst, 0, 1);
-            return ret;
-        }
-    }
-    p.n_operations += 1;
-    0
-}
-
-/// What tree_parse() reads into: the publication, its schema version,
-/// and before the publication takes it the operation in hand, the string
+/// What the parse reads into: the publication, its schema version, and
+/// before the publication takes it the operation in hand, the string
 /// just read and the values of a pair.
-struct Reader<'p> {
-    publication: &'p mut TreePublication,
+struct Reader {
+    publication: TreePublication,
     schema: i64,
     op: TreeOperation,
     value: Text,
-    pair: [Text; MAX_VALUES],
-    n_pair: c_int,
+    pair: Vec<Vec<u8>>,
 }
 
-/// The string just read joins the list of `n` `values`.
-fn list_add(values: &mut [Text; MAX_VALUES], n: &mut c_int, value: &Text) -> Result<(), c_int> {
-    let held = count(*n, MAX_VALUES);
-
-    if *n >= MAX_VALUES as c_int {
-        return Err(-E2BIG);
-    }
-    let _ = strscpy(&mut values[held], cstr(value));
-    *n += 1;
-    Ok(())
+/// The string just read joins the list `values`.
+fn list_add(values: &mut Vec<Vec<u8>>, value: &Text) -> Result<(), c_int> {
+    push_within(values, cstr(value).to_vec(), MAX_VALUES)
 }
-
-/// A map of a selector: where its pairs and their count are, and the
-/// most it holds.
-struct Map {
-    pairs: fn(&mut TreeSelector) -> (&mut *mut TreeSelectorKv, &mut c_int),
-    max: c_int,
-}
-
-const KCONFIG: Map = Map {
-    pairs: |s| (&mut s.kconfig, &mut s.n_kconfig),
-    max: MAX_KCONFIG as c_int,
-};
-
-const LABELS: Map = Map {
-    pairs: |s| (&mut s.labels, &mut s.n_labels),
-    max: MAX_LABELS as c_int,
-};
 
 /// Each key of a kconfig or labels map once, with a list of one value or
 /// more: a key twice would leave its order in the canonical form to the
 /// sort.
-fn map_pair(r: &mut Reader, map: &Map, key: &CStr) -> Result<(), c_int> {
-    let key = key.to_bytes();
-    let (kvs, n) = (map.pairs)(&mut r.op.selector);
-
-    if r.n_pair == 0 {
+fn map_pair(r: &mut Reader, map: SelectorMap, key: &CStr) -> Result<(), c_int> {
+    if r.pair.is_empty() {
         return Err(-EINVAL);
     }
-    // SAFETY: the selector's pairs, as many as its count says.
-    if unsafe { pairs(*kvs, *n, usize::MAX) }
-        .iter()
-        .any(|kv| cstr(&kv.key) == key)
-    {
-        return Err(-EINVAL);
-    }
-    // SAFETY: the selector's pairs, from the xmalloc family.
-    let kv = unsafe { kv_add(kvs, n, map.max) }?;
-    // SAFETY: the pair kv_add() added, zeroed, which the selector holds.
-    let kv = unsafe { &mut *kv };
-    let _ = strscpy(&mut kv.key, key);
-    kv.values = r.pair;
-    kv.n_values = r.n_pair;
-    r.n_pair = 0;
-    Ok(())
+    let values = mem::take(&mut r.pair);
+    r.op.selector.pair_add(map, key.to_bytes(), values)
 }
 
 /// The publication takes the operation once it is whole, with its pairs;
@@ -544,152 +343,122 @@ fn take_operation(r: &mut Reader, lists: &[JsonField<'_, Reader>]) -> Result<(),
         return Err(-EINVAL);
     }
     // A selector list is one value or more, never [].
-    let counts = [
-        s.n_kernel_release_prefix,
-        s.n_kernel_build_id,
-        s.n_architecture,
+    let lens = [
+        s.kernel_release_prefix.len(),
+        s.kernel_build_id.len(),
+        s.architecture.len(),
     ];
-    for (n, list) in counts.into_iter().zip(lists) {
+    for (n, list) in lens.into_iter().zip(lists) {
         if list.seen() && n == 0 {
             return Err(-EINVAL);
         }
     }
-    let p = &mut *r.publication;
-    operations_reserve(p)?;
-    // SAFETY: the slot past the operations, which operations_reserve()
-    // made room for; the operation moves there with its pairs.
-    unsafe {
-        ptr::copy_nonoverlapping(
-            &raw const r.op,
-            p.operations.add(count(p.n_operations, usize::MAX)),
-            1,
-        )
-    };
-    p.n_operations += 1;
-    // SAFETY: an all-zero operation holds nothing.
-    unsafe { ptr::write_bytes(&raw mut r.op, 0, 1) };
-    Ok(())
+    let op = mem::take(&mut r.op);
+    r.publication.append(op)
 }
 
-/// The publication the JSON at `body` describes, into `out`.
-///
-/// # Safety
-///
-/// `out` is room for a publication, which the parse owns.
-unsafe fn parse(body: &[u8], out: *mut TreePublication) -> c_int {
-    // SAFETY: the caller's room for a publication.
-    let p = unsafe { &mut *out };
-    let mut reader = Box::new(Reader {
-        publication: &mut *p,
-        schema: 0,
-        // SAFETY: an all-zero operation holds nothing.
-        op: unsafe { mem::zeroed() },
-        value: [0; STRING_MAX],
-        pair: [[0; STRING_MAX]; MAX_VALUES],
-        n_pair: 0,
-    });
-    let value = [JsonField::string(c"", |r: &mut Reader| &mut r.value)];
-    let add_pair_value = |r: &mut Reader| list_add(&mut r.pair, &mut r.n_pair, &r.value);
-    let pair_value = JsonField::array(c"", &value, &add_pair_value);
-    let add_release = |r: &mut Reader| {
-        let s = &mut r.op.selector;
-        list_add(
-            &mut s.kernel_release_prefix,
-            &mut s.n_kernel_release_prefix,
-            &r.value,
-        )
-    };
-    let add_build_id = |r: &mut Reader| {
-        let s = &mut r.op.selector;
-        list_add(&mut s.kernel_build_id, &mut s.n_kernel_build_id, &r.value)
-    };
-    let add_architecture = |r: &mut Reader| {
-        let s = &mut r.op.selector;
-        list_add(&mut s.architecture, &mut s.n_architecture, &r.value)
-    };
-    let kconfig_pair = |r: &mut Reader, key: &CStr| map_pair(r, &KCONFIG, key);
-    let label_pair = |r: &mut Reader, key: &CStr| map_pair(r, &LABELS, key);
-    let selector = [
-        JsonField::array(c"kernel_release_prefix", &value, &add_release),
-        JsonField::array(c"kernel_build_id", &value, &add_build_id),
-        JsonField::array(c"architecture", &value, &add_architecture),
-        JsonField::map(c"kconfig", &pair_value, &kconfig_pair),
-        JsonField::map(c"kernel_config", &pair_value, &kconfig_pair),
-        JsonField::map(c"labels", &pair_value, &label_pair),
-    ];
-    let artifact = [
-        JsonField::string(c"repository", |r: &mut Reader| {
-            &mut r.op.artifact.repository
-        }),
-        JsonField::string(c"manifest_digest", |r| &mut r.op.artifact.manifest_digest),
-        JsonField::string(c"layer_digest", |r| &mut r.op.artifact.layer_digest),
-        JsonField::string(c"payload_sha256", |r| &mut r.op.artifact.payload_sha256),
-    ];
-    let operation = [
-        JsonField::int(c"seq", |r: &mut Reader| &mut r.op.seq),
-        JsonField::string(c"op", |r| &mut r.op.op),
-        JsonField::string(c"id", |r| &mut r.op.id),
-        JsonField::object(c"selector", &selector),
-        JsonField::object(c"artifact", &artifact),
-        JsonField::string(c"operation_digest", |r| &mut r.op.operation_digest),
-    ];
-    let take = |r: &mut Reader| take_operation(r, &selector[..3]);
-    let base = [
-        JsonField::int(c"seq", |r: &mut Reader| &mut r.publication.base_seq),
-        JsonField::string(c"segment_manifest_digest", |r| {
-            &mut r.publication.segment_manifest_digest
-        }),
-        JsonField::string(c"history_root", |r| &mut r.publication.history_root),
-    ];
-    let head = [JsonField::int(c"seq", |r: &mut Reader| {
-        &mut r.publication.head_seq
-    })];
-    let root = [
-        JsonField::int(c"schema", |r: &mut Reader| &mut r.schema),
-        JsonField::string(c"tree_id", |r| &mut r.publication.tree_id),
-        JsonField::int(c"generation", |r| &mut r.publication.generation),
-        JsonField::string(c"parent_manifest_digest", |r| {
-            &mut r.publication.parent_manifest_digest
-        }),
-        JsonField::object(c"base", &base),
-        JsonField::array(c"operations", &operation, &take),
-        JsonField::object(c"head", &head),
-    ];
+impl TreePublication {
+    /// The publication the JSON `body` describes: -EINVAL for one that
+    /// is none, -E2BIG for one past a limit, or -ENOMEM.
+    pub(crate) fn parse(body: &[u8]) -> Result<Self, c_int> {
+        if body.len() > MAX_BYTES {
+            return Err(-EINVAL);
+        }
+        let mut reader = Reader {
+            publication: TreePublication::default(),
+            schema: 0,
+            op: TreeOperation::default(),
+            value: [0; STRING_MAX],
+            pair: Vec::new(),
+        };
+        let value = [JsonField::string(c"", |r: &mut Reader| &mut r.value)];
+        let add_pair_value = |r: &mut Reader| list_add(&mut r.pair, &r.value);
+        let pair_value = JsonField::array(c"", &value, &add_pair_value);
+        let add_release =
+            |r: &mut Reader| list_add(&mut r.op.selector.kernel_release_prefix, &r.value);
+        let add_build_id = |r: &mut Reader| list_add(&mut r.op.selector.kernel_build_id, &r.value);
+        let add_architecture = |r: &mut Reader| list_add(&mut r.op.selector.architecture, &r.value);
+        let kconfig_pair = |r: &mut Reader, key: &CStr| map_pair(r, SelectorMap::Kconfig, key);
+        let label_pair = |r: &mut Reader, key: &CStr| map_pair(r, SelectorMap::Labels, key);
+        let selector = [
+            JsonField::array(c"kernel_release_prefix", &value, &add_release),
+            JsonField::array(c"kernel_build_id", &value, &add_build_id),
+            JsonField::array(c"architecture", &value, &add_architecture),
+            JsonField::map(c"kconfig", &pair_value, &kconfig_pair),
+            JsonField::map(c"kernel_config", &pair_value, &kconfig_pair),
+            JsonField::map(c"labels", &pair_value, &label_pair),
+        ];
+        let artifact = [
+            JsonField::string(c"repository", |r: &mut Reader| {
+                &mut r.op.artifact.repository
+            }),
+            JsonField::string(c"manifest_digest", |r| &mut r.op.artifact.manifest_digest),
+            JsonField::string(c"layer_digest", |r| &mut r.op.artifact.layer_digest),
+            JsonField::string(c"payload_sha256", |r| &mut r.op.artifact.payload_sha256),
+        ];
+        let operation = [
+            JsonField::int(c"seq", |r: &mut Reader| &mut r.op.seq),
+            JsonField::string(c"op", |r| &mut r.op.op),
+            JsonField::string(c"id", |r| &mut r.op.id),
+            JsonField::object(c"selector", &selector),
+            JsonField::object(c"artifact", &artifact),
+            JsonField::string(c"operation_digest", |r| &mut r.op.operation_digest),
+        ];
+        let take = |r: &mut Reader| take_operation(r, &selector[..3]);
+        let base = [
+            JsonField::int(c"seq", |r: &mut Reader| &mut r.publication.base_seq),
+            JsonField::string(c"segment_manifest_digest", |r| {
+                &mut r.publication.segment_manifest_digest
+            }),
+            JsonField::string(c"history_root", |r| &mut r.publication.history_root),
+        ];
+        let head = [JsonField::int(c"seq", |r: &mut Reader| {
+            &mut r.publication.head_seq
+        })];
+        let root = [
+            JsonField::int(c"schema", |r: &mut Reader| &mut r.schema),
+            JsonField::string(c"tree_id", |r| &mut r.publication.tree_id),
+            JsonField::int(c"generation", |r| &mut r.publication.generation),
+            JsonField::string(c"parent_manifest_digest", |r| {
+                &mut r.publication.parent_manifest_digest
+            }),
+            JsonField::object(c"base", &base),
+            JsonField::array(c"operations", &operation, &take),
+            JsonField::object(c"head", &head),
+        ];
 
-    let mut ret = parse_schema(body, &root, &mut *reader).err().unwrap_or(0);
-    let required = [
-        &root[0], &root[2], &root[4], &base[0], &root[5], &root[6], &head[0],
-    ];
-    if ret == 0 && !required.iter().all(|f| f.seen()) {
-        ret = -EINVAL;
+        let mut ret = parse_schema(body, &root, &mut reader).err().unwrap_or(0);
+        let required = [
+            &root[0], &root[2], &root[4], &base[0], &root[5], &root[6], &head[0],
+        ];
+        if ret == 0 && !required.iter().all(|f| f.seen()) {
+            ret = -EINVAL;
+        }
+        if ret != 0 && ret != -E2BIG && ret != -ENOMEM {
+            ret = -EINVAL;
+        }
+        let mut p = reader.publication;
+        p.schema = reader.schema;
+        if ret == 0
+            && (p.schema != 1
+                || p.tree_id[0] == 0
+                || p.generation < 0
+                || p.generation == i64::MAX
+                || p.base_seq < 0
+                || p.head_seq < p.base_seq
+                || p.head_seq == i64::MAX)
+        {
+            ret = -EINVAL;
+        }
+        // Every operation's seq is positive, so seq - 1 cannot overflow.
+        if ret == 0 && p.operations.windows(2).any(|w| w[1].seq - 1 != w[0].seq) {
+            ret = -EINVAL;
+        }
+        if ret != 0 {
+            return Err(ret);
+        }
+        Ok(p)
     }
-    let schema = reader.schema;
-    selector_free(&mut reader.op.selector);
-    if ret != 0 && ret != -E2BIG && ret != -ENOMEM {
-        ret = -EINVAL;
-    }
-    if ret == 0
-        && (schema != 1
-            || p.tree_id[0] == 0
-            || p.generation < 0
-            || p.generation == i64::MAX
-            || p.base_seq < 0
-            || p.head_seq < p.base_seq
-            || p.head_seq == i64::MAX)
-    {
-        ret = -EINVAL;
-    }
-    p.schema = schema as c_int;
-    // SAFETY: the operations the parse kept.
-    let ops = unsafe { p.operations() };
-    // Every operation's seq is positive, so seq - 1 cannot overflow.
-    if ret == 0 && ops.windows(2).any(|w| w[1].seq - 1 != w[0].seq) {
-        ret = -EINVAL;
-    }
-    if ret != 0 {
-        publication_free(p);
-    }
-    ret
 }
 
 /// A tree string holds no control character: the node cannot compute the
@@ -699,26 +468,21 @@ fn text_ok(s: &[u8]) -> bool {
     cstr(s).iter().all(|&c| c >= 0x20)
 }
 
-/// # Safety
-///
-/// The operation's selector's pairs are as its counts say.
-unsafe fn operation_text(op: &TreeOperation) -> bool {
+fn operation_text(op: &TreeOperation) -> bool {
     let s = &op.selector;
     let a = &op.artifact;
     let kvs_ok = |kvs: &[TreeSelectorKv]| {
         kvs.iter()
-            .all(|kv| text_ok(&kv.key) && listed(&kv.values, kv.n_values).all(text_ok))
+            .all(|kv| text_ok(&kv.key) && kv.values.iter().all(|v| text_ok(v)))
     };
 
-    // SAFETY: the caller's selector.
-    let (kconfig, labels) = unsafe { (s.kconfig(), s.labels()) };
     text_ok(&op.op)
         && text_ok(&op.id)
         && s.lists()
             .iter()
-            .all(|(_, values, n)| listed(values, *n).all(text_ok))
-        && kvs_ok(kconfig)
-        && kvs_ok(labels)
+            .all(|(_, values)| values.iter().all(|v| text_ok(v)))
+        && kvs_ok(&s.kconfig)
+        && kvs_ok(&s.labels)
         && [
             &a.repository[..],
             &a.manifest_digest,
@@ -730,28 +494,28 @@ unsafe fn operation_text(op: &TreeOperation) -> bool {
 }
 
 /// A list of the canonical selector, when it has values.
-fn emit_list(e: &mut JsonEmit, key: &[u8], values: &[Text], n: c_int) {
-    if n == 0 {
+fn emit_list(e: &mut JsonEmit, key: &[u8], values: &[Vec<u8>]) {
+    if values.is_empty() {
         return;
     }
     e.arr_open(key);
-    for value in listed(values, n) {
+    for value in values {
         e.str(value);
     }
     e.arr_close();
 }
 
 /// A map of the canonical selector, its keys in order, when it has any.
-fn emit_pairs(e: &mut JsonEmit, key: &[u8], kvs: &[TreeSelectorKv], n: c_int) {
-    if n == 0 {
+fn emit_pairs(e: &mut JsonEmit, key: &[u8], kvs: &[TreeSelectorKv]) {
+    if kvs.is_empty() {
         return;
     }
     let mut sorted: Vec<&TreeSelectorKv> = kvs.iter().collect();
-    sorted.sort_by(|a, b| cstr(&a.key).cmp(cstr(&b.key)));
+    sorted.sort_by(|a, b| a.key.cmp(&b.key));
     e.obj_open_key(key);
     for kv in sorted {
-        e.arr_open(cstr(&kv.key));
-        for value in listed(&kv.values, kv.n_values) {
+        e.arr_open(&kv.key);
+        for value in &kv.values {
             e.str(value);
         }
         e.arr_close();
@@ -762,24 +526,18 @@ fn emit_pairs(e: &mut JsonEmit, key: &[u8], kvs: &[TreeSelectorKv], n: c_int) {
 /// The canonical selector object: keys in lexicographic order, each list
 /// in the publisher's order. Targets recompute operation digests from
 /// this form, so publisher and consumer share one emitter.
-///
-/// # Safety
-///
-/// The selector's pairs are as its counts say.
-unsafe fn emit_selector(e: &mut JsonEmit, s: &TreeSelector) -> Result<(), c_int> {
-    if s.n_kconfig > MAX_KCONFIG as c_int || s.n_labels > MAX_LABELS as c_int {
+fn emit_selector(e: &mut JsonEmit, s: &TreeSelector) -> Result<(), c_int> {
+    if s.kconfig.len() > MAX_KCONFIG || s.labels.len() > MAX_LABELS {
         return Err(-E2BIG);
     }
     let [arch, build_id, release] = s.lists();
 
     e.obj_open_key(b"selector");
-    emit_list(e, arch.0, arch.1, arch.2);
-    // SAFETY: the caller's selector.
-    emit_pairs(e, b"kconfig", unsafe { s.kconfig() }, s.n_kconfig);
-    emit_list(e, build_id.0, build_id.1, build_id.2);
-    emit_list(e, release.0, release.1, release.2);
-    // SAFETY: the caller's selector.
-    emit_pairs(e, b"labels", unsafe { s.labels() }, s.n_labels);
+    emit_list(e, arch.0, arch.1);
+    emit_pairs(e, b"kconfig", &s.kconfig);
+    emit_list(e, build_id.0, build_id.1);
+    emit_list(e, release.0, release.1);
+    emit_pairs(e, b"labels", &s.labels);
     e.obj_close();
     Ok(())
 }
@@ -794,49 +552,43 @@ fn emit_artifact(e: &mut JsonEmit, a: &TreeArtifact) {
 }
 
 /// The five keys the operation digest covers, into an open object.
-///
-/// # Safety
-///
-/// The operation's selector's pairs are as its counts say.
-unsafe fn emit_operation_keys(e: &mut JsonEmit, op: &TreeOperation) -> c_int {
-    // SAFETY: the caller's operation.
-    if !unsafe { operation_text(op) } {
-        return -EINVAL;
+fn emit_operation_keys(e: &mut JsonEmit, op: &TreeOperation) -> Result<(), c_int> {
+    if !operation_text(op) {
+        return Err(-EINVAL);
     }
     e.kv_int(b"seq", op.seq);
     e.kv_string(b"op", cstr(&op.op));
     e.kv_string(b"id", cstr(&op.id));
-    // SAFETY: the caller's operation.
-    if let Err(err) = unsafe { emit_selector(e, &op.selector) } {
-        return err;
-    }
+    emit_selector(e, &op.selector)?;
     emit_artifact(e, &op.artifact);
-    0
+    Ok(())
 }
 
-/// # Safety
-///
-/// The operation's selector's pairs are as its counts say.
-unsafe fn emit_operation(
+/// What the emitter has failed with, if anything.
+fn emitted(e: &JsonEmit) -> Result<(), c_int> {
+    match e.err() {
+        0 => Ok(()),
+        err => Err(err),
+    }
+}
+
+fn emit_operation(
     e: &mut JsonEmit,
     op: &TreeOperation,
     index: usize,
     extra: &mut Option<Extra<'_>>,
-) -> c_int {
+) -> Result<(), c_int> {
     e.obj_open();
-    // SAFETY: the caller's operation.
-    let mut ret = unsafe { emit_operation_keys(e, op) };
-    if ret == 0 {
-        if let Some(extra) = extra {
-            ret = extra(e, index);
+    emit_operation_keys(e, op)?;
+    if let Some(extra) = extra {
+        match extra(e, index) {
+            0 => {}
+            err => return Err(err),
         }
-    }
-    if ret != 0 {
-        return ret;
     }
     e.kv_string(b"operation_digest", cstr(&op.operation_digest));
     e.obj_close();
-    e.err()
+    emitted(e)
 }
 
 /// A zeroed buffer of `n` bytes, or -ENOMEM.
@@ -851,23 +603,16 @@ fn buffer(n: usize) -> Result<Vec<u8>, c_int> {
 /// The operation digest, "sha256:" and 64 hex digits, over the canonical
 /// operation without its digest field: seq, op, id, selector and
 /// artifact.
-///
-/// # Safety
-///
-/// The operation's selector's pairs are as its counts say.
-pub(crate) unsafe fn operation_digest(op: &TreeOperation) -> Result<[u8; 72], c_int> {
+pub(crate) fn operation_digest(op: &TreeOperation) -> Result<[u8; 72], c_int> {
     let mut body = buffer(DIGEST_BODY_MAX)?;
     let mut e = JsonEmit::fixed(&mut body);
     let mut digest = [0; 32];
 
     e.obj_open();
-    // SAFETY: the caller's operation.
-    let ret = unsafe { emit_operation_keys(&mut e, op) };
+    let keys = emit_operation_keys(&mut e, op);
     e.obj_close();
-    let ret = if ret != 0 { ret } else { e.err() };
-    if ret != 0 {
-        return Err(ret);
-    }
+    keys?;
+    emitted(&e)?;
     if sha256_into(e.output(), &mut digest) != 0 {
         return Err(-EIO);
     }
@@ -876,26 +621,19 @@ pub(crate) unsafe fn operation_digest(op: &TreeOperation) -> Result<[u8; 72], c_
 
 /// The publication in the field order every publisher has used: schema,
 /// tree_id, generation, parent_manifest_digest when it names one, base
-/// with its segment keys when it has them, operations, head; in an
-/// xmalloc'd buffer of `.1` bytes holding the `.2` written. `extra`
+/// with its segment keys when it has them, operations, head. `extra`
 /// adds a publisher's keys to each operation.
-///
-/// # Safety
-///
-/// The publication's operations and their pairs are as its counts say.
-pub(crate) unsafe fn emit_publication(
+pub(crate) fn emit_publication(
     p: &TreePublication,
     mut extra: Option<Extra<'_>>,
 ) -> Result<Vec<u8>, c_int> {
-    // SAFETY: the caller's publication.
-    let ops = unsafe { p.operations() };
-    // One past what tree_parse() takes, so that a document past it is
-    // told from one that fills it.
+    // One past what the parse takes, so that a document past it is told
+    // from one that fills it.
     let mut e = JsonEmit::growing(MAX_BYTES + 1);
-    let mut ret = 0;
+    let mut ops = Ok(());
 
     e.obj_open();
-    e.kv_int(b"schema", p.schema.into());
+    e.kv_int(b"schema", p.schema);
     e.kv_string(b"tree_id", cstr(&p.tree_id));
     e.kv_int(b"generation", p.generation);
     if p.parent_manifest_digest[0] != 0 {
@@ -911,10 +649,9 @@ pub(crate) unsafe fn emit_publication(
     }
     e.obj_close();
     e.arr_open(b"operations");
-    for (i, op) in ops.iter().enumerate() {
-        // SAFETY: the caller's operation.
-        ret = unsafe { emit_operation(&mut e, op, i, &mut extra) };
-        if ret != 0 {
+    for (i, op) in p.operations.iter().enumerate() {
+        ops = emit_operation(&mut e, op, i, &mut extra);
+        if ops.is_err() {
             break;
         }
     }
@@ -923,14 +660,10 @@ pub(crate) unsafe fn emit_publication(
     e.kv_int(b"seq", p.head_seq);
     e.obj_close();
     e.obj_close();
-    if ret == 0 {
-        ret = e.err();
-    }
-    if ret == 0 && e.written() > MAX_BYTES {
-        ret = -E2BIG;
-    }
-    if ret != 0 {
-        return Err(ret);
+    ops?;
+    emitted(&e)?;
+    if e.written() > MAX_BYTES {
+        return Err(-E2BIG);
     }
     e.finish()
 }
@@ -955,12 +688,8 @@ pub(crate) fn digest_bytes(text: &[u8]) -> Option<[u8; 32]> {
 
 /// An operation has a positive sequence number, an upatch name, add or
 /// delete, well-formed digests and the operation digest its fields hash
-/// to: 0, -EINVAL, or -EKEYREJECTED for a digest that does not match.
-///
-/// # Safety
-///
-/// The operation's selector's pairs are as its counts say.
-pub(crate) unsafe fn operation_validate(op: &TreeOperation) -> c_int {
+/// to: -EINVAL, or -EKEYREJECTED for a digest that does not match.
+pub(crate) fn operation_validate(op: &TreeOperation) -> Result<(), c_int> {
     let kind = cstr(&op.op);
     let a = &op.artifact;
 
@@ -968,7 +697,7 @@ pub(crate) unsafe fn operation_validate(op: &TreeOperation) -> c_int {
         || !upatch::name_valid(Some(cstr(&op.id)))
         || (kind != b"add" && kind != b"delete")
     {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
     if [
         &op.operation_digest,
@@ -979,13 +708,12 @@ pub(crate) unsafe fn operation_validate(op: &TreeOperation) -> c_int {
     .iter()
     .any(|d| digest_bytes(&d[..]).is_none())
     {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
-    // SAFETY: the caller's operation.
-    match unsafe { operation_digest(op) } {
-        Err(_) => -EINVAL,
-        Ok(expected) if cstr(&op.operation_digest) != cstr(&expected) => -EKEYREJECTED,
-        Ok(_) => 0,
+    match operation_digest(op) {
+        Err(_) => Err(-EINVAL),
+        Ok(expected) if cstr(&op.operation_digest) != cstr(&expected) => Err(-EKEYREJECTED),
+        Ok(_) => Ok(()),
     }
 }
 
@@ -997,7 +725,7 @@ fn base_valid(p: &TreePublication) -> bool {
         0 => p.segment_manifest_digest[0] == 0 && p.history_root[0] == 0,
         b if b < 0 => false,
         _ => {
-            p.n_operations > 0
+            !p.operations.is_empty()
                 && digest_bytes(&p.segment_manifest_digest).is_some()
                 && hex::decode(cstr(&p.history_root), &mut [0; 32]).is_ok()
         }
@@ -1006,54 +734,35 @@ fn base_valid(p: &TreePublication) -> bool {
 
 /// A publication names a well-formed parent digest if any, and its
 /// operations run from base_seq + 1 to head_seq, or head_seq is base_seq
-/// without them, past a base as [`base_valid`] has it: 0 or -EINVAL.
-///
-/// # Safety
-///
-/// The publication's operations are as its count says.
-pub(crate) unsafe fn publication_check(p: &TreePublication) -> c_int {
+/// without them, past a base as [`base_valid`] has it: -EINVAL if not.
+pub(crate) fn publication_check(p: &TreePublication) -> Result<(), c_int> {
     if p.parent_manifest_digest[0] != 0 && digest_bytes(&p.parent_manifest_digest).is_none() {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
     if !base_valid(p) {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
-    // SAFETY: the caller's publication.
-    let ops = unsafe { p.operations() };
-    let runs = match (ops.first(), ops.last()) {
+    let runs = match (p.operations.first(), p.operations.last()) {
         (Some(first), Some(last)) => first.seq == p.base_seq + 1 && p.head_seq == last.seq,
         _ => p.head_seq == p.base_seq,
     };
-    if runs { 0 } else { -EINVAL }
+    if runs { Ok(()) } else { Err(-EINVAL) }
 }
 
 /// What tree sync checks of a publication before it applies anything:
 /// its tree ID is a name the node can record, [`publication_check`], and
-/// [`operation_validate`] of each operation. 0, or the first failure
-/// with the index of the operation that failed, if one did.
-///
-/// # Safety
-///
-/// The publication's operations and their pairs are as its counts say.
-pub(crate) unsafe fn publication_verify(p: &TreePublication) -> Result<(), (c_int, Option<usize>)> {
+/// [`operation_validate`] of each operation. The first failure, with the
+/// index of the operation that failed, if one did.
+pub(crate) fn publication_verify(p: &TreePublication) -> Result<(), (c_int, Option<usize>)> {
     // The node records the tree ID in its state, which takes names
     // alone: one that is not would be applied, measured and logged and
     // then never recorded, failing every later sync.
     if !package_name_ok(cstr(&p.tree_id)) {
         return Err((-EINVAL, None));
     }
-    // SAFETY: the caller's publication.
-    match unsafe { publication_check(p) } {
-        0 => {}
-        err => return Err((err, None)),
-    }
-    // SAFETY: the caller's publication and operations.
-    for (i, op) in unsafe { p.operations() }.iter().enumerate() {
-        // SAFETY: as above.
-        match unsafe { operation_validate(op) } {
-            0 => {}
-            err => return Err((err, Some(i))),
-        }
+    publication_check(p).map_err(|err| (err, None))?;
+    for (i, op) in p.operations.iter().enumerate() {
+        operation_validate(op).map_err(|err| (err, Some(i)))?;
     }
     Ok(())
 }
@@ -1141,161 +850,26 @@ pub(crate) fn walk_within(base_seq: i64, last_seq: i64) -> c_int {
 }
 
 /// The history root at `seq` of a publication [`publication_check`]
-/// takes into `root`: its base's, 32 zero bytes at 0, over the digests
-/// of its operations up to `seq`. -EINVAL for a seq outside base to head
-/// or a malformed root or digest, with `root` as far as it got.
-///
-/// # Safety
-///
-/// The publication's operations are as its count says.
-pub(crate) unsafe fn history_at(p: &TreePublication, seq: i64, root: &mut [u8; 32]) -> c_int {
-    *root = [0; 32];
+/// takes: its base's, 32 zero bytes at 0, over the digests of its
+/// operations up to `seq`. -EINVAL for a seq outside base to head or a
+/// malformed root or digest.
+pub(crate) fn history_at(p: &TreePublication, seq: i64) -> Result<[u8; 32], c_int> {
+    let mut root = [0; 32];
+
     if seq < p.base_seq || seq > p.head_seq {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
-    if p.base_seq != 0 && hex::decode(cstr(&p.history_root), root).is_err() {
-        return -EINVAL;
+    if p.base_seq != 0 && hex::decode(cstr(&p.history_root), &mut root).is_err() {
+        return Err(-EINVAL);
     }
-    // SAFETY: the caller's publication.
-    let ops = unsafe { p.operations() };
-    for op in ops.iter().take_while(|op| op.seq <= seq) {
-        let Some(digest) = digest_bytes(&op.operation_digest) else {
-            return -EINVAL;
-        };
-        match history_step(root, &digest) {
-            Ok(next) => *root = next,
-            Err(err) => {
-                *root = [0; 32];
-                return err;
-            }
-        }
+    for op in p.operations.iter().take_while(|op| op.seq <= seq) {
+        let digest = digest_bytes(&op.operation_digest).ok_or(-EINVAL)?;
+        root = history_step(&root, &digest)?;
     }
-    0
-}
-
-/// A publication Rust code owns, released when it goes.
-pub(crate) struct Publication(Box<TreePublication>);
-
-impl Publication {
-    pub(crate) fn new() -> Self {
-        // SAFETY: an all-zero publication holds nothing.
-        Publication(Box::new(unsafe { mem::zeroed() }))
-    }
-
-    pub(crate) fn get(&self) -> &TreePublication {
-        &self.0
-    }
-
-    pub(crate) fn get_mut(&mut self) -> &mut TreePublication {
-        &mut self.0
-    }
-}
-
-impl Drop for Publication {
-    fn drop(&mut self) {
-        publication_free(&mut self.0);
-    }
+    Ok(root)
 }
 
 #[cfg(shirudo_fuzz)]
 mod fuzz;
 #[cfg(test)]
 mod tests;
-
-pub(crate) use capi::{
-    tree_parse, tree_publication_append, tree_selector_copy, tree_selector_free,
-    tree_selector_kv_add,
-};
-
-mod capi {
-    use core::ffi::{c_char, c_int};
-
-    use super::{TreeOperation, TreePublication, TreeSelector, TreeSelectorKv};
-    use crate::errno::EINVAL;
-    use crate::ffi;
-
-    use crate::util::json::MAX_BYTES;
-
-    /// # Safety
-    ///
-    /// `kvs` and `n` are a selector's pairs from the xmalloc family, and
-    /// `kv` room for a pointer.
-    pub unsafe extern "C" fn tree_selector_kv_add(
-        kvs: *mut *mut TreeSelectorKv,
-        n: *mut c_int,
-        max: c_int,
-        kv: *mut *mut TreeSelectorKv,
-    ) -> c_int {
-        // SAFETY: the caller's pairs and room.
-        match unsafe { super::kv_add(kvs, n, max) } {
-            Ok(added) => {
-                // SAFETY: the caller's room for the pair.
-                unsafe { *kv = added };
-                0
-            }
-            Err(err) => err,
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `src` is a selector whose pairs are as its counts say, and `dst`
-    /// room for one.
-    pub unsafe extern "C" fn tree_selector_copy(
-        dst: *mut TreeSelector,
-        src: *const TreeSelector,
-    ) -> c_int {
-        // SAFETY: the caller's selectors.
-        unsafe { super::selector_copy(dst, src) }
-    }
-
-    /// # Safety
-    ///
-    /// `s` is NULL or a selector whose pairs are as its counts say.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn tree_selector_free(s: *mut TreeSelector) {
-        // SAFETY: the caller's selector.
-        if let Some(s) = unsafe { s.as_mut() } {
-            super::selector_free(s);
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `body` holds `len` bytes and `out` is room for a publication.
-    pub unsafe extern "C" fn tree_parse(
-        body: *const c_char,
-        len: usize,
-        out: *mut TreePublication,
-    ) -> c_int {
-        if body.is_null() || out.is_null() || len > MAX_BYTES {
-            return -EINVAL;
-        }
-        // SAFETY: the caller's room for a publication, and its bytes.
-        unsafe {
-            out.write_bytes(0, 1);
-            super::parse(ffi::slice(body.cast(), len), out)
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `p` is NULL or a publication whose operations come from the
-    /// xmalloc family, and `op` NULL or an operation, each with pairs as
-    /// their counts say.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn tree_publication_append(
-        p: *mut TreePublication,
-        op: *const TreeOperation,
-    ) -> c_int {
-        if op.is_null() {
-            return -EINVAL;
-        }
-        // SAFETY: the caller's publication.
-        let Some(p) = (unsafe { p.as_mut() }) else {
-            return -EINVAL;
-        };
-        // SAFETY: the caller's operation.
-        unsafe { super::publication_append(p, op) }
-    }
-}

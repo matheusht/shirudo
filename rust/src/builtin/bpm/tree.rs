@@ -17,17 +17,17 @@ use super::{
 use crate::errno::{EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENOENT, ENOMEM, ERANGE};
 use crate::sys::upatch::UPATCH_INSTALL_TARGET_MISSING;
 use crate::text::{cstr, strscpy};
-use crate::util::bpm_oci::{Client, MAX_DIGEST};
+use crate::util::bpm_oci::Client;
 use crate::util::bpm_package::fetch_publication;
 use crate::util::bpm_tree::{
-    MAX_JOIN_OPS, MAX_WALK_OPS, Publication, TreeOperation, TreePending, TreePublication,
-    TreeState, digest_bytes, history_at, publication_follows, publication_verify, segment_precedes,
+    MAX_JOIN_OPS, MAX_WALK_OPS, TreeOperation, TreePending, TreePublication, TreeState,
+    digest_bytes, history_at, publication_follows, publication_verify, segment_precedes,
     walk_within,
 };
 use crate::util::bpm_tree_state::{
     OUTCOME_APPLIED, OUTCOME_MODULE_ABSENT, OUTCOME_UNMATCHED, outcome_append, outcome_roots,
-    outcomes_resume, tree_configured, tree_event_append, tree_event_replay, tree_pending_read,
-    tree_pending_write, tree_selector_matches, tree_state_read, tree_state_write,
+    outcomes_resume, selector_matches, tree_configured, tree_event_append, tree_event_replay,
+    tree_pending_read, tree_pending_write, tree_state_read, tree_state_write,
 };
 use crate::util::chain::{
     chain_bound, chain_extend, chain_tree_event, history_step, memneq_explicit, sha256_2,
@@ -250,8 +250,7 @@ fn recover_pending(
         err if err == -ENOENT => return Ok(()),
         err => return Err(err),
     }
-    // SAFETY: the publication the parse filled.
-    let ops = unsafe { p.operations() };
+    let ops = &p.operations;
     let Some(op) = ops.iter().find(|op| {
         op.seq == pending.seq
             && cstr(&op.id) == cstr(&pending.id)
@@ -383,25 +382,18 @@ impl Source {
     /// The publication `reference` names, a tag or a manifest digest,
     /// signed and with what tree sync checks before it applies anything,
     /// and its manifest's digest.
-    fn fetch_checked(&mut self, reference: &[u8], p: &mut TreePublication) -> Result<Vec<u8>> {
-        let mut digest = [0u8; MAX_DIGEST];
-
-        status(fetch_publication(
+    fn fetch_checked(&mut self, reference: &[u8]) -> Result<(TreePublication, Vec<u8>)> {
+        let (p, digest) = fetch_publication(
             &mut self.c,
             &self.repository,
             reference,
             initrd::cert_path(),
             self.trusted.as_ref(),
-            p,
-            &mut digest,
-        ))?;
-        // SAFETY: the publication the fetch filled.
-        match unsafe { publication_verify(p) } {
-            Ok(()) => Ok(cstr(&digest).to_vec()),
+        )?;
+        match publication_verify(&p) {
+            Ok(()) => Ok((p, digest)),
             Err((ret, bad)) => {
-                if let Some(i) = bad {
-                    // SAFETY: as above.
-                    let op = unsafe { &p.operations()[i] };
+                if let Some(op) = bad.and_then(|i| p.operations.get(i)) {
                     report_error(b"operation_validate", Some(op), ret);
                 }
                 Err(ret)
@@ -437,12 +429,12 @@ fn walk_back(
     last_seq: i64,
 ) -> Result<Vec<Segment>> {
     let mut walk = Vec::new();
-    let mut fetched: Option<Publication> = None;
+    let mut fetched: Option<TreePublication> = None;
 
     walk.try_reserve(1).map_err(|_| -ENOMEM)?;
     walk.push(segment(tag, tag_digest)?);
     loop {
-        let succ = fetched.as_ref().map_or(tag, Publication::get);
+        let succ = fetched.as_ref().unwrap_or(tag);
         if succ.base_seq <= last_seq {
             return Ok(walk);
         }
@@ -463,9 +455,8 @@ fn walk_back(
             ));
         }
         let named = lossy(cstr(&succ.segment_manifest_digest));
-        let mut pred = Publication::new();
-        let digest = match src.fetch_checked(cstr(&succ.segment_manifest_digest), pred.get_mut()) {
-            Ok(d) => d,
+        let (pred, digest) = match src.fetch_checked(cstr(&succ.segment_manifest_digest)) {
+            Ok(fetched) => fetched,
             Err(err) => {
                 return Err(refuse(
                     format!(
@@ -477,7 +468,7 @@ fn walk_back(
                 ));
             }
         };
-        match segment_precedes(pred.get(), &digest, succ) {
+        match segment_precedes(&pred, &digest, succ) {
             0 => {}
             err => {
                 return Err(refuse(
@@ -491,7 +482,7 @@ fn walk_back(
             }
         }
         walk.try_reserve(1).map_err(|_| -ENOMEM)?;
-        walk.push(segment(pred.get(), &digest)?);
+        walk.push(segment(&pred, &digest)?);
         fetched = Some(pred);
     }
 }
@@ -525,18 +516,14 @@ impl Sync {
     /// segment as at its base.
     fn history_check(&self, p: &TreePublication) -> Result {
         let last_seq = self.state.last_seq;
-        let mut doc = [0u8; 32];
         let node = if p.base_seq == last_seq {
             Ok(self.history_root)
         } else {
             outcome_roots(p.base_seq).map(|(_, history)| history)
         };
-        let ret = match node {
-            // SAFETY: the publication the fetch filled.
-            Ok(node) => match unsafe { history_at(p, p.base_seq, &mut doc) } {
-                0 if memneq_explicit(&node, &doc) => -EKEYREJECTED,
-                ret => ret,
-            },
+        let ret = match node.and_then(|node| history_at(p, p.base_seq).map(|doc| (node, doc))) {
+            Ok((node, doc)) if memneq_explicit(&node, &doc) => -EKEYREJECTED,
+            Ok(_) => 0,
             Err(err) => err,
         };
         if ret != 0 {
@@ -549,10 +536,10 @@ impl Sync {
                 ret,
             ));
         }
-        // SAFETY: as above.
-        let ret = match unsafe { history_at(p, last_seq, &mut doc) } {
-            0 if memneq_explicit(&self.history_root, &doc) => -EKEYREJECTED,
-            ret => ret,
+        let ret = match history_at(p, last_seq) {
+            Ok(doc) if memneq_explicit(&self.history_root, &doc) => -EKEYREJECTED,
+            Ok(_) => 0,
+            Err(err) => err,
         };
         if ret != 0 {
             return Err(refuse(
@@ -674,18 +661,14 @@ impl Sync {
             return Err(-EINVAL);
         };
 
-        // SAFETY: the publication the fetch filled.
-        for op in unsafe { p.operations() } {
+        for op in &p.operations {
             if op.seq <= self.state.last_seq {
                 continue;
             }
-            // SAFETY: the selector the parse filled.
-            let matched = unsafe { tree_selector_matches(&op.selector) };
-            if matched < 0 {
-                report_error(b"selector_evaluate", Some(op), matched);
-                return Err(matched);
-            }
-            if matched != 0 {
+            let matched = selector_matches(&op.selector).inspect_err(|&err| {
+                report_error(b"selector_evaluate", Some(op), err);
+            })?;
+            if matched {
                 self.counts.selected += 1;
             } else {
                 self.counts.skipped += 1;
@@ -698,7 +681,7 @@ impl Sync {
                 self.history_root = history_step(&self.history_root, &digest)?;
                 continue;
             }
-            if matched == 0 {
+            if !matched {
                 if let Err(err) = outcome_unmatched(op, &root, &mut self.history_root) {
                     report_error(b"tree_outcome_append", Some(op), err);
                     return Err(err);
@@ -762,14 +745,13 @@ impl Sync {
         for (i, seg) in walk.iter().enumerate().skip(1).rev() {
             let want = sha256_digest_encode(&seg.manifest_digest);
             let want = cstr(&want);
-            let mut p = Publication::new();
-            let fetched =
-                src.fetch_checked(want, p.get_mut())
-                    .and_then(|d| match digest_bytes(&d) {
-                        Some(got) if got == seg.manifest_digest => Ok(d),
-                        _ => Err(-ERANGE),
-                    });
-            let digest = fetched.map_err(|err| {
+            let fetched = src
+                .fetch_checked(want)
+                .and_then(|(p, d)| match digest_bytes(&d) {
+                    Some(got) if got == seg.manifest_digest => Ok((p, d)),
+                    _ => Err(-ERANGE),
+                });
+            let (p, digest) = fetched.map_err(|err| {
                 refuse(
                     format!(
                         "the sealed segment {}, which ends at seq {}, cannot be fetched again or has changed",
@@ -780,7 +762,7 @@ impl Sync {
                     err,
                 )
             })?;
-            self.apply_segment(p.get(), &digest, i == n - 1)?;
+            self.apply_segment(&p, &digest, i == n - 1)?;
         }
         self.apply_segment(tag, tag_digest, n == 1)
     }
@@ -844,24 +826,21 @@ fn sync(dry_run: bool, report: Option<&[u8]>) -> Result {
         err => return Err(err),
     }
     let mut src = Source::open(&cfg)?;
-    let mut tag = Publication::new();
     let against = if src.trusted.is_some() {
         "the config image's keys"
     } else {
         "the node's certificate"
     };
-    let tag_digest = src
-        .fetch_checked(cstr(&cfg.reference), tag.get_mut())
-        .map_err(|err| {
-            let named = String::from_utf8_lossy(cstr(&cfg.reference));
-            let what = if err == -EKEYREJECTED {
-                format!("the publication {named} does not verify against {against}")
-            } else {
-                format!("the publication {named} cannot be fetched")
-            };
-            refuse(what, b"publication_fetch", err)
-        })?;
-    let p = tag.get();
+    let (tag, tag_digest) = src.fetch_checked(cstr(&cfg.reference)).map_err(|err| {
+        let named = String::from_utf8_lossy(cstr(&cfg.reference));
+        let what = if err == -EKEYREJECTED {
+            format!("the publication {named} does not verify against {against}")
+        } else {
+            format!("the publication {named} cannot be fetched")
+        };
+        refuse(what, b"publication_fetch", err)
+    })?;
+    let p = &tag;
     let follows = publication_follows(p, sync.have_state.then_some(&sync.state), &tag_digest);
     if follows < 0 {
         return Err(follows);

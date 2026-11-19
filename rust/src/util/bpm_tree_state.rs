@@ -12,21 +12,21 @@ use std::ffi::CString;
 use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::fs::FileExt;
 
-use crate::errno::{
-    E2BIG, EBADMSG, EINTR, EINVAL, EIO, ENAMETOOLONG, ENOENT, ENOMEM, ENOSPC, text,
-};
+use crate::errno::{E2BIG, EBADMSG, EINTR, EINVAL, EIO, ENAMETOOLONG, ENOENT, ENOSPC, text};
 use crate::ffi;
-use crate::heap::{libc_free, xfree, xmalloc};
+use crate::heap::libc_free;
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
-    File, O_RDONLY, PATH_MAX, R_OK, Utsname, access, close, errno, fclose, fdopen, fopen, uname,
+    File, O_RDONLY, PATH_MAX, R_OK, Utsname, access, bytes, close, errno, fclose, fdopen, fopen,
+    uname,
 };
-use crate::text::{cstr, find, strscpy, strsprintf};
+use crate::text::{cstr, find, strscpy};
 use crate::util::bpm_tree::{
-    MAX_KCONFIG, MAX_LABELS, MAX_VALUES, STRING_MAX, TreeKv, TreeOperation, TreePending,
-    TreeSelector, TreeSelectorKv, TreeState, count, pairs,
+    MAX_KCONFIG, MAX_LABELS, STRING_MAX, TreeKv, TreeOperation, TreePending, TreeSelector,
+    TreeSelectorKv, TreeState,
 };
 use crate::util::crypto_openssl::sha256_into;
+use crate::util::gzip;
 use crate::util::hex::{self, hex_decode, hex_encode, sha256_digest_decode};
 use crate::util::image_config;
 use crate::util::io::lock_exclusive;
@@ -107,9 +107,15 @@ fn trim_end(mut s: &[u8]) -> &[u8] {
 
 /// Whether one of the values of `v` is `want`.
 fn values_match(v: &TreeSelectorKv, want: &[u8]) -> bool {
-    v.values[..count(v.n_values, MAX_VALUES)]
-        .iter()
-        .any(|value| cstr(value) == want)
+    v.values.iter().any(|value| value == want)
+}
+
+/// uname(2) of the node, None where it fails.
+fn node_names() -> Option<Utsname> {
+    let mut u = Utsname::zeroed();
+
+    // SAFETY: room for the node's names.
+    (unsafe { uname(&mut u) } == 0).then_some(u)
 }
 
 /// A pair added after the `n` at `dst`, of at most `max`: 0, -E2BIG for
@@ -251,68 +257,89 @@ fn selector_hash(key: &[u8]) -> u32 {
     })
 }
 
-/// The slots of an index of the kconfig keys, each the first pair of its
-/// key, or -1.
-fn hash_build(kconfig: &[TreeSelectorKv], slots: &mut [i32; HASH_SIZE]) {
-    *slots = [-1; HASH_SIZE];
-    for (i, kv) in kconfig.iter().enumerate() {
-        let key = cstr(&kv.key);
-        let mut slot = selector_hash(key) as usize & (HASH_SIZE - 1);
-
-        while slots[slot] >= 0 && cstr(&kconfig[slots[slot] as usize].key) != key {
-            slot = (slot + 1) & (HASH_SIZE - 1);
-        }
-        if slots[slot] < 0 {
-            slots[slot] = i as i32;
-        }
-    }
+/// The slot of the index where the probe for `key` starts.
+fn first_slot(key: &[u8]) -> usize {
+    selector_hash(key) as usize & (HASH_SIZE - 1)
 }
 
-/// The pair of the index holding `key`.
-fn hash_find(kconfig: &[TreeSelectorKv], slots: &[i32; HASH_SIZE], key: &[u8]) -> Option<usize> {
-    let mut slot = selector_hash(key) as usize & (HASH_SIZE - 1);
-
-    for _ in 0..HASH_SIZE {
-        let i = usize::try_from(slots[slot]).ok()?;
-
-        if cstr(&kconfig[i].key) == key {
-            return Some(i);
-        }
-        slot = (slot + 1) & (HASH_SIZE - 1);
-    }
-    None
-}
-
-/// Where the selector's kconfig values go as a config is read.
+/// The selector's kconfig keys, under an open-addressed index whose slots
+/// each hold the first pair of a key, and the values a config gives them
+/// as it is read.
 struct KconfigValues<'a> {
     kconfig: &'a [TreeSelectorKv],
-    slots: &'a [i32; HASH_SIZE],
-    values: &'a mut [[u8; STRING_MAX]],
-    found: &'a mut [bool],
+    slots: [Option<usize>; HASH_SIZE],
+    values: Vec<Option<Vec<u8>>>,
+}
+
+impl<'a> KconfigValues<'a> {
+    /// The index of `kconfig`, of at most MAX_KCONFIG pairs, which leaves
+    /// a free slot to end each probe.
+    fn new(kconfig: &'a [TreeSelectorKv]) -> Self {
+        let mut slots: [Option<usize>; HASH_SIZE] = [None; HASH_SIZE];
+
+        for (i, kv) in kconfig.iter().enumerate() {
+            let mut slot = first_slot(&kv.key);
+
+            while let Some(j) = slots[slot] {
+                if kconfig[j].key == kv.key {
+                    break;
+                }
+                slot = (slot + 1) & (HASH_SIZE - 1);
+            }
+            if slots[slot].is_none() {
+                slots[slot] = Some(i);
+            }
+        }
+        KconfigValues {
+            kconfig,
+            slots,
+            values: vec![None; kconfig.len()],
+        }
+    }
+
+    /// The pair of the index holding `key`.
+    fn find(&self, key: &[u8]) -> Option<usize> {
+        let mut slot = first_slot(key);
+
+        for _ in 0..HASH_SIZE {
+            let i = self.slots[slot]?;
+
+            if self.kconfig[i].key == key {
+                return Some(i);
+            }
+            slot = (slot + 1) & (HASH_SIZE - 1);
+        }
+        None
+    }
+
+    /// The value the config read gave the pair at `i`.
+    fn value(&self, i: usize) -> Option<&[u8]> {
+        self.values.get(i)?.as_deref()
+    }
 }
 
 /// One line of a kernel config: the value of a key the selector names
-/// kept, `# CONFIG_X is not set` reading as `n`. 0, or -ENOSPC for a
-/// value too long for any selector to name.
-fn config_line(line: &[u8], kv: &mut KconfigValues<'_>) -> c_int {
+/// kept, `# CONFIG_X is not set` reading as `n`. -ENOSPC for a value too
+/// long for any selector to name.
+fn config_line(line: &[u8], kv: &mut KconfigValues<'_>) -> Result<(), c_int> {
     let start = trim_start(cstr(line));
 
     if start.is_empty() {
-        return 0;
+        return Ok(());
     }
     let (key, value): (&[u8], &[u8]) = if start.starts_with(b"# CONFIG_") {
         let start = &start[2..];
         let Some(at) = find(start, b" is not set") else {
-            return 0;
+            return Ok(());
         };
 
         (&start[..at], b"n")
     } else {
         if start[0] == b'#' {
-            return 0;
+            return Ok(());
         }
         let Some(eq) = start.iter().position(|&c| c == b'=') else {
-            return 0;
+            return Ok(());
         };
         let mut value = trim_end(trim_start(&start[eq + 1..]));
 
@@ -321,56 +348,21 @@ fn config_line(line: &[u8], kv: &mut KconfigValues<'_>) -> c_int {
         }
         (trim_end(&start[..eq]), value)
     };
-    let Some(index) = hash_find(kv.kconfig, kv.slots, key) else {
-        return 0;
+    let Some(index) = kv.find(key) else {
+        return Ok(());
     };
-    if strscpy(&mut kv.values[index], value).is_err() {
-        return -ENOSPC;
+    if value.len() >= STRING_MAX {
+        return Err(-ENOSPC);
     }
-    kv.found[index] = true;
-    0
-}
-
-/// The one gzip member of `input`, with nothing behind it, into an
-/// allocation of `*cap` bytes holding `*out_len` and a NUL. Not through
-/// a gzip file's reads: zlib 1.3.2 reads on past the end of a member
-/// into a next one, finds that cut short, and has gzclose() fail the
-/// whole file.
-///
-/// # Safety
-///
-/// `input` holds `len` bytes.
-unsafe fn gunzip(
-    input: *mut u8,
-    len: usize,
-    out: &mut *mut u8,
-    out_len: &mut usize,
-    cap: &mut usize,
-) -> c_int {
-    // SAFETY: the caller's len bytes.
-    let input = unsafe { ffi::slice(input, len) };
-    let text = match crate::util::gzip::gunzip_one(input, KCONFIG_MAX) {
-        Ok(t) => t,
-        Err(err) => return -err,
-    };
-    // SAFETY: a size, the text and its NUL.
-    let buf = unsafe { xmalloc(text.len() + 1) }.cast::<u8>();
-    if buf.is_null() {
-        return -ENOMEM;
-    }
-    // SAFETY: the text.len() + 1 bytes xmalloc() gave, zeroed.
-    unsafe { core::ptr::copy_nonoverlapping(text.as_ptr(), buf, text.len()) };
-    *out = buf;
-    *out_len = text.len();
-    *cap = text.len() + 1;
-    0
+    kv.values[index] = Some(value.to_vec());
+    Ok(())
 }
 
 /// The lines of a kernel config into the selector's values. A line of
 /// LINE_MAX bytes or more with its newline is skipped whole, as a part
 /// from the middle of a long string value would read as an option of its
 /// own: its option reads as not set.
-fn config_text(text: &[u8], kv: &mut KconfigValues<'_>) -> c_int {
+fn config_text(text: &[u8], kv: &mut KconfigValues<'_>) -> Result<(), c_int> {
     let mut off = 0usize;
 
     while off < text.len() {
@@ -378,123 +370,76 @@ fn config_text(text: &[u8], kv: &mut KconfigValues<'_>) -> c_int {
         let n = rest.iter().position(|&c| c == b'\n').unwrap_or(rest.len());
 
         if n < LINE_MAX - 1 {
-            let ret = config_line(&rest[..n], kv);
-
-            if ret != 0 {
-                return ret;
-            }
+            config_line(&rest[..n], kv)?;
         }
         off += n + 1;
     }
-    0
+    Ok(())
 }
 
 /// The kernel config at `path`, gzip'd or not, into the selector's
-/// values: 0 or -errno.
-///
-/// # Safety
-///
-/// `path` is a C string.
-unsafe fn read_selector_config_file(
-    path: *const c_char,
+/// values.
+fn read_selector_config_file(
+    path: &CStr,
     kv: &mut KconfigValues<'_>,
     gz: bool,
-) -> c_int {
-    // SAFETY: the caller's C string.
-    let mut raw = match read(unsafe { CStr::from_ptr(path) }, KCONFIG_MAX) {
-        Ok(raw) => raw,
-        Err(err) => return err,
-    };
+) -> Result<(), c_int> {
+    let raw = read(path, KCONFIG_MAX)?;
+
     if !gz {
         return config_text(&raw, kv);
     }
-    let mut text: *mut u8 = ptr::null_mut();
-    let mut text_len = 0usize;
-    let mut cap = 0usize;
-    // SAFETY: the file's bytes, and rooms for what they inflate to.
-    let ret = unsafe {
-        gunzip(
-            raw.as_mut_ptr(),
-            raw.len(),
-            &mut text,
-            &mut text_len,
-            &mut cap,
-        )
-    };
-    if ret != 0 {
-        return ret;
-    }
-    // SAFETY: the text_len bytes of the text.
-    let ret = config_text(unsafe { ffi::slice(text, text_len) }, kv);
-
-    // SAFETY: the text's allocation, of cap bytes, freed once.
-    unsafe { xfree(text.cast(), cap) };
-    ret
+    // The one gzip member of the file, with nothing behind it; not
+    // through a gzip file's reads: zlib 1.3.2 reads on past the end of a
+    // member into a next one, finds that cut short, and has gzclose()
+    // fail the whole file.
+    let text = gzip::gunzip_one(&raw, KCONFIG_MAX).map_err(|err| -err)?;
+    config_text(&text, kv)
 }
 
-/// Whether the selector's kconfig pairs match the running kernel's
-/// config: /proc/config.gz, or /boot/config-<release> when that cannot
-/// be read or names none of them. 1, 0, or -errno.
-///
-/// # Safety
-///
-/// `release` is the node's release, a C string.
-unsafe fn kconfig_matches(kconfig: &[TreeSelectorKv], release: &[u8]) -> c_int {
-    let mut slots = [-1i32; HASH_SIZE];
-    let mut values = [[0u8; STRING_MAX]; MAX_KCONFIG];
-    let mut found = [false; MAX_KCONFIG];
+/// Whether the selector's kconfig pairs, at most MAX_KCONFIG, match the
+/// running kernel's config: /proc/config.gz, or /boot/config-<release>
+/// when that cannot be read or names none of them.
+fn kconfig_matches(kconfig: &[TreeSelectorKv], release: &[u8]) -> Result<bool, c_int> {
+    let mut kv = KconfigValues::new(kconfig);
+    let config_rc = read_selector_config_file(c"/proc/config.gz", &mut kv, true);
 
-    hash_build(kconfig, &mut slots);
-    let mut kv = KconfigValues {
-        kconfig,
-        slots: &slots,
-        values: &mut values,
-        found: &mut found,
-    };
-    // SAFETY: a C string.
-    let config_rc =
-        unsafe { read_selector_config_file(c"/proc/config.gz".as_ptr(), &mut kv, true) };
-    let config_any = kv.found[..kconfig.len()].iter().any(|&f| f);
+    if config_rc.is_err() || kv.values.iter().all(Option::is_none) {
+        let path = [&b"/boot/config-"[..], release].concat();
 
-    if config_rc != 0 || !config_any {
-        let mut path = [0u8; PATH_MAX];
-
-        kv.found.fill(false);
-        if strsprintf(&mut path, &[b"/boot/config-", release]).is_err() {
-            return -ENAMETOOLONG;
+        kv.values.fill(None);
+        if path.len() >= PATH_MAX {
+            return Err(-ENAMETOOLONG);
         }
-        // SAFETY: the path, terminated by strsprintf().
-        let ret = unsafe { read_selector_config_file(path.as_ptr().cast(), &mut kv, false) };
-
-        // No config to show, or a value longer than any selector names,
-        // matches nothing; a config that cannot be read is no answer,
-        // and the sync must not move past the operation on it.
-        if ret == -ENOENT || ret == -ENOSPC {
-            return if config_rc != 0 && config_rc != -ENOENT && config_rc != -ENOSPC {
-                config_rc
-            } else {
-                0
-            };
-        }
-        if ret != 0 {
-            return ret;
+        let path = CString::new(path).map_err(|_| -EINVAL)?;
+        match read_selector_config_file(&path, &mut kv, false) {
+            // No config to show, or a value longer than any selector
+            // names, matches nothing; a config that cannot be read is no
+            // answer, and the sync must not move past the operation on
+            // it.
+            Err(err) if err == -ENOENT || err == -ENOSPC => {
+                return match config_rc {
+                    Err(rc) if rc != -ENOENT && rc != -ENOSPC => Err(rc),
+                    _ => Ok(false),
+                };
+            }
+            Err(err) => return Err(err),
+            Ok(()) => {}
         }
     }
     // The config is read into the first pair of a key, so a key named
     // twice is matched there: left unfound, the operation was skipped
     // and the tree moved past it for good.
-    for pair in kconfig {
-        match hash_find(kconfig, &slots, cstr(&pair.key)) {
-            Some(k) if kv.found[k] && values_match(pair, cstr(&kv.values[k])) => {}
-            _ => return 0,
-        }
-    }
-    1
+    Ok(kconfig.iter().all(|pair| {
+        kv.find(&pair.key)
+            .and_then(|k| kv.value(k))
+            .is_some_and(|v| values_match(pair, v))
+    }))
 }
 
 /// Whether the selector's label pairs match the node's labels, from the
-/// config image when one is active. 1, 0, or -errno.
-fn labels_match(labels_wanted: &[TreeSelectorKv]) -> c_int {
+/// config image when one is active.
+fn labels_match(labels_wanted: &[TreeSelectorKv]) -> Result<bool, c_int> {
     let mut labels: [TreeKv; MAX_LABELS] = [const {
         TreeKv {
             key: [0; STRING_MAX],
@@ -506,10 +451,10 @@ fn labels_match(labels_wanted: &[TreeSelectorKv]) -> c_int {
         let fd = image_config::open(image_config::NODE_LABELS, O_RDONLY);
 
         if fd == -ENOENT {
-            return 0;
+            return Ok(false);
         }
         if fd < 0 {
-            return fd;
+            return Err(fd);
         }
         // SAFETY: the fd the image gave, and room for the labels.
         unsafe { read_config_fd(fd, labels.as_mut_ptr(), &mut nl, MAX_LABELS as c_int) }
@@ -525,100 +470,72 @@ fn labels_match(labels_wanted: &[TreeSelectorKv]) -> c_int {
         }
     };
     if ret == -ENOENT {
-        return 0;
+        return Ok(false);
     }
     if ret != 0 {
-        return ret;
+        return Err(ret);
     }
-    let have = &labels[..count(nl, MAX_LABELS)];
+    let have = &labels[..usize::try_from(nl).map_or(0, |n| n.min(MAX_LABELS))];
 
-    for wanted in labels_wanted {
-        match kv_value(have, cstr(&wanted.key)) {
-            Some(v) if values_match(wanted, v) => {}
-            _ => return 0,
-        }
-    }
-    1
+    Ok(labels_wanted
+        .iter()
+        .all(|wanted| kv_value(have, &wanted.key).is_some_and(|v| values_match(wanted, v))))
 }
 
-/// Whether the selector matches the running node: 1, 0, or -errno when
-/// its labels or kernel config cannot be read. An empty selector is the
+/// The first `max` of `v`.
+fn at_most<T>(v: &[T], max: usize) -> &[T] {
+    &v[..v.len().min(max)]
+}
+
+/// Whether the selector matches the running node, or -errno when its
+/// labels or kernel config cannot be read. An empty selector is the
 /// tree's explicit wildcard, and matches before the node is asked, so an
 /// unconstrained operation applies even without uname(2).
-///
-/// # Safety
-///
-/// `s` is NULL or a selector whose pairs are as its counts say.
-unsafe fn selector_matches(s: *const TreeSelector) -> c_int {
-    // SAFETY: the caller's selector, if any.
-    let Some(s) = (unsafe { s.as_ref() }) else {
-        return 0;
+pub(crate) fn selector_matches(s: &TreeSelector) -> Result<bool, c_int> {
+    if s.is_empty() {
+        return Ok(true);
+    }
+    let Some(u) = node_names() else {
+        return Ok(false);
     };
-    if s.n_kernel_release_prefix == 0
-        && s.n_kernel_build_id == 0
-        && s.n_architecture == 0
-        && s.n_kconfig == 0
-        && s.n_labels == 0
-    {
-        return 1;
-    }
-    let mut u = Utsname::zeroed();
+    let release = cstr(bytes(&u.release));
 
-    // SAFETY: room for the node's names.
-    if unsafe { uname(&mut u) } != 0 {
-        return 0;
-    }
-    let release = cstr(crate::sys::libc::bytes(&u.release));
-
-    if s.n_kernel_release_prefix != 0
-        && !s.kernel_release_prefix[..count(s.n_kernel_release_prefix, MAX_VALUES)]
+    if !s.kernel_release_prefix.is_empty()
+        && !s
+            .kernel_release_prefix
             .iter()
-            .any(|prefix| prefix_matches(release, cstr(prefix)))
+            .any(|prefix| prefix_matches(release, prefix))
     {
-        return 0;
+        return Ok(false);
     }
-    if s.n_kernel_build_id != 0 {
+    if !s.kernel_build_id.is_empty() {
         let mut build_id = [0u8; BUILD_ID_STRING_MAX];
 
         // A selector naming a build ID is fail-closed on a kernel that
         // publishes none.
         // SAFETY: room for the hex digits of a build ID.
         if unsafe { read_build_id(build_id.as_mut_ptr().cast()) } != 0 {
-            return 0;
+            return Ok(false);
         }
-        if !s.kernel_build_id[..count(s.n_kernel_build_id, MAX_VALUES)]
-            .iter()
-            .any(|id| cstr(id) == cstr(&build_id))
-        {
-            return 0;
+        if !s.kernel_build_id.iter().any(|id| id == cstr(&build_id)) {
+            return Ok(false);
         }
     }
-    if s.n_architecture != 0
-        && !s.architecture[..count(s.n_architecture, MAX_VALUES)]
+    if !s.architecture.is_empty()
+        && !s
+            .architecture
             .iter()
-            .any(|arch| cstr(arch) == cstr(crate::sys::libc::bytes(&u.machine)))
+            .any(|arch| arch == cstr(bytes(&u.machine)))
     {
-        return 0;
+        return Ok(false);
     }
-    if s.n_kconfig != 0 {
-        // SAFETY: the selector's kconfig pairs.
-        let kconfig = unsafe { pairs(s.kconfig, s.n_kconfig, MAX_KCONFIG) };
-        // SAFETY: the node's release, a C string.
-        let ret = unsafe { kconfig_matches(kconfig, release) };
-
-        if ret != 1 {
-            return ret;
-        }
+    if !s.kconfig.is_empty() && !kconfig_matches(at_most(&s.kconfig, MAX_KCONFIG), release)? {
+        return Ok(false);
     }
-    if s.n_labels != 0 {
-        // SAFETY: the selector's label pairs.
-        let ret = labels_match(unsafe { pairs(s.labels, s.n_labels, MAX_LABELS) });
-
-        if ret != 1 {
-            return ret;
-        }
+    if !s.labels.is_empty() && !labels_match(at_most(&s.labels, MAX_LABELS))? {
+        return Ok(false);
     }
-    1
+    Ok(true)
 }
 
 /// A record as its document holds it: the document's schema version
@@ -1290,43 +1207,19 @@ fn emit_status(e: &mut JsonEmit) {
     e.obj_close();
 }
 
-/// For the unit test and fuzz targets: the selector's kconfig values from
-/// the config at `path`, as the selector match reads them.
-///
-/// # Safety
-///
-/// `path` is a C string, `s` a selector, and `values` and `found` room
-/// for an entry for each of its kconfig pairs.
+/// For the unit test and fuzz targets: the values a config at `path`
+/// gives the selector's kconfig pairs, as the selector match reads them.
 #[cfg(any(test, shirudo_fuzz))]
-unsafe fn kconfig_read(
-    path: *const c_char,
-    s: *const TreeSelector,
-    values: *mut [u8; STRING_MAX],
-    found: *mut bool,
-    gz: bool,
-) -> c_int {
-    // SAFETY: the caller's selector and its pairs.
-    let kconfig = unsafe { pairs((*s).kconfig, (*s).n_kconfig, MAX_KCONFIG) };
-    let mut slots = [-1i32; HASH_SIZE];
+fn kconfig_read(path: &CStr, s: &TreeSelector, gz: bool) -> Result<Vec<Option<Vec<u8>>>, c_int> {
+    let mut kv = KconfigValues::new(at_most(&s.kconfig, MAX_KCONFIG));
 
-    hash_build(kconfig, &mut slots);
-    // SAFETY: the caller's room for an entry for each pair.
-    let mut kv = unsafe {
-        KconfigValues {
-            kconfig,
-            slots: &slots,
-            values: core::slice::from_raw_parts_mut(values, kconfig.len()),
-            found: core::slice::from_raw_parts_mut(found, kconfig.len()),
-        }
-    };
-    // SAFETY: the caller's C string.
-    unsafe { read_selector_config_file(path, &mut kv, gz) }
+    read_selector_config_file(path, &mut kv, gz)?;
+    Ok(kv.values)
 }
 
 pub(crate) use capi::{
     tree_configured, tree_emit_status, tree_event_append, tree_event_replay, tree_outcomes_read,
-    tree_pending_read, tree_pending_write, tree_selector_matches, tree_state_read,
-    tree_state_write,
+    tree_pending_read, tree_pending_write, tree_state_read, tree_state_write,
 };
 
 /// Whether an operation is pending: pending.json exists.
@@ -1351,7 +1244,7 @@ mod fuzz;
 mod capi {
     use core::ffi::{c_char, c_int};
 
-    use super::{TreeOperation, TreePending, TreeSelector, TreeState};
+    use super::{TreeOperation, TreePending, TreeState};
     use crate::util::json::JsonEmit;
 
     /// # Safety
@@ -1380,15 +1273,6 @@ mod capi {
 
     pub extern "C" fn tree_configured() -> bool {
         super::configured()
-    }
-
-    /// # Safety
-    ///
-    /// `selector` is NULL or a selector whose pairs are as its counts
-    /// say.
-    pub unsafe extern "C" fn tree_selector_matches(selector: *const TreeSelector) -> c_int {
-        // SAFETY: the caller passes a selector.
-        unsafe { super::selector_matches(selector) }
     }
 
     /// # Safety

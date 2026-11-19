@@ -7,14 +7,10 @@
 //! since a tree selector misread would widen a rollout.
 
 use core::ffi::c_int;
-use core::ptr;
 
-use crate::errno::{E2BIG, EEXIST, EINVAL, ENAMETOOLONG};
-use crate::text::parse_x64;
-use crate::util::bpm_tree::{
-    MAX_KCONFIG, MAX_LABELS, MAX_VALUES, STRING_MAX, Text, TreeSelector, TreeSelectorKv,
-    tree_selector_free, tree_selector_kv_add,
-};
+use crate::errno::{E2BIG, EINVAL, ENAMETOOLONG};
+use crate::text::{cstr, parse_x64};
+use crate::util::bpm_tree::{MAX_VALUES, STRING_MAX, SelectorMap, TreeSelector};
 use crate::util::upatch;
 
 /// The most files, and the most upatches, a package holds.
@@ -121,23 +117,6 @@ pub(super) struct FileEntry {
     pub(super) target: Vec<u8>,
 }
 
-/// A tree selector the Beefile spells, freed when it goes.
-pub(super) struct Selector(pub(super) Box<TreeSelector>);
-
-impl Selector {
-    fn new() -> Self {
-        // SAFETY: an all-zero selector is an empty one.
-        Selector(Box::new(unsafe { core::mem::zeroed() }))
-    }
-}
-
-impl Drop for Selector {
-    fn drop(&mut self) {
-        // SAFETY: the selector, its pairs from tree_selector_kv_add().
-        unsafe { tree_selector_free(&mut *self.0) };
-    }
-}
-
 #[derive(Default)]
 pub(super) struct Tree {
     pub(super) present: bool,
@@ -147,7 +126,7 @@ pub(super) struct Tree {
     /// What the operation fixes, sorted: IDs the publisher carries
     /// forward and no node reads.
     pub(super) fixes: Vec<Vec<u8>>,
-    pub(super) selector: Option<Selector>,
+    pub(super) selector: Option<TreeSelector>,
 }
 
 #[derive(Default)]
@@ -332,10 +311,12 @@ fn parse_string_array(value: &[u8], max: usize) -> Result<Vec<Vec<u8>>, c_int> {
     Ok(items)
 }
 
-fn text(s: &[u8]) -> Text {
-    let mut t = [0u8; STRING_MAX];
-    t[..s.len()].copy_from_slice(s);
-    t
+/// The values of a selector list or key, each up to a NUL in it, as the
+/// tree holds a string.
+fn selector_values(value: &[u8]) -> Result<Vec<Vec<u8>>, c_int> {
+    let values = parse_string_array(value, MAX_VALUES).map_err(|_| -EINVAL)?;
+
+    Ok(values.iter().map(|v| cstr(v).to_vec()).collect())
 }
 
 /// `key = [...]` of a kconfig or labels table: the key unquoted, unique,
@@ -343,18 +324,9 @@ fn text(s: &[u8]) -> Text {
 fn parse_selector_kv(
     key: &[u8],
     value: &[u8],
-    selector: &mut Selector,
-    kconfig: bool,
+    selector: &mut TreeSelector,
+    map: SelectorMap,
 ) -> Result<(), c_int> {
-    let (kvs, n, max) = if kconfig {
-        (
-            &mut selector.0.kconfig,
-            &mut selector.0.n_kconfig,
-            MAX_KCONFIG,
-        )
-    } else {
-        (&mut selector.0.labels, &mut selector.0.n_labels, MAX_LABELS)
-    };
     let key = match key {
         [q @ (b'"' | b'\''), inner @ .., last] if q == last => inner,
         _ => key,
@@ -362,31 +334,7 @@ fn parse_selector_kv(
     if key.is_empty() || key.len() >= STRING_MAX {
         return Err(-EINVAL);
     }
-    // SAFETY: the pairs the selector holds.
-    let held = unsafe { crate::util::bpm_tree::pairs(*kvs, *n, max) };
-    if held.iter().any(|kv| crate::text::cstr(&kv.key) == key) {
-        return Err(-EEXIST);
-    }
-    let mut kv: *mut TreeSelectorKv = ptr::null_mut();
-    // SAFETY: the selector's pairs, their count and room for the new one.
-    let ret =
-        unsafe { tree_selector_kv_add(kvs, n, c_int::try_from(max).map_err(|_| -E2BIG)?, &mut kv) };
-    if ret != 0 {
-        return Err(ret);
-    }
-    // SAFETY: the pair just added.
-    let kv = unsafe { &mut *kv };
-    kv.key = text(key);
-    match parse_string_array(value, MAX_VALUES) {
-        Ok(values) => {
-            for (dst, v) in kv.values.iter_mut().zip(&values) {
-                *dst = text(v);
-            }
-            kv.n_values = c_int::try_from(values.len()).map_err(|_| -E2BIG)?;
-            Ok(())
-        }
-        Err(_) => Err(-EINVAL),
-    }
+    selector.pair_add(map, key, selector_values(value)?)
 }
 
 /// A TOML bare key, or with `dots` a dotted one of bare keys alone.
@@ -565,7 +513,7 @@ fn header(
             };
             let t = &mut spec.upatches[o].tree;
             t.present = true;
-            t.selector.get_or_insert_with(Selector::new);
+            t.selector.get_or_insert_with(TreeSelector::default);
         }
         // A selector the builder cannot read would widen the rollout.
         _ if section.starts_with(b"upatches.tree") => return Err(-EINVAL),
@@ -693,43 +641,28 @@ fn assignment(
                     let Some(sel) = t.selector.as_mut() else {
                         return Err(-EINVAL);
                     };
-                    let sel = &mut sel.0;
-                    let (dst, n) = match key {
-                        b"kernel_release_prefix" => (
-                            &mut sel.kernel_release_prefix,
-                            &mut sel.n_kernel_release_prefix,
-                        ),
-                        b"kernel_build_id" => {
-                            (&mut sel.kernel_build_id, &mut sel.n_kernel_build_id)
-                        }
-                        b"architecture" => (&mut sel.architecture, &mut sel.n_architecture),
+                    let list = match key {
+                        b"kernel_release_prefix" => &mut sel.kernel_release_prefix,
+                        b"kernel_build_id" => &mut sel.kernel_build_id,
+                        b"architecture" => &mut sel.architecture,
                         _ => return Err(-EINVAL),
                     };
-                    if *n != 0 {
+                    if !list.is_empty() {
                         return Err(-EINVAL);
                     }
-                    match parse_string_array(value, MAX_VALUES) {
-                        Ok(v) => {
-                            for (d, s) in dst.iter_mut().zip(&v) {
-                                *d = text(s);
-                            }
-                            *n = c_int::try_from(v.len()).map_err(|_| -EINVAL)?;
-                            Ok(())
-                        }
-                        Err(_) => Err(-EINVAL),
-                    }
+                    *list = selector_values(value)?;
+                    Ok(())
                 }
                 _ => {
                     let Some(sel) = t.selector.as_mut() else {
                         return Err(-EINVAL);
                     };
-                    parse_selector_kv(
-                        key,
-                        value,
-                        sel,
-                        section == b"upatches.tree.selector.kconfig",
-                    )
-                    .map_err(|_| -EINVAL)
+                    let map = if section == b"upatches.tree.selector.kconfig" {
+                        SelectorMap::Kconfig
+                    } else {
+                        SelectorMap::Labels
+                    };
+                    parse_selector_kv(key, value, sel, map).map_err(|_| -EINVAL)
                 }
             }
         }

@@ -157,9 +157,6 @@ pub(crate) fn index_parse(body: &[u8]) -> Result<Vec<IndexEntry>> {
     }
 }
 
-/// The tree publication at `reference` of `repository`, verified against
-/// the certificate at `cert_path`, into `out`, with the digest of its
-/// manifest into `manifest_digest`.
 /// The checked bytes of the tree publication at `repository:reference`,
 /// against `trusted`, or the certificate at `cert_path` without one, and
 /// its manifest's digest.
@@ -190,22 +187,17 @@ pub(crate) fn fetch_document(
     Ok((document, crate::text::cstr(&digest).to_vec()))
 }
 
+/// The tree publication at `repository:reference`, checked as
+/// [`fetch_document`] checks it, and its manifest's digest.
 pub(crate) fn fetch_publication(
     client: &mut Client,
     repository: &[u8],
     reference: &[u8],
     cert_path: &CStr,
     trusted: Option<&crate::util::keys::TrustedSet>,
-    out: &mut TreePublication,
-    manifest_digest: &mut [u8],
-) -> c_int {
-    publication::fetch_publication(
-        client.as_mut(),
-        repository,
-        reference,
-        Some(cert_path),
-        trusted,
-        out,
-        manifest_digest,
-    )
+) -> Result<(TreePublication, Vec<u8>)> {
+    let (document, digest) =
+        fetch_document(client, repository, reference, Some(cert_path), trusted)?;
+
+    Ok((TreePublication::parse(&document)?, digest))
 }

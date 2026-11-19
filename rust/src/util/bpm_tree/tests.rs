@@ -15,52 +15,30 @@ fn set(t: &mut [u8], value: &str) {
     t[..value.len()].copy_from_slice(value.as_bytes());
 }
 
-/// Zeros of a struct of numbers, texts and NULL pointers.
-fn zeroed<T>() -> T {
-    // SAFETY: each struct asked for is of numbers, arrays and pointers,
-    // for which zeros are a value.
-    unsafe { core::mem::zeroed() }
-}
-
-/// An operation of upatch "t" at seq 1, of label site "a b", its pairs
-/// freed when it goes.
-struct Op(Box<TreeOperation>);
+/// An operation of upatch "t" at seq 1, of label site "a b".
+struct Op(TreeOperation);
 
 impl Op {
     fn new() -> Self {
-        let mut op: Box<TreeOperation> = Box::new(zeroed());
-        let mut kv = core::ptr::null_mut();
+        let mut op = TreeOperation {
+            seq: 1,
+            ..TreeOperation::default()
+        };
 
-        op.seq = 1;
         set(&mut op.op, "add");
         set(&mut op.id, "t");
         set(&mut op.artifact.repository, "oci://registry.example/t");
         set(&mut op.artifact.manifest_digest, DIGEST);
         set(&mut op.artifact.layer_digest, DIGEST);
         set(&mut op.artifact.payload_sha256, DIGEST);
-        // SAFETY: the selector's pairs and their count, and room for the
-        // pair added.
-        let label = unsafe {
-            assert_eq!(
-                tree_selector_kv_add(
-                    &mut op.selector.labels,
-                    &mut op.selector.n_labels,
-                    MAX_LABELS as c_int,
-                    &mut kv
-                ),
-                0
-            );
-            &mut *kv
-        };
-        set(&mut label.key, "site");
-        label.n_values = 1;
-        set(&mut label.values[0], "a b");
+        op.selector
+            .pair_add(SelectorMap::Labels, b"site", vec![b"a b".to_vec()])
+            .unwrap();
         Op(op)
     }
 
     fn digest(&self) -> Result<[u8; 72], c_int> {
-        // SAFETY: an operation whose pairs are as their counts say.
-        unsafe { operation_digest(&self.0) }
+        operation_digest(&self.0)
     }
 
     /// The operation's digest, recorded in it.
@@ -70,66 +48,43 @@ impl Op {
     }
 
     fn label(&mut self) -> &mut TreeSelectorKv {
-        // SAFETY: the one pair new() added.
-        unsafe { &mut *self.0.selector.labels }
+        &mut self.0.selector.labels[0]
     }
 }
 
-impl Drop for Op {
-    fn drop(&mut self) {
-        // SAFETY: the operation's selector, whose pairs kv_add() made.
-        unsafe { tree_selector_free(&mut self.0.selector) };
-    }
-}
-
-/// A publication whose operations and their pairs the xmalloc family
-/// gave, freed when it goes.
+/// A publication of tree "t".
 struct Pub(TreePublication);
 
 impl Pub {
     fn new(generation: i64) -> Self {
-        let mut p: TreePublication = zeroed();
-        p.schema = 1;
-        p.generation = generation;
+        let mut p = TreePublication {
+            schema: 1,
+            generation,
+            ..TreePublication::default()
+        };
         set(&mut p.tree_id, "t");
         Pub(p)
     }
 
     fn append(&mut self, op: &Op) {
-        // SAFETY: the publication, and an operation whose pairs are as
-        // their counts say, which it copies.
-        assert_eq!(unsafe { tree_publication_append(&mut self.0, &*op.0) }, 0);
+        assert_eq!(self.0.append(op.0.clone()), Ok(()));
     }
 
     fn operations(&self) -> &[TreeOperation] {
-        // SAFETY: the publication's operations, as many as it counts.
-        unsafe { self.0.operations() }
+        &self.0.operations
     }
 
     /// The document emit_publication() writes, with `extra`.
     fn emit(&self, extra: Option<Extra<'_>>) -> Result<Vec<u8>, c_int> {
-        // SAFETY: a publication whose operations are as its counts say.
-        unsafe { emit_publication(&self.0, extra) }
+        emit_publication(&self.0, extra)
     }
 
     fn parse(doc: &[u8]) -> Result<Self, c_int> {
-        let mut p = Pub(zeroed());
-        // SAFETY: the document and room for a publication.
-        match unsafe { parse(doc, &mut p.0) } {
-            0 => Ok(p),
-            err => Err(err),
-        }
+        TreePublication::parse(doc).map(Pub)
     }
 
-    fn check(&self) -> c_int {
-        // SAFETY: a publication whose operations are as its counts say.
-        unsafe { publication_check(&self.0) }
-    }
-}
-
-impl Drop for Pub {
-    fn drop(&mut self) {
-        publication_free(&mut self.0);
+    fn check(&self) -> Result<(), c_int> {
+        publication_check(&self.0)
     }
 }
 
@@ -137,9 +92,8 @@ fn has(doc: &[u8], part: &str) -> bool {
     crate::text::find(doc, part.as_bytes()).is_some()
 }
 
-fn validate(op: &TreeOperation) -> c_int {
-    // SAFETY: an operation whose pairs are as their counts say.
-    unsafe { operation_validate(op) }
+fn validate(op: &TreeOperation) -> Result<(), c_int> {
+    operation_validate(op)
 }
 
 /// The node's parser refuses a control character, so a publication
@@ -177,12 +131,10 @@ fn publication_reads_back() {
 
     assert_eq!(back.0.schema, 1);
     assert_eq!(back.operations().len(), 1);
-    // SAFETY: the operation parsed, whose pairs are as its counts say.
-    let digest = unsafe { operation_digest(&back.operations()[0]) }.unwrap();
+    let digest = operation_digest(&back.operations()[0]).unwrap();
     assert_eq!(cstr(&digest), cstr(&op.0.operation_digest));
-    // SAFETY: the one label the parsed operation holds.
-    let label = unsafe { &*back.operations()[0].selector.labels };
-    assert_eq!(cstr(&label.values[0]), b"a b");
+    let label = &back.operations()[0].selector.labels[0];
+    assert_eq!(label.values[0], b"a b");
 }
 
 /// Keys past the emitter's bound, as a publisher's fixes can be.
@@ -209,8 +161,7 @@ fn publication_carries_keys_outside_the_digest() {
     assert!(matches!((fixes_at, digest_at), (Some(f), Some(d)) if f < d));
     let back = Pub::parse(&doc).unwrap();
     assert_eq!(back.operations().len(), 1);
-    // SAFETY: the operation parsed, whose pairs are as their counts say.
-    let digest = unsafe { operation_digest(&back.operations()[0]) }.unwrap();
+    let digest = operation_digest(&back.operations()[0]).unwrap();
     assert_eq!(cstr(&digest), cstr(&op.0.operation_digest));
     assert_eq!(
         cstr(&back.operations()[0].operation_digest),
@@ -240,9 +191,9 @@ fn publication_reads_past_malformed_fixes() {
 
     assert!(has(&doc, r#""fixes":{"n":[null,"\u0007"]}"#));
     let back = Pub::parse(&doc).unwrap();
-    assert_eq!(back.check(), 0);
+    assert_eq!(back.check(), Ok(()));
     assert_eq!(back.operations().len(), 1);
-    assert_eq!(validate(&back.operations()[0]), 0);
+    assert_eq!(validate(&back.operations()[0]), Ok(()));
 }
 
 /// A later segment names its sealed predecessor and the history before it.
@@ -270,9 +221,9 @@ fn segment_reads_back() {
     assert_eq!(back.0.base_seq, 2);
     assert_eq!(cstr(&back.0.segment_manifest_digest), SEALED.as_bytes());
     assert_eq!(cstr(&back.0.history_root), ROOT.as_bytes());
-    assert_eq!(back.check(), 0);
+    assert_eq!(back.check(), Ok(()));
     assert_eq!(back.operations().len(), 1);
-    assert_eq!(validate(&back.operations()[0]), 0);
+    assert_eq!(validate(&back.operations()[0]), Ok(()));
     p.0.history_root[0] = 0;
     assert!(!has(&p.emit(None).unwrap(), "history_root"));
 }
@@ -295,72 +246,67 @@ fn operation_validates_against_its_digest() {
     let mut op = Op::new();
 
     op.seal();
-    assert_eq!(validate(&op.0), 0);
+    assert_eq!(validate(&op.0), Ok(()));
     op.0.seq = 2;
-    assert_eq!(validate(&op.0), -EKEYREJECTED);
+    assert_eq!(validate(&op.0), Err(-EKEYREJECTED));
     op.0.seq = 0;
-    assert_eq!(validate(&op.0), -EINVAL);
+    assert_eq!(validate(&op.0), Err(-EINVAL));
     op.0.seq = 1;
     set(&mut op.0.op, "replace");
-    assert_eq!(validate(&op.0), -EINVAL);
+    assert_eq!(validate(&op.0), Err(-EINVAL));
     set(&mut op.0.op, "add");
     set(&mut op.0.id, "../t");
-    assert_eq!(validate(&op.0), -EINVAL);
+    assert_eq!(validate(&op.0), Err(-EINVAL));
     set(&mut op.0.id, "t");
     set(&mut op.0.artifact.layer_digest, "sha256:aa");
-    assert_eq!(validate(&op.0), -EINVAL);
+    assert_eq!(validate(&op.0), Err(-EINVAL));
 }
 
-/// Operations of `seqs`, of no pairs, for a publication that borrows
-/// them and frees nothing.
-fn bare_ops(seqs: &[i64]) -> Vec<TreeOperation> {
-    seqs.iter()
-        .map(|&seq| {
-            let mut op: TreeOperation = zeroed();
-            op.seq = seq;
-            op
+/// A publication from `base_seq` to `head_seq` of operations of `seqs`,
+/// of no pairs.
+fn over(seqs: &[i64], base_seq: i64, head_seq: i64) -> TreePublication {
+    let operations = seqs
+        .iter()
+        .map(|&seq| TreeOperation {
+            seq,
+            ..TreeOperation::default()
         })
-        .collect()
+        .collect();
+
+    TreePublication {
+        operations,
+        base_seq,
+        head_seq,
+        ..TreePublication::default()
+    }
 }
 
-/// A publication over `ops`, which it does not own.
-fn over(ops: &mut [TreeOperation], base_seq: i64, head_seq: i64) -> TreePublication {
-    let mut p: TreePublication = zeroed();
-    p.operations = ops.as_mut_ptr();
-    p.n_operations = ops.len() as c_int;
-    p.base_seq = base_seq;
-    p.head_seq = head_seq;
-    p
-}
-
-fn check(p: &TreePublication) -> c_int {
-    // SAFETY: a publication of operations of no pairs.
-    unsafe { publication_check(p) }
+fn check(p: &TreePublication) -> Result<(), c_int> {
+    publication_check(p)
 }
 
 #[test]
 fn publication_runs_from_base_to_head() {
-    let mut ops = bare_ops(&[1, 2]);
-    let mut p = over(&mut ops, 0, 2);
+    let mut p = over(&[1, 2], 0, 2);
 
-    assert_eq!(check(&p), 0);
+    assert_eq!(check(&p), Ok(()));
     p.head_seq = 3;
-    assert_eq!(check(&p), -EINVAL);
+    assert_eq!(check(&p), Err(-EINVAL));
     p.head_seq = 2;
-    ops[0].seq = 2;
-    assert_eq!(check(&p), -EINVAL);
-    ops[0].seq = 1;
+    p.operations[0].seq = 2;
+    assert_eq!(check(&p), Err(-EINVAL));
+    p.operations[0].seq = 1;
     set(&mut p.parent_manifest_digest, "sha256:aa");
-    assert_eq!(check(&p), -EINVAL);
+    assert_eq!(check(&p), Err(-EINVAL));
     set(&mut p.parent_manifest_digest, DIGEST);
-    assert_eq!(check(&p), 0);
-    p.n_operations = 0;
-    assert_eq!(check(&p), -EINVAL);
+    assert_eq!(check(&p), Ok(()));
+    p.operations.clear();
+    assert_eq!(check(&p), Err(-EINVAL));
     p.head_seq = 0;
-    assert_eq!(check(&p), 0);
+    assert_eq!(check(&p), Ok(()));
     p.base_seq = -1;
     p.head_seq = -1;
-    assert_eq!(check(&p), -EINVAL);
+    assert_eq!(check(&p), Err(-EINVAL));
 }
 
 /// What sync checks of a publication: a tree ID its state can record,
@@ -370,10 +316,7 @@ fn publication_runs_from_base_to_head() {
 fn publication_verifies_as_sync_does() {
     let mut op = Op::new();
     let mut p = Pub::new(1);
-    let verify = |p: &Pub| {
-        // SAFETY: a publication whose operations are as its counts say.
-        unsafe { publication_verify(&p.0) }
-    };
+    let verify = |p: &Pub| publication_verify(&p.0);
 
     p.0.head_seq = 2;
     for seq in 1..=2 {
@@ -388,12 +331,10 @@ fn publication_verifies_as_sync_does() {
     p.0.head_seq = 3;
     assert_eq!(verify(&p), Err((-EINVAL, None)));
     p.0.head_seq = 2;
-    // SAFETY: the publication's two operations.
-    let ops = unsafe { core::slice::from_raw_parts_mut(p.0.operations, 2) };
-    ops[1].operation_digest[7] ^= 1;
-    ops[0].id[0] = b'.';
+    p.0.operations[1].operation_digest[7] ^= 1;
+    p.0.operations[0].id[0] = b'.';
     assert_eq!(verify(&p), Err((-EINVAL, Some(0))));
-    ops[0].id[0] = b't';
+    p.0.operations[0].id[0] = b't';
     assert_eq!(verify(&p), Err((-EKEYREJECTED, Some(1))));
 }
 
@@ -402,21 +343,20 @@ fn publication_verifies_as_sync_does() {
 /// neither.
 #[test]
 fn segment_names_its_base() {
-    let mut ops = bare_ops(&[3, 4]);
-    let mut p = over(&mut ops, 2, 4);
+    let mut p = over(&[3, 4], 2, 4);
 
-    assert_eq!(check(&p), -EINVAL);
+    assert_eq!(check(&p), Err(-EINVAL));
     set(&mut p.segment_manifest_digest, SEALED);
-    assert_eq!(check(&p), -EINVAL);
+    assert_eq!(check(&p), Err(-EINVAL));
     set(&mut p.history_root, ROOT);
-    assert_eq!(check(&p), 0);
+    assert_eq!(check(&p), Ok(()));
     for bad in [
         "",
         "sha256:bb",
         "sha512:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     ] {
         set(&mut p.segment_manifest_digest, bad);
-        assert_eq!(check(&p), -EINVAL, "{bad}");
+        assert_eq!(check(&p), Err(-EINVAL), "{bad}");
     }
     set(&mut p.segment_manifest_digest, SEALED);
     for bad in [
@@ -424,29 +364,28 @@ fn segment_names_its_base() {
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeg",
     ] {
         set(&mut p.history_root, bad);
-        assert_eq!(check(&p), -EINVAL, "{bad}");
+        assert_eq!(check(&p), Err(-EINVAL), "{bad}");
     }
     set(&mut p.history_root, ROOT);
-    assert_eq!(check(&p), 0);
-    p.n_operations = 0;
+    assert_eq!(check(&p), Ok(()));
+    p.operations.clear();
     p.head_seq = 2;
-    assert_eq!(check(&p), -EINVAL);
+    assert_eq!(check(&p), Err(-EINVAL));
 
-    let mut ops = bare_ops(&[1, 2]);
-    let mut p = over(&mut ops, 0, 2);
+    let mut p = over(&[1, 2], 0, 2);
     set(&mut p.segment_manifest_digest, SEALED);
-    assert_eq!(check(&p), -EINVAL);
+    assert_eq!(check(&p), Err(-EINVAL));
     p.segment_manifest_digest[0] = 0;
     set(&mut p.history_root, ROOT);
-    assert_eq!(check(&p), -EINVAL);
+    assert_eq!(check(&p), Err(-EINVAL));
     set(&mut p.history_root, &"0".repeat(64));
-    assert_eq!(check(&p), -EINVAL);
+    assert_eq!(check(&p), Err(-EINVAL));
     p.history_root[0] = 0;
-    assert_eq!(check(&p), 0);
+    assert_eq!(check(&p), Ok(()));
 }
 
 fn state(generation: i64, last_seq: i64, head_seq: i64) -> TreeState {
-    let mut s: TreeState = zeroed();
+    let mut s = TreeState::zeroed();
     s.generation = generation;
     s.last_seq = last_seq;
     s.head_seq = head_seq;
@@ -456,10 +395,12 @@ fn state(generation: i64, last_seq: i64, head_seq: i64) -> TreeState {
 }
 
 fn publication(generation: i64, base_seq: i64, head_seq: i64) -> TreePublication {
-    let mut p: TreePublication = zeroed();
-    p.generation = generation;
-    p.base_seq = base_seq;
-    p.head_seq = head_seq;
+    let mut p = TreePublication {
+        generation,
+        base_seq,
+        head_seq,
+        ..TreePublication::default()
+    };
     set(&mut p.tree_id, "t");
     p
 }
@@ -574,19 +515,11 @@ fn digest_of(text: &str) -> [u8; 32] {
 /// The history root at any seq of a segment, folded from its base.
 #[test]
 fn history_folds_from_the_base() {
-    let mut ops = bare_ops(&[5, 6]);
-    set(&mut ops[0].operation_digest, DIGEST);
-    set(&mut ops[1].operation_digest, SEALED);
-    let mut p = over(&mut ops, 4, 6);
+    let mut p = over(&[5, 6], 4, 6);
+    set(&mut p.operations[0].operation_digest, DIGEST);
+    set(&mut p.operations[1].operation_digest, SEALED);
     set(&mut p.history_root, ROOT);
-    let at = |p: &TreePublication, seq| {
-        let mut out = [0u8; 32];
-        // SAFETY: a publication of operations of no pairs.
-        match unsafe { history_at(p, seq, &mut out) } {
-            0 => Ok(out),
-            err => Err(err),
-        }
-    };
+    let at = history_at;
     let mut base = [0u8; 32];
     crate::util::hex::decode(ROOT.as_bytes(), &mut base).unwrap();
     let one = history_step(&base, &digest_of(DIGEST)).unwrap();
@@ -598,10 +531,8 @@ fn history_folds_from_the_base() {
     assert_eq!(at(&p, 3), Err(-EINVAL));
     assert_eq!(at(&p, 7), Err(-EINVAL));
     // The first segment starts from 32 zero bytes, whatever it holds.
-    // SAFETY: the publication's two operations.
-    let ops = unsafe { core::slice::from_raw_parts_mut(p.operations, 2) };
-    ops[0].seq = 1;
-    ops[1].seq = 2;
+    p.operations[0].seq = 1;
+    p.operations[1].seq = 2;
     p.base_seq = 0;
     p.head_seq = 2;
     assert_eq!(at(&p, 0), Ok([0; 32]));
@@ -613,10 +544,10 @@ fn history_folds_from_the_base() {
     set(&mut p.history_root, "00");
     assert_eq!(at(&p, 4), Err(-EINVAL));
     set(&mut p.history_root, ROOT);
-    ops[0].seq = 5;
-    ops[1].seq = 6;
+    p.operations[0].seq = 5;
+    p.operations[1].seq = 6;
     p.head_seq = 6;
-    ops[1].operation_digest[7] = b'x';
+    p.operations[1].operation_digest[7] = b'x';
     assert_eq!(at(&p, 5), Ok(one));
     assert_eq!(at(&p, 6), Err(-EINVAL));
 }

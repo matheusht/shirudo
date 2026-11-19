@@ -263,7 +263,7 @@ the model follows the C.
        (root, digest) and never 64 zeros; only sync writes the tree files,
        each write whole, one sync at a time; the unlink of ``pending.json``
        succeeds; an extend and its eventlog record are one write
-     - Review, ``tree_parse()`` included; the CBMC harnesses
+     - Review, ``TreePublication::parse()`` included; the CBMC harnesses
        ``bpm-tree-follows`` of ``tree_publication_follows()`` and
        ``bpm-tree-sync-model`` of the writes of a sync of up to two
        operations went with ``util/bpm_tree.c`` in the port to Rust
