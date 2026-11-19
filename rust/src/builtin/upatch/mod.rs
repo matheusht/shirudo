@@ -17,13 +17,12 @@ use core::ffi::{CStr, c_int};
 use std::ffi::CString;
 
 use crate::sys::libc::{fwrite, stderr, stdout};
-use crate::sys::upatch::MapSummary;
 use crate::util::help::{
     Help, HelpItem, HelpSection, is_help, is_list_cmds, print_help, print_subcmd_list,
     resolve_subcommand,
 };
 use crate::util::json::JsonEmit;
-use crate::util::map_read;
+use crate::util::map_read::{self, MapSummary};
 
 /// The most a JSON document grows to.
 const JSON_MAX: usize = 8 * 1024 * 1024;

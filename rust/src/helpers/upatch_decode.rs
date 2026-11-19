@@ -14,8 +14,8 @@ use core::ffi::{CStr, c_char, c_int, c_void};
 
 use super::{err, helper_main, out_bytes};
 use crate::sys::luajit::{LuaState, lua_close, luaL_newstate};
-use crate::sys::upatch_maps::MapView;
 use crate::util::decode::{JSON_MAX, decode_map};
+use crate::util::map_read::MapView;
 
 helper_main!(shirudo_helper_test_upatch_decode, run);
 

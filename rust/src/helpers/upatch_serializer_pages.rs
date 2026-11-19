@@ -15,8 +15,8 @@ use std::os::unix::ffi::OsStrExt;
 use super::{err, helper_main, out};
 use crate::errno::{EBADMSG, EBUSY};
 use crate::sys::libc::Zeroed;
-use crate::sys::upatch_maps::{MapView, SerialPage};
 use crate::util::json::JsonEmit;
+use crate::util::map_read::{MapView, SerialPage};
 use crate::util::map_render::{emit_json_fields, emit_json_object};
 use crate::util::serializer::{
     SERIAL_CHUNK_PAYLOAD, SERIAL_MAGIC, SERIAL_VERSION, SerialChunk, chunk_validate,

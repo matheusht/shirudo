@@ -18,8 +18,8 @@ use crate::bpf::btf::{
 };
 use crate::errno::{E2BIG, EINVAL, ENODATA, EOPNOTSUPP};
 use crate::sys::libc::{fwrite, stderr};
-use crate::sys::upatch_maps::MapView;
 use crate::util::map_format;
+use crate::util::map_read::MapView;
 
 /// `enum otel_signal`, the values of SHIRUDO_UPATCH_DECODER_EXPORT_*.
 pub(crate) const LOG: c_int = 1;

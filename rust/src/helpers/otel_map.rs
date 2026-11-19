@@ -28,9 +28,9 @@ use std::os::unix::ffi::OsStrExt;
 use super::{helper_main, out, out_bytes};
 use crate::btf_builder::BtfBuilder;
 use crate::errno::{E2BIG, EACCES, EINVAL, EOPNOTSUPP, EOVERFLOW, EPERM};
-use crate::sys::upatch_maps::{MapEntry, MapView, SerialPage};
 use crate::util::decode::{JSON_MAX, decode_map};
 use crate::util::json::JsonEmit;
+use crate::util::map_read::{MapEntry, MapView, SerialPage};
 use crate::util::map_render::emit_json_fields;
 use crate::util::otel::{
     AUTO, FORCE_LOG, FORCE_METRIC, METRIC, OtelOpts, S3, classify, payload_file, retry_after,

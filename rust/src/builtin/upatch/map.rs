@@ -18,14 +18,13 @@ use crate::errno::{EINVAL, EIO, ENODATA};
 use crate::sys::libc::{
     LOCK_UN, O_APPEND, O_CREAT, O_RDWR, STDOUT_FILENO, close, errno, ferror, flock, stdout,
 };
-use crate::sys::upatch_maps::{MAP_ENTRIES_DEFAULT, MAP_READ_PEEK, MapView};
 use crate::text::cstr;
 use crate::util::config::{self, Scrubbed};
 use crate::util::decode;
 use crate::util::help::{Help, HelpSection};
 use crate::util::io::{lock_exclusive, write_complete};
 use crate::util::json::JsonEmit;
-use crate::util::map_read;
+use crate::util::map_read::{self, MAP_ENTRIES_DEFAULT, MAP_READ_PEEK, MapView};
 use crate::util::map_render;
 use crate::util::options::{
     EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OPT_OPTIONAL, OptParser, OptSpec,

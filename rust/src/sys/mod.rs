@@ -12,5 +12,4 @@ pub mod luajit;
 pub mod openssl;
 pub mod tss2;
 pub mod upatch;
-pub mod upatch_maps;
 pub mod version;

@@ -8,11 +8,10 @@
 use core::ffi::CStr;
 
 use crate::sys::libc::{fwrite, stdout};
-use crate::sys::upatch::MapSummary;
-use crate::sys::upatch_maps::{MapEntry, MapView};
 use crate::text::cstr;
 use crate::util::json::JsonEmit;
 use crate::util::map_format::{cpu_values, format_cell, is_percpu, percpu_sum};
+use crate::util::map_read::{MapEntry, MapSummary, MapView};
 
 /// Text to the C library's stdout, where the rest of a report goes.
 fn out(text: &[u8]) {

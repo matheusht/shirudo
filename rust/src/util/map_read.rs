@@ -15,12 +15,11 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 
+use crate::bpf::btf::Btf;
 use crate::errno::{
     E2BIG, EBADMSG, EINVAL, EIO, ENAMETOOLONG, ENOENT, ENOMEM, EOPNOTSUPP, EOVERFLOW,
 };
 use crate::sys::libc::{Zeroed, errno, syscall};
-use crate::sys::upatch::MapSummary;
-use crate::sys::upatch_maps::{MAP_READ_PEEK, MapEntry, MapView, SerialPage};
 use crate::text::strscpy;
 use crate::util::bpf_info::{Info, MAP_INFO_SIZE};
 use crate::util::bpf_sys::{
@@ -33,6 +32,147 @@ use crate::util::serializer::{SerialChunk, chunk_validate, new_invocation_id};
 use crate::util::upatch::name_from_pin;
 use crate::util::upatch_pins::pin_payload;
 use crate::util::upatch_resolve::{BPFFS_UPATCHES_DIR, pin_path, resolve_location};
+
+/// UPATCH_NAME_MAX, MAP_NAME_MAX, UPATCH_LOCATION_MAX, MAP_TYPENAME_MAX
+/// and MAP_TYPEDEF_MAX.
+const UPATCH_NAME_MAX: usize = 256;
+const MAP_NAME_MAX: usize = 16;
+const UPATCH_LOCATION_MAX: usize = 160;
+const MAP_TYPENAME_MAX: usize = 64;
+const MAP_TYPEDEF_MAX: usize = 1024;
+
+/// The entries a read returns unless asked for all, which 0 asks.
+pub(crate) const MAP_ENTRIES_DEFAULT: u32 = 256;
+/// Reads a serializer's interval without taking it from the exporter.
+pub(crate) const MAP_READ_PEEK: u32 = 1 << 0;
+
+/// A key and its value, or its values per CPU a value stride apart, as
+/// a read copied them.
+pub(crate) struct MapEntry {
+    pub(crate) key: Vec<u8>,
+    pub(crate) value: Vec<u8>,
+}
+
+/// One page a serializer handed over.
+pub(crate) struct SerialPage {
+    pub(crate) page_index: u32,
+    pub(crate) cursor: u64,
+    pub(crate) next_cursor: u64,
+    pub(crate) flags: u32,
+    pub(crate) chunks: u32,
+    pub(crate) done: bool,
+    pub(crate) data: Vec<u8>,
+}
+
+impl SerialPage {
+    /// The bytes the page holds, which a read bounds well below 4 GiB.
+    pub(crate) fn bytes(&self) -> u32 {
+        u32::try_from(self.data.len()).unwrap_or(u32::MAX)
+    }
+}
+
+/// One map's contents, as read() reads them.
+pub(crate) struct MapView {
+    pub(crate) upatch: [u8; UPATCH_NAME_MAX + 1],
+    pub(crate) name: [u8; MAP_NAME_MAX + 1],
+    pub(crate) location: [u8; UPATCH_LOCATION_MAX],
+    pub(crate) ty: u32,
+    pub(crate) type_name: Option<&'static CStr>,
+    pub(crate) key_size: u32,
+    pub(crate) value_size: u32,
+    pub(crate) value_stride: u32,
+    pub(crate) max_entries: u32,
+    pub(crate) n_cpus: u32,
+    pub(crate) lifetime_start_ns: u64,
+    /// The pin directory's payload digest, when it has one.
+    pub(crate) has_payload: bool,
+    pub(crate) payload: [u8; 32],
+    pub(crate) truncated: bool,
+    pub(crate) n_truncated_at: u32,
+    pub(crate) serialized: bool,
+    pub(crate) serial_bytes_total: u64,
+    pub(crate) serial_pages: Vec<SerialPage>,
+    pub(crate) skipped: bool,
+    pub(crate) skipped_reason: Option<&'static CStr>,
+    pub(crate) btf_key_type: [u8; MAP_TYPENAME_MAX],
+    pub(crate) btf_value_type: [u8; MAP_TYPENAME_MAX],
+    pub(crate) key_type_def: [u8; MAP_TYPEDEF_MAX],
+    pub(crate) value_type_def: [u8; MAP_TYPEDEF_MAX],
+    pub(crate) key_type_id: u32,
+    pub(crate) value_type_id: u32,
+    pub(crate) btf: Option<Btf>,
+    pub(crate) entries: Vec<MapEntry>,
+}
+
+/// The view of no map, which a read or a test fills in.
+impl Default for MapView {
+    fn default() -> Self {
+        MapView {
+            upatch: [0; UPATCH_NAME_MAX + 1],
+            name: [0; MAP_NAME_MAX + 1],
+            location: [0; UPATCH_LOCATION_MAX],
+            ty: 0,
+            type_name: None,
+            key_size: 0,
+            value_size: 0,
+            value_stride: 0,
+            max_entries: 0,
+            n_cpus: 0,
+            lifetime_start_ns: 0,
+            has_payload: false,
+            payload: [0; 32],
+            truncated: false,
+            n_truncated_at: 0,
+            serialized: false,
+            serial_bytes_total: 0,
+            serial_pages: Vec::new(),
+            skipped: false,
+            skipped_reason: None,
+            btf_key_type: [0; MAP_TYPENAME_MAX],
+            btf_value_type: [0; MAP_TYPENAME_MAX],
+            key_type_def: [0; MAP_TYPEDEF_MAX],
+            value_type_def: [0; MAP_TYPEDEF_MAX],
+            key_type_id: 0,
+            value_type_id: 0,
+            btf: None,
+            entries: Vec::new(),
+        }
+    }
+}
+
+impl MapView {
+    /// The entries read, as many as a map's u32 count can say.
+    pub(crate) fn n_entries(&self) -> u32 {
+        u32::try_from(self.entries.len()).unwrap_or(u32::MAX)
+    }
+
+    /// The serialized pages read, at most SERIAL_MAX_PAGES.
+    pub(crate) fn n_serial_pages(&self) -> u32 {
+        u32::try_from(self.serial_pages.len()).unwrap_or(u32::MAX)
+    }
+}
+
+/// A map an upatch pins, as list() gives it.
+pub(crate) struct MapSummary {
+    pub(crate) upatch: [u8; UPATCH_NAME_MAX + 1],
+    pub(crate) name: [u8; MAP_NAME_MAX + 1],
+    pub(crate) type_name: Option<&'static CStr>,
+    pub(crate) max_entries: u32,
+    pub(crate) n_cpus: u32,
+}
+
+/// The summary of no map, which a listing fills in.
+impl Default for MapSummary {
+    fn default() -> Self {
+        MapSummary {
+            upatch: [0; UPATCH_NAME_MAX + 1],
+            name: [0; MAP_NAME_MAX + 1],
+            type_name: None,
+            max_entries: 0,
+            n_cpus: 0,
+        }
+    }
+}
 
 /// What bpf/lib/serializer.h fixes of the serializer protocol.
 const SERIAL_MAP_NAME: &[u8] = b"shirudo_ser";
@@ -672,7 +812,6 @@ fn scan(upatch: &[u8], list: &mut Vec<MapSummary>) {
             1
         };
         let mut one = MapSummary {
-            ty,
             type_name: Some(map_type_name(ty)),
             max_entries: info.u32_at(MAP_MAX_ENTRIES),
             n_cpus,

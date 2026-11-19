@@ -13,8 +13,8 @@ use core::ffi::c_char;
 use std::sync::OnceLock;
 
 use crate::fuzzing::fuzz_target;
-use crate::sys::upatch_maps::{MapEntry, MapView, SerialPage};
 use crate::util::json::MAX_BYTES;
+use crate::util::map_read::{MapEntry, MapView, SerialPage};
 use crate::util::serializer::SERIAL_CHUNK_PAYLOAD;
 use crate::util::upatch::DecoderView;
 

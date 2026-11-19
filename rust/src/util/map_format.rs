@@ -10,7 +10,7 @@ use crate::bpf::btf::{
     Btf, INT_SIGNED, KIND_ARRAY, KIND_CONST, KIND_ENUM, KIND_ENUM64, KIND_INT, KIND_PTR,
     KIND_RESTRICT, KIND_STRUCT, KIND_TYPE_TAG, KIND_TYPEDEF, KIND_UNION, KIND_VOLATILE,
 };
-use crate::sys::upatch_maps::MapView;
+use crate::util::map_read::MapView;
 
 /// How deep the value and type renderers follow nested types: real map
 /// values are flat, and chains beyond a few hops are crafted BTF or a

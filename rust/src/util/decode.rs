@@ -23,10 +23,10 @@ use crate::sys::libc::{explicit_bzero, snprintf};
 use crate::sys::luajit::{
     Allocator, LUA_MASKCOUNT, Lua, LuaCFunction, LuaDebug, LuaState, LuaType, Stack,
 };
-use crate::sys::upatch_maps::MapView;
 use crate::text::cstr;
 use crate::util::chain::memneq_explicit;
 use crate::util::json::JsonEmit;
+use crate::util::map_read::MapView;
 use crate::util::seal;
 use crate::util::upatch::{self, DecoderView, Upatch};
 use crate::util::upatch_verify::payload_digest;

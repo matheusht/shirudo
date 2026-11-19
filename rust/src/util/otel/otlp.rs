@@ -10,11 +10,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::{hex_lower, is_c_space, name_or_empty};
 use crate::errno::{E2BIG, EBADMSG, EINVAL, ENODATA};
 use crate::sys::libc::gethostname;
-use crate::sys::upatch_maps::MapView;
 use crate::text::cstr;
 use crate::util::decode::decode_map;
 use crate::util::json::JsonEmit;
 use crate::util::map_format;
+use crate::util::map_read::MapView;
 
 /// JSON_MAX_BYTES: the largest document the emitter makes.
 pub(super) const JSON_MAX: usize = 8 * 1024 * 1024;
