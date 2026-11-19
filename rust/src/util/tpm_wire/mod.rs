@@ -6,19 +6,17 @@
 //! derivations and credential protection, and the attestation
 //! structures a verifier parses from evidence.
 
-mod capi;
 #[cfg(shirudo_fuzz)]
 mod fuzz;
 mod kdf;
 mod parse;
 mod policy;
 
-pub(crate) use capi::{EK_POLICY, tpm_nv_name, tpm_register_policy};
 pub(crate) use kdf::{credential_protect, kdfe};
 pub(crate) use parse::{attest_parse, ecc_public_parse, public_marshal, public_parse};
 pub(crate) use policy::{
-    RegisterPolicy, nv_extend_cphash, nv_name, object_name, register_policy, register_policy_final,
-    writer_auth_hash, writer_public,
+    EK_POLICY, RegisterPolicy, nv_extend_cphash, nv_name, object_name, register_policy,
+    register_policy_final, writer_auth_hash, writer_public,
 };
 /// The rest of what test-tpm-wire drives.
 #[cfg(feature = "test-helpers")]

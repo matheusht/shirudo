@@ -24,6 +24,13 @@ const CC_POLICY_NV_WRITTEN: u32 = 0x0000_018F;
 
 type Digest = [u8; DIGEST_LEN];
 
+/// The TCG default endorsement key policy,
+/// PolicySecret(TPM_RH_ENDORSEMENT).
+pub(crate) const EK_POLICY: Digest = [
+    0x83, 0x71, 0x97, 0x67, 0x44, 0x84, 0xb3, 0xf8, 0x1a, 0x90, 0xcc, 0x8d, 0x46, 0xa5, 0xd7, 0x24,
+    0xfd, 0x52, 0xd7, 0x6e, 0x06, 0x52, 0x0b, 0x64, 0xf2, 0xa1, 0xda, 0x1b, 0x33, 0x14, 0x69, 0xaa,
+];
+
 /// SHA-256 of `data` into `out`, as `sha256_buffer()` gives it.
 fn sha256(data: &[u8], out: &mut [u8]) -> c_int {
     debug_assert!(out.len() >= DIGEST_LEN);
@@ -59,7 +66,7 @@ fn policy_hash(prev: &Digest, cc: u32, a: &[u8], b: &[u8], out: &mut Digest) -> 
     0
 }
 
-pub(super) fn policy_nv_written(prev: &Digest, written: bool, out: &mut Digest) -> c_int {
+pub(crate) fn policy_nv_written(prev: &Digest, written: bool, out: &mut Digest) -> c_int {
     policy_hash(prev, CC_POLICY_NV_WRITTEN, &[u8::from(written)], &[], out)
 }
 
@@ -78,7 +85,7 @@ pub(crate) fn policy_pcr(prev: &Digest, mask: u32, pcr_digest: &Digest, out: &mu
     policy_hash(prev, CC_POLICY_PCR, &pcr_selection(mask), pcr_digest, out)
 }
 
-pub(super) fn policy_or(a: &Digest, b: &Digest, out: &mut Digest) -> c_int {
+pub(crate) fn policy_or(a: &Digest, b: &Digest, out: &mut Digest) -> c_int {
     policy_hash(&[0; DIGEST_LEN], CC_POLICY_OR, a, b, out)
 }
 

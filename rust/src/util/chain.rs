@@ -22,7 +22,9 @@ use crate::util::eventlog::{EventlogInit, NV_INDEX, eventlog_boot_init};
 use crate::util::initrd::in_initrd;
 use crate::util::nv_writer;
 use crate::util::tpm::{Branches, NvInfo, REGISTER_ATTRS, Tpm};
-use crate::util::tpm_wire::{DIGEST_LEN, NAME_LEN, NV_RSA_BYTES, tpm_nv_name, tpm_register_policy};
+use crate::util::tpm_wire::{
+    DIGEST_LEN, NAME_LEN, NV_RSA_BYTES, RegisterPolicy, nv_name, register_policy,
+};
 use crate::util::upatch::{NAME_MAX, PAYLOAD_HASH_LEN};
 
 /// `CHAIN_NAME`, the register's name in its anchor.
@@ -310,8 +312,9 @@ impl Expectation {
     }
 }
 
-/// The expectation for the PCR values and the writer into `e`.
-fn register_expectation(
+/// The register's policy and its branches for the PCR values it binds
+/// to and the writer into `e`.
+fn expectation_policy(
     pcr_before: &[u8; DIGEST_LEN],
     phase_before: &[u8; DIGEST_LEN],
     writer_public: &[u8; NV_RSA_BYTES],
@@ -320,43 +323,44 @@ fn register_expectation(
     let mut values = [0u8; 2 * DIGEST_LEN];
 
     bind_values(pcr_before, phase_before, &mut values);
-    // SAFETY: two values, a modulus and three rooms for a digest.
-    let ret = unsafe {
-        tpm_register_policy(
-            PCR_MASK,
-            values.as_ptr(),
-            2,
-            writer_public.as_ptr(),
-            e.branch_written.as_mut_ptr(),
-            e.branch_init.as_mut_ptr(),
-            e.policy.as_mut_ptr(),
-        )
+    let digests = RegisterPolicy {
+        branch_written: &mut e.branch_written,
+        branch_init: &mut e.branch_init,
+        policy: &mut e.policy,
     };
+    let ret = register_policy(PCR_MASK, &values, writer_public, digests);
+
     if ret != 0 {
         crate::log::err(format!("tpm: compute signed register policy: {}", text(ret)).as_bytes());
+    }
+    ret
+}
+
+/// The expectation for the PCR values and the writer into `e`.
+fn register_expectation(
+    pcr_before: &[u8; DIGEST_LEN],
+    phase_before: &[u8; DIGEST_LEN],
+    writer_public: &[u8; NV_RSA_BYTES],
+    e: &mut Expectation,
+) -> c_int {
+    let ret = expectation_policy(pcr_before, phase_before, writer_public, e);
+
+    if ret != 0 {
         return ret;
     }
-    // SAFETY: the policy and rooms for the names.
-    unsafe {
-        let mut ret = tpm_nv_name(
-            NV_INDEX,
-            REGISTER_ATTRS,
-            e.policy.as_ptr(),
-            DIGEST_LEN as u16,
-            e.unwritten.as_mut_ptr(),
-        );
+    let size = DIGEST_LEN as u16;
+    let ret = nv_name(NV_INDEX, REGISTER_ATTRS, &e.policy, size, &mut e.unwritten);
 
-        if ret == 0 {
-            ret = tpm_nv_name(
-                NV_INDEX,
-                REGISTER_ATTRS | NV_WRITTEN,
-                e.policy.as_ptr(),
-                DIGEST_LEN as u16,
-                e.written.as_mut_ptr(),
-            );
-        }
-        ret
+    if ret != 0 {
+        return ret;
     }
+    nv_name(
+        NV_INDEX,
+        REGISTER_ATTRS | NV_WRITTEN,
+        &e.policy,
+        size,
+        &mut e.written,
+    )
 }
 
 fn name_equals(info: &NvInfo, name: &[u8; NAME_LEN]) -> bool {
@@ -562,28 +566,19 @@ fn rebind(
 /// its value then into `out_chain` when given.
 pub(crate) fn extend(event: &[u8; DIGEST_LEN], out_chain: Option<&mut [u8; DIGEST_LEN]>) -> c_int {
     let mut e = Expectation::new();
-    let mut values = [0u8; 2 * DIGEST_LEN];
     let mut rec: EventlogInit = zeroed();
 
     // SAFETY: the record to fill.
     if unsafe { eventlog_boot_init(&mut rec) } != 0 {
         return -ENODEV;
     }
-    bind_values(&rec.pcr_before, &rec.phase_before, &mut values);
-    // SAFETY: two values, a modulus and three rooms for a digest.
-    let ret = unsafe {
-        tpm_register_policy(
-            PCR_MASK,
-            values.as_ptr(),
-            2,
-            rec.writer_public.as_ptr(),
-            e.branch_written.as_mut_ptr(),
-            e.branch_init.as_mut_ptr(),
-            e.policy.as_mut_ptr(),
-        )
-    };
+    let ret = expectation_policy(
+        &rec.pcr_before,
+        &rec.phase_before,
+        &rec.writer_public,
+        &mut e,
+    );
     if ret != 0 {
-        crate::log::err(format!("tpm: compute signed register policy: {}", text(ret)).as_bytes());
         return ret;
     }
 
@@ -712,7 +707,6 @@ pub(crate) fn status(st: &mut ChainStatus) -> c_int {
 /// chain_status() on the connection `tpm`.
 fn status_on(tpm: &Tpm, st: &mut ChainStatus) -> c_int {
     let mut e = Expectation::new();
-    let mut values = [0u8; 2 * DIGEST_LEN];
     let mut ret = 0;
     let reset_count = match tpm.reset_count() {
         Ok(count) => count,
@@ -740,36 +734,26 @@ fn status_on(tpm: &Tpm, st: &mut ChainStatus) -> c_int {
         && name_equals(&nv, &st.init.name)
         && (!st.init.have_reset_count || st.init.reset_count == reset_count);
     if st.anchored {
-        bind_values(&st.init.pcr_before, &st.init.phase_before, &mut values);
-        // SAFETY: two values, a modulus and three rooms for a digest.
-        ret = unsafe {
-            tpm_register_policy(
-                PCR_MASK,
-                values.as_ptr(),
-                2,
-                st.init.writer_public.as_ptr(),
-                e.branch_written.as_mut_ptr(),
-                e.branch_init.as_mut_ptr(),
-                e.policy.as_mut_ptr(),
-            )
-        };
+        let init = &st.init;
+
+        ret = expectation_policy(
+            &init.pcr_before,
+            &init.phase_before,
+            &init.writer_public,
+            &mut e,
+        );
         if ret != 0 {
-            crate::log::err(
-                format!("tpm: compute signed register policy: {}", text(ret)).as_bytes(),
-            );
             st.anchored = false;
             return ret;
         }
-        // SAFETY: the policy and room for the name.
-        st.anchored = unsafe {
-            tpm_nv_name(
-                NV_INDEX,
-                REGISTER_ATTRS | NV_WRITTEN,
-                e.policy.as_ptr(),
-                DIGEST_LEN as u16,
-                e.written.as_mut_ptr(),
-            )
-        } == 0
+        let attrs = REGISTER_ATTRS | NV_WRITTEN;
+        st.anchored = nv_name(
+            NV_INDEX,
+            attrs,
+            &e.policy,
+            DIGEST_LEN as u16,
+            &mut e.written,
+        ) == 0
             && name_equals(&nv, &e.written);
     }
     ret

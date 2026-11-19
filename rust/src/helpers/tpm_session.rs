@@ -29,7 +29,7 @@ use crate::util::chain::{PCR_MASK, memneq_explicit};
 use crate::util::crypto_openssl::{hmac_sha256, sha256};
 use crate::util::identity::IDENTITY_PIN;
 use crate::util::tpm::{Branches, Key, Tpm};
-use crate::util::tpm_wire::tpm_register_policy;
+use crate::util::tpm_wire::{RegisterPolicy, register_policy};
 
 helper_main!(shirudo_helper_test_tpm_session, run);
 
@@ -516,19 +516,12 @@ fn setup(t: &mut Option<Tpm>, keys: &mut Keys, defined: &mut bool) -> Result<(),
     drop(ak);
     let public = take!(t.writer_create(&seed));
     take!(t.set_writer(&seed, &public));
-    // SAFETY: the PCR values, the writer's key and rooms for the policy.
-    let ret = unsafe {
-        tpm_register_policy(
-            PCR_MASK,
-            values.as_ptr(),
-            2,
-            public.as_ptr(),
-            keys.branch_written.as_mut_ptr(),
-            keys.branch_init.as_mut_ptr(),
-            policy.as_mut_ptr(),
-        )
+    let digests = RegisterPolicy {
+        branch_written: &mut keys.branch_written,
+        branch_init: &mut keys.branch_init,
+        policy: &mut policy,
     };
-    check!(ret == 0);
+    check!(register_policy(PCR_MASK, &values, &public, digests) == 0);
     check!(t.nv_info(TEST_INDEX).is_ok_and(|info| !info.defined));
     take!(t.nv_define(TEST_INDEX, &policy, &[]));
     *defined = true;

@@ -36,7 +36,7 @@ use crate::util::identity::IDENTITY_PIN;
 use crate::util::json::JsonEmit;
 use crate::util::nv_writer;
 use crate::util::tpm::{Attestation, Branches, KeyPublic, NvInfo, Tpm};
-use crate::util::tpm_wire::{NV_RSA_BYTES, tpm_register_policy};
+use crate::util::tpm_wire::{NV_RSA_BYTES, RegisterPolicy, register_policy};
 
 helper_main!(shirudo_helper_test_register, run);
 
@@ -356,18 +356,12 @@ fn first_write(event_hex: &CStr) -> c_int {
     }
     let values = [rec.pcr_before, rec.phase_before].concat();
     let (mut written, mut init, mut policy) = ([0u8; 32], [0u8; 32], [0u8; 32]);
-    // SAFETY: the PCR values, the writer's key and rooms for the policy.
-    let ret = unsafe {
-        tpm_register_policy(
-            PCR_MASK,
-            values.as_ptr(),
-            2,
-            rec.writer_public.as_ptr(),
-            written.as_mut_ptr(),
-            init.as_mut_ptr(),
-            policy.as_mut_ptr(),
-        )
+    let digests = RegisterPolicy {
+        branch_written: &mut written,
+        branch_init: &mut init,
+        policy: &mut policy,
     };
+    let ret = register_policy(PCR_MASK, &values, &rec.writer_public, digests);
     if ret != 0 {
         err(&format!("register policy: {}\n", strerror(-ret)));
         return 1;
@@ -425,18 +419,12 @@ fn forge_on_tpm(
     let reset = t.reset_count()?;
     before[..32].copy_from_slice(&t.pcr_read(pcr)?);
     before[32..].copy_from_slice(&t.pcr_read(phase)?);
-    // SAFETY: the PCR values, the writer's key and rooms for the policy.
-    zero_or(unsafe {
-        tpm_register_policy(
-            mask,
-            before.as_ptr(),
-            2,
-            public.as_ptr(),
-            written.as_mut_ptr(),
-            init.as_mut_ptr(),
-            policy.as_mut_ptr(),
-        )
-    })?;
+    let digests = RegisterPolicy {
+        branch_written: &mut written,
+        branch_init: &mut init,
+        policy: &mut policy,
+    };
+    zero_or(register_policy(mask, &before, public, digests))?;
     t.nv_define(index, &policy, &[])?;
     let branches = Branches {
         written: &written,
