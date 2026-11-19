@@ -6,15 +6,20 @@
 //! and the signature of the root, opened and checked against each other.
 
 use core::ffi::{CStr, c_int};
+use std::ffi::OsStr;
+use std::fs::{File, OpenOptions};
+use std::io::ErrorKind;
+use std::os::fd::{AsRawFd, IntoRawFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{FileExt, OpenOptionsExt};
 
-use crate::errno::{EFBIG, EINTR, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG};
+use crate::errno::{EFBIG, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG};
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
-    AT_EMPTY_PATH, O_CLOEXEC, O_NOFOLLOW, O_NONBLOCK, O_RDONLY, PATH_MAX, S_IFMT, S_IFREG,
-    STATX_SIZE, STATX_TYPE, Statx, close, errno, open, pread, statx,
+    AT_EMPTY_PATH, O_NOFOLLOW, O_NONBLOCK, PATH_MAX, S_IFMT, S_IFREG, STATX_SIZE, STATX_TYPE,
+    Statx, close, errno, statx,
 };
-use crate::text::strsprintf;
-use crate::util::hex::hex_decode;
+use crate::util::hex;
 
 pub(crate) const BLOCK_SIZE: u64 = 4096;
 const SALT_SIZE: usize = 32;
@@ -134,30 +139,17 @@ fn regular_file_size(fd: c_int) -> Result<u64, c_int> {
     Ok(st.stx_size)
 }
 
-/// `buf.len()` bytes from the start of `fd`; -EIO when it ends first.
-fn read_exact_at_start(fd: c_int, buf: &mut [u8]) -> c_int {
+/// `buf.len()` bytes from the start of `file`; -EIO when it ends first.
+fn read_exact_at_start(file: &File, buf: &mut [u8]) -> c_int {
     let mut done = 0;
 
     while done < buf.len() {
-        // SAFETY: the room left in buf, from the caller's fd.
-        let n = unsafe {
-            pread(
-                fd,
-                buf[done..].as_mut_ptr().cast(),
-                buf.len() - done,
-                done as i64,
-            )
-        };
-        if n < 0 {
-            if errno() == EINTR {
-                continue;
-            }
-            return -errno();
+        match file.read_at(&mut buf[done..], done as u64) {
+            Ok(0) => return -EIO,
+            Ok(n) => done += n,
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(e) => return -e.raw_os_error().unwrap_or(EIO),
         }
-        if n == 0 {
-            return -EIO;
-        }
-        done += n as usize;
     }
     0
 }
@@ -189,12 +181,12 @@ fn superblock_ok(h: &[u8; SUPERBLOCK_SIZE]) -> bool {
         && le16(&h[80..]) == SALT_SIZE as u16
 }
 
-/// The image the superblock at the start of `hash_fd` describes.
-pub(crate) fn read_header(hash_fd: c_int) -> Result<ConfigImage, c_int> {
+/// The image the superblock at the start of `hash` describes.
+pub(crate) fn read_header(hash: &File) -> Result<ConfigImage, c_int> {
     let mut header = [0u8; SUPERBLOCK_SIZE];
     let mut image = ConfigImage::zeroed();
 
-    let ret = read_exact_at_start(hash_fd, &mut header);
+    let ret = read_exact_at_start(hash, &mut header);
     if ret != 0 {
         return Err(ret);
     }
@@ -228,51 +220,45 @@ pub(crate) fn check_files(data_fd: c_int, hash_fd: c_int, image: &ConfigImage) -
 }
 
 /// `<prefix><suffix>` opened for reading, not through a symbolic link.
-fn open_part(prefix: &[u8], suffix: &[u8]) -> c_int {
-    let mut path = [0u8; PATH_MAX];
+fn open_part(prefix: &[u8], suffix: &[u8]) -> Result<File, c_int> {
+    let path = [prefix, suffix].concat();
 
-    if strsprintf(&mut path, &[prefix, suffix]).is_err() {
-        return -ENAMETOOLONG;
+    if path.len() >= PATH_MAX {
+        return Err(-ENAMETOOLONG);
     }
-    // SAFETY: strsprintf() terminated the path; flags without a mode.
-    let fd = unsafe {
-        open(
-            path.as_ptr().cast(),
-            O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK,
-        )
-    };
-    if fd < 0 { -errno() } else { fd }
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW | O_NONBLOCK)
+        .open(OsStr::from_bytes(&path))
+        .map_err(|e| -e.raw_os_error().unwrap_or(EIO))
 }
 
 /// The root hash `<prefix>.roothash` holds, 64 lowercase hex digits.
 fn read_root(prefix: &[u8], root: &mut [u8; 32]) -> c_int {
-    let mut text = [0u8; 65];
+    let mut text = [0u8; 64];
 
-    let fd = open_part(prefix, b".roothash");
-    if fd < 0 {
-        return fd;
-    }
-    let mut ret = match regular_file_size(fd) {
+    let file = match open_part(prefix, b".roothash") {
+        Ok(file) => file,
+        Err(e) => return e,
+    };
+    let mut ret = match regular_file_size(file.as_raw_fd()) {
         Ok(64) => 0,
         Ok(_) => -EINVAL,
         Err(e) => e,
     };
     if ret == 0 {
-        ret = read_exact_at_start(fd, &mut text[..64]);
+        ret = read_exact_at_start(&file, &mut text);
     }
-    // SAFETY: the fd open_part() gave, closed once, here.
-    unsafe { close(fd) };
     if ret != 0 {
         return ret;
     }
-    if !text[..64]
+    if !text
         .iter()
         .all(|&c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
     {
         return -EINVAL;
     }
-    // SAFETY: 64 digits and a NUL, and room for the 32 bytes.
-    unsafe { hex_decode(text.as_ptr().cast(), root.as_mut_ptr(), 32) }
+    hex::decode(&text, root).map_or_else(|e| e, |()| 0)
 }
 
 /// The image at `prefix`, its parts open and checked against each other
@@ -282,56 +268,47 @@ fn open_image(
     expected_root: Option<&[u8; 32]>,
     image: &mut ConfigImageOpen,
 ) -> c_int {
-    let prefix = prefix.to_bytes();
-
-    image.data_fd = open_part(prefix, b".img");
-    if image.data_fd < 0 {
-        let ret = image.data_fd;
-
-        image.data_fd = -1;
-        return ret;
-    }
-    image.hash_fd = open_part(prefix, b".verity");
-    if image.hash_fd < 0 {
-        let ret = image.hash_fd;
-
-        image.hash_fd = -1;
-        return ret;
-    }
-    image.image = match read_header(image.hash_fd) {
-        Ok(header) => header,
-        Err(e) => return e,
-    };
-    let mut ret = read_root(prefix, &mut image.image.root_hash);
-    if ret == 0 {
-        ret = check_files(image.data_fd, image.hash_fd, &image.image);
-    }
-    if ret != 0 {
-        return ret;
-    }
-    match expected_root {
-        Some(root) => {
-            if *root != image.image.root_hash {
-                return -EKEYREJECTED;
-            }
+    match open_parts(prefix.to_bytes(), expected_root) {
+        Ok((header, data, hash, signature)) => {
+            image.image = header;
+            image.data_fd = data.into_raw_fd();
+            image.hash_fd = hash.into_raw_fd();
+            image.signature_fd = signature.map_or(-1, IntoRawFd::into_raw_fd);
             0
         }
-        None => {
-            image.image.signed_root = true;
-            image.signature_fd = open_part(prefix, b".p7s");
-            if image.signature_fd < 0 {
-                let ret = image.signature_fd;
+        Err(e) => e,
+    }
+}
 
-                image.signature_fd = -1;
-                return ret;
-            }
-            match regular_file_size(image.signature_fd) {
-                Ok(0) => -EINVAL,
-                Ok(size) if size > SIG_MAX => -EINVAL,
-                Ok(_) => 0,
-                Err(e) => e,
-            }
+/// open_image() of `prefix`: the image, its data and hash files, and
+/// its signature unless `expected_root` names the root.
+fn open_parts(
+    prefix: &[u8],
+    expected_root: Option<&[u8; 32]>,
+) -> Result<(ConfigImage, File, File, Option<File>), c_int> {
+    let data = open_part(prefix, b".img")?;
+    let hash = open_part(prefix, b".verity")?;
+    let mut header = read_header(&hash)?;
+    let mut ret = read_root(prefix, &mut header.root_hash);
+    if ret == 0 {
+        ret = check_files(data.as_raw_fd(), hash.as_raw_fd(), &header);
+    }
+    if ret != 0 {
+        return Err(ret);
+    }
+    if let Some(root) = expected_root {
+        if *root != header.root_hash {
+            return Err(-EKEYREJECTED);
         }
+        return Ok((header, data, hash, None));
+    }
+    header.signed_root = true;
+    let signature = open_part(prefix, b".p7s")?;
+    match regular_file_size(signature.as_raw_fd()) {
+        Ok(0) => Err(-EINVAL),
+        Ok(size) if size > SIG_MAX => Err(-EINVAL),
+        Ok(_) => Ok((header, data, hash, Some(signature))),
+        Err(e) => Err(e),
     }
 }
 

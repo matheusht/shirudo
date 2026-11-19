@@ -4,6 +4,7 @@
 //! fuzz-image: a config image's bootstrap file read, initial and
 //! runtime, and its hash file's superblock.
 
+use std::fs::File;
 use std::os::fd::AsRawFd;
 
 use crate::fuzzing::{fuzz_target, input_file};
@@ -17,5 +18,5 @@ fuzz_target!(shirudo_fuzz_image, shirudo_fuzz_image_init, |data| {
     let mut boot: Box<super::ImageBootstrap> = Box::new(unsafe { core::mem::zeroed() });
     super::read_fd(fd, &mut boot, true);
     super::read_fd(fd, &mut boot, false);
-    let _ = crate::util::config_image::read_header(fd);
+    let _ = crate::util::config_image::read_header(&File::from(input.fd));
 });

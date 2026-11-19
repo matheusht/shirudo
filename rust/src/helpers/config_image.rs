@@ -8,7 +8,6 @@
 //!   test-config-image root <prefix> <root hex>
 
 use core::ffi::{CStr, c_int};
-use std::os::fd::AsRawFd;
 
 use super::{err, helper_main, out, strerror};
 use crate::errno::EINVAL;
@@ -36,7 +35,7 @@ fn decode(path: &CStr) -> c_int {
         Ok(f) => f,
         Err(e) => return -e.raw_os_error().unwrap_or(crate::errno::EIO),
     };
-    match read_header(file.as_raw_fd()) {
+    match read_header(&file) {
         Ok(image) => {
             out(&format!("{} {}\n", image.data_blocks, image.hash_blocks));
             0
