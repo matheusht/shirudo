@@ -736,8 +736,8 @@ pub(crate) fn lock(path: &[u8]) -> Result<OwnedFd, c_int> {
 /// lock that keeps its appenders apart.
 pub(crate) fn append(path: &CStr, line: &[u8]) -> Result<(), c_int> {
     let fd = open(path.to_bytes(), O_RDWR | O_CREAT | O_APPEND, 0o600)?;
-    let appended = status(lock_exclusive(fd.as_raw_fd()))
-        .and_then(|()| status(append_line(fd.as_raw_fd(), path, line)));
+    let appended =
+        status(lock_exclusive(fd.as_raw_fd())).and_then(|()| append_line(fd.as_fd(), path, line));
 
     appended.and(close_checked(fd))
 }

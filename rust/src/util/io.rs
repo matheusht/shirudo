@@ -73,7 +73,7 @@ pub(crate) unsafe fn write_complete(fd: c_int, buf: *const c_void, len: usize) -
 
 /// The offset after the last newline of the `size` bytes of `fd`, read
 /// back from its end a chunk at a time, or 0 for none.
-fn last_line_end(fd: c_int, size: i64, end: &mut i64) -> c_int {
+fn last_line_end(fd: BorrowedFd<'_>, size: i64) -> Result<i64, c_int> {
     let mut chunk = [0u8; 4096];
     let step = chunk.len() as i64;
     let mut off = size;
@@ -82,25 +82,32 @@ fn last_line_end(fd: c_int, size: i64, end: &mut i64) -> c_int {
         let n = off.min(step) as usize;
         let start = off - n as i64;
         // SAFETY: the caller's fd and room for n bytes.
-        let got = unsafe { pread(fd, chunk.as_mut_ptr().cast(), n, start) };
+        let got = unsafe { pread(fd.as_raw_fd(), chunk.as_mut_ptr().cast(), n, start) };
 
         if got < 0 && errno() == EINTR {
             continue;
         }
         if got < 0 {
-            return -errno();
+            return Err(-errno());
         }
         if got as usize != n {
-            return -EIO;
+            return Err(-EIO);
         }
         if let Some(i) = chunk[..n].iter().rposition(|&c| c == b'\n') {
-            *end = start + i as i64 + 1;
-            return 0;
+            return Ok(start + i as i64 + 1);
         }
         off = start;
     }
-    *end = 0;
-    0
+    Ok(0)
+}
+
+/// The file open on `fd` cut to `len` bytes: -errno.
+fn truncate_to(fd: BorrowedFd<'_>, len: i64) -> Result<(), c_int> {
+    // SAFETY: the caller's fd.
+    if unsafe { ftruncate(fd.as_raw_fd(), len) } != 0 {
+        return Err(-errno());
+    }
+    Ok(())
 }
 
 /// The status of the open `fd`, as fstat() gave it: 0 or -errno.
@@ -203,31 +210,24 @@ pub(crate) fn stat_fd(fd: c_int, st: &mut Statx) -> c_int {
 /// `line` and its newline appended to the log open on `fd` at `path`,
 /// after a torn tail is dropped; the log taken back to its last record
 /// when the append fails.
-pub(crate) fn append_line(fd: c_int, path: &CStr, line: &[u8]) -> c_int {
+pub(crate) fn append_line(fd: BorrowedFd<'_>, path: &CStr, line: &[u8]) -> Result<(), c_int> {
     let mut st = Statx::zeroed();
-    let mut end: i64 = 0;
     let mut text = line;
 
     if text.last() == Some(&b'\n') {
         text = &text[..text.len() - 1];
     }
     if text.contains(&b'\n') || text.contains(&0) {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
-    let ret = stat_fd(fd, &mut st);
+    let ret = stat_fd(fd.as_raw_fd(), &mut st);
     if ret != 0 {
-        return ret;
+        return Err(ret);
     }
     let size = st.stx_size as i64;
-    let ret = last_line_end(fd, size, &mut end);
-    if ret != 0 {
-        return ret;
-    }
+    let end = last_line_end(fd, size)?;
     if end != size {
-        // SAFETY: the caller's fd.
-        if unsafe { ftruncate(fd, end) } != 0 {
-            return -errno();
-        }
+        truncate_to(fd, end)?;
         crate::log::warn(
             &[
                 path.to_bytes(),
@@ -240,23 +240,25 @@ pub(crate) fn append_line(fd: c_int, path: &CStr, line: &[u8]) -> c_int {
     }
     let record = [text, b"\n"].concat();
     // SAFETY: the caller's fd, and the record's bytes.
-    let mut ret = unsafe { write_complete(fd, record.as_ptr().cast(), record.len()) };
+    let mut ret = unsafe { write_complete(fd.as_raw_fd(), record.as_ptr().cast(), record.len()) };
     // SAFETY: the caller's fd.
-    if ret == 0 && unsafe { fsync(fd) } != 0 {
+    if ret == 0 && unsafe { fsync(fd.as_raw_fd()) } != 0 {
         ret = -errno();
     }
-    // SAFETY: the caller's fd.
-    if ret != 0 && unsafe { ftruncate(fd, end) } != 0 {
+    if ret == 0 {
+        return Ok(());
+    }
+    if let Err(err) = truncate_to(fd, end) {
         crate::log::warn(
             &[
                 path.to_bytes(),
                 b": could not roll back a partial append: ",
-                crate::errno::text(-errno()).as_bytes(),
+                crate::errno::text(err).as_bytes(),
             ]
             .concat(),
         );
     }
-    ret
+    Err(ret)
 }
 
 /// `rel` opened beneath the directory open as `dirfd`, with `flags` and

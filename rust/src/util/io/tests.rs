@@ -27,8 +27,8 @@ fn log_of(dir: &TempDir) -> Vec<u8> {
 }
 
 /// append_line() of `line` to the log `f`.
-fn append(f: &File, line: &[u8]) -> c_int {
-    append_line(f.as_raw_fd(), c"log", line)
+fn append(f: &File, line: &[u8]) -> Result<(), c_int> {
+    append_line(f.as_fd(), c"log", line)
 }
 
 #[test]
@@ -36,8 +36,8 @@ fn append_line_adds_one_record() {
     let dir = TempDir::new();
     let f = log_with(&dir, b"");
 
-    assert_eq!(append(&f, b"x"), 0);
-    assert_eq!(append(&f, b"y\n"), 0);
+    assert_eq!(append(&f, b"x"), Ok(()));
+    assert_eq!(append(&f, b"y\n"), Ok(()));
     assert_eq!(log_of(&dir), b"x\ny\n");
 }
 
@@ -55,7 +55,7 @@ fn append_line_drops_what_did_not_finish() {
         let dir = TempDir::new();
         let f = log_with(&dir, text);
 
-        assert_eq!(append(&f, b"z"), 0);
+        assert_eq!(append(&f, b"z"), Ok(()));
         assert_eq!(log_of(&dir), want);
     }
 }
@@ -65,8 +65,8 @@ fn append_line_takes_one_line_alone() {
     let dir = TempDir::new();
     let f = log_with(&dir, b"x\n");
 
-    assert_eq!(append(&f, b"a\nb"), -EINVAL);
-    assert_eq!(append(&f, b"a\0b"), -EINVAL);
+    assert_eq!(append(&f, b"a\nb"), Err(-EINVAL));
+    assert_eq!(append(&f, b"a\0b"), Err(-EINVAL));
     assert_eq!(log_of(&dir), b"x\n");
 }
 
