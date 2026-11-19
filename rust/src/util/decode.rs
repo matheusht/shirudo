@@ -17,23 +17,18 @@ use core::ptr;
 use std::ffi::CString;
 use std::os::fd::AsRawFd;
 
-use crate::errno::{E2BIG, EINVAL, ENAMETOOLONG, ENODATA, ENOENT, ENOMEM, ERANGE, ESTALE, text};
+use crate::errno::{E2BIG, EINVAL, ENAMETOOLONG, ENODATA, ENOENT, ERANGE, ESTALE, text};
 use crate::ffi;
 use crate::sys::libc::{explicit_bzero, snprintf};
 use crate::sys::luajit::{
-    Allocator, LUA_MASKCOUNT, LUA_TFUNCTION, LUA_TSTRING, LUA_TTABLE, LUAJIT_MODE_ENGINE,
-    LUAJIT_MODE_OFF, Lua, LuaDebug, LuaState, LuaType, Stack, lua_getfield, lua_getglobal,
-    lua_newtable, lua_pcall, lua_pop, lua_pushcclosure, lua_pushcfunction, lua_pushlightuserdata,
-    lua_pushnil, lua_pushstring, lua_pushvalue, lua_remove, lua_setfield, lua_setglobal,
-    lua_sethook, lua_tolstring, lua_touserdata, lua_type, lua_upvalueindex, luaJIT_setmode,
-    luaL_error, luaL_loadbufferx, luaL_newmetatable, luaL_openlibs,
+    Allocator, LUA_MASKCOUNT, Lua, LuaCFunction, LuaDebug, LuaState, LuaType, Stack,
 };
 use crate::sys::upatch_maps::MapView;
 use crate::text::cstr;
 use crate::util::chain::memneq_explicit;
 use crate::util::json::JsonEmit;
 use crate::util::seal;
-use crate::util::upatch::{self, DecoderView, Opened, upatch_decoder_view};
+use crate::util::upatch::{self, DecoderView, Opened};
 use crate::util::upatch_verify::payload_digest;
 
 const INSN_LIMIT: c_int = 1_000_000;
@@ -73,20 +68,8 @@ fn printf_double(fmt: &CStr, v: f64) -> Vec<u8> {
     let mut buf = [0u8; 64];
     // SAFETY: the room for the text and a format of one double.
     let n = unsafe { snprintf(buf.as_mut_ptr().cast(), buf.len(), fmt.as_ptr(), v) };
-    buf[..(n.max(0) as usize).min(buf.len() - 1)].to_vec()
-}
-
-/// The string at `idx` and its length, or None.
-///
-/// # Safety
-///
-/// `l` is a state; the bytes live while the value stays on the stack.
-unsafe fn to_bytes<'a>(l: *mut LuaState, idx: c_int) -> Option<&'a [u8]> {
-    let mut n = 0usize;
-    // SAFETY: the caller's state and room for the length.
-    let s = unsafe { lua_tolstring(l, idx, &mut n) };
-    // SAFETY: Lua's n bytes.
-    (!s.is_null()).then(|| unsafe { crate::ffi::slice(s.cast::<u8>(), n) })
+    let n = usize::try_from(n).unwrap_or(0).min(buf.len() - 1);
+    buf[..n].to_vec()
 }
 
 /// What the decoder's memory has used, against its limit.
@@ -870,28 +853,21 @@ fn push_pages(s: &mut Stack<'_>, v: &MapView) {
 
 /// The decoder's entrypoint: a function of the table its chunk returned,
 /// the function it returned, or a global of the name.
-///
-/// # Safety
-///
-/// `l` is a state with the chunk's result on top.
-unsafe fn get_entrypoint(l: *mut LuaState, entrypoint: &CStr) -> bool {
-    // SAFETY: the caller's state.
-    unsafe {
-        if lua_type(l, -1) == LUA_TTABLE {
-            lua_getfield(l, -1, entrypoint.as_ptr());
-            if lua_type(l, -1) == LUA_TFUNCTION {
-                lua_remove(l, -2);
-                return true;
-            }
-            lua_pop(l, 1);
-        }
-        if lua_type(l, -1) == LUA_TFUNCTION {
+fn get_entrypoint(s: &mut Stack<'_>, entrypoint: &CStr) -> bool {
+    if s.type_of(-1) == LuaType::Table {
+        s.get_field(-1, entrypoint);
+        if s.type_of(-1) == LuaType::Function {
+            s.remove(-2);
             return true;
         }
-        lua_pop(l, 1);
-        lua_getglobal(l, entrypoint.as_ptr());
-        lua_type(l, -1) == LUA_TFUNCTION
+        s.pop(1);
     }
+    if s.type_of(-1) == LuaType::Function {
+        return true;
+    }
+    s.pop(1);
+    s.get_global(entrypoint);
+    s.type_of(-1) == LuaType::Function
 }
 
 /// What the closure a decoder runs in reads and writes.
@@ -899,23 +875,22 @@ struct Call<'a, 'b> {
     view: &'a MapView,
     e: &'a mut JsonEmit<'b>,
     otel: bool,
-    ret: c_int,
 }
 
 /// The closure the decoder runs in: its entrypoint, upvalue 2, called
 /// with the input of the view of the call, upvalue 1. The result is
 /// encoded under the same pcall, as that may run out of memory.
 unsafe extern "C-unwind" fn call_decoder(l: *mut LuaState) -> c_int {
-    // SAFETY: the closure's state and upvalues, the call live across the
-    // pcall that runs this.
-    let call = unsafe {
-        let call = &mut *lua_touserdata(l, lua_upvalueindex(1)).cast::<Call<'_, '_>>();
-        lua_pushvalue(l, lua_upvalueindex(2));
-        call
-    };
     // SAFETY: LuaJIT called this C function with the state, and this is
     // the one Stack of its frame.
     let mut s = unsafe { Stack::from_raw(l) };
+    // SAFETY: the frame is this C closure's.
+    let call = unsafe { s.upvalue_pointer(1) }.cast::<Call<'_, '_>>();
+    // SAFETY: decode() made the closure with its call there, which lives
+    // across the pcall that runs this and is not used meanwhile.
+    let call = unsafe { &mut *call };
+    // SAFETY: the frame is this C closure's.
+    unsafe { s.push_upvalue(2) };
     push_map_input(&mut s, call.view);
     s.call(1, 1);
     if call.otel {
@@ -923,7 +898,6 @@ unsafe extern "C-unwind" fn call_decoder(l: *mut LuaState) -> c_int {
     } else {
         json_value(&mut s, -1, call.e, 0);
     }
-    call.ret = call.e.err();
     0
 }
 
@@ -938,22 +912,16 @@ fn log_err(text: &[u8]) {
     crate::log::err(text.to_bytes());
 }
 
-/// The error on top of the state, under `what`. The message is the
+/// The error on top of the stack, under `what`. The message is the
 /// decoder's and may carry what a map recorded, so it is cut to 255 bytes
-/// and its control characters replaced.
-///
-/// # Safety
-///
-/// `l` is a live state with the error on top of its stack.
-unsafe fn report(l: *mut LuaState, what: &str) {
-    // SAFETY: the state, with the error on top; a number is not shown.
-    let message = unsafe {
-        (lua_type(l, -1) == LUA_TSTRING)
-            .then(|| to_bytes(l, -1))
-            .flatten()
-    };
-    let message = message.unwrap_or(b"unknown Lua error");
-    let mut shown = cstr(message)[..cstr(message).len().min(255)].to_vec();
+/// and its control characters replaced; a number is not shown.
+fn report(s: &Stack<'_>, what: &str) {
+    let message = (s.type_of(-1) == LuaType::String)
+        .then(|| s.to_bytes(-1))
+        .flatten()
+        .unwrap_or(b"unknown Lua error");
+    let message = cstr(message);
+    let mut shown = message.get(..255).unwrap_or(message).to_vec();
     crate::text::sanitize(&mut shown, false);
     log_err(&[b"upatch map: ", what.as_bytes(), b": ", &shown].concat());
 }
@@ -969,13 +937,24 @@ unsafe extern "C-unwind" fn budget_hook(l: *mut LuaState, _ar: *mut LuaDebug) {
         b.get()
     });
     if left <= 0 {
+        // SAFETY: LuaJIT called this hook with the state, and this is the
+        // one Stack of its frame.
+        let mut s = unsafe { Stack::from_raw(l) };
         // pcall() catches the error, so once the budget is spent every
         // instruction raises it again: no protected call runs past it.
-        // SAFETY: the hooked state; this raises.
-        unsafe {
-            lua_sethook(l, Some(budget_hook), LUA_MASKCOUNT, 1);
-            luaL_error(l, c"decoder instruction limit exceeded".as_ptr());
-        }
+        // SAFETY: the hook needs no more than the state LuaJIT hooks.
+        unsafe { s.set_hook(budget_hook, LUA_MASKCOUNT, 1) };
+        s.error(c"decoder instruction limit exceeded");
+    }
+}
+
+/// Sets the host functions as fields of the table on top.
+fn set_functions(s: &mut Stack<'_>, fns: &[(&CStr, LuaCFunction)]) {
+    for &(name, f) in fns {
+        // SAFETY: a host function needs no more than the state Lua calls
+        // it with, and checks its arguments.
+        unsafe { s.push_function(f) };
+        s.set_field(-2, name);
     }
 }
 
@@ -987,11 +966,7 @@ unsafe extern "C-unwind" fn budget_hook(l: *mut LuaState, _ar: *mut LuaDebug) {
 /// inside the hook. A pattern match is one C call the count hook never
 /// interrupts, and backtracks for as long as the subject, a string a map
 /// recorded, makes it. print() writes where --json does.
-///
-/// # Safety
-///
-/// `l` is a state with its libraries open.
-unsafe fn install_host_api(l: *mut LuaState) {
+fn install_host_api(s: &mut Stack<'_>) {
     const DENY: [&CStr; 16] = [
         c"io",
         c"os",
@@ -1011,147 +986,133 @@ unsafe fn install_host_api(l: *mut LuaState) {
         c"print",
     ];
     const PATTERNS: [&CStr; 4] = [c"find", c"match", c"gmatch", c"gsub"];
-    type Fns<'a> = &'a [(&'a CStr, crate::sys::luajit::LuaCFunction)];
-    // SAFETY: the caller's state.
-    unsafe {
-        for name in DENY {
-            lua_pushnil(l);
-            lua_setglobal(l, name.as_ptr());
-        }
-        lua_getglobal(l, c"string".as_ptr());
-        for name in PATTERNS {
-            lua_pushnil(l);
-            lua_setfield(l, -2, name.as_ptr());
-        }
-        lua_pop(l, 1);
-        let set = |fns: Fns<'_>| {
-            for (name, f) in fns {
-                lua_pushcfunction(l, *f);
-                lua_setfield(l, -2, name.as_ptr());
-            }
-        };
-        luaL_newmetatable(l, SLOT_MT.as_ptr());
-        lua_newtable(l);
-        set(&[
+    for name in DENY {
+        s.push_nil();
+        s.set_global(name);
+    }
+    s.get_global(c"string");
+    for name in PATTERNS {
+        s.push_nil();
+        s.set_field(-2, name);
+    }
+    s.pop(1);
+    s.new_metatable(SLOT_MT);
+    s.new_table();
+    set_functions(
+        s,
+        &[
             (c"u8", slot_u8),
             (c"u16", slot_u16),
             (c"u32", slot_u32),
             (c"u64", slot_u64),
             (c"cstring", slot_cstring),
-        ]);
-        lua_setfield(l, -2, c"__index".as_ptr());
-        // A __gc a decoder added to it would run with hooks off.
-        lua_pushstring(l, SLOT_MT.as_ptr());
-        lua_setfield(l, -2, c"__metatable".as_ptr());
-        lua_pop(l, 1);
-        lua_newtable(l);
-        set(&[
+        ],
+    );
+    s.set_field(-2, c"__index");
+    // A __gc a decoder added to it would run with hooks off.
+    s.push_bytes(SLOT_MT.to_bytes());
+    s.set_field(-2, c"__metatable");
+    s.pop(1);
+    s.new_table();
+    set_functions(
+        s,
+        &[
             (c"fixed_records", fixed_records),
             (c"page_slots", page_slots),
             (c"u64_add", u64_add),
             (c"u64_sub", u64_sub),
             (c"hex_u64", hex_u64),
-        ]);
-        lua_setglobal(l, c"shirudo".as_ptr());
-    }
+        ],
+    );
+    s.set_global(c"shirudo");
 }
 
-/// Disables the hook before the decoder state closes.
-struct Decoder<'a>(Lua<'a>);
-
-impl Drop for Decoder<'_> {
-    fn drop(&mut self) {
-        // SAFETY: the decoder's state lives until the field is dropped.
-        unsafe { lua_sethook(self.0.as_ptr(), None, 0, 0) };
+/// Opens the standard libraries, turns the JIT off and installs the
+/// host API: -EINVAL when the JIT stays on.
+fn open_sandbox(s: &mut Stack<'_>) -> Result<(), c_int> {
+    s.open_libs();
+    // Instruction hooks must see every instruction: no traces.
+    if !s.jit_off() {
+        return Err(-EINVAL);
     }
+    install_host_api(s);
+    Ok(())
 }
 
-struct ResetBudget;
+/// The decoder's Lua source.
+fn decoder_source(d: &DecoderView) -> &[u8] {
+    // SAFETY: decoder_view() points a view's source at source_len bytes of
+    // the open container, which outlives the view's use.
+    unsafe { ffi::slice(d.source.cast::<u8>(), view_len(u64::from(d.source_len))) }
+}
 
-impl Drop for ResetBudget {
-    fn drop(&mut self) {
-        BUDGET.with(|b| b.set(0));
+/// Loads the decoder and calls its entrypoint on the view, the result
+/// encoded into `e`: -EINVAL when the decoder fails, -ENOENT without its
+/// entrypoint, or the encoder's error, each logged.
+fn decode(
+    s: &mut Stack<'_>,
+    d: &DecoderView,
+    v: &MapView,
+    otel: bool,
+    e: &mut JsonEmit,
+) -> Result<(), c_int> {
+    let source_name = CString::new(cstr(&d.source_name)).unwrap_or_default();
+    let entrypoint = CString::new(cstr(&d.entrypoint)).unwrap_or_default();
+    // LuaJIT checks no bytecode it loads: a decoder is source text.
+    if !s.load(decoder_source(d), &source_name, c"t") || !s.pcall(0, 1) {
+        report(s, "decoder load failed");
+        return Err(-EINVAL);
+    }
+    if !get_entrypoint(s, &entrypoint) {
+        log_err(
+            &[
+                &b"upatch map: decoder entrypoint "[..],
+                entrypoint.to_bytes(),
+                b" not found",
+            ]
+            .concat(),
+        );
+        return Err(-ENOENT);
+    }
+    let mut call = Call { view: v, e, otel };
+    s.push_pointer(&mut call);
+    s.push_value(-2);
+    // SAFETY: call_decoder() finds the call, which lives across the pcall
+    // below, in its first upvalue, and the entrypoint in its second.
+    unsafe { s.push_closure(call_decoder, 2) };
+    s.remove(-2);
+    if !s.pcall(0, 0) {
+        report(s, "decoder failed");
+        return Err(-EINVAL);
+    }
+    match call.e.err() {
+        0 => Ok(()),
+        err => {
+            log_err(format!("upatch map: decoder encode failed: {}", text(err)).as_bytes());
+            Err(err)
+        }
     }
 }
 
 /// Runs the decoder on the view: the JSON, or the AnyValue with `otel`,
 /// of what it returns, at most `max` bytes.
 pub(crate) fn run(d: &DecoderView, v: &MapView, otel: bool, max: usize) -> Result<Vec<u8>, c_int> {
-    let _budget;
-    let allocator = Lua::new().ok_or(-ENOMEM)?;
-    _budget = ResetBudget;
+    let native = Lua::new()?;
     let mut memory = Memory {
-        inner: allocator.allocator(),
+        inner: native.allocator(),
         used: 0,
     };
-    // SAFETY: limited_alloc receives this memory record. It borrows the
-    // native allocator, so both outlive the decoder through lua_close.
-    let lua = unsafe { Lua::with_allocator(limited_alloc, &mut memory) }.ok_or(-ENOMEM)?;
-    let decoder = Decoder(lua);
-    let l = decoder.0.as_ptr();
+    // SAFETY: limited_alloc() takes the memory record it is handed, which
+    // the state borrows until it closes, as the record borrows the native
+    // state whose allocator it hands out.
+    let mut lua = unsafe { Lua::with_allocator(limited_alloc, &mut memory) }?;
+    let mut s = lua.stack();
+    open_sandbox(&mut s)?;
+    BUDGET.with(|b| b.set(INSN_LIMIT / HOOK_COUNT));
+    // SAFETY: the hook needs no more than the state LuaJIT hooks.
+    unsafe { s.set_hook(budget_hook, LUA_MASKCOUNT, HOOK_COUNT) };
     let mut e = JsonEmit::growing(max);
-    let source_name = CString::new(cstr(&d.source_name)).unwrap_or_default();
-    let entrypoint = CString::new(cstr(&d.entrypoint)).unwrap_or_default();
-    // SAFETY: the decoder's state, its source and the view, which
-    // outlive it.
-    let ret = unsafe {
-        luaL_openlibs(l);
-        // Instruction hooks must see every instruction: no traces.
-        if luaJIT_setmode(l, 0, LUAJIT_MODE_ENGINE | LUAJIT_MODE_OFF) == 0 {
-            return Err(-EINVAL);
-        }
-        install_host_api(l);
-        BUDGET.with(|b| b.set(INSN_LIMIT / HOOK_COUNT));
-        lua_sethook(l, Some(budget_hook), LUA_MASKCOUNT, HOOK_COUNT);
-        // LuaJIT checks no bytecode it loads: a decoder is source text.
-        if luaL_loadbufferx(
-            l,
-            d.source,
-            d.source_len as usize,
-            source_name.as_ptr(),
-            c"t".as_ptr(),
-        ) != 0
-            || lua_pcall(l, 0, 1, 0) != 0
-        {
-            report(l, "decoder load failed");
-            -EINVAL
-        } else if !get_entrypoint(l, &entrypoint) {
-            log_err(
-                &[
-                    &b"upatch map: decoder entrypoint "[..],
-                    entrypoint.to_bytes(),
-                    b" not found",
-                ]
-                .concat(),
-            );
-            -ENOENT
-        } else {
-            let mut call = Call {
-                view: v,
-                e: &mut e,
-                otel,
-                ret: 0,
-            };
-            lua_pushlightuserdata(l, (&raw mut call).cast());
-            lua_pushvalue(l, -2);
-            lua_pushcclosure(l, call_decoder, 2);
-            lua_remove(l, -2);
-            if lua_pcall(l, 0, 0, 0) != 0 {
-                report(l, "decoder failed");
-                -EINVAL
-            } else {
-                if call.ret != 0 {
-                    log_err(
-                        format!("upatch map: decoder encode failed: {}", text(call.ret)).as_bytes(),
-                    );
-                }
-                call.ret
-            }
-        }
-    };
-    if ret != 0 {
-        return Err(ret);
-    }
+    decode(&mut s, d, v, otel, &mut e)?;
     e.finish()
 }
 
@@ -1204,8 +1165,7 @@ fn decoders(u: &Opened) -> impl Iterator<Item = DecoderView> + '_ {
     (0..u.nr_decoders).filter_map(move |i| {
         // SAFETY: an all-zero view, which the call fills.
         let mut d: DecoderView = unsafe { core::mem::zeroed() };
-        // SAFETY: the container and room for the view.
-        (unsafe { upatch_decoder_view(&**u, i, &mut d) } == 0).then_some(d)
+        (upatch::decoder_view(u, i, &mut d) == 0).then_some(d)
     })
 }
 

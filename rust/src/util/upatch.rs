@@ -1144,9 +1144,9 @@ pub(crate) unsafe fn specs_parse(
 }
 
 pub(crate) use capi::{
-    upatch_close, upatch_data, upatch_decoder_view, upatch_header_name, upatch_loader,
-    upatch_member_valid, upatch_metadata, upatch_open, upatch_open_fd, upatch_open_memory,
-    upatch_select, upatch_signature,
+    upatch_close, upatch_data, upatch_header_name, upatch_loader, upatch_member_valid,
+    upatch_metadata, upatch_open, upatch_open_fd, upatch_open_memory, upatch_select,
+    upatch_signature,
 };
 
 #[cfg(test)]
@@ -1159,8 +1159,7 @@ mod capi {
     use core::ffi::{c_char, c_int, c_void};
     use core::ptr;
 
-    use super::{DecoderView, NAME_MAX, Upatch, at};
-    use crate::errno::EINVAL;
+    use super::{NAME_MAX, Upatch, at};
     use crate::ffi;
     use crate::sys::libc::Dirent;
     use crate::text::capi::name_has_suffix;
@@ -1260,21 +1259,6 @@ mod capi {
             return ptr::null();
         }
         at(u, u.hdr.data_off)
-    }
-
-    /// # Safety
-    ///
-    /// `u` is a container, and `out` NULL or room for a view.
-    pub unsafe extern "C" fn upatch_decoder_view(
-        u: *const Upatch,
-        idx: u32,
-        out: *mut DecoderView,
-    ) -> c_int {
-        if out.is_null() {
-            return -EINVAL;
-        }
-        // SAFETY: the caller passes a container and the room.
-        unsafe { super::decoder_view(&*u, idx, &mut *out) }
     }
 
     /// # Safety

@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
-//! The LuaJIT 2.1 API the decoder sandbox uses, and its macros.
+//! The LuaJIT 2.1 API the decoder sandbox uses: its declarations, a
+//! state that closes itself, and a Stack whose operations check what
+//! LuaJIT leaves to its caller.
 //!
 //! LuaJIT raises an error by unwinding the stack to the lua_pcall() that
 //! catches it, through every frame between, so each function that can
@@ -12,6 +14,7 @@ use core::ffi::{CStr, c_char, c_int, c_void};
 use core::marker::PhantomData;
 use core::ptr::{self, NonNull};
 
+use crate::errno::ENOMEM;
 use crate::ffi;
 
 /// `lua_State`.
@@ -30,20 +33,20 @@ pub type LuaAlloc = unsafe extern "C" fn(
 ) -> *mut c_void;
 pub type LuaHook = unsafe extern "C-unwind" fn(l: *mut LuaState, ar: *mut LuaDebug);
 
-pub const LUA_REGISTRYINDEX: c_int = -10000;
-pub const LUA_GLOBALSINDEX: c_int = -10002;
+const LUA_REGISTRYINDEX: c_int = -10000;
+const LUA_GLOBALSINDEX: c_int = -10002;
 const LUA_TNONE: c_int = -1;
-pub const LUA_TNIL: c_int = 0;
-pub const LUA_TBOOLEAN: c_int = 1;
-pub const LUA_TNUMBER: c_int = 3;
-pub const LUA_TSTRING: c_int = 4;
-pub const LUA_TTABLE: c_int = 5;
-pub const LUA_TFUNCTION: c_int = 6;
+const LUA_TNIL: c_int = 0;
+const LUA_TBOOLEAN: c_int = 1;
+const LUA_TNUMBER: c_int = 3;
+const LUA_TSTRING: c_int = 4;
+const LUA_TTABLE: c_int = 5;
+const LUA_TFUNCTION: c_int = 6;
 const LUA_TUSERDATA: c_int = 7;
 /// `1 << LUA_HOOKCOUNT`.
 pub const LUA_MASKCOUNT: c_int = 8;
-pub const LUAJIT_MODE_ENGINE: c_int = 0;
-pub const LUAJIT_MODE_OFF: c_int = 0;
+const LUAJIT_MODE_ENGINE: c_int = 0;
+const LUAJIT_MODE_OFF: c_int = 0;
 
 // The binaries link LuaJIT themselves; the crate's tests, which rustc
 // links, name it.
@@ -81,7 +84,6 @@ unsafe extern "C-unwind" {
     pub fn lua_pushnumber(l: *mut LuaState, n: LuaNumber);
     pub fn lua_pushinteger(l: *mut LuaState, n: LuaInteger);
     pub fn lua_pushlstring(l: *mut LuaState, s: *const c_char, len: usize);
-    pub fn lua_pushstring(l: *mut LuaState, s: *const c_char);
     pub fn lua_pushcclosure(l: *mut LuaState, f: LuaCFunction, n: c_int);
     pub fn lua_pushboolean(l: *mut LuaState, b: c_int);
     pub fn lua_pushlightuserdata(l: *mut LuaState, p: *mut c_void);
@@ -104,17 +106,19 @@ unsafe extern "C-unwind" {
     pub fn luaL_newmetatable(l: *mut LuaState, tname: *const c_char) -> c_int;
 }
 
-/// Owns a Lua state and borrows any allocator data it depends on.
+/// Owns a Lua state, closed when it goes, and borrows any allocator data
+/// it depends on.
 pub(crate) struct Lua<'a> {
     state: NonNull<LuaState>,
     data: PhantomData<&'a mut ()>,
 }
 
 impl Lua<'static> {
-    pub(crate) fn new() -> Option<Self> {
+    /// A state over LuaJIT's own allocator, or -ENOMEM.
+    pub(crate) fn new() -> Result<Self, c_int> {
         // SAFETY: this creates an independent state with LuaJIT's allocator.
-        let state = NonNull::new(unsafe { luaL_newstate() })?;
-        Some(Self {
+        let state = NonNull::new(unsafe { luaL_newstate() }).ok_or(-ENOMEM)?;
+        Ok(Self {
             state,
             data: PhantomData,
         })
@@ -122,39 +126,53 @@ impl Lua<'static> {
 }
 
 impl<'a> Lua<'a> {
+    /// A state whose memory `allocate` hands out, or -ENOMEM.
+    ///
     /// # Safety
     ///
     /// `allocate` must implement Lua's allocator contract and accept a
     /// pointer to `data` as its context.
-    pub(crate) unsafe fn with_allocator<T>(allocate: LuaAlloc, data: &'a mut T) -> Option<Self> {
+    pub(crate) unsafe fn with_allocator<T>(
+        allocate: LuaAlloc,
+        data: &'a mut T,
+    ) -> Result<Self, c_int> {
         // SAFETY: the caller supplies a matching allocator and context.
-        let state = NonNull::new(unsafe { lua_newstate(allocate, ptr::from_mut(data).cast()) })?;
-        Some(Self {
+        let state = unsafe { lua_newstate(allocate, ptr::from_mut(data).cast()) };
+        let state = NonNull::new(state).ok_or(-ENOMEM)?;
+        Ok(Self {
             state,
             data: PhantomData,
         })
     }
 
-    pub(crate) fn as_ptr(&self) -> *mut LuaState {
-        self.state.as_ptr()
-    }
-
     pub(crate) fn allocator(&self) -> Option<Allocator<'_>> {
         let mut context = ptr::null_mut();
         // SAFETY: the state is live and context can hold the allocator data.
-        let allocate = unsafe { lua_getallocf(self.as_ptr(), &mut context) }?;
+        let allocate = unsafe { lua_getallocf(self.state.as_ptr(), &mut context) }?;
         Some(Allocator {
             allocate,
             context,
             owner: PhantomData,
         })
     }
+
+    /// The state's stack, at its base.
+    pub(crate) fn stack(&mut self) -> Stack<'_> {
+        Stack {
+            l: self.state.as_ptr(),
+            base: 0,
+            frame: PhantomData,
+        }
+    }
 }
 
 impl Drop for Lua<'_> {
     fn drop(&mut self) {
+        // A hook left set would count the finalizers lua_close() runs, and
+        // could raise an error in them.
+        self.stack().clear_hook();
         // SAFETY: this owner closes the live state once, before its allocator goes.
-        unsafe { lua_close(self.as_ptr()) };
+        unsafe { lua_close(self.state.as_ptr()) };
     }
 }
 
@@ -191,11 +209,11 @@ pub(crate) enum LuaType {
     Other,
 }
 
-/// The stack of a live Lua state, in the frame of the C function or the
-/// hook LuaJIT called. An index counts up from 1 at the bottom of the
-/// frame or down from -1 at its top. What a read finds in a slot borrows
-/// the Stack, and what pushes or pops takes it, so the one cannot outlive
-/// the other; split() holds slots for longer.
+/// The stack of a live Lua state, at its base or in the frame of the C
+/// function or the hook LuaJIT called. An index counts up from 1 at the
+/// bottom of the frame or down from -1 at its top. What a read finds in
+/// a slot borrows the Stack, and what pushes or pops takes it, so the one
+/// cannot outlive the other; split() holds slots for longer.
 ///
 /// Any call may raise a Lua error, which unwinds to the lua_pcall() that
 /// catches it: when memory runs out, an argument check fails, or a call
@@ -248,6 +266,34 @@ impl Stack<'_> {
     pub(crate) fn top(&self) -> c_int {
         // SAFETY: the state is live.
         unsafe { lua_gettop(self.l) }
+    }
+
+    /// Opens the standard libraries.
+    pub(crate) fn open_libs(&mut self) {
+        // SAFETY: the state is live.
+        unsafe { luaL_openlibs(self.l) };
+    }
+
+    /// Turns the JIT compiler off for the whole state: whether LuaJIT did.
+    pub(crate) fn jit_off(&mut self) -> bool {
+        // SAFETY: the state is live; mode 0 is the whole engine.
+        unsafe { luaJIT_setmode(self.l, 0, LUAJIT_MODE_ENGINE | LUAJIT_MODE_OFF) != 0 }
+    }
+
+    /// Runs `hook` on the events in `mask`, a count hook every `count`
+    /// instructions.
+    ///
+    /// # Safety
+    ///
+    /// `hook` is sound for LuaJIT to call with the state it hooks.
+    pub(crate) unsafe fn set_hook(&mut self, hook: LuaHook, mask: c_int, count: c_int) {
+        // SAFETY: the state is live, and the caller vouches for the hook.
+        unsafe { lua_sethook(self.l, Some(hook), mask, count) };
+    }
+
+    pub(crate) fn clear_hook(&mut self) {
+        // SAFETY: the state is live.
+        unsafe { lua_sethook(self.l, None, 0, 0) };
     }
 
     /// The slot `idx` names, counted from 1, if it names one.
@@ -409,6 +455,79 @@ impl Stack<'_> {
         unsafe { lua_createtable(self.l, 0, 0) };
     }
 
+    /// Pushes the address of `value` as a light userdata.
+    pub(crate) fn push_pointer<T>(&mut self, value: &mut T) {
+        // SAFETY: as in push_nil(); LuaJIT keeps the address, and what
+        // reads it back is unsafe.
+        unsafe { lua_pushlightuserdata(self.l, ptr::from_mut(value).cast()) };
+    }
+
+    /// Pushes a copy of the value at `idx`, nil for an index that names
+    /// none.
+    pub(crate) fn push_value(&mut self, idx: c_int) {
+        let slot = self.slot_or_none(idx);
+        // SAFETY: as in type_of(); LuaJIT grows the stack.
+        unsafe { lua_pushvalue(self.l, slot) };
+    }
+
+    /// Pushes a C function.
+    ///
+    /// # Safety
+    ///
+    /// `f` is sound for Lua to call on this state with any arguments.
+    pub(crate) unsafe fn push_function(&mut self, f: LuaCFunction) {
+        // SAFETY: as in push_nil(), and the caller vouches for f.
+        unsafe { lua_pushcclosure(self.l, f, 0) };
+    }
+
+    /// Pushes a C closure of `f` with the `n` values on top, which it
+    /// pops, as its upvalues.
+    ///
+    /// # Safety
+    ///
+    /// `f` is sound for Lua to call on this state with any arguments and
+    /// these upvalues.
+    pub(crate) unsafe fn push_closure(&mut self, f: LuaCFunction, n: c_int) {
+        self.need(n);
+        // SAFETY: as in push_nil(), with n values above the split, and the
+        // caller vouches for f.
+        unsafe { lua_pushcclosure(self.l, f, n) };
+    }
+
+    /// Pushes upvalue `n` of the C function running, nil past its last.
+    ///
+    /// # Safety
+    ///
+    /// The frame is a C function's, and `n` at least 1.
+    pub(crate) unsafe fn push_upvalue(&mut self, n: c_int) {
+        // SAFETY: as in push_nil(), and as the caller vouches.
+        unsafe { lua_pushvalue(self.l, lua_upvalueindex(n)) };
+    }
+
+    /// The address of the light or full userdata that is upvalue `n` of
+    /// the C function running, NULL for another value.
+    ///
+    /// # Safety
+    ///
+    /// The frame is a C function's, and `n` at least 1.
+    pub(crate) unsafe fn upvalue_pointer(&self, n: c_int) -> *mut c_void {
+        // SAFETY: the state is live, and as the caller vouches.
+        unsafe { lua_touserdata(self.l, lua_upvalueindex(n)) }
+    }
+
+    /// Pushes global `name`, metamethods and all.
+    pub(crate) fn get_global(&mut self, name: &CStr) {
+        // SAFETY: as in push_nil(); the globals are always there.
+        unsafe { lua_getfield(self.l, LUA_GLOBALSINDEX, name.as_ptr()) };
+    }
+
+    /// Pushes the metatable registered as `name`, made and registered
+    /// first when there is none.
+    pub(crate) fn new_metatable(&mut self, name: &CStr) {
+        // SAFETY: as in push_nil(); the registry is always there.
+        unsafe { luaL_newmetatable(self.l, name.as_ptr()) };
+    }
+
     /// Pushes a userdata of `len` bytes, zeroed, for `fill` to write before
     /// anything can read them; what `fill` returns.
     pub(crate) fn push_userdata_with<R>(
@@ -468,6 +587,14 @@ impl Stack<'_> {
         unsafe { lua_setfield(self.l, target, k.as_ptr()) };
     }
 
+    /// Pops the value on top into global `name`, metamethods and all.
+    pub(crate) fn set_global(&mut self, name: &CStr) {
+        self.need(1);
+        // SAFETY: the state is live with a value on top; the globals are
+        // always there.
+        unsafe { lua_setfield(self.l, LUA_GLOBALSINDEX, name.as_ptr()) };
+    }
+
     /// Pops the value on top into element `n` of the table at `idx`,
     /// without metamethods.
     pub(crate) fn raw_set_index(&mut self, idx: c_int, n: c_int) {
@@ -512,6 +639,33 @@ impl Stack<'_> {
         // above the split; LuaJIT raises an error for a value it cannot
         // call, and what the function raises unwinds through here.
         unsafe { lua_call(self.l, nargs, nresults) };
+    }
+
+    /// Loads `chunk`, named `name`, in `mode`, "t" for source alone, and
+    /// pushes the function it makes, or the error: whether it loaded.
+    pub(crate) fn load(&mut self, chunk: &[u8], name: &CStr, mode: &CStr) -> bool {
+        // SAFETY: as in push_nil(); the chunk's bytes and two C strings.
+        unsafe {
+            luaL_loadbufferx(
+                self.l,
+                chunk.as_ptr().cast(),
+                chunk.len(),
+                name.as_ptr(),
+                mode.as_ptr(),
+            ) == 0
+        }
+    }
+
+    /// call() in protected mode: what the function raises stops here, its
+    /// error pushed in place of the results; whether it returned.
+    pub(crate) fn pcall(&mut self, nargs: c_int, nresults: c_int) -> bool {
+        self.need(nargs.saturating_add(1));
+        if nresults < 0 {
+            self.error(c"no count of results");
+        }
+        // SAFETY: the state is live, with the function and its arguments
+        // above the split.
+        unsafe { lua_pcall(self.l, nargs, nresults, 0) == 0 }
     }
 
     /// Pops `n` values.
@@ -588,56 +742,6 @@ unsafe fn bytes_at<'a>(l: *mut LuaState, idx: c_int) -> Option<&'a [u8]> {
 }
 
 /// lua_upvalueindex().
-pub const fn lua_upvalueindex(i: c_int) -> c_int {
+const fn lua_upvalueindex(i: c_int) -> c_int {
     LUA_GLOBALSINDEX - i
-}
-
-/// lua_pop().
-///
-/// # Safety
-///
-/// `l` is a state with `n` values on its stack.
-pub unsafe fn lua_pop(l: *mut LuaState, n: c_int) {
-    // SAFETY: the caller's state.
-    unsafe { lua_settop(l, -n - 1) };
-}
-
-/// lua_newtable().
-///
-/// # Safety
-///
-/// `l` is a state.
-pub unsafe fn lua_newtable(l: *mut LuaState) {
-    // SAFETY: the caller's state.
-    unsafe { lua_createtable(l, 0, 0) };
-}
-
-/// lua_pushcfunction().
-///
-/// # Safety
-///
-/// `l` is a state.
-pub unsafe fn lua_pushcfunction(l: *mut LuaState, f: LuaCFunction) {
-    // SAFETY: the caller's state.
-    unsafe { lua_pushcclosure(l, f, 0) };
-}
-
-/// lua_setglobal().
-///
-/// # Safety
-///
-/// `l` is a state with a value on its stack; `name` a C string.
-pub unsafe fn lua_setglobal(l: *mut LuaState, name: *const c_char) {
-    // SAFETY: the caller's state and C string.
-    unsafe { lua_setfield(l, LUA_GLOBALSINDEX, name) };
-}
-
-/// lua_getglobal().
-///
-/// # Safety
-///
-/// `l` is a state; `name` a C string.
-pub unsafe fn lua_getglobal(l: *mut LuaState, name: *const c_char) {
-    // SAFETY: the caller's state and C string.
-    unsafe { lua_getfield(l, LUA_GLOBALSINDEX, name) };
 }
