@@ -1217,7 +1217,9 @@ fn apply_policy_labels(u: &Upatch) {
     };
     let count = u32::from_le_bytes([labels[8], labels[9], labels[10], labels[11]]) as usize;
     for e in labels[POLICY_LABEL_HEADER..]
-        .chunks_exact(POLICY_LABEL_ENTRY)
+        .as_chunks::<POLICY_LABEL_ENTRY>()
+        .0
+        .iter()
         .take(count)
     {
         let bit = u64::from_le_bytes(e[..8].try_into().unwrap_or_default());

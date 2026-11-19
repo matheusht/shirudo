@@ -686,7 +686,7 @@ pub(crate) fn digest_bytes(text: &[u8]) -> Option<[u8; 32]> {
     if hex.len() != 64 {
         return None;
     }
-    for (b, pair) in out.iter_mut().zip(hex.chunks_exact(2)) {
+    for (b, pair) in out.iter_mut().zip(hex.as_chunks::<2>().0.iter()) {
         *b = nibble(pair[0])? << 4 | nibble(pair[1])?;
     }
     Some(out)

@@ -57,7 +57,7 @@ fn hex32(text: &[u8]) -> Option<[u8; 32]> {
     if hex.len() != 64 {
         return None;
     }
-    for (b, pair) in out.iter_mut().zip(hex.chunks_exact(2)) {
+    for (b, pair) in out.iter_mut().zip(hex.as_chunks::<2>().0.iter()) {
         let digit = |c: u8| char::from(c).to_digit(16);
         *b = (digit(pair[0])? << 4 | digit(pair[1])?) as u8;
     }

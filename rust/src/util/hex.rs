@@ -36,7 +36,7 @@ pub(crate) fn decode(hex: &[u8], out: &mut [u8]) -> Result<(), c_int> {
     if Some(hex.len()) != out.len().checked_mul(2) {
         return Err(-EINVAL);
     }
-    for (o, pair) in out.iter_mut().zip(hex.chunks_exact(2)) {
+    for (o, pair) in out.iter_mut().zip(hex.as_chunks::<2>().0.iter()) {
         match (nibble(pair[0]), nibble(pair[1])) {
             (Some(hi), Some(lo)) => *o = (hi << 4) | lo,
             _ => return Err(-EINVAL),
@@ -137,7 +137,6 @@ mod capi {
     /// # Safety
     ///
     /// `digest` is NULL or a C string, and `out` room for 32 bytes.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn sha256_digest_decode(digest: *const c_char, out: *mut u8) -> c_int {
         if digest.is_null() {
             return -EINVAL;

@@ -575,8 +575,10 @@ fn add_programs(
             sec_insn_off: off / INSN_SZ,
             sec_insn_cnt: sz / INSN_SZ,
             insns: data[off..end]
-                .chunks_exact(INSN_SZ)
-                .map(Insn::parse)
+                .as_chunks::<INSN_SZ>()
+                .0
+                .iter()
+                .map(|insn| Insn::parse(insn))
                 .collect(),
             strategy,
             mark_btf_static: sym_global

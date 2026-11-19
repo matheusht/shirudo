@@ -222,7 +222,9 @@ impl<'a> Elf<'a> {
     /// The symbols of the symbol table `idx`.
     pub(crate) fn symbols(&self, idx: usize) -> Option<Vec<Symbol>> {
         let d = self.section_data(idx)?;
-        d.chunks_exact(SYM_SIZE)
+        d.as_chunks::<SYM_SIZE>()
+            .0
+            .iter()
             .map(|s| {
                 Some(Symbol {
                     name: u32_at(s, 0)?,
@@ -239,7 +241,9 @@ impl<'a> Elf<'a> {
     /// The relocations of the REL section `idx`.
     pub(crate) fn rels(&self, idx: usize) -> Option<Vec<Rel>> {
         let d = self.section_data(idx)?;
-        d.chunks_exact(REL_SIZE)
+        d.as_chunks::<REL_SIZE>()
+            .0
+            .iter()
             .map(|r| {
                 Some(Rel {
                     offset: u64_at(r, 0)?,

@@ -93,7 +93,9 @@ fuzz_target!(
             data: page_data.to_vec(),
         };
         let entries = page_data
-            .chunks_exact(12)
+            .as_chunks::<12>()
+            .0
+            .iter()
             .take(MAX_ENTRIES)
             .map(|entry| {
                 let (key, value) = entry.split_at(4);

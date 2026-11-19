@@ -207,7 +207,9 @@ fn expect_uprobe(
         return Err("uprobe path or metadata length mismatch");
     }
     let offsets: Vec<u64> = rest[path_len + build_id_len..]
-        .chunks_exact(8)
+        .as_chunks::<8>()
+        .0
+        .iter()
         .map(|c| le64(c, 0))
         .collect();
     if offsets.windows(2).any(|w| w[1] <= w[0]) {
@@ -349,7 +351,9 @@ fn expect_policy_labels(u: &Upatch) -> Check {
         return Err("policy label header mismatch");
     }
     for (i, e) in raw[POLICY_LABEL_HEADER..]
-        .chunks_exact(POLICY_LABEL_ENTRY)
+        .as_chunks::<POLICY_LABEL_ENTRY>()
+        .0
+        .iter()
         .enumerate()
     {
         if le64(e, 0) != BITS[i]

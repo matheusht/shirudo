@@ -104,7 +104,7 @@ fn base64_field(text: &[u8], cap: usize) -> Option<Vec<u8>> {
     let value = |c: u8| BASE64.iter().position(|&b| b == c).map(|v| v as u32);
     let mut out = Vec::with_capacity(text.len() / 4 * 3);
 
-    for (i, quad) in text.chunks_exact(4).enumerate() {
+    for (i, quad) in text.as_chunks::<4>().0.iter().enumerate() {
         let last = i + 1 == text.len() / 4;
         let pad = quad.iter().rev().take_while(|&&c| c == b'=').count();
         if pad > 2 || (pad != 0 && !last) {
@@ -134,7 +134,7 @@ fn body_sha256_field(text: &[u8]) -> Option<[u8; DIGEST_LEN]> {
     if text.len() != BODY_HEX_LEN {
         return None;
     }
-    for (b, pair) in out.iter_mut().zip(text.chunks_exact(2)) {
+    for (b, pair) in out.iter_mut().zip(text.as_chunks::<2>().0.iter()) {
         *b = (digit(pair[0])? << 4 | digit(pair[1])?) as u8;
     }
     Some(out)

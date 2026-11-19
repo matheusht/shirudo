@@ -361,9 +361,9 @@ impl Btf {
             return;
         }
         let mut v: Vec<[u8; 12]> = self.types[start..start + 12 * n]
-            .chunks_exact(12)
-            .map(|c| c.try_into().unwrap_or([0; 12]))
-            .collect();
+            .as_chunks::<12>()
+            .0
+            .to_vec();
         v.sort_by_key(|c| le32(c, 4) as i32);
         for (i, c) in v.iter().enumerate() {
             self.types[start + 12 * i..start + 12 * (i + 1)].copy_from_slice(c);

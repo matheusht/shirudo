@@ -714,7 +714,7 @@ fn push_hex(s: &mut Stack<'_>, bytes: &[u8]) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     // The hex and a NUL.
     s.push_userdata_with(bytes.len() * 2 + 1, |hex| {
-        for (pair, b) in hex.chunks_exact_mut(2).zip(bytes) {
+        for (pair, b) in hex.as_chunks_mut::<2>().0.iter_mut().zip(bytes) {
             pair.copy_from_slice(&[HEX[usize::from(b >> 4)], HEX[usize::from(b & 0xf)]]);
         }
     });

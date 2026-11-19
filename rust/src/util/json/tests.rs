@@ -753,7 +753,7 @@ fn growth_keeps_room_for_the_nul() {
 /// A string field has room for nothing without a byte for its NUL.
 #[test]
 fn string_field_needs_room_for_the_nul() {
-    let mut guard = [b'x', b'y'];
+    let mut guard = *b"xy";
     let f = [JsonField::string(c"s", |g: &mut [u8; 2]| &mut g[1..1])];
 
     assert_eq!(parse_schema(br#"{"s":""}"#, &f, &mut guard), Err(-ENOSPC));

@@ -344,7 +344,7 @@ fn base64_that_is_not_standard_is_malformed() {
     for n in 0..3 {
         let at = field(&row, n);
         let was = row[at];
-        for c in [b'*', b' ', b'-'] {
+        for c in *b"* -" {
             row[at] = c;
             assert_eq!(verdict(&row), QUOTE_MALFORMED, "{n} {c}");
         }
