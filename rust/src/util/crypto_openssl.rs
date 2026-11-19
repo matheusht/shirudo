@@ -13,7 +13,7 @@ use core::ptr;
 use std::ffi::CString;
 use std::fs::File;
 use std::io::Read;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, FromRawFd, OwnedFd};
 
 use foreign_types::{ForeignType, ForeignTypeRef};
 use openssl::asn1::{Asn1Time, Asn1TimeRef};
@@ -148,8 +148,7 @@ fn read_x509(path: &CStr) -> Result<X509, c_int> {
     }
     // SAFETY: the fd open() gave, owned from here.
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-    // SAFETY: the fd, the caller's path, and not a secret.
-    let ret = unsafe { check_trusted(fd.as_raw_fd(), path.as_ptr(), false) };
+    let ret = check_trusted(fd.as_fd(), path, false);
     if ret != 0 {
         return Err(ret);
     }

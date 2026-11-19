@@ -139,8 +139,7 @@ pub(crate) fn read_der(path: &CStr) -> Result<Vec<u8>, c_int> {
     // SAFETY: the fd open() just gave, owned from here.
     let file = File::from(unsafe { OwnedFd::from_raw_fd(fd) });
     let size = der_size(&file)?;
-    // SAFETY: the file's fd, and a C string.
-    if unsafe { check_trusted(file.as_raw_fd(), path.as_ptr(), false) } != 0 {
+    if check_trusted(file.as_fd(), path, false) != 0 {
         return Err(-EPERM);
     }
     let mut der = room_for(size)?;

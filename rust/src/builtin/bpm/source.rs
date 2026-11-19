@@ -117,8 +117,7 @@ fn trusted(stream: &Stream, path: &CStr) -> Result {
     if image_config::active() {
         return Ok(());
     }
-    // SAFETY: the stream's fd and a C string.
-    match unsafe { check_trusted(stream.fd(), path.as_ptr(), false) } {
+    match check_trusted(stream.as_fd(), path, false) {
         0 => Ok(()),
         _ => Err(-EPERM),
     }

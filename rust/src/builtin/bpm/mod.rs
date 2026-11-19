@@ -17,7 +17,7 @@ use core::ffi::{CStr, c_char, c_int};
 use core::ptr;
 use std::ffi::CString;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 
 use crate::errno::{EINVAL, EIO, ENAMETOOLONG};
 use crate::ffi;
@@ -189,9 +189,10 @@ impl Stream {
         Ok(Stream(f))
     }
 
-    fn fd(&self) -> c_int {
-        // SAFETY: the stream's own FILE.
-        unsafe { crate::sys::libc::fileno(self.0) }
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        // SAFETY: the stream's own FILE, whose fd stays open until the
+        // stream closes it.
+        unsafe { BorrowedFd::borrow_raw(crate::sys::libc::fileno(self.0)) }
     }
 
     /// Each line of at most PATH_MAX - 1 bytes to `each`, as a C string

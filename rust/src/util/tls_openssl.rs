@@ -12,7 +12,7 @@ use core::mem::ManuallyDrop;
 use core::ptr;
 use std::fs::File;
 use std::io::Read;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, FromRawFd, OwnedFd};
 
 use openssl::ssl::{SslContextBuilder, SslVersion};
 use openssl::x509::X509;
@@ -147,8 +147,7 @@ fn add_ca(ctx: &mut SslContextBuilder, path: &CStr) -> CurlCode {
     }
     // SAFETY: the fd open() gave, owned from here.
     let file = File::from(unsafe { OwnedFd::from_raw_fd(fd) });
-    // SAFETY: the fd, and a C string.
-    if unsafe { check_trusted(file.as_raw_fd(), path.as_ptr(), false) } != 0 {
+    if check_trusted(file.as_fd(), path, false) != 0 {
         return CURLE_SSL_CACERT_BADFILE;
     }
     let mut text = Vec::new();

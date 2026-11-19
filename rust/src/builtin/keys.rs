@@ -11,7 +11,7 @@ use core::ffi::{CStr, c_int};
 use std::ffi::CString;
 use std::fs::File;
 use std::io::Read;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, FromRawFd, OwnedFd};
 
 use foreign_types::ForeignTypeRef;
 use openssl::asn1::Asn1TimeRef;
@@ -138,8 +138,7 @@ fn read_file(path: &CStr, trusted: bool) -> Option<Vec<u8>> {
     }
     // SAFETY: the fd open() gave, owned from here.
     let file = File::from(unsafe { OwnedFd::from_raw_fd(fd) });
-    // SAFETY: the fd and a C string.
-    if trusted && unsafe { check_trusted(file.as_raw_fd(), path.as_ptr(), false) } != 0 {
+    if trusted && check_trusted(file.as_fd(), path, false) != 0 {
         return None;
     }
     let mut text = Vec::new();

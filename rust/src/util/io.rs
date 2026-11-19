@@ -301,8 +301,8 @@ pub(crate) fn read_whole(fd: c_int, label: &CStr, max: usize) -> Result<Vec<u8>,
     if st.stx_mode & S_IFMT != S_IFREG {
         return Err(-EINVAL);
     }
-    // SAFETY: the label, a C string.
-    let ret = unsafe { check_trusted(fd, label.as_ptr(), false) };
+    // SAFETY: the caller's fd, open for the call.
+    let ret = check_trusted(unsafe { BorrowedFd::borrow_raw(fd) }, label, false);
     if ret != 0 {
         return Err(ret);
     }
@@ -393,16 +393,6 @@ pub(crate) unsafe fn read_text_line(
     if n > max { -E2BIG } else { 1 }
 }
 
-/// Whether the C string `path` lies below `dir`.
-///
-/// # Safety
-///
-/// `path` is a C string.
-unsafe fn under(path: *const c_char, dir: &CStr) -> bool {
-    // SAFETY: the caller's C string.
-    under_dir(unsafe { CStr::from_ptr(path) }.to_bytes(), dir)
-}
-
 /// Whether `p` names something beneath the directory `dir`.
 fn under_dir(p: &[u8], dir: &CStr) -> bool {
     let d = dir.to_bytes();
@@ -457,20 +447,14 @@ fn trusted_owner(uid: u32) -> bool {
 /// read, in directories up to / that nobody else can change, a sticky
 /// one of root's guarding its files; elsewhere the caller's to vouch
 /// for. 0, or -EPERM logged, or -errno.
-///
-/// # Safety
-///
-/// `path` is a C string.
-pub(crate) unsafe fn check_trusted(fd: c_int, path: *const c_char, secret: bool) -> c_int {
-    // SAFETY: the caller's C string.
-    let path_text = unsafe { ffi::c_str(path) };
+pub(crate) fn check_trusted(fd: BorrowedFd<'_>, path: &CStr, secret: bool) -> c_int {
+    let path_text = path.to_bytes();
     let mut st = Statx::zeroed();
 
-    // SAFETY: the caller's C string.
-    if !unsafe { under(path, ETC_DIR) } && !unsafe { under(path, VAR_LIB) } {
+    if !under_dir(path_text, ETC_DIR) && !under_dir(path_text, VAR_LIB) {
         return 0;
     }
-    let ret = stat_fd(fd, &mut st);
+    let ret = stat_fd(fd.as_raw_fd(), &mut st);
     if ret != 0 {
         return ret;
     }
@@ -500,10 +484,8 @@ pub(crate) unsafe fn check_trusted(fd: c_int, path: *const c_char, secret: bool)
 
     // The file's directories up to /, as realpath() resolves its path
     // and as statx() of each, following links, finds them.
-    // SAFETY: the caller's C string.
-    let given = unsafe { CStr::from_ptr(path) };
     let errno = |e: std::io::Error| -e.raw_os_error().unwrap_or(crate::errno::EIO);
-    let real = match std::fs::canonicalize(OsStr::from_bytes(given.to_bytes())) {
+    let real = match std::fs::canonicalize(OsStr::from_bytes(path_text)) {
         Ok(real) => real,
         Err(e) => return errno(e),
     };

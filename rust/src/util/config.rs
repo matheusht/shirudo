@@ -11,7 +11,7 @@ use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::mem::ManuallyDrop;
-use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+use std::os::fd::{BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 
 use crate::errno::{EINVAL, EIO, ENOENT, EPERM};
@@ -345,8 +345,9 @@ fn parse(cfg: &mut Config, f: File, path: &CStr) -> c_int {
     let fd = f.into_raw_fd();
     let mut ret = 0;
 
-    // SAFETY: the file's fd, and the caller's C string.
-    if unsafe { check_trusted(fd, path.as_ptr(), false) } != 0 {
+    // SAFETY: the file's fd, open until closed below.
+    let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+    if check_trusted(borrowed, path, false) != 0 {
         // SAFETY: the fd, closed once.
         unsafe { close(fd) };
         return -EPERM;
@@ -382,8 +383,7 @@ fn parse(cfg: &mut Config, f: File, path: &CStr) -> c_int {
         unreadable(path, ret);
     }
     // The TPM owner's authorization is for no other user's eyes.
-    // SAFETY: the file's fd, and the caller's C string.
-    if cfg.tpm_owner_auth_len != 0 && unsafe { check_trusted(fd, path.as_ptr(), true) } != 0 {
+    if cfg.tpm_owner_auth_len != 0 && check_trusted(borrowed, path, true) != 0 {
         scrub(&mut cfg.tpm_owner_auth);
         cfg.tpm_owner_auth_len = 0;
         ret = -EPERM;
