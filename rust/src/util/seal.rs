@@ -688,11 +688,6 @@ pub(crate) fn open_sealed(path: &[u8]) -> Result<OwnedFd, c_int> {
     open_file(path, true)
 }
 
-/// Whether `path` is a file of shirudo's own, as [`open_read`] takes it.
-pub(crate) fn owns(path: &[u8]) -> bool {
-    open_read(path).is_ok()
-}
-
 /// Whether the directory `path` names an entry of carries the label.
 pub(crate) fn parent_labeled(path: &[u8]) -> bool {
     open_parent(path).is_ok_and(|(dir, _)| matches!(fget(dir.as_fd()), Ok(Some(_))))

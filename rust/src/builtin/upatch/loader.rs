@@ -1331,24 +1331,6 @@ pub(crate) fn trust_anchor(rep: Option<&mut OpReport>) -> Result<(i32, i32), ()>
     Ok((keyring::KEY_SPEC_BPF_KEYRING, ring))
 }
 
-/// Opens the upatch at `path` and applies it: boot restore's way in.
-pub(crate) fn apply_path(
-    path: &CStr,
-    verify_only: bool,
-    rep: Option<&mut OpReport>,
-) -> Result<(), ()> {
-    let mut rep = Rep(rep);
-    let u = match Upatch::open(path) {
-        Ok(u) => u,
-        Err(e) => {
-            log_err(&[&b"open "[..], path.to_bytes(), b": ", strerr(-e)].concat());
-            rep.fail(c"parse", c"parser_rejected", -e, b"cannot open .upatch");
-            return Err(());
-        }
-    };
-    apply(&u, path, verify_only, rep.0)
-}
-
 /// Loads `u`, which the caller read once and closes: the name the
 /// signature covers, the loader the kernel verifies and what the caller
 /// then measures and archives are all those bytes, which `label` names

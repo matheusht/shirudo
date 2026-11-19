@@ -186,8 +186,8 @@ structure Pin (Payload : Type) where
   deriving DecidableEq
 
 /-- A file of the archive: the name and payload its header carries,
-whether it carries the seal label (`seal::owns()`), and, as a ghost the C
-does not have, whether root rather than shirudo put it there. -/
+whether it carries the seal label (`seal::open_read()`), and, as a ghost
+the C does not have, whether root rather than shirudo put it there. -/
 structure Entry (Name Payload : Type) where
   name : Name
   payload : Payload

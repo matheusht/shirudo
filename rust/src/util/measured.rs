@@ -6,6 +6,7 @@
 //! and archives that set does not account for.
 
 use core::ffi::{CStr, c_int};
+use std::fs::File;
 
 use crate::errno::{E2BIG, EEXIST, EINVAL, ENAMETOOLONG, ENOENT, ENOSPC};
 use crate::sys::libc::{PATH_MAX, getxattr};
@@ -254,13 +255,10 @@ impl MeasuredSet {
             if strsprintf(&mut path, &[UPATCHES_DIR.to_bytes(), b"/", archive]).is_err() {
                 continue;
             }
-            let Ok(path_c) = CStr::from_bytes_until_nul(&path) else {
+            let Ok(archive) = seal::open_read(cstr(&path)) else {
                 continue;
             };
-            if !seal::owns(path_c.to_bytes()) {
-                continue;
-            }
-            let m = match Upatch::open(path_c) {
+            let m = match Upatch::read(&File::from(archive)) {
                 Ok(u) => upatch_of(&u),
                 Err(_) => continue,
             };

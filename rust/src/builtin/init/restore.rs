@@ -8,6 +8,7 @@
 use core::ffi::c_int;
 use core::mem;
 use std::ffi::CString;
+use std::fs::File;
 
 use super::{Init, cat, error, hex, info, strerr, warn};
 use crate::builtin::upatch::loader;
@@ -77,25 +78,23 @@ fn restore_one(
         return Err(-ENAMETOOLONG);
     }
     let file = CString::new(file).unwrap_or_default();
-    if !seal::owns(file.to_bytes()) {
+    let Ok(archive) = seal::open_read(file.to_bytes()) else {
         warn(&cat!(
             "boot-restore: ",
             name,
             " is not shirudo's own (foreign entry); ignored"
         ));
         return Ok(None);
-    }
-    let e = match Upatch::open(&file) {
-        Ok(u) => upatch_of(&u),
-        Err(_) => {
-            warn(&cat!(
-                "boot-restore: ",
-                name,
-                " is not an artifact shirudo archived (foreign entry); ignored"
-            ));
-            return Ok(None);
-        }
     };
+    let Ok(u) = Upatch::read(&File::from(archive)) else {
+        warn(&cat!(
+            "boot-restore: ",
+            name,
+            " is not an artifact shirudo archived (foreign entry); ignored"
+        ));
+        return Ok(None);
+    };
+    let e = upatch_of(&u);
     let upatch = cstr(&e.name);
     if !measured.holds(cstr(&e.name), cstr(&e.payload_hex)) {
         warn(&cat!(
@@ -137,7 +136,7 @@ fn restore_one(
         ));
         return Err(-EPERM);
     }
-    if loader::apply_path(&file, false, None).is_err() {
+    if loader::apply(&u, &file, false, None).is_err() {
         error(&cat!("boot-restore: failed to apply ", name));
         return Err(-EINVAL);
     }
