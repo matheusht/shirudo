@@ -170,15 +170,6 @@ pub(crate) struct TreeState {
     pub(crate) segment_base_seq: i64,
 }
 
-/// `struct tree_kv`.
-#[repr(C)]
-pub struct TreeKv {
-    pub(crate) key: Text,
-    pub(crate) value: Text,
-}
-
-const _: () = assert!(size_of::<TreeKv>() == 512);
-
 /// What a publisher adds to the operation of an index, into its open
 /// object: the fixes, which no node reads.
 pub(crate) type Extra<'a> = &'a mut dyn FnMut(&mut JsonEmit, usize) -> c_int;

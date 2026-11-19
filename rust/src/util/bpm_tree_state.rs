@@ -6,31 +6,24 @@
 //! record a sync keeps, and the tree eventlog whose projection chain it
 //! replays.
 
-use core::ffi::{CStr, c_char, c_int};
-use core::ptr;
+use core::ffi::{CStr, c_int};
 use std::ffi::{CString, OsStr};
+use std::io::{BufRead, BufReader};
 use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileExt;
 
 use crate::errno::{E2BIG, EBADMSG, EINTR, EINVAL, EIO, ENAMETOOLONG, ENOENT, ENOSPC, text};
-use crate::ffi;
-use crate::heap::libc_free;
-use crate::sys::libc::Zeroed;
-use crate::sys::libc::{
-    File, O_RDONLY, PATH_MAX, R_OK, Utsname, access, bytes, close, errno, fclose, fdopen, fopen,
-    uname,
-};
-use crate::text::{cstr, find, strscpy};
+use crate::sys::libc::{O_RDONLY, PATH_MAX, R_OK, Utsname, Zeroed, access, bytes, uname};
+use crate::text::{cstr, find};
 use crate::util::bpm_tree::{
-    MAX_KCONFIG, MAX_LABELS, STRING_MAX, TreeKv, TreeOperation, TreePending, TreeSelector,
-    TreeSelectorKv, TreeState, digest_bytes,
+    MAX_KCONFIG, MAX_LABELS, STRING_MAX, TreeOperation, TreePending, TreeSelector, TreeSelectorKv,
+    TreeState, digest_bytes,
 };
 use crate::util::crypto_openssl::sha256_into;
 use crate::util::hex;
 use crate::util::image_config;
-use crate::util::io::lock_exclusive;
-use crate::util::io::{read, read_text_line};
+use crate::util::io::{lock_exclusive, read};
 use crate::util::json::{JsonEmit, JsonField, MAX_BYTES, parse_schema};
 use crate::util::kernel_build_id::read_build_id;
 use crate::util::kernel_release::prefix_matches;
@@ -110,34 +103,9 @@ fn values_match(v: &TreeSelectorKv, want: &[u8]) -> bool {
     v.values.iter().any(|value| value == want)
 }
 
-/// uname(2) of the node, None where it fails.
-fn node_names() -> Option<Utsname> {
-    let mut u = Utsname::zeroed();
-
-    // SAFETY: room for the node's names.
-    (unsafe { uname(&mut u) } == 0).then_some(u)
-}
-
-/// A pair added after the `n` at `dst`, of at most `max`: 0, -E2BIG for
-/// no room, or -ENOSPC for a key or value too long.
-fn kv_add(dst: &mut [TreeKv], n: &mut c_int, max: c_int, key: &[u8], value: &[u8]) -> c_int {
-    if *n >= max {
-        return -E2BIG;
-    }
-    let kv = &mut dst[*n as usize];
-
-    if strscpy(&mut kv.key, key).is_err() || strscpy(&mut kv.value, value).is_err() {
-        return -ENOSPC;
-    }
-    *n += 1;
-    0
-}
-
-/// The value of the first of the pairs with `key`.
-fn kv_value<'a>(v: &'a [TreeKv], key: &[u8]) -> Option<&'a [u8]> {
-    v.iter()
-        .find(|kv| cstr(&kv.key) == key)
-        .map(|kv| cstr(&kv.value))
+/// The errno of an I/O error.
+fn io_errno(e: std::io::Error) -> c_int {
+    -e.raw_os_error().unwrap_or(EIO)
 }
 
 /// Whether access(2) lets this process read `path`.
@@ -146,49 +114,78 @@ fn readable(path: &CStr) -> bool {
     unsafe { access(path.as_ptr(), R_OK) == 0 }
 }
 
+/// uname(2) of the node, None where it fails.
+fn node_names() -> Option<Utsname> {
+    let mut u = Utsname::zeroed();
+
+    // SAFETY: room for the node's names.
+    (unsafe { uname(&mut u) } == 0).then_some(u)
+}
+
 /// Whether a tree is configured, in the config image when one is active.
 pub(crate) fn configured() -> bool {
     if !image_config::active() {
         return readable(TREE_ETC_PATH);
     }
-    let fd = image_config::open(image_config::TREE_CONF, O_RDONLY);
-
-    if fd < 0 {
-        return false;
-    }
-    // SAFETY: the fd the image gave, closed once.
-    unsafe { close(fd) };
-    true
+    image_config::open_fd(image_config::TREE_CONF, O_RDONLY).is_ok()
 }
 
-/// The `key = value` lines of `f`, which it closes, into the `max` pairs
-/// at `out`, `*n` of them; a blank line, a comment and a line without a
-/// `=` say nothing. 0, or -errno.
-///
-/// # Safety
-///
-/// `f` is an open stream, and `out` room for `max` pairs.
-unsafe fn read_config_stream(f: *mut File, out: *mut TreeKv, n: &mut c_int, max: c_int) -> c_int {
-    // SAFETY: the caller's room for max pairs.
-    let out = unsafe { core::slice::from_raw_parts_mut(out, usize::try_from(max).unwrap_or(0)) };
-    let mut capacity = 0usize;
-    let mut line: *mut c_char = ptr::null_mut();
-    let mut ret = 0;
+/// A `key = value` line of a node's labels.
+struct Label {
+    key: Vec<u8>,
+    value: Vec<u8>,
+}
 
-    *n = 0;
+/// The most bytes a line of a labels file holds, without its newline.
+const LABEL_LINE_MAX: usize = 511;
+
+/// The line read, without its newline: -EINVAL for one that holds a NUL,
+/// -E2BIG for one longer than LABEL_LINE_MAX.
+fn text_line(line: &[u8]) -> Result<&[u8], c_int> {
+    let row = line.strip_suffix(b"\n").unwrap_or(line);
+
+    if line.contains(&0) {
+        return Err(-EINVAL);
+    }
+    if row.len() > LABEL_LINE_MAX {
+        return Err(-E2BIG);
+    }
+    Ok(row)
+}
+
+/// A label added after `labels`, of at most `max`: -E2BIG for no room,
+/// or -ENOSPC for a key or value too long.
+fn label_add(labels: &mut Vec<Label>, max: usize, key: &[u8], value: &[u8]) -> Result<(), c_int> {
+    if labels.len() >= max {
+        return Err(-E2BIG);
+    }
+    if key.len() >= STRING_MAX || value.len() >= STRING_MAX {
+        return Err(-ENOSPC);
+    }
+    labels.push(Label {
+        key: key.to_vec(),
+        value: value.to_vec(),
+    });
+    Ok(())
+}
+
+/// The value of the first of the labels with `key`.
+fn label_value<'a>(labels: &'a [Label], key: &[u8]) -> Option<&'a [u8]> {
+    labels.iter().find(|l| l.key == key).map(|l| &l.value[..])
+}
+
+/// The `key = value` lines of `config`, at most `max`; a blank line, a
+/// comment and a line without a `=` say nothing.
+fn read_config(mut config: impl BufRead, max: usize) -> Result<Vec<Label>, c_int> {
+    let mut labels = Vec::new();
+    let mut line = Vec::new();
+
     loop {
-        // SAFETY: the caller's stream, and getline()'s buffer and size.
-        let got = unsafe { read_text_line(f, &mut line, &mut capacity, 511) };
-
-        if got == 0 {
-            break;
+        line.clear();
+        if config.read_until(b'\n', &mut line).map_err(io_errno)? == 0 {
+            return Ok(labels);
         }
-        if got < 0 {
-            ret = got;
-            break;
-        }
-        // SAFETY: the line read_text_line() gave, a C string.
-        let text = trim_start(unsafe { ffi::c_str(line) });
+        let text = trim_start(text_line(&line)?);
 
         if text.is_empty() || text[0] == b'#' {
             continue;
@@ -199,60 +196,25 @@ unsafe fn read_config_stream(f: *mut File, out: *mut TreeKv, n: &mut c_int, max:
         };
         // The key keeps what is before the '='; the value loses the
         // spaces it starts with.
-        ret = kv_add(out, n, max, &text[..eq], trim_start(&text[eq + 1..]));
-        if ret != 0 {
-            break;
-        }
+        label_add(&mut labels, max, &text[..eq], trim_start(&text[eq + 1..]))?;
     }
-    // SAFETY: getline()'s buffer and the caller's stream, each released
-    // once.
-    unsafe {
-        libc_free(line.cast());
-        fclose(f);
-    }
-    ret
 }
 
-/// read_config_stream() on `fd`, which it closes.
-///
-/// # Safety
-///
-/// `fd` is open, and `out` room for `max` pairs.
-unsafe fn read_config_fd(fd: c_int, out: *mut TreeKv, n: &mut c_int, max: c_int) -> c_int {
-    // SAFETY: the caller's fd, and a mode.
-    let f = unsafe { fdopen(fd, c"r".as_ptr()) };
+/// read_config() of the file at `path`.
+fn read_config_file(path: &CStr, max: usize) -> Result<Vec<Label>, c_int> {
+    let file = std::fs::File::open(OsStr::from_bytes(path.to_bytes())).map_err(io_errno)?;
 
-    if f.is_null() {
-        let ret = -errno();
-
-        // SAFETY: the caller's fd, which no stream took, closed once.
-        unsafe { close(fd) };
-        return ret;
-    }
-    // SAFETY: the stream, and the caller's room.
-    unsafe { read_config_stream(f, out, n, max) }
+    read_config(BufReader::new(file), max)
 }
 
-/// read_config_stream() on the file at `path`.
-///
-/// # Safety
-///
-/// `path` is a C string, and `out` room for `max` pairs.
-unsafe fn read_config_file(
-    path: *const c_char,
-    out: *mut TreeKv,
-    n: &mut c_int,
-    max: c_int,
-) -> c_int {
-    *n = 0;
-    // SAFETY: the caller's C string, and a mode.
-    let f = unsafe { fopen(path, c"re".as_ptr()) };
-
-    if f.is_null() {
-        return -errno();
+/// The node's labels, from the config image when one is active.
+fn node_labels() -> Result<Vec<Label>, c_int> {
+    if !image_config::active() {
+        return read_config_file(NODE_LABELS_PATH, MAX_LABELS);
     }
-    // SAFETY: the stream, and the caller's room.
-    unsafe { read_config_stream(f, out, n, max) }
+    let fd = image_config::open_fd(image_config::NODE_LABELS, O_RDONLY)?;
+
+    read_config(BufReader::new(std::fs::File::from(fd)), MAX_LABELS)
 }
 
 /// FNV-1a of a selector key.
@@ -445,46 +407,14 @@ fn kconfig_matches(kconfig: &[TreeSelectorKv], release: &[u8]) -> Result<bool, c
 /// Whether the selector's label pairs match the node's labels, from the
 /// config image when one is active.
 fn labels_match(labels_wanted: &[TreeSelectorKv]) -> Result<bool, c_int> {
-    let mut labels: [TreeKv; MAX_LABELS] = [const {
-        TreeKv {
-            key: [0; STRING_MAX],
-            value: [0; STRING_MAX],
-        }
-    }; MAX_LABELS];
-    let mut nl: c_int = 0;
-    let ret = if image_config::active() {
-        let fd = image_config::open(image_config::NODE_LABELS, O_RDONLY);
-
-        if fd == -ENOENT {
-            return Ok(false);
-        }
-        if fd < 0 {
-            return Err(fd);
-        }
-        // SAFETY: the fd the image gave, and room for the labels.
-        unsafe { read_config_fd(fd, labels.as_mut_ptr(), &mut nl, MAX_LABELS as c_int) }
-    } else {
-        // SAFETY: a C string, and room for the labels.
-        unsafe {
-            read_config_file(
-                NODE_LABELS_PATH.as_ptr(),
-                labels.as_mut_ptr(),
-                &mut nl,
-                MAX_LABELS as c_int,
-            )
-        }
+    let labels = match node_labels() {
+        Err(err) if err == -ENOENT => return Ok(false),
+        labels => labels?,
     };
-    if ret == -ENOENT {
-        return Ok(false);
-    }
-    if ret != 0 {
-        return Err(ret);
-    }
-    let have = &labels[..usize::try_from(nl).map_or(0, |n| n.min(MAX_LABELS))];
 
     Ok(labels_wanted
         .iter()
-        .all(|wanted| kv_value(have, &wanted.key).is_some_and(|v| values_match(wanted, v))))
+        .all(|wanted| label_value(&labels, &wanted.key).is_some_and(|v| values_match(wanted, v))))
 }
 
 /// The first `max` of `v`.

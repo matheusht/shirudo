@@ -132,23 +132,15 @@ fn pending_is_an_operation_in_flight() {
     }
 }
 
-/// read_config_file() of `path` into four pairs: their keys and values,
-/// or the error.
 /// A key and its value.
 type Pair = (Vec<u8>, Vec<u8>);
 
-fn labels_of(path: &CStr) -> Result<Vec<Pair>, (c_int, c_int)> {
-    // SAFETY: pairs of texts, for which zeros are a value.
-    let mut labels: [TreeKv; 4] = unsafe { core::mem::zeroed() };
-    let mut n = -1;
-    // SAFETY: a C string and room for four pairs and their count.
-    match unsafe { read_config_file(path.as_ptr(), labels.as_mut_ptr(), &mut n, 4) } {
-        0 => Ok(labels[..n as usize]
-            .iter()
-            .map(|kv| (cstr(&kv.key).to_vec(), cstr(&kv.value).to_vec()))
-            .collect()),
-        err => Err((err, n)),
-    }
+/// read_config_file() of `path`, of four pairs at most: their keys and
+/// values, or the error.
+fn labels_of(path: &CStr) -> Result<Vec<Pair>, c_int> {
+    let labels = read_config_file(path, 4)?;
+
+    Ok(labels.into_iter().map(|l| (l.key, l.value)).collect())
 }
 
 /// As the format has it: blanks go but for those between a key and its =.
@@ -170,7 +162,7 @@ fn labels_are_cut_at_the_first_equals() {
             pair("empty", "")
         ])
     );
-    assert_eq!(labels_of(c"/nonexistent/node.labels"), Err((-ENOENT, 0)));
+    assert_eq!(labels_of(c"/nonexistent/node.labels"), Err(-ENOENT));
 }
 
 /// The tree's directory of this test's thread, in `dir`.

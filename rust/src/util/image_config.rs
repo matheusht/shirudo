@@ -21,7 +21,7 @@ use crate::sys::libc::{
 use crate::text::parse_u64;
 use crate::util::config::{Config, Scrubbed, load_fd};
 use crate::util::io::open_beneath;
-use std::os::fd::{AsRawFd, IntoRawFd};
+use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd};
 
 /// `enum image_path`: the entries of the image, by their paths under its
 /// root.
@@ -66,15 +66,19 @@ pub(crate) fn active() -> bool {
     unsafe { *STATE.active.get() }
 }
 
-/// An entry of the image, opened from its verified root: an fd, or
-/// -errno.
-pub(crate) fn open(which: c_uint, flags: c_int) -> c_int {
+/// An entry of the image, opened from its verified root.
+pub(crate) fn open_fd(which: c_uint, flags: c_int) -> Result<OwnedFd, c_int> {
     let fd = root_fd();
 
     if which as usize >= RELATIVE.len() || fd < 0 {
-        return -ENOENT;
+        return Err(-ENOENT);
     }
-    open_beneath(fd, RELATIVE[which as usize], flags).map_or_else(|err| err, IntoRawFd::into_raw_fd)
+    open_beneath(fd, RELATIVE[which as usize], flags)
+}
+
+/// [`open_fd`], as an fd the caller closes, or -errno.
+pub(crate) fn open(which: c_uint, flags: c_int) -> c_int {
+    open_fd(which, flags).map_or_else(|err| err, IntoRawFd::into_raw_fd)
 }
 
 /// `path`, relative to the image's root and never above it, open with

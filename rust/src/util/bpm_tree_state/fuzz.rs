@@ -11,10 +11,10 @@ use std::sync::OnceLock;
 
 use super::{
     OUTCOME_LINE_MAX, Outcomes, event_replay_at, eventlog_matches_at, kconfig_read, outcome_emit,
-    outcome_parse, outcome_valid, state_read_at,
+    outcome_parse, outcome_valid, read_config_file, state_read_at,
 };
 
-use crate::util::bpm_tree::{MAX_LABELS, TreeKv, TreeSelector, TreeSelectorKv};
+use crate::util::bpm_tree::{MAX_LABELS, TreeSelector, TreeSelectorKv};
 
 use crate::fuzzing::{fuzz_target, input_file};
 
@@ -97,22 +97,9 @@ fuzz_target!(
         let (Some(sel), Some(input)) = (SELECTOR.get(), input_file(data)) else {
             return;
         };
-        // SAFETY: labels of nothing, for which zeros are the value.
-        let mut labels: Vec<TreeKv> = (0..MAX_LABELS)
-            .map(|_| unsafe { core::mem::zeroed() })
-            .collect();
-        let mut n = 0;
         let _ = kconfig_read(&input.path, sel, false);
         let _ = kconfig_read(&input.path, sel, true);
-        // SAFETY: a C string, and room for the labels.
-        unsafe {
-            super::read_config_file(
-                input.path.as_ptr(),
-                labels.as_mut_ptr(),
-                &mut n,
-                MAX_LABELS as i32,
-            );
-        }
+        let _ = read_config_file(&input.path, MAX_LABELS);
     },
     kconfig_init
 );
