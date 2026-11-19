@@ -239,7 +239,6 @@ that field in the publisher means it reads the previous publication
 twice. The node still parses only the fields it needs for sync
 (:doc:`/reference/formats/bpm-formats`).
 
-
 A keepalive key for each run
 ----------------------------
 

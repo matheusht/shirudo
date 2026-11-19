@@ -1102,7 +1102,7 @@ the functional tests run.
 command prints from a file it has not verified to what
 ``text_sanitize()`` leaves for a terminal, UTF-8 with no control
 character but a tab, a line feed and a carriage return before a line
-feed, and its JSON to one document :src:`util/json.c` reads.
+feed, and its JSON to one document :src:`rust/src/util/json/parse.rs` reads.
 
 Backend tests
 ~~~~~~~~~~~~~

@@ -124,8 +124,8 @@ Compared with attest verify
 ---------------------------
 
 ``shirudo attest verify`` and this program check a signature and its
-signer with the same two functions of :src:`rust/src/util/tpm_wire/`,
-``tpm_attest_verify()`` and ``tpm_attest_signer()``: the ECDSA signature
+signer with the same two functions of :src:`rust/src/util/tpm_wire/mod.rs`,
+``attest_verify()`` and ``attest_signer()``: the ECDSA signature
 over the SHA-256 of the ``attest`` bytes, where a key that is no point
 of the curve verifies nothing, and the signer as the key's qualified
 name under the endorsement hierarchy, compared in constant time. Both

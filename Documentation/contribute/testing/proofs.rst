@@ -218,9 +218,9 @@ Write a Lean 4 proof
 
 3. Where CBMC can, add a CBMC proof that the C computes what the model
    computes, for every input up to a bound, as
-   :src:`testing/proofs/cbmc/string-number-model.c` does for the number
-   parser; elsewhere the model follows the C by review, and the coverage
-   page says so.
+   :src:`testing/proofs/cbmc/string-prefix.c` does for the C prefix
+   helpers; elsewhere the model follows the implementation by review,
+   and the coverage page says so.
 
 4. Add a row to :doc:`proof-coverage`.
 

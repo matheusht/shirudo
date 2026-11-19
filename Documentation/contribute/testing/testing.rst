@@ -173,8 +173,7 @@ Test tiers
      - Runs
      - Command
    * - Unit
-     - ``tests.rs`` beside a module of :src:`rust/src/`, and
-       :src:`testing/unit/`
+     - ``tests.rs`` beside a module of :src:`rust/src/`
      - On the build host
      - ``make -C testing unit``
    * - CI checks
@@ -320,8 +319,7 @@ one tier, one unit suite or one family:
    $ make -C testing functional/<family>
 
 ``<suite>`` is the name of a Rust module with a ``tests.rs``, such as
-``hex``, or of a file under :src:`testing/unit/` without ``.c``, such as
-``json``. ``<family>`` is a directory under :src:`testing/functional/`,
+``hex`` or ``json``. ``<family>`` is a directory under :src:`testing/functional/`,
 such as ``upatch``. A family runs its operator tests in number order,
 then boots its VM and runs its target tests there. ``make -j`` boots the
 VMs of several families side by side.
