@@ -484,7 +484,8 @@ fn upatch_rows(pins: &[Vec<u8>]) -> Vec<UpatchTableRow> {
                 );
                 r.age_sec = upatch_table::age_sec(r.loaded_at.as_ptr());
             }
-            r.n_maps = map_read::list(Some(name.to_bytes())).len() as u32;
+            r.n_maps =
+                u32::try_from(map_read::list(Some(name.to_bytes())).len()).unwrap_or(u32::MAX);
             r
         })
         .collect()

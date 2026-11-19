@@ -8,7 +8,7 @@
 //! maps of one upatch or of all are listed.
 
 use core::ffi::{CStr, c_int, c_long};
-use core::sync::atomic::{AtomicI32, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 use std::ffi::OsStr;
 use std::fs;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
@@ -101,12 +101,13 @@ pub(crate) fn map_skip_reason(ty: u32) -> Option<&'static CStr> {
     }
 }
 
-/// The bytes a CPU's value takes in a lookup: rounded to 8 per CPU.
-fn stride_of(ty: u32, value_size: u32) -> u32 {
+/// The bytes a CPU's value takes in a lookup, rounded to 8 per CPU;
+/// none for a size that rounds past a u32.
+fn stride_of(ty: u32, value_size: u32) -> Option<u32> {
     if is_percpu(ty) {
-        (value_size + 7) & !7
+        value_size.checked_next_multiple_of(8)
     } else {
-        value_size
+        Some(value_size)
     }
 }
 
@@ -124,35 +125,39 @@ fn is_hash(ty: u32) -> bool {
 /// own, so either undersizes the buffer the kernel fills. The shortest
 /// mask sched_getaffinity accepts is the kernel's own cpumask,
 /// nr_cpu_ids bits rounded up, and bounds what a lookup writes.
-fn nproc_possible() -> c_int {
-    static CACHED: AtomicI32 = AtomicI32::new(0);
+fn nproc_possible() -> Result<u32, c_int> {
+    static CACHED: AtomicU32 = AtomicU32::new(0);
     let cached = CACHED.load(Ordering::Relaxed);
     if cached != 0 {
-        return cached;
+        return Ok(cached);
     }
     let mut mask = [0u8; 1024];
-    let mut len = 8usize;
+    let mut len = 8;
     while len <= mask.len() {
-        // SAFETY: the raw syscall, with room for `len` bytes of mask.
-        let n = unsafe {
-            syscall(
-                SYS_SCHED_GETAFFINITY,
-                0 as c_long,
-                len as c_long,
-                mask.as_mut_ptr(),
-            )
-        };
-        if n > 0 {
-            let cpus = (n * 8) as c_int;
-            CACHED.store(cpus, Ordering::Relaxed);
-            return cpus;
+        match affinity_mask(&mut mask[..len]) {
+            Ok(bytes) => {
+                let cpus = u32::try_from(bytes * 8).map_err(|_| -E2BIG)?;
+                CACHED.store(cpus, Ordering::Relaxed);
+                return Ok(cpus);
+            }
+            Err(e) if e == -EINVAL => len *= 2,
+            Err(e) => return Err(e),
         }
-        if errno() != EINVAL {
-            return -errno();
-        }
-        len *= 2;
     }
-    -E2BIG
+    Err(-E2BIG)
+}
+
+/// The bytes of this task's CPU mask that sched_getaffinity() writes
+/// into `mask`, at most its length: -EINVAL when the kernel's mask is
+/// longer.
+fn affinity_mask(mask: &mut [u8]) -> Result<usize, c_int> {
+    let len = c_long::try_from(mask.len()).map_err(|_| -EINVAL)?;
+    // SAFETY: the raw syscall, with room for the mask's bytes.
+    let n = unsafe { syscall(SYS_SCHED_GETAFFINITY, 0 as c_long, len, mask.as_mut_ptr()) };
+    match usize::try_from(n) {
+        Ok(bytes) if bytes > 0 => Ok(bytes.min(mask.len())),
+        _ => Err(-errno()),
+    }
 }
 
 fn os(b: &[u8]) -> &OsStr {
@@ -593,16 +598,9 @@ pub(crate) fn read(upatch: &[u8], map: &[u8], cap: u32, flags: u32) -> Result<Ma
     out.type_name = Some(map_type_name(ty));
     out.key_size = info.u32_at(MAP_KEY_SIZE);
     out.value_size = info.u32_at(MAP_VALUE_SIZE);
-    out.value_stride = stride_of(ty, out.value_size);
+    out.value_stride = stride_of(ty, out.value_size).ok_or(-EOVERFLOW)?;
     out.max_entries = info.u32_at(MAP_MAX_ENTRIES);
-    out.n_cpus = 1;
-    if is_percpu(ty) {
-        let n = nproc_possible();
-        if n < 0 {
-            return Err(n);
-        }
-        out.n_cpus = n as u32;
-    }
+    out.n_cpus = if is_percpu(ty) { nproc_possible()? } else { 1 };
     resolve_location(kernel_btf::vmlinux(), upatch, &mut out.location);
     if let Ok(dir) = pin_path(upatch, &[]) {
         if let Ok(st) = fs::metadata(os(dir.as_bytes())) {
@@ -664,22 +662,24 @@ fn scan(upatch: &[u8], list: &mut Vec<MapSummary>) {
             continue;
         };
         drop(fd);
-        // SAFETY: an all-zero summary is an empty one.
-        let mut one: MapSummary = unsafe { core::mem::zeroed() };
+        let ty = info.u32_at(MAP_TYPE);
+        let n_cpus = if is_percpu(ty) {
+            let Ok(cpus) = nproc_possible() else {
+                continue;
+            };
+            cpus
+        } else {
+            1
+        };
+        let mut one = MapSummary {
+            ty,
+            type_name: Some(map_type_name(ty)),
+            max_entries: info.u32_at(MAP_MAX_ENTRIES),
+            n_cpus,
+            ..MapSummary::default()
+        };
         let _ = strscpy(&mut one.upatch, upatch);
         let _ = strscpy(&mut one.name, name);
-        let ty = info.u32_at(MAP_TYPE);
-        one.ty = ty;
-        one.type_name = Some(map_type_name(ty));
-        one.max_entries = info.u32_at(MAP_MAX_ENTRIES);
-        one.n_cpus = 1;
-        if is_percpu(ty) {
-            let cpus = nproc_possible();
-            if cpus < 0 {
-                continue;
-            }
-            one.n_cpus = cpus as u32;
-        }
         list.push(one);
     }
 }

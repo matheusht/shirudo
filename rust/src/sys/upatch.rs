@@ -20,3 +20,17 @@ pub struct MapSummary {
     pub max_entries: u32,
     pub n_cpus: u32,
 }
+
+/// The summary of no map, which a listing fills in.
+impl Default for MapSummary {
+    fn default() -> Self {
+        MapSummary {
+            upatch: [0; 257],
+            name: [0; 17],
+            ty: 0,
+            type_name: None,
+            max_entries: 0,
+            n_cpus: 0,
+        }
+    }
+}
