@@ -732,14 +732,6 @@ can rewrite what it finds does so with ``-D patch``:
        ``getrandom()`` when named for a secret, that a return or function
        fallthrough leaves without a full-size ``memzero_explicit()``. It
        recognizes output passed by address.
-   * - ``sensitive_scrub``
-     - A local of a struct with a member marked ``__sensitive`` that a
-       return path leaves, once the function has used it, without
-       a full-size ``memzero_explicit()`` of the whole struct or a
-       ``__cleanup()`` function, and the address of a compound literal
-       of such a struct.
-       The structs come from the headers under :src:`include/`,
-       :src:`util/` and :src:`tools/` and at the top of the tree.
    * - ``curl_slist_free``
      - A libcurl header list freed without first scrubbing its copied
        header strings with ``curl_slist_free_sensitive()``.

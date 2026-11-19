@@ -851,90 +851,17 @@ void credential_fallthrough(void)
 EOF
 }
 
-# The same for a struct a header marks: the two returns after its use,
-# the compound literal and the scrub of one field alone are reported, the
-# return before its use, the scrubbed form and the __cleanup() one not.
-write_sensitive_samples() {
-	mkdir -p "$1/include" &&
-	printf 'struct client {\n\tchar name[32];\n\tchar password[64] __sensitive;\n\tchar token[32] __sensitive;\n};\n' \
-		>"$1/include/client.h" &&
-	cat >"$1/sensitive.c" <<'EOF'
-int client_left(const char *url)
-{
-	struct client c = {};
-
-	if (early())
-		return -EINVAL;
-	if (client_parse(url, &c))
-		return -EINVAL;
-	return use(&c);
-}
-
-int client_scrubbed(const char *url)
-{
-	struct client c = {};
-	int ret = -EINVAL;
-
-	if (early())
-		goto out;
-	ret = client_parse(url, &c);
-	if (!ret)
-		ret = use(&c);
-out:
-	memzero_explicit(&c, sizeof(c));
-	return ret;
-}
-
-int client_cleanup(const char *url)
-{
-	struct client c __cleanup(client_clear) = {};
-
-	if (client_parse(url, &c))
-		return -EINVAL;
-	return use(&c);
-}
-
-int client_literal(const char *url)
-{
-	return client_parse(url, &(struct client){});
-}
-
-int client_field(const char *url)
-{
-	struct client c = {};
-
-	c.name[0] = url[0];
-	memzero_explicit(c.password, sizeof(c.password));
-	return 0;
-}
-
-int client_partial_scrub(const char *url)
-{
-	struct client c = {};
-
-	if (client_parse(url, &c))
-		return -EINVAL;
-	memzero_explicit(&c, 1);
-	return use(&c);
-}
-
-EOF
-}
-
 test_expect_success 'each scrub rule reports its samples and spares the scrubbed forms' '
 	R4=$W/scrub &&
 	mkdir -p "$R4/testing/coccinelle" &&
 	git init -q "$R4" &&
 	cp "$ROOT/testing/coccinelle/scrub_missing.cocci" \
-		"$ROOT/testing/coccinelle/sensitive_scrub.cocci" \
 		"$R4/testing/coccinelle/" &&
 	write_scrub_samples "$R4/samples.c" &&
-	write_sensitive_samples "$R4" &&
 	! (cd "$R4" && git add -A && sh "$S") >"$W/out" 2>"$W/err" &&
-	grep -q "2 of 2 rules matched" "$W/err" &&
+	grep -q "1 of 1 rules matched" "$W/err" &&
 	[ "$(grep -c "^scrub_missing: samples.c:" "$W/err")" = 9 ] &&
-	[ "$(grep -c "^sensitive_scrub: sensitive.c:" "$W/err")" = 6 ] &&
-	[ "$(grep -c "^[a-z_]*: " "$W/err")" = 15 ]
+	[ "$(grep -c "^[a-z_]*: " "$W/err")" = 9 ]
 '
 
 test_expect_success 'curl_slist_free reports lists freed without scrubbing' '
@@ -1008,8 +935,7 @@ test_expect_success 'dead_store reports a store stored over and spares the reads
 '
 
 # An option compared by hand, which option_by_hand reports, beside the
-# standard output path "-", which is no option, and the parser itself,
-# whose file the rule leaves alone.
+# standard output path "-", which is no option.
 write_option_samples() {
 	cat >"$1/samples.c" <<'EOF'
 int by_hand(int argc, const char **argv)
@@ -1020,13 +946,6 @@ int by_hand(int argc, const char **argv)
 int to_stdout(const char *path)
 {
 	return !strcmp(path, "-");
-}
-EOF
-	mkdir -p "$1/util" &&
-	cat >"$1/util/options.c" <<'EOF'
-int is_end(const char *arg)
-{
-	return !strcmp(arg, "--");
 }
 EOF
 }
