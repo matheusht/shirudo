@@ -9,10 +9,12 @@
 use core::ffi::{CStr, c_char, c_int, c_long, c_ulong};
 use core::mem::MaybeUninit;
 use core::ptr;
+use std::fs::File;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 
 use crate::errno::{
-    EEXIST, EINTR, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENODEV, ENOENT, EOVERFLOW, ESTALE,
+    EBADF, EEXIST, EINTR, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG, ENODEV, ENOENT, EOVERFLOW,
+    ESTALE,
 };
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
@@ -358,7 +360,7 @@ pub(crate) fn list(mut f: impl FnMut(&CStr, u64) -> c_int) -> c_int {
 
 /// A free loop device attached read-only to the file at `file_fd`, `bytes`
 /// of it, its fd into `*out`.
-fn loop_attach(file_fd: c_int, bytes: u64, out: &mut c_int) -> c_int {
+fn loop_attach(file: &File, bytes: u64, out: &mut c_int) -> c_int {
     let mut config: LoopConfig = zeroed();
     let mut path = [0u8; 64];
 
@@ -391,7 +393,7 @@ fn loop_attach(file_fd: c_int, bytes: u64, out: &mut c_int) -> c_int {
         Ok(fd) => fd,
         Err(err) => return err,
     };
-    config.fd = file_fd as u32;
+    config.fd = file.as_raw_fd() as u32;
     config.block_size = BLOCK_SIZE as u32;
     config.info.lo_sizelimit = bytes;
     config.info.lo_flags = LO_FLAGS_READ_ONLY | LO_FLAGS_AUTOCLEAR;
@@ -674,12 +676,13 @@ pub(crate) fn remove(device: &mut DmVerity, deferred: bool) -> c_int {
 /// signature_key(): the image's root hash signature as a "user" key on
 /// the thread keyring, where request_key() finds it, with its permissions
 /// fixed; its description into `description`.
-fn signature_key(fd: c_int, description: &mut [u8; 64]) -> i32 {
+fn signature_key(file: &File, description: &mut [u8; 64]) -> i32 {
     let mut signature = [0u8; SIG_MAX as usize];
     let mut random = [0u8; 16];
     let mut suffix = [0u8; 33];
     let mut st = Statx::zeroed();
     let mut done = 0usize;
+    let fd = file.as_raw_fd();
 
     if stat_fd(fd, &mut st) != 0 {
         return -errno();
@@ -803,7 +806,7 @@ pub(crate) fn create(image: &ConfigImageOpen, name: &CStr) -> Result<DmVerity, c
     let mut _control_fd: Option<OwnedFd> = None;
     let mut ret;
 
-    ret = check_files(image.data_fd, image.hash_fd, &image.image);
+    ret = check_files(&image.data, &image.hash, &image.image);
     if ret != 0 {
         return Err(ret);
     }
@@ -811,13 +814,13 @@ pub(crate) fn create(image: &ConfigImageOpen, name: &CStr) -> Result<DmVerity, c
     let _ = strscpy(&mut device.name, name);
     'out: {
         ret = loop_attach(
-            image.data_fd,
+            &image.data,
             image.image.data_blocks.wrapping_mul(BLOCK_SIZE),
             &mut device.data_loop_fd,
         );
         if ret == 0 {
             ret = loop_attach(
-                image.hash_fd,
+                &image.hash,
                 image.image.hash_blocks.wrapping_mul(BLOCK_SIZE),
                 &mut device.hash_loop_fd,
             );
@@ -859,7 +862,10 @@ pub(crate) fn create(image: &ConfigImageOpen, name: &CStr) -> Result<DmVerity, c
         if image.image.signed_root {
             let remaining = params.len() as c_int - n;
 
-            key = signature_key(image.signature_fd, &mut signature);
+            key = match &image.signature {
+                Some(file) => signature_key(file, &mut signature),
+                None => -EBADF,
+            };
             if key < 0 {
                 ret = key;
                 break 'out;
@@ -994,11 +1000,11 @@ fn loop_open(device: u64) -> Result<OwnedFd, c_int> {
 
 /// loop_check(): whether the loop device reads the file `bytes` long,
 /// read-only, from its start and in the clear.
-fn loop_check(loop_fd: c_int, file_fd: c_int, bytes: u64) -> c_int {
+fn loop_check(loop_fd: c_int, file: &File, bytes: u64) -> c_int {
     let mut info: LoopInfo64 = zeroed();
     let mut st = Statx::zeroed();
 
-    if stat_fd(file_fd, &mut st) != 0
+    if stat_fd(file.as_raw_fd(), &mut st) != 0
         // SAFETY: the loop device's fd, and room for its status.
         || unsafe { ioctl(loop_fd, LOOP_GET_STATUS64, ptr::from_mut(&mut info)) } != 0
     {
@@ -1035,7 +1041,7 @@ pub(crate) fn verify(device: &DmVerity, image: &ConfigImageOpen) -> c_int {
     let mut readonly: c_int = 0;
     let mut offset = 0u64;
 
-    let mut ret = check_files(image.data_fd, image.hash_fd, &image.image);
+    let mut ret = check_files(&image.data, &image.hash, &image.image);
     if ret != 0 {
         return ret;
     }
@@ -1065,11 +1071,11 @@ pub(crate) fn verify(device: &DmVerity, image: &ConfigImageOpen) -> c_int {
                 break 'out;
             }
         };
-        ret = loop_check(data, image.data_fd, bytes);
+        ret = loop_check(data, &image.data, bytes);
         if ret == 0 {
             ret = loop_check(
                 hashes,
-                image.hash_fd,
+                &image.hash,
                 image.image.hash_blocks.wrapping_mul(BLOCK_SIZE),
             );
         }
@@ -1133,12 +1139,12 @@ pub(crate) fn verify(device: &DmVerity, image: &ConfigImageOpen) -> c_int {
             ret = -ESTALE;
         }
         if ret == 0 {
-            ret = loop_check(data, image.data_fd, bytes);
+            ret = loop_check(data, &image.data, bytes);
         }
         if ret == 0 {
             ret = loop_check(
                 hashes,
-                image.hash_fd,
+                &image.hash,
                 image.image.hash_blocks.wrapping_mul(BLOCK_SIZE),
             );
         }

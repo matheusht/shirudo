@@ -9,7 +9,7 @@ use core::ffi::{CStr, c_int};
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::io::ErrorKind;
-use std::os::fd::{AsRawFd, IntoRawFd};
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileExt, OpenOptionsExt};
 
@@ -17,7 +17,7 @@ use crate::errno::{EFBIG, EINVAL, EIO, EKEYREJECTED, ENAMETOOLONG};
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
     AT_EMPTY_PATH, O_NOFOLLOW, O_NONBLOCK, PATH_MAX, S_IFMT, S_IFREG, STATX_SIZE, STATX_TYPE,
-    Statx, close, errno, statx,
+    Statx, errno, statx,
 };
 use crate::util::hex;
 
@@ -39,18 +39,15 @@ pub struct ConfigImage {
     pub(crate) root_hash: [u8; 32],
 }
 
-/// An image and its open parts, -1 for one
-/// not open.
-#[repr(C)]
+/// An image and its open parts, the signature only for a signed root.
 pub struct ConfigImageOpen {
     pub(crate) image: ConfigImage,
-    pub(crate) data_fd: c_int,
-    pub(crate) hash_fd: c_int,
-    pub(crate) signature_fd: c_int,
+    pub(crate) data: File,
+    pub(crate) hash: File,
+    pub(crate) signature: Option<File>,
 }
 
 const _: () = assert!(size_of::<ConfigImage>() == 88);
-const _: () = assert!(size_of::<ConfigImageOpen>() == 104);
 
 impl ConfigImage {
     const fn zeroed() -> Self {
@@ -74,21 +71,10 @@ impl ConfigImageOpen {
         let (image, data, hash, signature) = open_parts(prefix.to_bytes(), expected_root)?;
         Ok(ConfigImageOpen {
             image,
-            data_fd: data.into_raw_fd(),
-            hash_fd: hash.into_raw_fd(),
-            signature_fd: signature.map_or(-1, IntoRawFd::into_raw_fd),
+            data,
+            hash,
+            signature,
         })
-    }
-}
-
-impl Drop for ConfigImageOpen {
-    fn drop(&mut self) {
-        for fd in [self.data_fd, self.hash_fd, self.signature_fd] {
-            if fd >= 0 {
-                // SAFETY: an fd this image opened, closed once, here.
-                unsafe { close(fd) };
-            }
-        }
     }
 }
 
@@ -107,15 +93,15 @@ fn hash_blocks(mut data_blocks: u64) -> Result<u64, c_int> {
     Ok(total)
 }
 
-/// The size of the regular file open on `fd`.
-fn regular_file_size(fd: c_int) -> Result<u64, c_int> {
+/// The size of the regular file `file`.
+fn regular_file_size(file: &File) -> Result<u64, c_int> {
     let mut st = Statx::zeroed();
 
-    // SAFETY: an empty path with AT_EMPTY_PATH names the fd, and a statx
-    // to fill.
+    // SAFETY: an empty path with AT_EMPTY_PATH names the file's fd, and a
+    // statx to fill.
     if unsafe {
         statx(
-            fd,
+            file.as_raw_fd(),
             c"".as_ptr(),
             AT_EMPTY_PATH,
             STATX_TYPE | STATX_SIZE,
@@ -192,7 +178,7 @@ pub(crate) fn read_header(hash: &File) -> Result<ConfigImage, c_int> {
 }
 
 /// Whether the data and hash files are the sizes `image` gives them.
-pub(crate) fn check_files(data_fd: c_int, hash_fd: c_int, image: &ConfigImage) -> c_int {
+pub(crate) fn check_files(data: &File, hash: &File, image: &ConfigImage) -> c_int {
     let blocks = match hash_blocks(image.data_blocks) {
         Ok(blocks) => blocks,
         Err(e) => return e,
@@ -200,7 +186,7 @@ pub(crate) fn check_files(data_fd: c_int, hash_fd: c_int, image: &ConfigImage) -
     if blocks != image.hash_blocks {
         return -EINVAL;
     }
-    let sizes = regular_file_size(data_fd).and_then(|d| Ok((d, regular_file_size(hash_fd)?)));
+    let sizes = regular_file_size(data).and_then(|d| Ok((d, regular_file_size(hash)?)));
     let (data_size, hash_size) = match sizes {
         Ok(sizes) => sizes,
         Err(e) => return e,
@@ -233,7 +219,7 @@ fn read_root(prefix: &[u8], root: &mut [u8; 32]) -> c_int {
         Ok(file) => file,
         Err(e) => return e,
     };
-    let mut ret = match regular_file_size(file.as_raw_fd()) {
+    let mut ret = match regular_file_size(&file) {
         Ok(64) => 0,
         Ok(_) => -EINVAL,
         Err(e) => e,
@@ -266,7 +252,7 @@ fn open_parts(
     let mut header = read_header(&hash)?;
     let mut ret = read_root(prefix, &mut header.root_hash);
     if ret == 0 {
-        ret = check_files(data.as_raw_fd(), hash.as_raw_fd(), &header);
+        ret = check_files(&data, &hash, &header);
     }
     if ret != 0 {
         return Err(ret);
@@ -279,7 +265,7 @@ fn open_parts(
     }
     header.signed_root = true;
     let signature = open_part(prefix, b".p7s")?;
-    match regular_file_size(signature.as_raw_fd()) {
+    match regular_file_size(&signature) {
         Ok(0) => Err(-EINVAL),
         Ok(size) if size > SIG_MAX => Err(-EINVAL),
         Ok(_) => Ok((header, data, hash, Some(signature))),

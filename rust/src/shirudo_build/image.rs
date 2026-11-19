@@ -10,13 +10,14 @@
 use core::ffi::{CStr, c_int};
 use std::ffi::OsStr;
 use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::Command;
 
 use super::{KeyFiles, error, hex, print, strerr};
-use crate::errno::{EINTR, EINVAL, EIO, EKEYREJECTED, ENOENT};
+use crate::errno::{EBADF, EINTR, EINVAL, EIO, EKEYREJECTED, ENOENT};
 use crate::sys::libc::{F_SETFD, O_NOFOLLOW, O_NONBLOCK, fcntl, pread};
 use crate::util::config_image::{self, ConfigImageOpen};
 use crate::util::crypto_openssl::{cert_key_algorithm, cms_signed_by, verify_detached};
@@ -79,7 +80,7 @@ fn build(args: &[&CStr]) -> c_int {
 /// Runs veritysetup on the very data and hash descriptors the image
 /// reader checked. Only the child clears close-on-exec.
 fn verify_verity(img: &ConfigImageOpen, root: &[u8]) -> Result<(), c_int> {
-    let (data_fd, hash_fd) = (img.data_fd, img.hash_fd);
+    let (data_fd, hash_fd) = (img.data.as_raw_fd(), img.hash.as_raw_fd());
     let (data, hash) = (
         format!("/proc/self/fd/{data_fd}"),
         format!("/proc/self/fd/{hash_fd}"),
@@ -153,6 +154,9 @@ fn verify_root_signature(
 
 /// The signature the image holds, at most SIG_MAX bytes.
 fn read_signature(img: &ConfigImageOpen) -> Result<Vec<u8>, c_int> {
+    let Some(file) = &img.signature else {
+        return Err(-EBADF);
+    };
     let mut bytes = vec![0u8; SIG_MAX + 1];
     let mut size = 0;
     while size < bytes.len() {
@@ -161,7 +165,7 @@ fn read_signature(img: &ConfigImageOpen) -> Result<Vec<u8>, c_int> {
         // SAFETY: the image owns the fd and rest is writable for its length.
         let n = unsafe {
             pread(
-                img.signature_fd,
+                file.as_raw_fd(),
                 rest.as_mut_ptr().cast(),
                 rest.len(),
                 offset,

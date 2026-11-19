@@ -290,11 +290,14 @@ fn verify_config_root(
     certificates: &[ConfigCertificate],
     opened: &ConfigImageOpen,
 ) -> c_int {
-    if bootstrap.n_certificates == 0 || opened.signature_fd < 0 {
+    let Some(signature) = &opened.signature else {
+        return -ENOKEY;
+    };
+    if bootstrap.n_certificates == 0 {
         return -ENOKEY;
     }
     let sig = match read_whole(
-        opened.signature_fd,
+        signature.as_raw_fd(),
         c"config root signature",
         CONFIG_IMAGE_SIG_MAX,
     ) {
