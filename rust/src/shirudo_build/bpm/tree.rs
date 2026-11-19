@@ -11,7 +11,6 @@
 //! reject or fail.
 
 use core::ffi::{CStr, c_int};
-use core::ptr;
 
 use super::beefile::{MAX_ENTRIES, MAX_FIXES, Spec, Upatch as BuildUpatch, fix_id_ok, parse};
 use super::build::cstring;
@@ -41,7 +40,7 @@ use crate::util::hex::{self, sha256_digest_encode};
 use crate::util::json::{JsonEmit, JsonField, parse_schema};
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptName, OptParser, OptSpec};
 use crate::util::paths::{key_file, keys_dir};
-use crate::util::upatch::{self, ProgSpec, Upatch, specs_free, specs_parse, specs_xdp_classes};
+use crate::util::upatch::{self, Specs, Upatch, specs_xdp_classes};
 
 const TREE_MEDIA: &CStr = c"application/vnd.shirudo.upatch.tree.v1+json";
 const TREE_SIG_MEDIA: &CStr = c"application/vnd.shirudo.upatch.tree.signature.v1";
@@ -187,55 +186,12 @@ impl Later {
     }
 }
 
-/// Owns the program specifications and nested data from the shared parser.
-struct Specs {
-    programs: *mut ProgSpec,
-    count: u32,
-}
-
-impl Specs {
-    fn parse(u: &Upatch) -> Result<Self, c_int> {
-        let attach = u.signed_attach().unwrap_or_default();
-        let len = u32::try_from(attach.len()).map_err(|_| -EINVAL)?;
-        let mut programs = ptr::null_mut();
-        // SAFETY: the signed attach metadata of the parsed artifact, and
-        // room for the specifications the parser allocates.
-        let ret = unsafe {
-            specs_parse(
-                attach.as_ptr().cast(),
-                len,
-                u.hdr.nr_maps,
-                u.hdr.nr_progs,
-                &mut programs,
-            )
-        };
-        if ret != 0 {
-            return Err(ret);
-        }
-        Ok(Self {
-            programs,
-            count: u.hdr.nr_progs,
-        })
-    }
-
-    fn classes(&self) -> Result<u32, c_int> {
-        let count = usize::try_from(self.count).map_err(|_| -EOVERFLOW)?;
-        // SAFETY: parse allocated count entries which this guard owns.
-        let programs = unsafe { crate::ffi::slice(self.programs, count) };
-        Ok(specs_xdp_classes(programs))
-    }
-}
-
-impl Drop for Specs {
-    fn drop(&mut self) {
-        // SAFETY: these are the specifications allocated by the parser.
-        unsafe { specs_free(self.programs, self.count) };
-    }
-}
-
 /// The classes of a load upatch, none for one without an XDP program.
 fn upatch_xdp_classes(body: &[u8]) -> Result<u32, c_int> {
-    Specs::parse(&Upatch::from_bytes(body)?)?.classes()
+    let u = Upatch::from_bytes(body)?;
+    let attach = u.signed_attach().unwrap_or_default();
+    let specs = Specs::parse(attach, u.hdr.nr_maps, u.hdr.nr_progs)?;
+    Ok(specs_xdp_classes(specs.as_slice()))
 }
 
 /// The classes of the artifact of `op`, fetched from its repository,

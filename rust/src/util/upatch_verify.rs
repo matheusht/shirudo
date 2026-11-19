@@ -17,7 +17,7 @@ use crate::errno::{
 };
 use crate::util::chain::{memneq_explicit, sha256_2};
 use crate::util::measured::MeasuredSet;
-use crate::util::upatch::{ATTACH_XDP, ProgSpec, ROLE_ATTACH, Upatch, specs_free, specs_parse};
+use crate::util::upatch::{ATTACH_XDP, ProgSpec, ROLE_ATTACH, Specs, Upatch};
 use crate::util::upatch_pins::{
     PAYLOAD_HASH_LEN, Pins, each_pinned, pin_payload, xdp_prog_open, xdp_prog_pin,
 };
@@ -102,56 +102,13 @@ pub(crate) fn archive_verify(
     Ok(u)
 }
 
-/// The attach specs a container's signed metadata gives, freed when they
-/// go.
-pub(crate) struct Specs {
-    ptr: *mut ProgSpec,
-    n: u32,
-}
-
-impl Specs {
-    pub(crate) fn as_slice(&self) -> &[ProgSpec] {
-        // SAFETY: the n specs specs_parse() gave.
-        unsafe { crate::ffi::slice(self.ptr, self.n as usize) }
-    }
-}
-
-impl Drop for Specs {
-    fn drop(&mut self) {
-        // SAFETY: the specs specs_parse() gave, freed once.
-        unsafe { specs_free(self.ptr, self.n) };
-    }
-}
-
 /// The specs of an open container: -ESTALE for metadata that does not
-/// parse, -ENOMEM; `u` stays open.
+/// parse, -ENOMEM.
 pub(crate) fn verified_specs(u: &Upatch) -> Result<Specs, c_int> {
-    let Some((attach, len)) = u
-        .signed_attach()
-        .and_then(|a| Some((a, u32::try_from(a.len()).ok()?)))
-    else {
-        return Err(-ESTALE);
-    };
-    let mut ptr: *mut ProgSpec = core::ptr::null_mut();
-    // SAFETY: the signed metadata of the open container, and room for the
-    // specs.
-    let ret = unsafe {
-        specs_parse(
-            attach.as_ptr().cast(),
-            len,
-            u.hdr.nr_maps,
-            u.hdr.nr_progs,
-            &mut ptr,
-        )
-    };
-    match ret {
-        0 => Ok(Specs {
-            ptr,
-            n: u.hdr.nr_progs,
-        }),
-        err if err == -ENOMEM => Err(err),
-        _ => Err(-ESTALE),
-    }
+    let attach = u.signed_attach().ok_or(-ESTALE)?;
+
+    Specs::parse(attach, u.hdr.nr_maps, u.hdr.nr_progs)
+        .map_err(|err| if err == -ENOMEM { err } else { -ESTALE })
 }
 
 /// The signed attach metadata of every program of the archive

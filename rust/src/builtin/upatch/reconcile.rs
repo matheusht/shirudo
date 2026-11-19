@@ -25,12 +25,10 @@ use crate::util::help::{Help, HelpSection};
 use crate::util::measured::MeasuredSet;
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::report::OpReport;
-use crate::util::upatch::{NAME_MAX, ProgSpec};
+use crate::util::upatch::{NAME_MAX, ProgSpec, Specs};
 use crate::util::upatch_pins::{LINK_PIN_PREFIX, PAYLOAD_HASH_LEN, Pins, each_pinned, pin_payload};
 use crate::util::upatch_resolve::{each_link_info, pin_path};
-use crate::util::upatch_verify::{
-    Specs, archive_specs, archive_verify, pin_measured, xdp_each_uncovered,
-};
+use crate::util::upatch_verify::{archive_specs, archive_verify, pin_measured, xdp_each_uncovered};
 use crate::util::xdp::{self, XdpDevice};
 
 /// bpf_link_info's type, and its xdp.ifindex at the start of the union.

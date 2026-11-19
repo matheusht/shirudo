@@ -20,8 +20,8 @@ use crate::util::upatch::{
     ATTACH_NETFILTER_IPV6_PRE_ROUTING, ATTACH_UPROBE, ATTACH_UPROBE_MULTI, ATTACH_URETPROBE,
     ATTACH_URETPROBE_MULTI, ATTACH_XDP, BUILD_ID_MAX, POLICY_LABEL_ENTRY, POLICY_LABEL_HEADER,
     POLICY_LABELS_MAGIC, POLICY_LABELS_VERSION, PROG_ENTRY, PROG_MAGIC, PROG_METADATA,
-    PROG_VERSION, ProgSpec, ROLE_ATTACH, ROLE_SERIALIZER, UPROBE_TARGET, UPROBE_TARGET_MAGIC,
-    UPROBE_TARGET_VERSION, UPROBE_TARGETS, Upatch, XDP_ALL, specs_free, specs_parse,
+    PROG_VERSION, ROLE_ATTACH, ROLE_SERIALIZER, Specs, UPROBE_TARGET, UPROBE_TARGET_MAGIC,
+    UPROBE_TARGET_VERSION, UPROBE_TARGETS, Upatch, XDP_ALL,
 };
 
 helper_main!(shirudo_helper_test_upatch_prog_metadata, run);
@@ -365,30 +365,13 @@ fn expect_policy_labels(u: &Upatch) -> Check {
 fn expect_xdp(u: &Upatch, classes: &CStr) -> Check {
     let mask =
         parse_u64(classes.to_bytes(), u64::from(XDP_ALL)).map_err(|_| "XDP metadata mismatch")?;
-    let raw = signed_attach(u);
-    let mut specs: *mut ProgSpec = core::ptr::null_mut();
-    // SAFETY: the signed metadata, of its length, and room for the specs,
-    // freed after.
-    let ret = unsafe {
-        specs_parse(
-            raw.as_ptr().cast(),
-            raw.len() as u32,
-            u.hdr.nr_maps,
-            u.hdr.nr_progs,
-            &mut specs,
-        )
-    };
-    if ret != 0 {
-        return Err("XDP metadata mismatch");
-    }
-    // SAFETY: the specs parsed, one per program.
-    let ok = unsafe {
-        let ok = u.hdr.nr_progs == 1
-            && (*specs).kind == ATTACH_XDP
-            && u64::from((*specs).device_classes) == mask;
-        specs_free(specs, u.hdr.nr_progs);
-        ok
-    };
+    let specs = Specs::parse(signed_attach(u), u.hdr.nr_maps, u.hdr.nr_progs)
+        .map_err(|_| "XDP metadata mismatch")?;
+    let ok = u.hdr.nr_progs == 1
+        && specs
+            .as_slice()
+            .first()
+            .is_some_and(|s| s.kind == ATTACH_XDP && u64::from(s.device_classes) == mask);
     if ok {
         Ok(())
     } else {

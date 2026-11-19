@@ -49,7 +49,7 @@ use crate::util::upatch::{
     ATTACH_KRETPROBE, ATTACH_NETFILTER_IPV6_PRE_ROUTING, ATTACH_RAW_TRACEPOINT, ATTACH_UPROBE,
     ATTACH_UPROBE_MULTI, ATTACH_URETPROBE, ATTACH_URETPROBE_MULTI, ATTACH_XDP, MAPS_MAX,
     POLICY_LABEL_ENTRY, POLICY_LABEL_HEADER, ProgSpec, ROLE_ATTACH, ROLE_SERIALIZER, ROLE_TEST_RUN,
-    Upatch, kind_has_uprobe_target,
+    Specs, Upatch, kind_has_uprobe_target,
 };
 use crate::util::upatch_pins::{LINK_PIN_PREFIX, xdp_prog_pin};
 use crate::util::upatch_resolve::{BPFFS_UPATCHES_DIR, XATTR_PAYLOAD, pin_path};
@@ -255,54 +255,6 @@ fn io_errno(e: &std::io::Error) -> c_int {
 
 fn num(n: impl ToString) -> String {
     n.to_string()
-}
-
-/// The program specs of the signed attach metadata, freed when dropped
-/// with the targets they hold open.
-struct Specs {
-    ptr: *mut ProgSpec,
-    n: u32,
-}
-
-impl Specs {
-    fn parse(meta: &[u8], nr_maps: u32, nr_progs: u32) -> Result<Self, c_int> {
-        let mut ptr = core::ptr::null_mut();
-        // SAFETY: the metadata, and room for the array it gives.
-        let ret = unsafe {
-            upatch::specs_parse(
-                meta.as_ptr().cast(),
-                meta.len() as u32,
-                nr_maps,
-                nr_progs,
-                &mut ptr,
-            )
-        };
-        if ret != 0 {
-            Err(ret)
-        } else {
-            Ok(Specs { ptr, n: nr_progs })
-        }
-    }
-
-    fn get(&self) -> &[ProgSpec] {
-        // SAFETY: the n specs parsed, or none.
-        unsafe { crate::ffi::slice(self.ptr, self.n as usize) }
-    }
-
-    fn get_mut(&mut self) -> &mut [ProgSpec] {
-        if self.ptr.is_null() {
-            return &mut [];
-        }
-        // SAFETY: the n specs parsed, owned here.
-        unsafe { core::slice::from_raw_parts_mut(self.ptr, self.n as usize) }
-    }
-}
-
-impl Drop for Specs {
-    fn drop(&mut self) {
-        // SAFETY: the specs parsed, freed once.
-        unsafe { upatch::specs_free(self.ptr, self.n) };
-    }
 }
 
 /// The name the BTF of `prog` gives its first function.
@@ -1522,7 +1474,7 @@ pub(crate) fn apply(
                 return Err(());
             }
         };
-        if let Err(e) = prepare_uprobe_targets(parsed.get_mut()) {
+        if let Err(e) = prepare_uprobe_targets(parsed.as_mut_slice()) {
             let cat = target_category(e);
             log_err(
                 &[
@@ -1810,7 +1762,7 @@ pub(crate) fn apply(
 
     // Without a pinned link a program detaches when this one-shot CLI
     // exits.
-    let specs = specs.as_ref().map_or(&[][..], Specs::get);
+    let specs = specs.as_ref().map_or(&[][..], Specs::as_slice);
     if let Err(e) = attach_and_pin(&cx, name, specs) {
         rep.fail(
             c"link_create",

@@ -31,49 +31,11 @@ fn metadata(nr_maps: u32, entries: &[Vec<u8>]) -> Vec<u8> {
         .collect()
 }
 
-/// The specs of `md` parsed for the counts the header signed, freed
-/// when they go.
-struct Specs(*mut ProgSpec, u32);
-
-impl Specs {
-    fn parse(md: &[u8], nr_maps: u32, nr_progs: u32) -> Result<Self, c_int> {
-        let mut out = ptr::null_mut();
-        // SAFETY: the metadata's bytes and room for the specs' pointer.
-        match unsafe {
-            specs_parse(
-                md.as_ptr().cast(),
-                md.len() as u32,
-                nr_maps,
-                nr_progs,
-                &mut out,
-            )
-        } {
-            0 => Ok(Specs(out, nr_progs)),
-            err => {
-                assert!(out.is_null());
-                Err(err)
-            }
-        }
-    }
-
-    fn get(&self) -> &[ProgSpec] {
-        // SAFETY: the specs specs_parse() gave, as many as asked for.
-        unsafe { core::slice::from_raw_parts(self.0, self.1 as usize) }
-    }
-}
-
-impl Drop for Specs {
-    fn drop(&mut self) {
-        // SAFETY: what specs_parse() gave, freed once.
-        unsafe { specs_free(self.0, self.1) };
-    }
-}
-
 #[test]
 fn prog_specs_take_the_signed_counts() {
     let md = metadata(3, &[entry(ATTACH_RAW_TRACEPOINT, 0)]);
     let specs = Specs::parse(&md, 3, 1).unwrap();
-    let s = &specs.get()[0];
+    let s = &specs.as_slice()[0];
 
     assert_eq!(
         (s.role, s.kind, s.target_fd),
@@ -271,7 +233,7 @@ fn xdp_masks_are_signed_and_bounded() {
         let md = metadata(0, &[entry(ATTACH_XDP, mask)]);
         match Specs::parse(&md, 0, 1) {
             Ok(specs) => {
-                let s = &specs.get()[0];
+                let s = &specs.as_slice()[0];
                 assert_eq!(mask & !XDP_ALL, 0);
                 assert_eq!((s.kind, s.device_classes, s.offset), (ATTACH_XDP, mask, 0));
             }

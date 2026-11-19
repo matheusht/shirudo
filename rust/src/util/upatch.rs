@@ -5,9 +5,8 @@
 //! the bounds of its sections, the signed sections behind the loader
 //! data, the programs' metadata, and the names of upatches.
 
-use core::ffi::{CStr, c_char, c_int, c_void};
+use core::ffi::{CStr, c_char, c_int};
 use core::ops::Range;
-use core::ptr;
 use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::fs::File;
@@ -807,8 +806,9 @@ pub(crate) fn member_valid(name: &[u8], payload_hex: &[u8]) -> bool {
 
 /// # Safety
 ///
-/// `specs` is NULL or the `nr_progs` specs prog_specs_parse() gave.
-pub(crate) unsafe fn specs_free(specs: *mut ProgSpec, nr_progs: u32) {
+/// `specs` is NULL or the `nr_progs` specs Specs::parse() took from
+/// xcalloc().
+unsafe fn specs_free(specs: *mut ProgSpec, nr_progs: u32) {
     if specs.is_null() {
         return;
     }
@@ -994,14 +994,7 @@ fn uprobe_targets(
 
 /// The programs' specs from the metadata `m` into `specs`, zeroed with
 /// no fds: 0, or -errno with what was set for specs_free().
-///
-/// # Safety
-///
-/// `specs` holds `nr_progs` specs.
-unsafe fn specs_fill(specs: *mut ProgSpec, m: &[u8], nr_progs: u32, base_len: usize) -> c_int {
-    // SAFETY: the caller's specs, zeroed but for their fds, which makes
-    // each a valid spec.
-    let specs = unsafe { core::slice::from_raw_parts_mut(specs, nr_progs as usize) };
+fn specs_fill(specs: &mut [ProgSpec], m: &[u8], base_len: usize) -> c_int {
     let (mut nr_uprobes, mut xdp_classes) = (0u32, 0u32);
 
     for (i, spec) in specs.iter_mut().enumerate() {
@@ -1044,63 +1037,68 @@ unsafe fn specs_fill(specs: *mut ProgSpec, m: &[u8], nr_progs: u32, base_len: us
     if end != m.len() { -EINVAL } else { 0 }
 }
 
-/// The programs of the metadata, `nr_progs` of them for a loader of
-/// `nr_maps` maps, into `*out` for prog_specs_free(): 0, or -errno with
-/// `*out` NULL.
-///
-/// # Safety
-///
-/// `metadata` is NULL or points to `metadata_len` bytes, and `out` to
-/// room for a pointer.
-pub(crate) unsafe fn specs_parse(
-    metadata: *const c_void,
-    metadata_len: u32,
-    nr_maps: u32,
-    nr_progs: u32,
-    out: *mut *mut ProgSpec,
-) -> c_int {
-    // SAFETY: the caller's room.
-    unsafe { *out = ptr::null_mut() };
-    if metadata.is_null() || (metadata_len as usize) < size_of::<u32>() {
-        return -EINVAL;
-    }
-    // SAFETY: the caller's metadata_len bytes.
-    let m = unsafe { ffi::slice(metadata.cast::<u8>(), metadata_len as usize) };
-    if le32(m, 0) != PROG_MAGIC || m.len() < PROG_METADATA {
-        return -EINVAL;
-    }
-    if le32(m, 4) != PROG_VERSION {
-        return -EOPNOTSUPP;
-    }
-    if le32(m, 8) != nr_progs || le32(m, 12) != nr_maps {
-        return -EINVAL;
-    }
-    let base_len = PROG_METADATA + nr_progs as usize * PROG_ENTRY;
-    if base_len > u32::MAX as usize {
-        return -EOVERFLOW;
-    }
-    if m.len() < base_len {
-        return -EINVAL;
-    }
-    // SAFETY: a count of specs.
-    let specs = unsafe { xcalloc(nr_progs as usize, size_of::<ProgSpec>()) }.cast::<ProgSpec>();
-    if specs.is_null() {
-        return -ENOMEM;
-    }
-    // SAFETY: the nr_progs zeroed specs xcalloc() gave, handed to the
-    // caller whole or freed once.
-    unsafe {
-        for i in 0..nr_progs as usize {
-            (*specs.add(i)).target_fd = -1;
+/// The programs' specs of a container's signed attach metadata, freed
+/// with the binary's descriptor, path and offsets each holds when they
+/// go.
+pub(crate) struct Specs {
+    ptr: *mut ProgSpec,
+    n: u32,
+}
+
+impl Specs {
+    /// The specs of the metadata `m`, `nr_progs` of them for a loader of
+    /// `nr_maps` maps: -EINVAL for metadata that breaks a rule or counts
+    /// others, -EOPNOTSUPP for another version, -EOVERFLOW or -ENOMEM.
+    pub(crate) fn parse(m: &[u8], nr_maps: u32, nr_progs: u32) -> Result<Self, c_int> {
+        if m.len() < size_of::<u32>() || le32(m, 0) != PROG_MAGIC || m.len() < PROG_METADATA {
+            return Err(-EINVAL);
         }
-        let ret = specs_fill(specs, m, nr_progs, base_len);
-        if ret != 0 {
-            specs_free(specs, nr_progs);
-            return ret;
+        if le32(m, 4) != PROG_VERSION {
+            return Err(-EOPNOTSUPP);
         }
-        *out = specs;
+        if le32(m, 8) != nr_progs || le32(m, 12) != nr_maps {
+            return Err(-EINVAL);
+        }
+        let base_len = PROG_METADATA + nr_progs as usize * PROG_ENTRY;
+        if base_len > u32::MAX as usize {
+            return Err(-EOVERFLOW);
+        }
+        if m.len() < base_len {
+            return Err(-EINVAL);
+        }
+        // SAFETY: a count of specs.
+        let ptr = unsafe { xcalloc(nr_progs as usize, size_of::<ProgSpec>()) }.cast::<ProgSpec>();
+        if ptr.is_null() {
+            return Err(-ENOMEM);
+        }
+        let mut specs = Specs { ptr, n: nr_progs };
+        for spec in specs.as_mut_slice() {
+            spec.target_fd = -1;
+        }
+        match specs_fill(specs.as_mut_slice(), m, base_len) {
+            0 => Ok(specs),
+            err => Err(err),
+        }
     }
-    0
+
+    pub(crate) fn as_slice(&self) -> &[ProgSpec] {
+        // SAFETY: the n specs xcalloc() gave, which zeroed bits make
+        // valid and the parse filled.
+        unsafe { ffi::slice(self.ptr, self.n as usize) }
+    }
+
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [ProgSpec] {
+        // SAFETY: as as_slice(), borrowed from the one owner of the specs.
+        unsafe { core::slice::from_raw_parts_mut(self.ptr, self.n as usize) }
+    }
+}
+
+impl Drop for Specs {
+    fn drop(&mut self) {
+        // SAFETY: the specs xcalloc() gave, freed once with what each
+        // holds.
+        unsafe { specs_free(self.ptr, self.n) };
+    }
 }
 
 #[cfg(test)]

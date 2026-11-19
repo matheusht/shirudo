@@ -9,16 +9,7 @@ use crate::fuzzing::{fuzz_target, input_file};
 
 /// The metadata's specs parsed, and freed.
 fn specs(metadata: &[u8], nr_maps: u32, nr_progs: u32) {
-    let mut specs: *mut super::ProgSpec = core::ptr::null_mut();
-    let Ok(len) = u32::try_from(metadata.len()) else {
-        return;
-    };
-    // SAFETY: the metadata's bytes, and room for the specs, freed once.
-    unsafe {
-        if super::specs_parse(metadata.as_ptr().cast(), len, nr_maps, nr_progs, &mut specs) == 0 {
-            super::specs_free(specs, nr_progs);
-        }
-    }
+    drop(super::Specs::parse(metadata, nr_maps, nr_progs));
 }
 
 fuzz_target!(
