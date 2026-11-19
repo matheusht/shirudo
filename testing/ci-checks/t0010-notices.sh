@@ -12,6 +12,7 @@ for t in jq pkg-config cargo rustc; do
 	command -v $t >/dev/null 2>&1 || test_skip_all "$t not installed"
 done
 N=$(cd .. && pwd)/packaging/notices.sh
+rustc=$(command -v rustc)
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
 
@@ -82,10 +83,22 @@ cat >"$W/bin/cc" <<'EOF'
 root=$(CDPATH= cd "$(dirname "$0")/../sys" && pwd)
 printf '%s/%s\n' "$root" "${1#-print-file-name=}"
 EOF
-chmod +x "$W/bin/dpkg" "$W/bin/dpkg-query" "$W/bin/cc"
+mkdir -p "$W/rust/share/doc/rust"
+printf '%s\n' '<p>License: Apache-2.0 OR MIT</p>' \
+	>"$W/rust/share/doc/rust/COPYRIGHT-library.html"
+cat >"$W/bin/rustc" <<'EOF'
+#!/bin/sh
+case "$*" in
+'--print sysroot') CDPATH= cd "$(dirname "$0")/../rust" && pwd ;;
+-V) echo 'rustc 1.88.0' ;;
+*) exec "$SHIRUDO_TEST_RUSTC" "$@" ;;
+esac
+EOF
+chmod +x "$W/bin/dpkg" "$W/bin/dpkg-query" "$W/bin/cc" "$W/bin/rustc"
 
 run() {
 	env PATH="$W/bin:$PATH" SHIRUDO_CI_VERSION=v1.0 CC="$W/bin/cc" \
+		SHIRUDO_TEST_RUSTC="$rustc" \
 		SHIRUDO_TARGET_PKG_CONFIG_PATH="$W/curl/lib/pkgconfig:$W/openssl/lib/pkgconfig" \
 		SHIRUDO_TARGET_STATIC_LIBDIR="$W/deps/lib" \
 		SHIRUDO_DOC_ROOT="$W/doc" SHIRUDO_COMMON_LICENSES="$W/common" \
