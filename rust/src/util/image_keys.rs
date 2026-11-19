@@ -8,12 +8,13 @@
 
 use core::ffi::{CStr, c_int};
 use std::ffi::CString;
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 
 use crate::errno::{EINVAL, EKEYREJECTED, ENOENT, ENOKEY, last_errno, text};
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
-    O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW, O_NONBLOCK, S_IFMT, S_IFREG, Statx, close, closedir,
-    fdopendir, openat, readdir, set_errno,
+    O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW, O_NONBLOCK, S_IFMT, S_IFREG, Statx, closedir, fdopendir,
+    openat, readdir, set_errno,
 };
 use crate::util::image_config;
 use crate::util::io::stat_fd;
@@ -55,19 +56,7 @@ fn revoked_fingerprint(name: &[u8]) -> Option<[u8; 32]> {
     (!hex.iter().any(u8::is_ascii_uppercase)).then_some(out)
 }
 
-/// An fd, closed when it goes.
-struct Fd(c_int);
-
-impl Drop for Fd {
-    fn drop(&mut self) {
-        if self.0 >= 0 {
-            // SAFETY: an fd this module opened, closed once, here.
-            unsafe { close(self.0) };
-        }
-    }
-}
-
-fn open_dir(at: c_int, name: &CStr) -> Result<Option<Fd>, c_int> {
+fn open_dir(at: c_int, name: &CStr) -> Result<Option<OwnedFd>, c_int> {
     // SAFETY: an open directory and a C string.
     let fd = unsafe {
         openat(
@@ -77,7 +66,8 @@ fn open_dir(at: c_int, name: &CStr) -> Result<Option<Fd>, c_int> {
         )
     };
     if fd >= 0 {
-        return Ok(Some(Fd(fd)));
+        // SAFETY: the fd openat() just gave, owned from here.
+        return Ok(Some(unsafe { OwnedFd::from_raw_fd(fd) }));
     }
     match last_errno() {
         e if e == -ENOENT => Ok(None),
@@ -90,18 +80,20 @@ fn open_dir(at: c_int, name: &CStr) -> Result<Option<Fd>, c_int> {
 fn revoked_cert(dir: c_int, name: &CStr, dev: (u32, u32)) -> Result<Vec<u8>, c_int> {
     let expected = revoked_fingerprint(name.to_bytes()).ok_or(-EINVAL)?;
     // SAFETY: the open directory and an entry's name.
-    let fd = Fd(unsafe {
+    let fd = unsafe {
         openat(
             dir,
             name.as_ptr(),
             O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW,
         )
-    });
-    if fd.0 < 0 {
+    };
+    if fd < 0 {
         return Err(last_errno());
     }
+    // SAFETY: the fd openat() just gave, owned from here.
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
     let mut st = Statx::zeroed();
-    let ret = stat_fd(fd.0, &mut st);
+    let ret = stat_fd(fd.as_raw_fd(), &mut st);
     if ret != 0 {
         return Err(ret);
     }
@@ -112,7 +104,7 @@ fn revoked_cert(dir: c_int, name: &CStr, dev: (u32, u32)) -> Result<Vec<u8>, c_i
     {
         return Err(-EINVAL);
     }
-    let bytes = read_der_fd(fd.0);
+    let bytes = read_der_fd(fd.as_raw_fd());
     drop(fd);
     let bytes = bytes?;
     if digest_der(&bytes)?.fingerprint != expected {
@@ -136,19 +128,19 @@ fn revocations(root_fd: c_int, apply: bool, boot: bool) -> c_int {
         Ok(None) => return 0,
         Err(err) => return err,
     };
-    let revoked = match open_dir(keys.0, c"revoked") {
+    let revoked = match open_dir(keys.as_raw_fd(), c"revoked") {
         Ok(Some(fd)) => fd,
         Ok(None) => return 0,
         Err(err) => return err,
     };
     drop(keys);
-    let dir_fd = revoked.0;
+    let dir_fd = revoked.as_raw_fd();
     // SAFETY: the open directory, whose fd the stream takes over.
     let dir = unsafe { fdopendir(dir_fd) };
     if dir.is_null() {
         return last_errno();
     }
-    core::mem::forget(revoked);
+    let _ = revoked.into_raw_fd();
 
     let mut ret = 0;
     loop {
