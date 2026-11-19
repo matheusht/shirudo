@@ -6,7 +6,7 @@
 //! with their contract: a descriptor, never 0, 1 or 2, or 0; else -errno,
 //! errno set.
 
-use core::ffi::{c_char, c_int, c_long, c_void};
+use core::ffi::{CStr, c_char, c_int, c_long, c_void};
 use std::os::fd::{FromRawFd, OwnedFd};
 
 use crate::errno::E2BIG;
@@ -147,6 +147,17 @@ fn good_fd(r: Result<c_int, c_int>) -> c_int {
 /// `pathname` is a C string.
 pub(crate) unsafe fn bpf_obj_get(pathname: *const c_char) -> c_int {
     good_fd(Attr::new().ptr(0, pathname).run(BPF_OBJ_GET))
+}
+
+/// The BPF object pinned at `path`, opened, or -errno.
+pub(crate) fn obj_get(path: &CStr) -> Result<OwnedFd, c_int> {
+    // SAFETY: a C string.
+    let fd = unsafe { bpf_obj_get(path.as_ptr()) };
+    if fd < 0 {
+        return Err(fd);
+    }
+    // SAFETY: the descriptor the kernel just made, owned here alone.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
 /// Pins the object at `fd` at `pathname`.

@@ -14,7 +14,7 @@ use core::ffi::{CStr, c_int, c_long, c_void};
 use core::sync::atomic::{AtomicI32, Ordering};
 use std::ffi::OsStr;
 use std::fs;
-use std::os::fd::IntoRawFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 
@@ -22,14 +22,13 @@ use crate::errno::{
     E2BIG, EBADMSG, EINVAL, EIO, ENAMETOOLONG, ENOENT, ENOMEM, EOPNOTSUPP, EOVERFLOW,
 };
 use crate::heap::{xcalloc, xfree, xmalloc, xreallocarray};
-use crate::sys::libc::{close, errno, syscall};
+use crate::sys::libc::{errno, syscall};
 use crate::sys::upatch::MapSummary;
 use crate::sys::upatch_maps::{MAP_READ_PEEK, MapEntry, MapView, SerialPage};
 use crate::text::strscpy;
 use crate::util::bpf_info::{Info, MAP_INFO_SIZE};
 use crate::util::bpf_sys::{
-    BPF_ANY, bpf_map_get_next_key, bpf_map_lookup_elem, bpf_map_update_elem, bpf_obj_get,
-    prog_test_run,
+    BPF_ANY, bpf_map_get_next_key, bpf_map_lookup_elem, bpf_map_update_elem, obj_get, prog_test_run,
 };
 use crate::util::kernel_btf;
 use crate::util::map_format::{is_percpu, type_def, type_name, value_stride};
@@ -165,32 +164,16 @@ fn os(b: &[u8]) -> &OsStr {
 }
 
 /// The pin of map `map` of upatch `upatch`, opened, and its info.
-fn open_map_pin(upatch: &[u8], map: &[u8]) -> Result<(c_int, Info<MAP_INFO_SIZE>), c_int> {
-    let path = pin_path(upatch, &[b"maps", map])?;
-    // SAFETY: a C string.
-    let fd = unsafe { bpf_obj_get(path.as_ptr()) };
-    if fd < 0 {
-        return Err(-errno());
-    }
+fn open_map_pin(upatch: &[u8], map: &[u8]) -> Result<(OwnedFd, Info<MAP_INFO_SIZE>), c_int> {
+    let fd = obj_get(&pin_path(upatch, &[b"maps", map])?)?;
     let mut info = Info::<MAP_INFO_SIZE>::new();
-    if info.read(fd).is_err() {
-        let e = -errno();
-        // SAFETY: the pin opened above.
-        unsafe { close(fd) };
-        return Err(e);
-    }
+    info.read(fd.as_raw_fd())?;
     Ok((fd, info))
 }
 
-/// The serializer upatch `upatch` pins for map `map`, opened, or -errno.
-fn open_serializer_pin(upatch: &[u8], map: &[u8]) -> c_int {
-    let path = match pin_path(upatch, &[b"serializers", map]) {
-        Ok(p) => p,
-        Err(e) => return e,
-    };
-    // SAFETY: a C string.
-    let fd = unsafe { bpf_obj_get(path.as_ptr()) };
-    if fd < 0 { -errno() } else { fd }
+/// The serializer upatch `upatch` pins for map `map`, opened.
+fn open_serializer_pin(upatch: &[u8], map: &[u8]) -> Result<OwnedFd, c_int> {
+    obj_get(&pin_path(upatch, &[b"serializers", map])?)
 }
 
 /// The output map of a serializer: an array of 4-byte keys and chunk
@@ -385,18 +368,6 @@ struct SerializeCtx {
 
 const _: () = assert!(size_of::<SerializeCtx>() == 40);
 
-/// The descriptors a serialized read holds, closed when dropped.
-struct Fds(Vec<c_int>);
-
-impl Drop for Fds {
-    fn drop(&mut self) {
-        for &fd in self.0.iter().filter(|&&fd| fd >= 0) {
-            // SAFETY: a descriptor opened here, closed once.
-            unsafe { close(fd) };
-        }
-    }
-}
-
 /// The map through the serializer upatch `upatch` pins for it, page by
 /// page until the serializer says it is done: 1, 0 for a map without a
 /// serializer, or -errno with no pages kept.
@@ -412,16 +383,15 @@ fn read_serialized(upatch: &[u8], map: &[u8], flags: u32, out: &mut MapView) -> 
     if map == SERIAL_MAP_NAME {
         return 0;
     }
-    let prog = open_serializer_pin(upatch, map);
-    if prog < 0 {
-        return if prog == -ENOENT { 0 } else { prog };
-    }
-    let mut fds = Fds(vec![prog]);
+    let prog = match open_serializer_pin(upatch, map) {
+        Ok(fd) => fd,
+        Err(e) if e == -ENOENT => return 0,
+        Err(e) => return e,
+    };
     let (serial, info) = match open_map_pin(upatch, SERIAL_MAP_NAME) {
         Ok(p) => p,
         Err(e) => return e,
     };
-    fds.0.push(serial);
     let ret = validate_serial_map(&info);
     if ret != 0 {
         return ret;
@@ -429,11 +399,10 @@ fn read_serialized(upatch: &[u8], map: &[u8], flags: u32, out: &mut MapView) -> 
     // Clearing, running and reading are one transaction, under a lock
     // keyed by the output map's kernel ID: every process sharing the map
     // contends, and unrelated upatches stay independent.
-    let lock = match crate::util::serializer::lock_acquire(info.u32_at(MAP_ID)) {
+    let _lock = match crate::util::serializer::lock_acquire(info.u32_at(MAP_ID)) {
         Ok(lock) => lock,
         Err(err) => return err,
     };
-    fds.0.push(lock.into_raw_fd());
     let mut invocation_id = 0u64;
     let ret = new_invocation_id(&mut invocation_id);
     if ret != 0 {
@@ -442,7 +411,7 @@ fn read_serialized(upatch: &[u8], map: &[u8], flags: u32, out: &mut MapView) -> 
     let max = info.u32_at(MAP_MAX_ENTRIES);
     let (mut cursor, mut bytes_total) = (0u64, 0u64);
     for page_index in 0..SERIAL_MAX_PAGES {
-        let ret = clear_serial_map(serial, max, info.u32_at(MAP_VALUE_SIZE));
+        let ret = clear_serial_map(serial.as_raw_fd(), max, info.u32_at(MAP_VALUE_SIZE));
         if ret != 0 {
             return ret;
         }
@@ -465,7 +434,7 @@ fn read_serialized(upatch: &[u8], map: &[u8], flags: u32, out: &mut MapView) -> 
         let ctx_bytes = unsafe {
             core::slice::from_raw_parts_mut((&raw mut ctx).cast::<u8>(), size_of::<SerializeCtx>())
         };
-        let retval = match prog_test_run(prog, ctx_bytes) {
+        let retval = match prog_test_run(prog.as_raw_fd(), ctx_bytes) {
             Ok(r) => r,
             Err(e) => return e,
         };
@@ -480,10 +449,11 @@ fn read_serialized(upatch: &[u8], map: &[u8], flags: u32, out: &mut MapView) -> 
         {
             return -EBADMSG;
         }
-        let page = match read_serial_page(serial, max, page_index, cursor, invocation_id) {
-            Ok(p) => p,
-            Err(e) => return e,
-        };
+        let page =
+            match read_serial_page(serial.as_raw_fd(), max, page_index, cursor, invocation_id) {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
         if bytes_total + u64::from(page.bytes) > SERIAL_MAX_TOTAL_BYTES {
             // SAFETY: the page's data, freed once.
             unsafe { xfree(page.data, page.bytes as usize) };
@@ -695,7 +665,6 @@ pub(crate) fn read(upatch: &[u8], map: &[u8], cap: u32, flags: u32, out: &mut Ma
         Ok(p) => p,
         Err(e) => return e,
     };
-    let fd = Fds(vec![fd]);
     let ty = info.u32_at(MAP_TYPE);
     out.ty = ty;
     out.type_name = Some(map_type_name(ty));
@@ -752,7 +721,7 @@ pub(crate) fn read(upatch: &[u8], map: &[u8], cap: u32, flags: u32, out: &mut Ma
         type_def(Some(btf), vid, &mut out.value_type_def);
     }
     out.btf = btf.map_or(core::ptr::null_mut(), |b| Box::into_raw(Box::new(b)));
-    read_entries(fd.0[0], out, cap)
+    read_entries(fd.as_raw_fd(), out, cap)
 }
 
 /// The maps upatch `upatch` pins, onto `list`, in directory order: each
@@ -773,8 +742,7 @@ fn scan(upatch: &[u8], list: &mut Vec<MapSummary>) {
         let Ok((fd, info)) = open_map_pin(upatch, name) else {
             continue;
         };
-        // SAFETY: the pin opened above.
-        unsafe { close(fd) };
+        drop(fd);
         // SAFETY: an all-zero summary is an empty one.
         let mut one: MapSummary = unsafe { core::mem::zeroed() };
         let _ = strscpy(&mut one.upatch, upatch);
