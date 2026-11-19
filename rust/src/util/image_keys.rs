@@ -8,7 +8,7 @@
 
 use core::ffi::{CStr, c_int};
 use std::ffi::CString;
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 
 use crate::errno::{EINVAL, EKEYREJECTED, ENOENT, ENOKEY, last_errno, text};
 use crate::sys::libc::Zeroed;
@@ -104,7 +104,7 @@ fn revoked_cert(dir: c_int, name: &CStr, dev: (u32, u32)) -> Result<Vec<u8>, c_i
     {
         return Err(-EINVAL);
     }
-    let bytes = read_der_fd(fd.as_raw_fd());
+    let bytes = read_der_fd(fd.as_fd());
     drop(fd);
     let bytes = bytes?;
     if digest_der(&bytes)?.fingerprint != expected {

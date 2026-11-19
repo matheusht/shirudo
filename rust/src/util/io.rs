@@ -19,7 +19,7 @@ use crate::sys::libc::{
 };
 use crate::util::seal;
 use core::ptr::NonNull;
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
 
 /// `ETC_DIR` of util/paths.h.
 const ETC_DIR: &CStr = c"/etc/shirudo";
@@ -293,18 +293,17 @@ pub(crate) fn open_beneath(dirfd: c_int, rel: &CStr, flags: c_int) -> Result<Own
 
 /// The whole regular file behind `fd`, from its start, of at most `max`
 /// bytes, which may steer trust as `label` says.
-pub(crate) fn read_whole(fd: c_int, label: &CStr, max: usize) -> Result<Vec<u8>, c_int> {
+pub(crate) fn read_whole(fd: BorrowedFd<'_>, label: &CStr, max: usize) -> Result<Vec<u8>, c_int> {
     let mut st = Statx::zeroed();
 
-    let ret = stat_fd(fd, &mut st);
+    let ret = stat_fd(fd.as_raw_fd(), &mut st);
     if ret != 0 {
         return Err(ret);
     }
     if st.stx_mode & S_IFMT != S_IFREG {
         return Err(-EINVAL);
     }
-    // SAFETY: the caller's fd, open for the call.
-    let ret = check_trusted(unsafe { BorrowedFd::borrow_raw(fd) }, label, false);
+    let ret = check_trusted(fd, label, false);
     if ret != 0 {
         return Err(ret);
     }
@@ -318,7 +317,7 @@ pub(crate) fn read_whole(fd: c_int, label: &CStr, max: usize) -> Result<Vec<u8>,
         // SAFETY: the caller's fd, and the room left in buf.
         let n = unsafe {
             pread(
-                fd,
+                fd.as_raw_fd(),
                 buf[done..].as_mut_ptr().cast(),
                 size - done,
                 done as i64,
@@ -418,7 +417,7 @@ pub(crate) fn read(path: &CStr, max: usize) -> Result<Vec<u8>, c_int> {
         // goes.
         unsafe { OwnedFd::from_raw_fd(fd) }
     };
-    read_whole(fd.as_raw_fd(), path, max)
+    read_whole(fd.as_fd(), path, max)
 }
 
 /// As [`read`], into `*out`, xmalloc'd to `*len + 1` bytes and
@@ -590,18 +589,9 @@ mod tests;
 
 mod capi {
     use core::ffi::{CStr, c_char, c_int, c_void};
-    use std::os::fd::IntoRawFd;
+    use std::os::fd::{BorrowedFd, IntoRawFd};
 
     use crate::sys::libc::File;
-
-    /// # Safety
-    ///
-    /// `buf` holds `len` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn write_complete(fd: c_int, buf: *const c_void, len: usize) -> c_int {
-        // SAFETY: the caller passes the bytes.
-        unsafe { super::write_complete(fd, buf, len) }
-    }
 
     /// # Safety
     ///
@@ -620,8 +610,8 @@ mod capi {
 
     /// # Safety
     ///
-    /// `label` is a C string, `out` room for a pointer and `len` for a
-    /// length.
+    /// `fd` is an open descriptor, `label` is a C string, `out` room
+    /// for a pointer and `len` for a length.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn read_fd(
         fd: c_int,
@@ -632,6 +622,8 @@ mod capi {
     ) -> c_int {
         // SAFETY: the caller passes a C string.
         let label = unsafe { CStr::from_ptr(label) };
+        // SAFETY: the caller keeps the open descriptor valid for this call.
+        let fd = unsafe { BorrowedFd::borrow_raw(fd) };
         // SAFETY: the caller provides rooms for the output pointer and length.
         unsafe { super::hand_over(super::read_whole(fd, label, max), out, len) }
     }
@@ -665,15 +657,6 @@ mod capi {
     ) -> c_int {
         // SAFETY: the caller passes the stream and the buffer.
         unsafe { super::read_text_line(f, line, cap, max) }
-    }
-
-    /// # Safety
-    ///
-    /// `path` is a C string.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn check_trusted(fd: c_int, path: *const c_char, secret: bool) -> c_int {
-        // SAFETY: the caller passes a C string.
-        unsafe { super::check_trusted(fd, path, secret) }
     }
 
     #[unsafe(no_mangle)]

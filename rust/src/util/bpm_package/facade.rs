@@ -5,6 +5,7 @@
 
 use core::ffi::{CStr, c_char, c_int};
 use core::ptr;
+use std::os::fd::BorrowedFd;
 
 use super::archive::{self, Found};
 use super::publication::{self, Signed};
@@ -139,7 +140,7 @@ pub(crate) fn verify_cms(payload: &[u8], sig: &[u8], cert_path: &CStr) -> c_int 
 }
 
 /// As [`verify_cms`], with the certificate open on `cert_fd`.
-pub(crate) fn verify_cms_fd(payload: &[u8], sig: &[u8], cert_fd: c_int) -> c_int {
+pub(crate) fn verify_cms_fd(payload: &[u8], sig: &[u8], cert_fd: BorrowedFd<'_>) -> c_int {
     publication::verify_cms_fd(&signed(payload, sig), cert_fd)
 }
 

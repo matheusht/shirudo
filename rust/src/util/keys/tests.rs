@@ -283,7 +283,7 @@ fn read_der_wants_a_regular_file_of_one_to_der_max_bytes() {
     assert_eq!(read_der(&dir.cpath("missing")), Err(-ENOENT));
     assert_eq!(read_der(&dir.cpath("max")).map(|d| d.len()), Ok(DER_MAX));
     let empty = File::open(dir.join("empty")).unwrap();
-    assert_eq!(read_der_fd(empty.as_raw_fd()), Err(-EINVAL));
+    assert_eq!(read_der_fd(empty.as_fd()), Err(-EINVAL));
 }
 
 #[test]

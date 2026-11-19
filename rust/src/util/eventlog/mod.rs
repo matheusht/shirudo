@@ -140,7 +140,7 @@ impl FileBuf {
     /// The file open at `fd`, read whole, `label` naming it in a refusal.
     fn read_fd(fd: std::os::fd::OwnedFd, label: &CStr) -> Result<FileBuf, c_int> {
         Self::of(crate::util::io::read_whole(
-            std::os::fd::AsRawFd::as_raw_fd(&fd),
+            std::os::fd::AsFd::as_fd(&fd),
             label,
             MAX_BYTES,
         ))

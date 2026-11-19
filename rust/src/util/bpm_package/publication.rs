@@ -6,6 +6,7 @@
 
 use core::ffi::{CStr, c_int};
 use core::ptr;
+use std::os::fd::BorrowedFd;
 
 use crate::errno::{EBADMSG, EINVAL, ENAMETOOLONG, ENOMEM};
 use crate::ffi;
@@ -55,7 +56,7 @@ pub(super) fn verify_cms(s: &Signed, cert_path: &CStr) -> c_int {
 }
 
 /// Against the certificate the open `cert_fd` reads.
-pub(super) fn verify_cms_fd(s: &Signed, cert_fd: c_int) -> c_int {
+pub(super) fn verify_cms_fd(s: &Signed, cert_fd: BorrowedFd<'_>) -> c_int {
     // SAFETY: an fd and a cert to fill.
     verify_with(s, |cert| unsafe { cert_read_fd(cert_fd, cert) })
 }

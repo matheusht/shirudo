@@ -18,7 +18,7 @@ use core::ptr;
 use std::ffi::{CString, OsStr};
 use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::ErrorKind;
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::path::Path;
@@ -252,7 +252,7 @@ fn read_config_certificate(s: &mut State, index: usize, device: u64) -> c_int {
         Ok(fd) => fd,
         Err(err) => return err,
     };
-    let der = read_der_fd(fd.as_raw_fd());
+    let der = read_der_fd(fd.as_fd());
     drop(fd);
     let cert = der.and_then(|der| {
         let x509 = x509_from_der(&der)?;
@@ -297,7 +297,7 @@ fn verify_config_root(
         return -ENOKEY;
     }
     let sig = match read_whole(
-        signature.as_raw_fd(),
+        signature.as_fd(),
         c"config root signature",
         CONFIG_IMAGE_SIG_MAX,
     ) {

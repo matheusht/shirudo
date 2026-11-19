@@ -111,7 +111,7 @@ fn room_for(len: usize) -> Result<Vec<u8>, c_int> {
 
 /// The certificate open at `fd`, whole: -EINVAL for an empty one, or
 /// what read_whole() refused it with.
-pub(crate) fn read_der_fd(fd: c_int) -> Result<Vec<u8>, c_int> {
+pub(crate) fn read_der_fd(fd: BorrowedFd<'_>) -> Result<Vec<u8>, c_int> {
     let der = read_whole(fd, c"certificate", DER_MAX)?;
 
     if der.is_empty() {
@@ -122,7 +122,7 @@ pub(crate) fn read_der_fd(fd: c_int) -> Result<Vec<u8>, c_int> {
 
 /// [`read_der_fd`] of `name` beneath the directory open as `dir`.
 fn read_der_at(dir: BorrowedFd<'_>, name: &CStr) -> Result<Vec<u8>, c_int> {
-    read_der_fd(open_beneath(dir.as_raw_fd(), name, O_RDONLY)?.as_raw_fd())
+    read_der_fd(open_beneath(dir.as_raw_fd(), name, O_RDONLY)?.as_fd())
 }
 
 /// The certificate at `path`, a regular file of 1 to KEYS_DER_MAX bytes

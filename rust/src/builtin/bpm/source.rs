@@ -7,13 +7,14 @@
 
 use core::ffi::{CStr, c_int};
 use std::ffi::CString;
+use std::os::fd::{AsFd, FromRawFd, OwnedFd};
 
 use super::{
     BPM_KEYS_DIR, DirStream, INDEX_REPOSITORY_NAME, REGISTRIES_DIR, Result, Stream, TREE_ETC_PATH,
     error, path, print, remove, status,
 };
 use crate::errno::{E2BIG, EINVAL, ENAMETOOLONG, EPERM};
-use crate::sys::libc::{O_DIRECTORY, O_RDONLY, PATH_MAX, close};
+use crate::sys::libc::{O_DIRECTORY, O_RDONLY, PATH_MAX};
 use crate::text::{contains, cstr, name_has_suffix, strscpy, strsprintf};
 use crate::util::bpm_oci::{Client, MAX_DIGEST, MAX_ENDPOINT, MAX_NAME, name_ok};
 use crate::util::bpm_package::{verify_cms, verify_cms_fd};
@@ -95,10 +96,9 @@ impl Source {
         if fd < 0 {
             return fd;
         }
-        let ret = verify_cms_fd(data, sig, fd);
-        // SAFETY: the fd opened above.
-        unsafe { close(fd) };
-        ret
+        // SAFETY: the fd key_open() just gave, owned from here.
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        verify_cms_fd(data, sig, fd.as_fd())
     }
 }
 
