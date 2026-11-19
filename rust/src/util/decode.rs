@@ -17,18 +17,18 @@ use std::ffi::CString;
 use std::os::fd::AsRawFd;
 
 use crate::errno::{E2BIG, EINVAL, ENAMETOOLONG, ENODATA, ENOENT, ENOMEM, ERANGE, ESTALE, text};
+use crate::ffi;
 use crate::sys::libc::{explicit_bzero, snprintf};
 use crate::sys::luajit::{
     Allocator, LUA_MASKCOUNT, LUA_REGISTRYINDEX, LUA_TFUNCTION, LUA_TSTRING, LUA_TTABLE,
-    LUAJIT_MODE_ENGINE, LUAJIT_MODE_OFF, Lua, LuaDebug, LuaState, LuaType, Stack, lua_call,
-    lua_getfield, lua_getglobal, lua_gettop, lua_newtable, lua_newuserdata, lua_objlen, lua_pcall,
-    lua_pop, lua_pushboolean, lua_pushcclosure, lua_pushcfunction, lua_pushinteger,
-    lua_pushlightuserdata, lua_pushlstring, lua_pushnil, lua_pushnumber, lua_pushstring,
-    lua_pushvalue, lua_rawgeti, lua_rawseti, lua_remove, lua_setfield, lua_setglobal, lua_sethook,
-    lua_setmetatable, lua_tolstring, lua_tonumber, lua_touserdata, lua_type, lua_upvalueindex,
-    luaJIT_setmode, luaL_argerror, luaL_checkinteger, luaL_checklstring, luaL_checktype,
-    luaL_checkudata, luaL_error, luaL_loadbufferx, luaL_newmetatable, luaL_openlibs,
-    lual_getmetatable,
+    LUAJIT_MODE_ENGINE, LUAJIT_MODE_OFF, Lua, LuaDebug, LuaState, LuaType, Stack, lua_getfield,
+    lua_getglobal, lua_gettop, lua_newtable, lua_newuserdata, lua_objlen, lua_pcall, lua_pop,
+    lua_pushcclosure, lua_pushcfunction, lua_pushinteger, lua_pushlightuserdata, lua_pushlstring,
+    lua_pushnil, lua_pushnumber, lua_pushstring, lua_pushvalue, lua_rawgeti, lua_rawseti,
+    lua_remove, lua_setfield, lua_setglobal, lua_sethook, lua_setmetatable, lua_tolstring,
+    lua_tonumber, lua_touserdata, lua_type, lua_upvalueindex, luaJIT_setmode, luaL_argerror,
+    luaL_checkinteger, luaL_checklstring, luaL_checktype, luaL_checkudata, luaL_error,
+    luaL_loadbufferx, luaL_newmetatable, luaL_openlibs, lual_getmetatable,
 };
 use crate::sys::upatch_maps::MapView;
 use crate::text::cstr;
@@ -520,7 +520,7 @@ unsafe extern "C-unwind" fn slot_u64(l: *mut LuaState) -> c_int {
     unsafe {
         let slot = check_slot(l);
         let off = check_c_int(l, 2);
-        push_u64_string(l, slot_word(slot, off, 8));
+        push_u64_string(&mut Stack::from_raw(l), slot_word(slot, off, 8));
     }
     1
 }
@@ -727,7 +727,7 @@ unsafe extern "C-unwind" fn u64_add(l: *mut LuaState) -> c_int {
     unsafe {
         let a = check_u64_string(l, 1);
         let b = check_u64_string(l, 2);
-        push_u64_string(l, a.saturating_add(b));
+        push_u64_string(&mut Stack::from_raw(l), a.saturating_add(b));
     }
     1
 }
@@ -738,7 +738,7 @@ unsafe extern "C-unwind" fn u64_sub(l: *mut LuaState) -> c_int {
     unsafe {
         let a = check_u64_string(l, 1);
         let b = check_u64_string(l, 2);
-        push_u64_string(l, a.saturating_sub(b));
+        push_u64_string(&mut Stack::from_raw(l), a.saturating_sub(b));
     }
     1
 }
@@ -753,7 +753,7 @@ unsafe extern "C-unwind" fn hex_u64(l: *mut LuaState) -> c_int {
         let hex = crate::ffi::slice(luaL_checklstring(l, 1, &mut len).cast::<u8>(), len);
         let start = (off as usize).wrapping_mul(2);
         if off < 0 || start + 16 > hex.len() {
-            push_u64_string(l, 0);
+            push_u64_string(&mut Stack::from_raw(l), 0);
             return 1;
         }
         let mut v = 0u64;
@@ -762,12 +762,12 @@ unsafe extern "C-unwind" fn hex_u64(l: *mut LuaState) -> c_int {
             match (hex_nibble(p[0]), hex_nibble(p[1])) {
                 (Some(hi), Some(lo)) => v = v << 8 | u64::from(hi << 4 | lo),
                 _ => {
-                    push_u64_string(l, 0);
+                    push_u64_string(&mut Stack::from_raw(l), 0);
                     return 1;
                 }
             }
         }
-        push_u64_string(l, v);
+        push_u64_string(&mut Stack::from_raw(l), v);
     }
     1
 }
@@ -810,58 +810,39 @@ unsafe extern "C-unwind" fn fixed_records(l: *mut LuaState) -> c_int {
     1
 }
 
-/// # Safety
-///
-/// `l` is a state.
-unsafe fn push_u64_string(l: *mut LuaState, v: u64) {
-    let s = CString::new(v.to_string()).unwrap_or_default();
-    // SAFETY: the caller's state and a C string, which Lua copies.
-    unsafe { lua_pushstring(l, s.as_ptr()) };
+/// Pushes `v` as a decimal string, which a Lua number would round.
+fn push_u64_string(s: &mut Stack<'_>, v: u64) {
+    let mut digits = [0; 20];
+    s.push_bytes(crate::text::decimal(v, &mut digits));
 }
 
-/// The bytes as lowercase hex, made in a userdata the collector owns: a
-/// Lua error on an allocation would leak a buffer of our own.
-///
-/// # Safety
-///
-/// `l` is a state; `data` holds `len` bytes.
-unsafe fn push_hex(l: *mut LuaState, data: *const u8, len: usize) {
+/// Pushes the bytes as lowercase hex, made in a userdata the collector
+/// owns: a Lua error on an allocation would leak a buffer of our own.
+fn push_hex(s: &mut Stack<'_>, bytes: &[u8]) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    // SAFETY: the caller's state and bytes; a userdata of the hex and a
-    // NUL, removed once the string is made of it.
-    unsafe {
-        let out = lua_newuserdata(l, len * 2 + 1).cast::<u8>();
-        for i in 0..len {
-            let b = *data.add(i);
-            *out.add(2 * i) = HEX[usize::from(b >> 4)];
-            *out.add(2 * i + 1) = HEX[usize::from(b & 0xf)];
+    // The hex and a NUL.
+    s.push_userdata_with(bytes.len() * 2 + 1, |hex| {
+        for (pair, b) in hex.chunks_exact_mut(2).zip(bytes) {
+            pair.copy_from_slice(&[HEX[usize::from(b >> 4)], HEX[usize::from(b & 0xf)]]);
         }
-        *out.add(len * 2) = 0;
-        lua_pushstring(l, out.cast());
-        lua_remove(l, -2);
+    });
+    {
+        let (held, mut above) = s.split();
+        above.push_bytes(cstr(held.userdata(-1).unwrap_or_default()));
     }
+    s.remove(-2);
 }
 
-/// # Safety
-///
-/// `l` is a state with a table on top.
-unsafe fn set_number(l: *mut LuaState, key: &CStr, v: f64) {
-    // SAFETY: the caller's state and table.
-    unsafe {
-        lua_pushnumber(l, v);
-        lua_setfield(l, -2, key.as_ptr());
-    }
+/// Sets field `key` of the table on top to `v`.
+fn set_number(s: &mut Stack<'_>, key: &CStr, v: f64) {
+    s.push_number(v);
+    s.set_field(-2, key);
 }
 
-/// # Safety
-///
-/// `l` is a state with a table on top.
-unsafe fn set_bool(l: *mut LuaState, key: &CStr, v: bool) {
-    // SAFETY: the caller's state and table.
-    unsafe {
-        lua_pushboolean(l, c_int::from(v));
-        lua_setfield(l, -2, key.as_ptr());
-    }
+/// Sets field `key` of the table on top to `v`.
+fn set_bool(s: &mut Stack<'_>, key: &CStr, v: bool) {
+    s.push_bool(v);
+    s.set_field(-2, key);
 }
 
 fn realtime_ns() -> u64 {
@@ -876,84 +857,105 @@ fn realtime_ns() -> u64 {
 
 /// The decoder's input, the map as raw bytes and its shape: the same
 /// whether BTF can render it or not.
-///
-/// # Safety
-///
-/// `l` is a state; `v` a view whose entries and pages it holds.
-unsafe fn push_map_input(l: *mut LuaState, v: &MapView) {
+fn push_map_input(s: &mut Stack<'_>, v: &MapView) {
     let now = realtime_ns();
     let start = if v.lifetime_start_ns != 0 {
         v.lifetime_start_ns
     } else {
         now
     };
-    let name = CString::new(cstr(&v.name)).unwrap_or_default();
-    let upatch = CString::new(cstr(&v.upatch)).unwrap_or_default();
-    let type_name = v.type_name.unwrap_or(c"");
-    // SAFETY: the caller's state and view.
-    unsafe {
-        lua_newtable(l);
-        lua_pushinteger(l, 1);
-        lua_setfield(l, -2, c"schema".as_ptr());
-        lua_pushstring(l, upatch.as_ptr());
-        lua_setfield(l, -2, c"upatch".as_ptr());
-        lua_pushstring(l, name.as_ptr());
-        lua_setfield(l, -2, c"map".as_ptr());
-        // OTLP wall-clock times, as decimal strings: a Lua number cannot
-        // hold nanoseconds since the epoch.
-        push_u64_string(l, start);
-        lua_setfield(l, -2, c"startTimeUnixNano".as_ptr());
-        push_u64_string(l, now);
-        lua_setfield(l, -2, c"timeUnixNano".as_ptr());
+    s.new_table();
+    s.push_integer(1);
+    s.set_field(-2, c"schema");
+    s.push_bytes(cstr(&v.upatch));
+    s.set_field(-2, c"upatch");
+    s.push_bytes(cstr(&v.name));
+    s.set_field(-2, c"map");
+    // OTLP wall-clock times, as decimal strings: a Lua number cannot
+    // hold nanoseconds since the epoch.
+    push_u64_string(s, start);
+    s.set_field(-2, c"startTimeUnixNano");
+    push_u64_string(s, now);
+    s.set_field(-2, c"timeUnixNano");
+    push_map_data(s, v);
+    s.set_field(-2, c"data");
+}
 
-        lua_newtable(l);
-        lua_pushstring(l, name.as_ptr());
-        lua_setfield(l, -2, c"name".as_ptr());
-        lua_pushstring(l, type_name.as_ptr());
-        lua_setfield(l, -2, c"type".as_ptr());
-        set_number(l, c"max_entries", f64::from(v.max_entries));
-        set_number(l, c"n_entries", f64::from(v.n_entries));
-        set_bool(l, c"serialized", v.serialized);
-        set_number(l, c"serialized_pages", f64::from(v.n_serial_pages));
-        set_number(l, c"serialized_bytes", v.serial_bytes_total as f64);
-        set_number(l, c"key_size", f64::from(v.key_size));
-        set_number(l, c"value_size", f64::from(v.value_size));
-        set_number(l, c"n_cpus", f64::from(v.n_cpus));
-        set_bool(l, c"truncated", v.truncated);
+/// The input's `data`: the map's shape, its entries and its serialized
+/// pages.
+fn push_map_data(s: &mut Stack<'_>, v: &MapView) {
+    s.new_table();
+    s.push_bytes(cstr(&v.name));
+    s.set_field(-2, c"name");
+    s.push_bytes(v.type_name.unwrap_or(c"").to_bytes());
+    s.set_field(-2, c"type");
+    set_number(s, c"max_entries", f64::from(v.max_entries));
+    set_number(s, c"n_entries", f64::from(v.n_entries));
+    set_bool(s, c"serialized", v.serialized);
+    set_number(s, c"serialized_pages", f64::from(v.n_serial_pages));
+    set_number(s, c"serialized_bytes", v.serial_bytes_total as f64);
+    set_number(s, c"key_size", f64::from(v.key_size));
+    set_number(s, c"value_size", f64::from(v.value_size));
+    set_number(s, c"n_cpus", f64::from(v.n_cpus));
+    set_bool(s, c"truncated", v.truncated);
+    push_entries(s, v);
+    s.set_field(-2, c"entries");
+    push_pages(s, v);
+    s.set_field(-2, c"pages");
+}
 
-        lua_newtable(l);
-        for i in 0..v.n_entries as usize {
-            let entry = &*v.entries.add(i);
-            lua_newtable(l);
-            push_hex(l, entry.key.cast(), v.key_size as usize);
-            lua_setfield(l, -2, c"key_hex".as_ptr());
-            push_hex(
-                l,
-                entry.value.cast(),
-                v.value_stride as usize * v.n_cpus as usize,
-            );
-            lua_setfield(l, -2, c"value_hex".as_ptr());
-            lua_rawseti(l, -2, i as c_int + 1);
-        }
-        lua_setfield(l, -2, c"entries".as_ptr());
+/// A length the view holds, as one: 0 for one no slice can have.
+fn view_len(n: u64) -> usize {
+    usize::try_from(n).unwrap_or(0)
+}
 
-        lua_newtable(l);
-        for p in 0..v.n_serial_pages as usize {
-            let page = &*v.serial_pages.add(p);
-            lua_newtable(l);
-            set_number(l, c"page_index", f64::from(page.page_index));
-            set_number(l, c"cursor", page.cursor as f64);
-            set_number(l, c"next_cursor", page.next_cursor as f64);
-            set_bool(l, c"done", page.done);
-            set_number(l, c"flags", f64::from(page.flags));
-            set_number(l, c"chunks", f64::from(page.chunks));
-            set_number(l, c"bytes", f64::from(page.bytes));
-            push_hex(l, page.data.cast(), page.bytes as usize);
-            lua_setfield(l, -2, c"data_hex".as_ptr());
-            lua_rawseti(l, -2, p as c_int + 1);
-        }
-        lua_setfield(l, -2, c"pages".as_ptr());
-        lua_setfield(l, -2, c"data".as_ptr());
+/// The entries of the view, each its key and its value on every CPU as
+/// hex.
+fn push_entries(s: &mut Stack<'_>, v: &MapView) {
+    let key_len = view_len(u64::from(v.key_size));
+    let value_len = view_len(u64::from(v.value_stride) * u64::from(v.n_cpus));
+    // SAFETY: map_read() points the view's entries at n_entries of them,
+    // which live as it does.
+    let entries = unsafe { ffi::slice(v.entries, view_len(u64::from(v.n_entries))) };
+    s.new_table();
+    for (n, entry) in (1..=c_int::MAX).zip(entries) {
+        s.new_table();
+        // SAFETY: map_read() points an entry's key at key_size bytes,
+        // which live as the view does.
+        push_hex(s, unsafe { ffi::slice(entry.key.cast::<u8>(), key_len) });
+        s.set_field(-2, c"key_hex");
+        // SAFETY: and its value at value_stride bytes for each CPU.
+        push_hex(s, unsafe {
+            ffi::slice(entry.value.cast::<u8>(), value_len)
+        });
+        s.set_field(-2, c"value_hex");
+        s.raw_set_index(-2, n);
+    }
+}
+
+/// The serialized pages of the view, each its place, its cursors and
+/// flags, and its bytes as hex.
+fn push_pages(s: &mut Stack<'_>, v: &MapView) {
+    // SAFETY: map_read() points the view's pages at n_serial_pages of
+    // them, which live as it does.
+    let pages = unsafe { ffi::slice(v.serial_pages, view_len(u64::from(v.n_serial_pages))) };
+    s.new_table();
+    for (n, page) in (1..=c_int::MAX).zip(pages) {
+        s.new_table();
+        set_number(s, c"page_index", f64::from(page.page_index));
+        set_number(s, c"cursor", page.cursor as f64);
+        set_number(s, c"next_cursor", page.next_cursor as f64);
+        set_bool(s, c"done", page.done);
+        set_number(s, c"flags", f64::from(page.flags));
+        set_number(s, c"chunks", f64::from(page.chunks));
+        set_number(s, c"bytes", f64::from(page.bytes));
+        // SAFETY: map_read() points a page's data at its bytes, which live
+        // as the view does.
+        push_hex(s, unsafe {
+            ffi::slice(page.data.cast::<u8>(), view_len(u64::from(page.bytes)))
+        });
+        s.set_field(-2, c"data_hex");
+        s.raw_set_index(-2, n);
     }
 }
 
@@ -1000,13 +1002,13 @@ unsafe extern "C-unwind" fn call_decoder(l: *mut LuaState) -> c_int {
     let call = unsafe {
         let call = &mut *lua_touserdata(l, lua_upvalueindex(1)).cast::<Call<'_, '_>>();
         lua_pushvalue(l, lua_upvalueindex(2));
-        push_map_input(l, call.view);
-        lua_call(l, 1, 1);
         call
     };
     // SAFETY: LuaJIT called this C function with the state, and this is
     // the one Stack of its frame.
     let mut s = unsafe { Stack::from_raw(l) };
+    push_map_input(&mut s, call.view);
+    s.call(1, 1);
     if call.otel {
         otel_value(&mut s, -1, call.e, 0);
     } else {

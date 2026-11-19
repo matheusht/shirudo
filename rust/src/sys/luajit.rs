@@ -39,6 +39,7 @@ pub const LUA_TNUMBER: c_int = 3;
 pub const LUA_TSTRING: c_int = 4;
 pub const LUA_TTABLE: c_int = 5;
 pub const LUA_TFUNCTION: c_int = 6;
+const LUA_TUSERDATA: c_int = 7;
 /// `1 << LUA_HOOKCOUNT`.
 pub const LUA_MASKCOUNT: c_int = 8;
 pub const LUAJIT_MODE_ENGINE: c_int = 0;
@@ -193,16 +194,19 @@ pub(crate) enum LuaType {
 /// The stack of a live Lua state, in the frame of the C function or the
 /// hook LuaJIT called. An index counts up from 1 at the bottom of the
 /// frame or down from -1 at its top. What a read finds in a slot borrows
-/// the Stack, and what pops a slot takes it, so the one cannot outlive
-/// the other.
+/// the Stack, and what pushes or pops takes it, so the one cannot outlive
+/// the other; split() holds slots for longer.
 ///
 /// Any call may raise a Lua error, which unwinds to the lua_pcall() that
 /// catches it: when memory runs out, an argument check fails, or a call
 /// misuses the stack, with an index that names no slot or no table where
-/// one is needed, or a pop of more than the frame holds. LuaJIT does not
-/// check those, and the Stack does so that a misuse is not undefined.
+/// one is needed, or a pop of more than the frame holds above its split.
+/// LuaJIT does not check those, and the Stack does so that a misuse is
+/// not undefined.
 pub(crate) struct Stack<'s> {
     l: *mut LuaState,
+    /// The slots up to it are held by a split, and stay.
+    base: c_int,
     frame: PhantomData<&'s mut LuaState>,
 }
 
@@ -217,8 +221,27 @@ impl Stack<'_> {
     pub(crate) unsafe fn from_raw(l: *mut LuaState) -> Self {
         Self {
             l,
+            base: 0,
             frame: PhantomData,
         }
+    }
+
+    /// Splits the stack at its top: the Held reads the slots up to there,
+    /// which stay as they are while the split lasts, and the new Stack
+    /// works above them.
+    pub(crate) fn split(&mut self) -> (Held<'_>, Stack<'_>) {
+        let top = self.top();
+        let held = Held {
+            l: self.l,
+            top,
+            split: PhantomData,
+        };
+        let above = Stack {
+            l: self.l,
+            base: top,
+            frame: PhantomData,
+        };
+        (held, above)
     }
 
     /// How many values the frame holds.
@@ -253,9 +276,9 @@ impl Stack<'_> {
         }
     }
 
-    /// Raises an error unless the frame holds `n` values.
+    /// Raises an error unless the frame holds `n` values above its split.
     fn need(&self, n: c_int) {
-        if !(0..=self.top()).contains(&n) {
+        if !(0..=self.top() - self.base).contains(&n) {
             self.error(c"too few values on the stack");
         }
     }
@@ -301,6 +324,50 @@ impl Stack<'_> {
         unsafe { lua_pushnil(self.l) };
     }
 
+    pub(crate) fn push_bool(&mut self, b: bool) {
+        // SAFETY: as in push_nil().
+        unsafe { lua_pushboolean(self.l, c_int::from(b)) };
+    }
+
+    pub(crate) fn push_integer(&mut self, n: isize) {
+        // SAFETY: as in push_nil().
+        unsafe { lua_pushinteger(self.l, n) };
+    }
+
+    pub(crate) fn push_number(&mut self, n: f64) {
+        // SAFETY: as in push_nil().
+        unsafe { lua_pushnumber(self.l, n) };
+    }
+
+    /// Pushes a string of the bytes.
+    pub(crate) fn push_bytes(&mut self, bytes: &[u8]) {
+        // SAFETY: as in push_nil(); LuaJIT copies the bytes.
+        unsafe { lua_pushlstring(self.l, bytes.as_ptr().cast(), bytes.len()) };
+    }
+
+    pub(crate) fn new_table(&mut self) {
+        // SAFETY: as in push_nil().
+        unsafe { lua_createtable(self.l, 0, 0) };
+    }
+
+    /// Pushes a userdata of `len` bytes, zeroed, for `fill` to write before
+    /// anything can read them; what `fill` returns.
+    pub(crate) fn push_userdata_with<R>(
+        &mut self,
+        len: usize,
+        fill: impl FnOnce(&mut [u8]) -> R,
+    ) -> R {
+        // SAFETY: as in push_nil(); LuaJIT raises an error for a size it
+        // cannot make.
+        let data = unsafe { lua_newuserdata(self.l, len) }.cast::<u8>();
+        // SAFETY: the len bytes LuaJIT made, which it does not clear.
+        unsafe { data.write_bytes(0, len) };
+        // SAFETY: the len bytes, which nothing else reaches until fill
+        // returns: a userdata is read through a Held, which sees no slot
+        // pushed after its split, and the Stack is borrowed meanwhile.
+        fill(unsafe { ffi::bytes_mut(data, len) })
+    }
+
     /// Pushes element `n` of the table at `idx`, without metamethods.
     pub(crate) fn raw_get_index(&mut self, idx: c_int, n: c_int) {
         let table = self.table(idx);
@@ -317,6 +384,48 @@ impl Stack<'_> {
         unsafe { lua_next(self.l, table) != 0 }
     }
 
+    /// Pops the value on top into field `k` of the value at `idx`, as
+    /// `t[k] = v` does, metamethods and all.
+    pub(crate) fn set_field(&mut self, idx: c_int, k: &CStr) {
+        self.need(1);
+        let target = self.slot_or_none(idx);
+        // SAFETY: the state is live with a value on top, and the index as
+        // in type_of(); LuaJIT raises an error for a value it cannot index.
+        unsafe { lua_setfield(self.l, target, k.as_ptr()) };
+    }
+
+    /// Pops the value on top into element `n` of the table at `idx`,
+    /// without metamethods.
+    pub(crate) fn raw_set_index(&mut self, idx: c_int, n: c_int) {
+        let table = self.table(idx);
+        self.need(1);
+        // SAFETY: the state is live, the slot a table and a value on top.
+        unsafe { lua_rawseti(self.l, table, n) };
+    }
+
+    /// Removes the value at `idx` above the split, those above it moving
+    /// down.
+    pub(crate) fn remove(&mut self, idx: c_int) {
+        match self.abs_index(idx) {
+            // SAFETY: the state is live and the slot one of its frame.
+            Some(slot) if slot > self.base => unsafe { lua_remove(self.l, slot) },
+            _ => self.error(c"no slot to remove at the stack index"),
+        }
+    }
+
+    /// Calls the function under the `nargs` arguments on top, popping
+    /// them, and pushes `nresults` of its results.
+    pub(crate) fn call(&mut self, nargs: c_int, nresults: c_int) {
+        self.need(nargs.saturating_add(1));
+        if nresults < 0 {
+            self.error(c"no count of results");
+        }
+        // SAFETY: the state is live, with the function and its arguments
+        // above the split; LuaJIT raises an error for a value it cannot
+        // call, and what the function raises unwinds through here.
+        unsafe { lua_call(self.l, nargs, nresults) };
+    }
+
     /// Pops `n` values.
     pub(crate) fn pop(&mut self, n: c_int) {
         self.need(n);
@@ -328,6 +437,44 @@ impl Stack<'_> {
     pub(crate) fn error(&self, msg: &CStr) -> ! {
         // SAFETY: the state is live; the format takes msg as its string.
         unsafe { luaL_error(self.l, c"%s".as_ptr(), msg.as_ptr()) }
+    }
+}
+
+/// The slots of a stack up to where it was split, to read: they stay as
+/// they are while the split lasts, and so does what is read of them.
+pub(crate) struct Held<'h> {
+    l: *mut LuaState,
+    top: c_int,
+    split: PhantomData<&'h LuaState>,
+}
+
+impl<'h> Held<'h> {
+    /// The held slot `idx` names, counted from 1 up, or from -1 down at
+    /// the split.
+    fn slot(&self, idx: c_int) -> Option<c_int> {
+        let abs = if idx < 0 {
+            self.top.checked_add(idx)?.checked_add(1)?
+        } else {
+            idx
+        };
+        (1..=self.top).contains(&abs).then_some(abs)
+    }
+
+    /// The bytes of the userdata at `idx`.
+    pub(crate) fn userdata(&self, idx: c_int) -> Option<&'h [u8]> {
+        let slot = self.slot(idx)?;
+        // SAFETY: the state is live and the slot one of its frame.
+        if unsafe { lua_type(self.l, slot) } != LUA_TUSERDATA {
+            return None;
+        }
+        // SAFETY: as above, and a full userdata there.
+        let data = unsafe { lua_touserdata(self.l, slot) }.cast::<u8>();
+        // SAFETY: as above.
+        let len = unsafe { lua_objlen(self.l, slot) };
+        // SAFETY: the userdata's len bytes, which live while the split
+        // holds its slot; only push_userdata_with() writes one, as it makes
+        // it, above any split.
+        Some(unsafe { ffi::slice(data, len) })
     }
 }
 
