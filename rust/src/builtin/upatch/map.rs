@@ -282,7 +282,7 @@ fn append_record(path: &CStr, json: &[u8]) -> c_int {
         Ok(fd) => File::from(fd),
         Err(err) => return err,
     };
-    let mut ret = lock_exclusive(file.as_raw_fd());
+    let mut ret = lock_exclusive(file.as_fd()).err().unwrap_or(0);
     if ret == 0 {
         ret = append_locked(&file, path, json);
         // SAFETY: the descriptor locked above.

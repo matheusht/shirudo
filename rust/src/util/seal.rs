@@ -65,10 +65,6 @@ fn shown(p: &[u8]) -> std::borrow::Cow<'_, str> {
     String::from_utf8_lossy(p)
 }
 
-fn status(ret: c_int) -> Result<(), c_int> {
-    if ret == 0 { Ok(()) } else { Err(ret) }
-}
-
 /// `name` opened in the directory `dir`, or in the working directory
 /// for none.
 fn open_at(
@@ -716,7 +712,7 @@ fn open_file(path: &[u8], in_sealed_dir: bool) -> Result<OwnedFd, c_int> {
 pub(crate) fn lock(path: &[u8]) -> Result<OwnedFd, c_int> {
     let fd = open(path, O_RDWR | O_CREAT, 0o600)?;
 
-    status(lock_exclusive(fd.as_raw_fd()))?;
+    lock_exclusive(fd.as_fd())?;
     Ok(fd)
 }
 
@@ -724,8 +720,7 @@ pub(crate) fn lock(path: &[u8]) -> Result<OwnedFd, c_int> {
 /// lock that keeps its appenders apart.
 pub(crate) fn append(path: &CStr, line: &[u8]) -> Result<(), c_int> {
     let fd = open(path.to_bytes(), O_RDWR | O_CREAT | O_APPEND, 0o600)?;
-    let appended =
-        status(lock_exclusive(fd.as_raw_fd())).and_then(|()| append_line(fd.as_fd(), path, line));
+    let appended = lock_exclusive(fd.as_fd()).and_then(|()| append_line(fd.as_fd(), path, line));
 
     appended.and(close_checked(fd))
 }
@@ -763,47 +758,4 @@ pub(crate) fn write_file(path: &[u8], data: &[u8], mode: u32) -> Result<(), c_in
         unlink_at(dir.as_fd(), &tmp);
     }
     placed
-}
-
-/// Entry points still used by the C Java agent.
-mod capi {
-    use core::ffi::{CStr, c_char, c_int};
-    use std::os::fd::IntoRawFd;
-
-    /// [`super::open_read`]: the fd, the caller's to close, or -errno.
-    ///
-    /// # Safety
-    ///
-    /// `path` is a C string.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn seal_open_read(path: *const c_char) -> c_int {
-        // SAFETY: the caller's C string.
-        let path = unsafe { CStr::from_ptr(path) };
-
-        super::open_read(path.to_bytes()).map_or_else(|err| err, IntoRawFd::into_raw_fd)
-    }
-
-    /// Return whether this path is under a labeled directory.
-    ///
-    /// # Safety
-    ///
-    /// `path` is a C string.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn seal_parent_labeled(path: *const c_char) -> bool {
-        // SAFETY: the caller's C string.
-        super::parent_labeled(unsafe { CStr::from_ptr(path) }.to_bytes())
-    }
-
-    /// Label a path for the remaining C Java agent.
-    ///
-    /// # Safety
-    ///
-    /// `path` is a C string.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn seal_label(path: *const c_char) -> c_int {
-        // SAFETY: the caller's C string.
-        super::label(unsafe { CStr::from_ptr(path) })
-            .err()
-            .unwrap_or(0)
-    }
 }

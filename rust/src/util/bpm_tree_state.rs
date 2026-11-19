@@ -9,7 +9,7 @@
 use core::ffi::{CStr, c_int};
 use std::ffi::{CString, OsStr};
 use std::io::{BufRead, BufReader};
-use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd};
+use std::os::fd::{AsFd, IntoRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileExt;
 
@@ -962,11 +962,10 @@ pub(crate) fn outcomes_resume(last_seq: i64) -> Result<[u8; 32], c_int> {
         fd => fd?,
     };
     let mut o = Outcomes::new(fd);
-    let resumed = match lock_exclusive(o.file.as_raw_fd()) {
-        0 => o.seek(last_seq).and_then(|()| o.cut()),
-        err => Err(err),
-    }
-    .map(|()| o.line.history_root);
+    let resumed = lock_exclusive(o.file.as_fd())
+        .and_then(|()| o.seek(last_seq))
+        .and_then(|()| o.cut())
+        .map(|()| o.line.history_root);
     match (resumed, o.close()) {
         (Ok(root), 0) => Ok(root),
         (Ok(_), err) => Err(err),

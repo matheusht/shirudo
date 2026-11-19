@@ -563,97 +563,20 @@ pub(crate) unsafe fn bpffs_mounted_at(path: *const c_char) -> c_int {
     ret
 }
 
-/// An exclusive flock() on `fd`, waited for through signals.
-pub(crate) fn lock_exclusive(fd: c_int) -> c_int {
+/// An exclusive flock() on `fd`, waited for through signals, held until
+/// the file is closed or unlocked: -errno.
+pub(crate) fn lock_exclusive(fd: BorrowedFd<'_>) -> Result<(), c_int> {
     // SAFETY: the caller's fd.
-    while unsafe { flock(fd, LOCK_EX) } != 0 {
+    while unsafe { flock(fd.as_raw_fd(), LOCK_EX) } != 0 {
         if errno() != EINTR {
-            return -errno();
+            return Err(-errno());
         }
     }
-    0
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests;
-
-mod capi {
-    use core::ffi::{CStr, c_char, c_int, c_void};
-    use std::os::fd::{BorrowedFd, IntoRawFd};
-
-    use crate::sys::libc::File;
-
-    /// # Safety
-    ///
-    /// `path` is a C string, `out` room for a pointer and `len` for a
-    /// length.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn read_file(
-        path: *const c_char,
-        max: usize,
-        out: *mut c_void,
-        len: *mut usize,
-    ) -> c_int {
-        // SAFETY: the caller passes a C string and the rooms.
-        unsafe { super::read_file(path, max, out, len) }
-    }
-
-    /// # Safety
-    ///
-    /// `fd` is an open descriptor, `label` is a C string, `out` room
-    /// for a pointer and `len` for a length.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn read_fd(
-        fd: c_int,
-        label: *const c_char,
-        max: usize,
-        out: *mut c_void,
-        len: *mut usize,
-    ) -> c_int {
-        // SAFETY: the caller passes a C string.
-        let label = unsafe { CStr::from_ptr(label) };
-        // SAFETY: the caller keeps the open descriptor valid for this call.
-        let fd = unsafe { BorrowedFd::borrow_raw(fd) };
-        // SAFETY: the caller provides rooms for the output pointer and length.
-        unsafe { super::hand_over(super::read_whole(fd, label, max), out, len) }
-    }
-
-    /// # Safety
-    ///
-    /// `rel` is NULL or a C string.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn open_beneath(dirfd: c_int, rel: *const c_char, flags: c_int) -> c_int {
-        if rel.is_null() {
-            return -crate::errno::EINVAL;
-        }
-        // SAFETY: the caller passes a C string.
-        let rel = unsafe { CStr::from_ptr(rel) };
-        match super::open_beneath(dirfd, rel, flags) {
-            Ok(fd) => fd.into_raw_fd(),
-            Err(err) => err,
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `f` is an open stream, and `line` and `cap` getline()'s buffer
-    /// and its size.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn read_text_line(
-        f: *mut File,
-        line: *mut *mut c_char,
-        cap: *mut usize,
-        max: usize,
-    ) -> c_int {
-        // SAFETY: the caller passes the stream and the buffer.
-        unsafe { super::read_text_line(f, line, cap, max) }
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn kernel_dev(dev: u64) -> u32 {
-        super::kernel_dev(dev)
-    }
-}
 
 /// An anonymous file in memory, named `name` where /proc shows its
 /// descriptors, closed on exec: what a download is kept in rather than a

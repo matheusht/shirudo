@@ -76,13 +76,13 @@ fn lock_exclusive_keeps_others_out() {
     let f = log_with(&dir, b"");
     let other = File::open(dir.join("log")).unwrap();
 
-    assert_eq!(lock_exclusive(f.as_raw_fd()), 0);
+    assert_eq!(lock_exclusive(f.as_fd()), Ok(()));
     // SAFETY: an open descriptor.
     let ret = unsafe { libc::flock(other.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     assert_eq!(ret, -1);
     assert_eq!(errno(), libc::EWOULDBLOCK);
     drop(f);
-    assert_eq!(lock_exclusive(other.as_raw_fd()), 0);
+    assert_eq!(lock_exclusive(other.as_fd()), Ok(()));
 }
 
 #[test]
