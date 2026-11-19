@@ -47,7 +47,25 @@ pub struct SerialChunk {
     pub(crate) data: [u8; SERIAL_CHUNK_PAYLOAD as usize],
 }
 
+// The fields' sizes add up to the chunk's: it has no padding.
+const _: () = assert!(size_of::<SerialChunk>() == 10 * 4 + 3 * 8 + SERIAL_CHUNK_PAYLOAD as usize);
 const _: () = assert!(size_of::<SerialChunk>() == 4096);
+
+impl Zeroed for SerialChunk {}
+
+impl SerialChunk {
+    /// The chunk's bytes, which a lookup of the output map writes.
+    pub(crate) fn bytes_mut(&mut self) -> &mut [u8] {
+        // SAFETY: the chunk's own bytes: integers and a byte array without
+        // padding between them, which any bytes written make a chunk.
+        unsafe {
+            core::slice::from_raw_parts_mut(
+                core::ptr::from_mut(self).cast::<u8>(),
+                size_of::<Self>(),
+            )
+        }
+    }
+}
 
 /// The lock of map `map_id` in `dir`, created sealed when it is not
 /// there and held exclusively until the fd returned goes; -EBUSY when
@@ -130,7 +148,7 @@ pub(crate) fn lock_acquire_at(dir: &CStr, map_id: u32) -> Result<OwnedFd, c_int>
 }
 
 /// A random ID for one read of a map, never 0.
-pub(crate) fn new_invocation_id(out: &mut u64) -> c_int {
+pub(crate) fn new_invocation_id() -> Result<u64, c_int> {
     let mut id = [0u8; 8];
 
     loop {
@@ -144,36 +162,33 @@ pub(crate) fn new_invocation_id(out: &mut u64) -> c_int {
                 if errno() == EINTR {
                     continue;
                 }
-                return -errno();
+                return Err(-errno());
             }
             if n == 0 {
-                return -EIO;
+                return Err(-EIO);
             }
             off += n as usize;
         }
         if id != [0; 8] {
-            break;
+            return Ok(u64::from_ne_bytes(id));
         }
     }
-    *out = u64::from_ne_bytes(id);
-    0
 }
 
-/// Whether the chunk is the one asked for, of this read: 0, -EINVAL or
-/// -EBADMSG.
+/// Whether the chunk is the one asked for, of this read: -EINVAL for no
+/// read, -EBADMSG for another chunk.
 pub(crate) fn chunk_validate(
-    c: Option<&SerialChunk>,
+    c: &SerialChunk,
     want_index: u32,
     total_chunks: u32,
     page_index: u32,
     cursor: u64,
     next_cursor: u64,
     invocation_id: u64,
-) -> c_int {
-    let Some(c) = c.filter(|_| invocation_id != 0) else {
-        return -EINVAL;
-    };
-
+) -> Result<(), c_int> {
+    if invocation_id == 0 {
+        return Err(-EINVAL);
+    }
     if c.magic != SERIAL_MAGIC
         || c.version != SERIAL_VERSION
         || c.chunk_index != want_index
@@ -184,9 +199,9 @@ pub(crate) fn chunk_validate(
         || c.next_cursor != next_cursor
         || c.invocation_id != invocation_id
     {
-        return -EBADMSG;
+        return Err(-EBADMSG);
     }
-    0
+    Ok(())
 }
 
 /// The lock of the serializer of the map `map_id`: its fd, or -errno.

@@ -11,6 +11,7 @@ use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
 use super::read_serial_page;
 use crate::fuzzing::fuzz_target;
+use crate::sys::libc::Zeroed;
 use crate::util::serializer::SerialChunk;
 
 const BPF_MAP_LOOKUP_ELEM: c_long = 1;
@@ -68,17 +69,12 @@ fuzz_target!(
     |data| {
         CHUNKS.store(data.as_ptr().cast_mut(), Ordering::Relaxed);
         CHUNKS_LEN.store(data.len(), Ordering::Relaxed);
-        // SAFETY: a chunk of nothing, for which zeros are the value, its
-        // first bytes the input's.
-        let first: SerialChunk = unsafe {
-            let mut first: SerialChunk = core::mem::zeroed();
-            core::ptr::copy_nonoverlapping(
-                data.as_ptr(),
-                (&raw mut first).cast::<u8>(),
-                data.len().min(size_of::<SerialChunk>()),
-            );
-            first
-        };
+        let mut first = Box::new(SerialChunk::zeroed());
+        first
+            .bytes_mut()
+            .iter_mut()
+            .zip(data)
+            .for_each(|(b, d)| *b = *d);
         let _ = read_serial_page(0, 64, first.page_index, first.cursor, first.invocation_id);
     }
 );

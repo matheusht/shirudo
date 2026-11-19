@@ -18,7 +18,7 @@ use std::os::unix::fs::MetadataExt;
 use crate::errno::{
     E2BIG, EBADMSG, EINVAL, EIO, ENAMETOOLONG, ENOENT, ENOMEM, EOPNOTSUPP, EOVERFLOW,
 };
-use crate::sys::libc::{errno, syscall};
+use crate::sys::libc::{Zeroed, errno, syscall};
 use crate::sys::upatch::MapSummary;
 use crate::sys::upatch_maps::{MAP_READ_PEEK, MapEntry, MapView, SerialPage};
 use crate::text::strscpy;
@@ -211,17 +211,12 @@ fn read_serial_page(
     want_cursor: u64,
     invocation_id: u64,
 ) -> Result<SerialPage, c_int> {
-    // SAFETY: an all-zero chunk is a valid one.
-    let mut chunk: Box<SerialChunk> = Box::new(unsafe { core::mem::zeroed() });
+    let mut chunk = Box::new(SerialChunk::zeroed());
     let lookup = |key: u32, chunk: &mut SerialChunk| -> Result<(), c_int> {
+        let value = chunk.bytes_mut();
         // SAFETY: the map, a key and room for a chunk, its value size.
-        match unsafe {
-            bpf_map_lookup_elem(
-                fd,
-                (&raw const key).cast(),
-                core::ptr::from_mut(chunk).cast(),
-            )
-        } {
+        match unsafe { bpf_map_lookup_elem(fd, (&raw const key).cast(), value.as_mut_ptr().cast()) }
+        {
             0 => Ok(()),
             _ => Err(-errno()),
         }
@@ -259,18 +254,15 @@ fn read_serial_page(
         if key != 0 {
             lookup(key, &mut chunk)?;
         }
-        let ret = chunk_validate(
-            Some(&chunk),
+        chunk_validate(
+            &chunk,
             key,
             total,
             page_index,
             cursor,
             next_cursor,
             invocation_id,
-        );
-        if ret != 0 {
-            return Err(ret);
-        }
+        )?;
         if chunk.status != 0 {
             return Err(if chunk.status < 0 { chunk.status } else { -EIO });
         }
@@ -335,11 +327,7 @@ fn read_serialized(
     // keyed by the output map's kernel ID: every process sharing the map
     // contends, and unrelated upatches stay independent.
     let _lock = crate::util::serializer::lock_acquire(info.u32_at(MAP_ID))?;
-    let mut invocation_id = 0u64;
-    let ret = new_invocation_id(&mut invocation_id);
-    if ret != 0 {
-        return Err(ret);
-    }
+    let invocation_id = new_invocation_id()?;
     let max = info.u32_at(MAP_MAX_ENTRIES);
     let (mut cursor, mut bytes_total) = (0u64, 0u64);
     for page_index in 0..SERIAL_MAX_PAGES {

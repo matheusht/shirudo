@@ -14,6 +14,7 @@ use std::os::unix::ffi::OsStrExt;
 
 use super::{err, helper_main, out};
 use crate::errno::{EBADMSG, EBUSY};
+use crate::sys::libc::Zeroed;
 use crate::sys::upatch_maps::{MapView, SerialPage};
 use crate::util::json::JsonEmit;
 use crate::util::map_render::{emit_json_fields, emit_json_object};
@@ -25,8 +26,7 @@ use crate::util::serializer::{
 helper_main!(shirudo_helper_test_upatch_serializer_pages, run);
 
 fn abi_and_nonce() -> Result<(), &'static str> {
-    // SAFETY: a chunk of no data, for which zeros are the value.
-    let mut chunk: Box<SerialChunk> = Box::new(unsafe { core::mem::zeroed() });
+    let mut chunk = Box::new(SerialChunk::zeroed());
     chunk.magic = SERIAL_MAGIC;
     chunk.version = SERIAL_VERSION;
     chunk.chunk_index = 1;
@@ -40,14 +40,13 @@ fn abi_and_nonce() -> Result<(), &'static str> {
     if SERIAL_VERSION != 1 || size_of::<SerialChunk>() != 4096 || SERIAL_CHUNK_PAYLOAD != 4032 {
         return Err("serializer v1 ABI layout mismatch");
     }
-    if chunk_validate(Some(&chunk), 1, 2, 3, 10, 11, 0x1234_5678) != 0 {
+    if chunk_validate(&chunk, 1, 2, 3, 10, 11, 0x1234_5678).is_err() {
         return Err("valid serializer nonce rejected");
     }
-    if chunk_validate(Some(&chunk), 1, 2, 3, 10, 11, 0x8765_4321) != -EBADMSG {
+    if chunk_validate(&chunk, 1, 2, 3, 10, 11, 0x8765_4321) != Err(-EBADMSG) {
         return Err("serializer nonce mismatch accepted");
     }
-    let mut generated = 0;
-    if new_invocation_id(&mut generated) != 0 || generated == 0 {
+    if !new_invocation_id().is_ok_and(|id| id != 0) {
         return Err("serializer invocation ID generation failed");
     }
     Ok(())
