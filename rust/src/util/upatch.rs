@@ -1141,7 +1141,7 @@ pub(crate) unsafe fn specs_parse(
 
 pub(crate) use capi::{
     upatch_close, upatch_data, upatch_header_name, upatch_loader, upatch_metadata, upatch_open,
-    upatch_open_fd, upatch_open_memory, upatch_select, upatch_signature,
+    upatch_open_fd, upatch_open_memory, upatch_signature,
 };
 
 #[cfg(test)]
@@ -1155,9 +1155,6 @@ mod capi {
     use core::ptr;
 
     use super::{NAME_MAX, Upatch, at};
-    use crate::ffi;
-    use crate::sys::libc::Dirent;
-    use crate::text::capi::name_has_suffix;
 
     /// # Safety
     ///
@@ -1254,21 +1251,5 @@ mod capi {
             return ptr::null();
         }
         at(u, u.hdr.data_off)
-    }
-
-    /// # Safety
-    ///
-    /// `e` is a directory entry.
-    pub unsafe extern "C" fn upatch_select(e: *const Dirent) -> c_int {
-        // SAFETY: the entry's name, a C string, and a suffix.
-        unsafe {
-            let name = (*e).d_name.as_ptr();
-
-            c_int::from(name_has_suffix(
-                name,
-                ffi::c_str(name).len(),
-                c".upatch".as_ptr(),
-            ))
-        }
     }
 }

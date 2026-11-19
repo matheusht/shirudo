@@ -655,8 +655,8 @@ and the C-shaped one goes.
   before it frees it, the old block of one that grows included. A raw
   buffer comes from its `xmalloc()` family, which zeroes and scrubs the
   same way, and goes back through `xfree(p, size)`; what the C library
-  allocates, as `scandir()`, `getline()` and `realpath()` do, goes back
-  through `libc_free()`.
+  allocates, as `getline()` and `realpath()` do, goes back through
+  `libc_free()`.
 - A panic is a bug: `rust/src/panic.rs` reports it through `log::err()`
   and aborts. The crate unwinds only so that a Lua error can cross a
   `"C-unwind"` callback, and a Rust frame such an unwind may cross holds

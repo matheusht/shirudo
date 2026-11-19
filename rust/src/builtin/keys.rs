@@ -8,7 +8,6 @@
 //! through shirudo-build.
 
 use core::ffi::{CStr, c_int};
-use core::ptr;
 use std::ffi::CString;
 use std::fs::File;
 use std::io::Read;
@@ -22,14 +21,10 @@ use openssl::x509::{X509, X509NameRef};
 
 use crate::errno::{EACCES, EINVAL, EIO, EKEYREJECTED, ENODEV, ENOENT, ENOKEY, ESTALE};
 use crate::ffi;
-use crate::heap::libc_free;
 use crate::sys::identity::Identity;
-use crate::sys::libc::{
-    Dirent, O_CLOEXEC, O_RDONLY, PATH_MAX, alphasort, errno, fwrite, open, scandir, stdout,
-    strerror,
-};
+use crate::sys::libc::{O_CLOEXEC, O_RDONLY, PATH_MAX, errno, fwrite, open, stdout, strerror};
 use crate::sys::openssl::{EVP_PKEY_get_base_id, X509_NAME_oneline};
-use crate::text::cstr;
+use crate::text::{cstr, name_has_suffix};
 use crate::util::chain::{chain_extend, chain_key_event};
 use crate::util::crypto_openssl::{
     Cert, cert_free, cert_key_algorithm, cert_read_der, cms_signed_by, complain_stack,
@@ -43,7 +38,7 @@ use crate::util::help::{
 };
 use crate::util::identity;
 use crate::util::image_config;
-use crate::util::io::check_trusted;
+use crate::util::io::{check_trusted, dir_names};
 use crate::util::json::JsonEmit;
 use crate::util::keyring;
 use crate::util::keys::{
@@ -51,9 +46,7 @@ use crate::util::keys::{
 };
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::paths::{key_files, keys_dir, path_exists};
-use crate::util::upatch::{
-    self, Upatch, upatch_close, upatch_open, upatch_select, upatch_signature,
-};
+use crate::util::upatch::{self, Upatch, upatch_close, upatch_open, upatch_signature};
 
 const KEYS_DIR: &CStr = c"/var/lib/shirudo/keys";
 const RUNTIME_KEYS_DIR: &CStr = c"/run/shirudo/runtime/keys";
@@ -991,34 +984,21 @@ fn measure_revoke(sha256: &[u8; 32], fp_hex: &[u8]) -> c_int {
 /// error.
 fn purge_signed_by(der: &[u8]) -> c_int {
     let mut cert = Cert::new();
-    let mut names: *mut *mut Dirent = ptr::null_mut();
-    let dir = message(&[UPATCHES_DIR.as_bytes()]);
     let (mut ret, mut purged) = (0, 0);
 
     // SAFETY: the bytes and a certificate to fill.
     if unsafe { cert_read_der(der.as_ptr(), der.len(), &mut cert) } != 0 {
         return -EINVAL;
     }
-    // SAFETY: a C string, room for the list, and the filter and order.
-    let n = unsafe {
-        scandir(
-            dir.as_ptr(),
-            &mut names,
-            Some(upatch_select),
-            Some(alphasort),
-        )
+    let files = match dir_names(UPATCHES_DIR.as_bytes(), |n| name_has_suffix(n, b".upatch")) {
+        Ok(files) => files,
+        Err(err) => {
+            // SAFETY: the certificate read above.
+            unsafe { cert_free(&mut cert) };
+            return if err == -ENOENT { 0 } else { err };
+        }
     };
-    if n < 0 {
-        let e = errno();
-        // SAFETY: the certificate read above.
-        unsafe { cert_free(&mut cert) };
-        return if e == ENOENT { 0 } else { -e };
-    }
-    // SAFETY: the n entries scandir() gave.
-    let entries = unsafe { ffi::slice(names, n as usize) };
-    for &entry in entries {
-        // SAFETY: an entry, whose name is a C string.
-        let file = unsafe { ffi::c_str((*entry).d_name.as_ptr()) };
+    for file in &files {
         let path = [UPATCHES_DIR.as_bytes(), b"/", file].concat();
         if path.len() >= PATH_MAX {
             continue;
@@ -1069,14 +1049,8 @@ fn purge_signed_by(der: &[u8]) -> c_int {
         info(&[b"keys revoke: ", name, b" ", what]);
         purged += 1;
     }
-    // SAFETY: scandir()'s entries and list, from the C library's malloc.
-    unsafe {
-        for &entry in entries {
-            libc_free(entry.cast());
-        }
-        libc_free(names.cast());
-        cert_free(&mut cert);
-    }
+    // SAFETY: the certificate read above.
+    unsafe { cert_free(&mut cert) };
     if ret != 0 { ret } else { purged }
 }
 
