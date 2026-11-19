@@ -133,8 +133,9 @@ fn unwrap_btf_type(btf: &Btf, mut id: u32) -> Option<u32> {
 /// Whether the map's value is an integer scalar of 1, 2, 4 or 8 bytes,
 /// and signed: -ENODATA without BTF, -EOPNOTSUPP for another value.
 fn metric_type(v: &MapView) -> Result<(bool, u32), c_int> {
-    // SAFETY: the view's BTF, NULL or its own.
-    let btf = unsafe { v.btf.as_ref() }
+    let btf = v
+        .btf
+        .as_ref()
         .filter(|_| v.value_type_id != 0)
         .ok_or(-ENODATA)?;
     let t = unwrap_btf_type(btf, v.value_type_id).ok_or(-EOPNOTSUPP)?;

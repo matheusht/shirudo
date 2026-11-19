@@ -174,32 +174,32 @@ fn open_serializer_pin(upatch: &[u8], map: &[u8]) -> Result<OwnedFd, c_int> {
 
 /// The output map of a serializer: an array of 4-byte keys and chunk
 /// values, of at most SERIAL_MAX_CHUNKS entries.
-fn validate_serial_map(info: &Info<MAP_INFO_SIZE>) -> c_int {
+fn validate_serial_map(info: &Info<MAP_INFO_SIZE>) -> Result<(), c_int> {
     if info.u32_at(MAP_TYPE) != ARRAY
         || info.u32_at(MAP_KEY_SIZE) != 4
         || info.u32_at(MAP_VALUE_SIZE) as usize != size_of::<SerialChunk>()
     {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
     let max = info.u32_at(MAP_MAX_ENTRIES);
     if max == 0 || max > SERIAL_MAX_CHUNKS {
-        return -E2BIG;
+        return Err(-E2BIG);
     }
-    0
+    Ok(())
 }
 
 /// Zeroes every chunk of the output map before a run.
-fn clear_serial_map(fd: c_int, max_entries: u32, value_size: u32) -> c_int {
+fn clear_serial_map(fd: c_int, max_entries: u32, value_size: u32) -> Result<(), c_int> {
     let zero = vec![0u8; value_size as usize];
     for i in 0..max_entries {
         // SAFETY: the map, a key and a value of its sizes.
         if unsafe { bpf_map_update_elem(fd, (&raw const i).cast(), zero.as_ptr().cast(), BPF_ANY) }
             != 0
         {
-            return -errno();
+            return Err(-errno());
         }
     }
-    0
+    Ok(())
 }
 
 /// The page the serializer wrote: its chunks checked against each other
@@ -312,54 +312,38 @@ struct SerializeCtx {
 
 const _: () = assert!(size_of::<SerializeCtx>() == 40);
 
-/// The map through the serializer upatch `upatch` pins for it, page by
-/// page until the serializer says it is done: 1, 0 for a map without a
-/// serializer, or -errno with no pages kept.
-fn try_read_serialized(upatch: &[u8], map: &[u8], flags: u32, out: &mut MapView) -> c_int {
-    let ret = read_serialized(upatch, map, flags, out);
-    if ret < 0 {
-        out.serial_pages = Vec::new();
-        out.serial_bytes_total = 0;
-    }
-    ret
-}
-
-fn read_serialized(upatch: &[u8], map: &[u8], flags: u32, out: &mut MapView) -> c_int {
+/// The map through the serializer upatch `upatch` pins for it, into
+/// `out` page by page until the serializer says it is done: whether the
+/// map has a serializer.
+fn read_serialized(
+    upatch: &[u8],
+    map: &[u8],
+    flags: u32,
+    out: &mut MapView,
+) -> Result<bool, c_int> {
     if map == SERIAL_MAP_NAME {
-        return 0;
+        return Ok(false);
     }
     let prog = match open_serializer_pin(upatch, map) {
         Ok(fd) => fd,
-        Err(e) if e == -ENOENT => return 0,
-        Err(e) => return e,
+        Err(e) if e == -ENOENT => return Ok(false),
+        Err(e) => return Err(e),
     };
-    let (serial, info) = match open_map_pin(upatch, SERIAL_MAP_NAME) {
-        Ok(p) => p,
-        Err(e) => return e,
-    };
-    let ret = validate_serial_map(&info);
-    if ret != 0 {
-        return ret;
-    }
+    let (serial, info) = open_map_pin(upatch, SERIAL_MAP_NAME)?;
+    validate_serial_map(&info)?;
     // Clearing, running and reading are one transaction, under a lock
     // keyed by the output map's kernel ID: every process sharing the map
     // contends, and unrelated upatches stay independent.
-    let _lock = match crate::util::serializer::lock_acquire(info.u32_at(MAP_ID)) {
-        Ok(lock) => lock,
-        Err(err) => return err,
-    };
+    let _lock = crate::util::serializer::lock_acquire(info.u32_at(MAP_ID))?;
     let mut invocation_id = 0u64;
     let ret = new_invocation_id(&mut invocation_id);
     if ret != 0 {
-        return ret;
+        return Err(ret);
     }
     let max = info.u32_at(MAP_MAX_ENTRIES);
     let (mut cursor, mut bytes_total) = (0u64, 0u64);
     for page_index in 0..SERIAL_MAX_PAGES {
-        let ret = clear_serial_map(serial.as_raw_fd(), max, info.u32_at(MAP_VALUE_SIZE));
-        if ret != 0 {
-            return ret;
-        }
+        clear_serial_map(serial.as_raw_fd(), max, info.u32_at(MAP_VALUE_SIZE))?;
         let mut ctx = SerializeCtx {
             magic: SERIAL_MAGIC,
             version: SERIAL_VERSION,
@@ -379,12 +363,9 @@ fn read_serialized(upatch: &[u8], map: &[u8], flags: u32, out: &mut MapView) -> 
         let ctx_bytes = unsafe {
             core::slice::from_raw_parts_mut((&raw mut ctx).cast::<u8>(), size_of::<SerializeCtx>())
         };
-        let retval = match prog_test_run(prog.as_raw_fd(), ctx_bytes) {
-            Ok(r) => r,
-            Err(e) => return e,
-        };
+        let retval = prog_test_run(prog.as_raw_fd(), ctx_bytes)?;
         if (retval as i32) < 0 {
-            return retval as i32;
+            return Err(retval as i32);
         }
         if ctx.magic != SERIAL_MAGIC
             || ctx.version != SERIAL_VERSION
@@ -392,36 +373,30 @@ fn read_serialized(upatch: &[u8], map: &[u8], flags: u32, out: &mut MapView) -> 
             || ctx.cursor != cursor
             || ctx.invocation_id != invocation_id
         {
-            return -EBADMSG;
+            return Err(-EBADMSG);
         }
-        let page =
-            match read_serial_page(serial.as_raw_fd(), max, page_index, cursor, invocation_id) {
-                Ok(p) => p,
-                Err(e) => return e,
-            };
+        let page = read_serial_page(serial.as_raw_fd(), max, page_index, cursor, invocation_id)?;
         if bytes_total + u64::from(page.bytes()) > SERIAL_MAX_TOTAL_BYTES {
-            return -E2BIG;
+            return Err(-E2BIG);
         }
         bytes_total += u64::from(page.bytes());
         let (done, next) = (page.done, page.next_cursor);
-        if out.serial_pages.try_reserve(1).is_err() {
-            return -ENOMEM;
-        }
+        out.serial_pages.try_reserve(1).map_err(|_| -ENOMEM)?;
         out.serial_pages.push(page);
         if done {
             break;
         }
         if next == cursor {
-            return -EBADMSG;
+            return Err(-EBADMSG);
         }
         cursor = next;
     }
     if !out.serial_pages.last().is_some_and(|page| page.done) {
-        return -E2BIG;
+        return Err(-E2BIG);
     }
     out.serialized = true;
     out.serial_bytes_total = bytes_total;
-    1
+    Ok(true)
 }
 
 /// `len` zero bytes, or -ENOMEM.
@@ -523,32 +498,18 @@ fn read_hash(
     Ok(())
 }
 
-/// Frees the BTF a read put in `v`.
-pub(crate) fn view_free(v: &mut MapView) {
-    if !v.btf.is_null() {
-        // SAFETY: the view's BTF, boxed by read(), freed once.
-        drop(unsafe { Box::from_raw(v.btf) });
-        v.btf = core::ptr::null_mut();
-    }
-}
-
 fn fill(dst: &mut [u8], src: &[u8]) -> Result<(), c_int> {
     strscpy(dst, src).map(|_| ()).map_err(|_| -ENAMETOOLONG)
 }
 
-/// Map `map` of upatch `upatch` into `out`, which it zeroes first: at
-/// most `cap` entries or all for 0, through its serializer if it has one,
-/// MAP_READ_PEEK in `flags` to leave the serializer's interval to the
-/// exporter. 0 or -errno; view_free() frees what it holds either way.
-pub(crate) fn read(upatch: &[u8], map: &[u8], cap: u32, flags: u32, out: &mut MapView) -> c_int {
-    *out = MapView::default();
-    if fill(&mut out.upatch, upatch).is_err() || fill(&mut out.name, map).is_err() {
-        return -ENAMETOOLONG;
-    }
-    let (fd, info) = match open_map_pin(upatch, map) {
-        Ok(p) => p,
-        Err(e) => return e,
-    };
+/// Map `map` of upatch `upatch`: at most `cap` entries or all for 0,
+/// through its serializer if it has one, MAP_READ_PEEK in `flags` to
+/// leave the serializer's interval to the exporter.
+pub(crate) fn read(upatch: &[u8], map: &[u8], cap: u32, flags: u32) -> Result<MapView, c_int> {
+    let mut out = MapView::default();
+    fill(&mut out.upatch, upatch)?;
+    fill(&mut out.name, map)?;
+    let (fd, info) = open_map_pin(upatch, map)?;
     let ty = info.u32_at(MAP_TYPE);
     out.ty = ty;
     out.type_name = Some(map_type_name(ty));
@@ -560,7 +521,7 @@ pub(crate) fn read(upatch: &[u8], map: &[u8], cap: u32, flags: u32, out: &mut Ma
     if is_percpu(ty) {
         let n = nproc_possible();
         if n < 0 {
-            return n;
+            return Err(n);
         }
         out.n_cpus = n as u32;
     }
@@ -578,21 +539,19 @@ pub(crate) fn read(upatch: &[u8], map: &[u8], cap: u32, flags: u32, out: &mut Ma
         out.has_payload = true;
     }
 
-    match try_read_serialized(upatch, map, flags, out) {
-        r if r < 0 => return r,
-        r if r > 0 => return 0,
-        _ => {}
+    if read_serialized(upatch, map, flags, &mut out)? {
+        return Ok(out);
     }
     if let Some(reason) = map_skip_reason(ty) {
         out.skipped = true;
         out.skipped_reason = Some(reason);
-        return 0;
+        return Ok(out);
     }
     let btf_id = info.u32_at(MAP_BTF_ID);
-    let btf = (btf_id != 0)
+    out.btf = (btf_id != 0)
         .then(|| kernel_btf::by_id(btf_id).ok())
         .flatten();
-    if let Some(btf) = &btf {
+    if let Some(btf) = &out.btf {
         let (kid, vid) = (
             info.u32_at(MAP_BTF_KEY_TYPE_ID),
             info.u32_at(MAP_BTF_VALUE_TYPE_ID),
@@ -604,11 +563,8 @@ pub(crate) fn read(upatch: &[u8], map: &[u8], cap: u32, flags: u32, out: &mut Ma
         type_def(Some(btf), kid, &mut out.key_type_def);
         type_def(Some(btf), vid, &mut out.value_type_def);
     }
-    out.btf = btf.map_or(core::ptr::null_mut(), |b| Box::into_raw(Box::new(b)));
-    match read_entries(fd.as_raw_fd(), out, cap) {
-        Ok(()) => 0,
-        Err(e) => e,
-    }
+    read_entries(fd.as_raw_fd(), &mut out, cap)?;
+    Ok(out)
 }
 
 /// The maps upatch `upatch` pins, onto `list`, in directory order: each

@@ -75,7 +75,7 @@ pub struct MapView {
     pub value_type_def: [u8; MAP_TYPEDEF_MAX],
     pub key_type_id: u32,
     pub value_type_id: u32,
-    pub btf: *mut Btf,
+    pub btf: Option<Btf>,
     pub entries: Vec<MapEntry>,
 }
 
@@ -109,7 +109,7 @@ impl Default for MapView {
             value_type_def: [0; MAP_TYPEDEF_MAX],
             key_type_id: 0,
             value_type_id: 0,
-            btf: core::ptr::null_mut(),
+            btf: None,
             entries: Vec::new(),
         }
     }

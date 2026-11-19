@@ -418,8 +418,7 @@ fn format_plain(value: &[u8], btf_type: &[u8]) -> Vec<u8> {
 /// A key or value of the view: through its BTF type `type_id` where the
 /// view has BTF, else as `btf_name` names it, else plain.
 pub(crate) fn format_cell(v: &MapView, type_id: u32, bytes: &[u8], btf_name: &[u8]) -> Vec<u8> {
-    // SAFETY: the view's BTF, NULL or its own.
-    let formatted = match unsafe { v.btf.as_ref() } {
+    let formatted = match &v.btf {
         Some(btf) if type_id != 0 => format_btf(btf, type_id, bytes, 0),
         _ => None,
     };
@@ -434,8 +433,7 @@ pub(crate) fn percpu_sum(v: &MapView, values: &[u8]) -> Vec<u8> {
         return b"(unsupported width)".to_vec();
     }
     let bits = 8 * v.value_size;
-    // SAFETY: the view's BTF, NULL or its own.
-    let signed = unsafe { v.btf.as_ref() }.is_some_and(|btf| {
+    let signed = v.btf.as_ref().is_some_and(|btf| {
         v.value_type_id != 0
             && type_of(btf, unwrap(btf, v.value_type_id))
                 .is_some_and(|t| btf.kind(t) == KIND_INT && btf.int_encoding(t) & INT_SIGNED != 0)

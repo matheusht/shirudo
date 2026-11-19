@@ -355,43 +355,42 @@ fn export(upatch: &CStr, map: &CStr, a: &Args, opts: &OtelOpts, detail: bool) ->
     } else {
         MAP_ENTRIES_DEFAULT
     };
-    let mut v: Box<MapView> = Box::default();
     let (u, m) = (upatch.to_bytes(), map.to_bytes());
-    let r = map_read::read(u, m, cap, if a.peek { MAP_READ_PEEK } else { 0 }, &mut v);
+    let v = match map_read::read(u, m, cap, if a.peek { MAP_READ_PEEK } else { 0 }) {
+        Ok(v) => v,
+        Err(r) => {
+            log_err(&[b"upatch map: read ", u, b"/", m, b": ", strerr(-r)].concat());
+            return 1;
+        }
+    };
     let mut ret = 0;
 
-    if r != 0 {
-        log_err(&[b"upatch map: read ", u, b"/", m, b": ", strerr(-r)].concat());
-        ret = 1;
-    } else {
-        if a.json {
-            let e = append_json(a.json_path, &v);
-            if e != 0 {
-                emit_failed(a.json_path, e);
-                ret = 1;
-            }
-        }
-        if a.otel {
-            let e = match decode::signal(&v) {
-                Err(e) if e == -ENODATA => otel::send_auto(&v, Some(opts)),
-                Ok(s) => otel::send_decoded(&v, s as c_int, Some(opts)),
-                Err(e) => e,
-            };
-            if e != 0 {
-                log_err(&[b"upatch map: OTLP export ", u, b"/", m, b": ", strerr(-e)].concat());
-                ret = 1;
-            }
-        }
-        if detail {
-            map_render::print_detail(&v);
-            // SAFETY: the C library's stdout, whose error flag the print
-            // leaves.
-            if unsafe { ferror(stdout) } != 0 {
-                ret = 1;
-            }
+    if a.json {
+        let e = append_json(a.json_path, &v);
+        if e != 0 {
+            emit_failed(a.json_path, e);
+            ret = 1;
         }
     }
-    map_read::view_free(&mut v);
+    if a.otel {
+        let e = match decode::signal(&v) {
+            Err(e) if e == -ENODATA => otel::send_auto(&v, Some(opts)),
+            Ok(s) => otel::send_decoded(&v, s as c_int, Some(opts)),
+            Err(e) => e,
+        };
+        if e != 0 {
+            log_err(&[b"upatch map: OTLP export ", u, b"/", m, b": ", strerr(-e)].concat());
+            ret = 1;
+        }
+    }
+    if detail {
+        map_render::print_detail(&v);
+        // SAFETY: the C library's stdout, whose error flag the print
+        // leaves.
+        if unsafe { ferror(stdout) } != 0 {
+            ret = 1;
+        }
+    }
     ret
 }
 

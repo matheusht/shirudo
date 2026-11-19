@@ -154,14 +154,10 @@ fn age(ts: &[u8]) -> Vec<u8> {
     cstr(&buf).to_vec()
 }
 
-/// Hands `f` what map `m` of upatch `upatch` holds, its first `cap`
-/// entries or all for 0, without draining a serializer: the view, or
-/// -errno.
-fn read_map(upatch: &CStr, m: &MapSummary, cap: u32, f: impl FnOnce(Result<&MapView, c_int>)) {
-    let mut v: Box<MapView> = Box::default();
-    let r = map_read::read(upatch.to_bytes(), cstr(&m.name), cap, MAP_READ_PEEK, &mut v);
-    f(if r == 0 { Ok(&v) } else { Err(r) });
-    map_read::view_free(&mut v);
+/// What map `m` of upatch `upatch` holds, its first `cap` entries or
+/// all for 0, without draining a serializer.
+fn read_map(upatch: &CStr, m: &MapSummary, cap: u32) -> Result<MapView, c_int> {
+    map_read::read(upatch.to_bytes(), cstr(&m.name), cap, MAP_READ_PEEK)
 }
 
 fn text(name: &CStr, l: &Loaded, maps: &[MapSummary], cap: u32) {
@@ -215,13 +211,12 @@ fn text(name: &CStr, l: &Loaded, maps: &[MapSummary], cap: u32) {
     out(&t);
 
     for m in maps {
-        read_map(name, m, cap, |v| {
-            out(&[b"\n== Map: ", cstr(&m.name), b" ==\n"].concat());
-            match v {
-                Ok(v) => map_render::print_detail(v),
-                Err(e) => out(&[b"  (read failed: ", strerr(-e), b")\n"].concat()),
-            }
-        });
+        let v = read_map(name, m, cap);
+        out(&[b"\n== Map: ", cstr(&m.name), b" ==\n"].concat());
+        match v {
+            Ok(v) => map_render::print_detail(&v),
+            Err(e) => out(&[b"  (read failed: ", strerr(-e), b")\n"].concat()),
+        }
     }
 }
 
@@ -260,8 +255,8 @@ fn json(name: &CStr, l: &Loaded, maps: &[MapSummary], cap: u32) -> c_int {
     e.obj_close();
     e.arr_open(b"maps");
     for m in maps {
-        read_map(name, m, cap, |v| match v {
-            Ok(v) => map_render::emit_json_object(&mut e, v),
+        match read_map(name, m, cap) {
+            Ok(v) => map_render::emit_json_object(&mut e, &v),
             Err(err) => {
                 e.obj_open();
                 e.kv_string(b"name", cstr(&m.name));
@@ -270,7 +265,7 @@ fn json(name: &CStr, l: &Loaded, maps: &[MapSummary], cap: u32) -> c_int {
                 e.kv_string(b"error", strerr(-err));
                 e.obj_close();
             }
-        });
+        }
     }
     e.arr_close();
     e.obj_close();

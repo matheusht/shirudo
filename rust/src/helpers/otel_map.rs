@@ -26,7 +26,6 @@ use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
 
 use super::{helper_main, out, out_bytes};
-use crate::bpf::btf::Btf;
 use crate::btf_builder::BtfBuilder;
 use crate::errno::{E2BIG, EACCES, EINVAL, EOPNOTSUPP, EOVERFLOW, EPERM};
 use crate::sys::upatch_maps::{MapEntry, MapView, SerialPage};
@@ -188,39 +187,31 @@ fn make_decoder(metric: bool, counter: bool, snapshot: bool) -> Result<Decoder, 
 
 /// A map of one entry, 5 and 7 on two CPUs with a poisoned pad between,
 /// and its BTF when asked.
-struct Fixture {
-    view: MapView,
-    btf: Option<Box<Btf>>,
-}
-
-fn fixture(map_type: u32, is_signed: bool, with_btf: bool) -> Option<Box<Fixture>> {
+fn fixture(map_type: u32, is_signed: bool, with_btf: bool) -> Option<MapView> {
     let array = map_type == BPF_MAP_TYPE_ARRAY;
     let (value_stride, n_cpus) = if array { (4, 1) } else { (8, 2) };
     let mut values = [0u8; 16];
     values[..4].copy_from_slice(&5u32.to_ne_bytes());
     values[4..8].copy_from_slice(&0xdead_beef_u32.to_ne_bytes());
     values[8..12].copy_from_slice(&7u32.to_ne_bytes());
-    let mut f = Box::new(Fixture {
-        view: MapView {
-            ty: map_type,
-            type_name: Some(if array { c"array" } else { c"percpu_array" }),
-            key_size: 4,
-            value_size: 4,
-            value_stride,
-            max_entries: 1,
-            n_cpus,
-            lifetime_start_ns: 1_544_712_660_300_000_000,
-            entries: vec![MapEntry {
-                key: 0u32.to_ne_bytes().to_vec(),
-                value: values[..(value_stride * n_cpus) as usize].to_vec(),
-            }],
-            ..MapView::default()
-        },
-        btf: None,
-    });
-    put_str(&mut f.view.upatch, "test-upatch");
-    put_str(&mut f.view.name, "hits_total");
-    put_str(&mut f.view.location, "fentry/test_hook");
+    let mut f = MapView {
+        ty: map_type,
+        type_name: Some(if array { c"array" } else { c"percpu_array" }),
+        key_size: 4,
+        value_size: 4,
+        value_stride,
+        max_entries: 1,
+        n_cpus,
+        lifetime_start_ns: 1_544_712_660_300_000_000,
+        entries: vec![MapEntry {
+            key: 0u32.to_ne_bytes().to_vec(),
+            value: values[..(value_stride * n_cpus) as usize].to_vec(),
+        }],
+        ..MapView::default()
+    };
+    put_str(&mut f.upatch, "test-upatch");
+    put_str(&mut f.name, "hits_total");
+    put_str(&mut f.location, "fentry/test_hook");
     if !with_btf {
         return Some(f);
     }
@@ -234,25 +225,23 @@ fn fixture(map_type: u32, is_signed: bool, with_btf: bool) -> Option<Box<Fixture
     let key_type = b.typedef("__u32", key_int);
     let value_type = b.typedef(if is_signed { "__s32" } else { "__u32" }, value_int);
     // The view reads BTF as shirudo parses it.
-    let mut btf = Box::new(b.parse().ok()?);
-    f.view.btf = &raw mut *btf;
-    f.btf = Some(btf);
-    f.view.key_type_id = key_type;
-    f.view.value_type_id = value_type;
-    put_str(&mut f.view.btf_key_type, "__u32");
+    f.btf = Some(b.parse().ok()?);
+    f.key_type_id = key_type;
+    f.value_type_id = value_type;
+    put_str(&mut f.btf_key_type, "__u32");
     put_str(
-        &mut f.view.btf_value_type,
+        &mut f.btf_value_type,
         if is_signed { "__s32" } else { "__u32" },
     );
     Some(f)
 }
 
 /// One serialized page of 1024 bytes in place of the entries.
-fn large_serialized(f: &mut Fixture) {
+fn large_serialized(f: &mut MapView) {
     const BYTES: u32 = 1024;
-    f.view.serialized = true;
-    f.view.entries.clear();
-    f.view.serial_pages = vec![SerialPage {
+    f.serialized = true;
+    f.entries.clear();
+    f.serial_pages = vec![SerialPage {
         page_index: 0,
         cursor: 0,
         next_cursor: 1,
@@ -261,7 +250,7 @@ fn large_serialized(f: &mut Fixture) {
         done: true,
         data: vec![b'A'; BYTES as usize],
     }];
-    f.view.serial_bytes_total = u64::from(BYTES);
+    f.serial_bytes_total = u64::from(BYTES);
 }
 
 fn opts() -> OtelOpts {
@@ -284,8 +273,8 @@ fn print_classification(ty: u32, is_signed: bool, with_btf: bool, serialized: bo
     let Some(mut f) = fixture(ty, is_signed, with_btf) else {
         return 1;
     };
-    f.view.serialized = serialized;
-    let (signal, reason) = classify(&f.view);
+    f.serialized = serialized;
+    let (signal, reason) = classify(&f);
     out(&format!(
         "{}:{reason}\n",
         if signal == METRIC { "metric" } else { "log" }
@@ -298,10 +287,9 @@ fn print_payload(metric: bool, counter: bool, with_location: bool) -> c_int {
         return 1;
     };
     if !with_location {
-        f.view.location[0] = 0;
+        f.location[0] = 0;
     }
-    let payload =
-        make_decoder(metric, counter, false).and_then(|d| payload_file(&d.0, &f.view, metric));
+    let payload = make_decoder(metric, counter, false).and_then(|d| payload_file(&d.0, &f, metric));
     match payload {
         Ok(p) => {
             out_bytes(&p);
@@ -318,7 +306,7 @@ fn print_local_json() -> c_int {
     let mut buf = [0u8; 4096];
     let mut e = JsonEmit::fixed(&mut buf);
     e.obj_open();
-    emit_json_fields(&mut e, &f.view);
+    emit_json_fields(&mut e, &f);
     e.obj_close();
     let err = e.err();
     if err == 0 {
@@ -329,7 +317,7 @@ fn print_local_json() -> c_int {
 
 /// The fixture sent through a decoder made for it, as `mode` says.
 fn send(
-    f: &Fixture,
+    f: &MapView,
     metric: bool,
     counter: bool,
     snapshot: bool,
@@ -337,7 +325,7 @@ fn send(
     o: &OtelOpts,
 ) -> c_int {
     match make_decoder(metric, counter, snapshot) {
-        Ok(d) => send_file(Some(&d.0), &f.view, mode, Some(o)),
+        Ok(d) => send_file(Some(&d.0), f, mode, Some(o)),
         Err(e) => e,
     }
 }
@@ -357,7 +345,7 @@ fn print_record_size() -> c_int {
         Ok(d) => d,
         Err(_) => return 1,
     };
-    let ret = match decode_map(&f.view, Some(&d.0), true, JSON_MAX) {
+    let ret = match decode_map(&f, Some(&d.0), true, JSON_MAX) {
         Ok(decoded) => {
             out(&format!("{}\n", decoded.len()));
             0
@@ -449,7 +437,7 @@ fn tenant_validation() -> c_int {
         endpoint: c"http://127.0.0.1:1".as_ptr(),
         ..opts()
     };
-    let send = |o: &OtelOpts| send_file(None, &f.view, FORCE_LOG, Some(o));
+    let send = |o: &OtelOpts| send_file(None, &f, FORCE_LOG, Some(o));
     let mut failed = 0;
     o.tenant_id = c"bad tenant".as_ptr();
     failed += u32::from(send(&o) != -EINVAL);
@@ -493,7 +481,7 @@ fn s3_validation() -> c_int {
     ] {
         unset(name);
     }
-    let send = |f: &Fixture, o: &OtelOpts| send_file(None, &f.view, S3, Some(o));
+    let send = |f: &MapView, o: &OtelOpts| send_file(None, f, S3, Some(o));
     let checks = [
         (send(&f, &o), -EACCES),
         (
@@ -536,12 +524,12 @@ fn s3_validation() -> c_int {
         }
     }
     o.s3_uri = c"s3://test-bucket/prefix".as_ptr();
-    f.view.truncated = true;
+    f.truncated = true;
     let truncated = send(&f, &o);
-    f.view.truncated = false;
-    f.view.skipped = true;
+    f.truncated = false;
+    f.skipped = true;
     let skipped = send(&f, &o);
-    f.view.skipped = false;
+    f.skipped = false;
     if truncated != -E2BIG || skipped != -EOPNOTSUPP {
         return 1;
     }
@@ -557,7 +545,7 @@ fn security_check() -> c_int {
         endpoint: c"http://collector.example".as_ptr(),
         ..opts()
     };
-    c_int::from(send_file(None, &f.view, FORCE_LOG, Some(&o)) != -EPERM)
+    c_int::from(send_file(None, &f, FORCE_LOG, Some(&o)) != -EPERM)
 }
 
 fn run(args: &[&CStr]) -> c_int {
