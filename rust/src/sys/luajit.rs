@@ -268,6 +268,12 @@ impl Stack<'_> {
             .unwrap_or_else(|| self.top().saturating_add(1))
     }
 
+    /// `arg` for an argument check: an argument's place as it is, as
+    /// LuaJIT reads one past the top as none, else the slot it names.
+    fn arg(&self, arg: c_int) -> c_int {
+        if arg > 0 { arg } else { self.slot_or_none(arg) }
+    }
+
     /// The slot of the table at `idx`.
     fn table(&self, idx: c_int) -> c_int {
         match self.abs_index(idx) {
@@ -319,6 +325,58 @@ impl Stack<'_> {
         unsafe { bytes_at(self.l, self.slot_or_none(idx)) }
     }
 
+    /// The length of the value at `idx` without metamethods: a string's
+    /// bytes, a table's border, a userdata's size; 0 for another value.
+    pub(crate) fn length(&self, idx: c_int) -> usize {
+        // SAFETY: as in type_of().
+        unsafe { lua_objlen(self.l, self.slot_or_none(idx)) }
+    }
+
+    /// Argument `arg` as an integer; raises an error unless it is a
+    /// number or a string that spells one.
+    pub(crate) fn check_integer(&self, arg: c_int) -> isize {
+        // SAFETY: the state is live, and an argument's place one LuaJIT
+        // reads as none past the top.
+        unsafe { luaL_checkinteger(self.l, self.arg(arg)) }
+    }
+
+    /// Argument `arg` as a string, a number made one in its slot; raises
+    /// an error for another value.
+    pub(crate) fn check_bytes(&self, arg: c_int) -> &[u8] {
+        let mut len = 0;
+        // SAFETY: as in check_integer(); room for the length.
+        let text = unsafe { luaL_checklstring(self.l, self.arg(arg), &mut len) };
+        // SAFETY: the string's len bytes, which live while the slot holds
+        // it, which the borrow of the Stack keeps.
+        unsafe { ffi::slice(text.cast::<u8>(), len) }
+    }
+
+    /// Raises an error unless argument `arg` is a table.
+    pub(crate) fn check_table(&self, arg: c_int) {
+        // SAFETY: as in check_integer().
+        unsafe { luaL_checktype(self.l, self.arg(arg), LUA_TTABLE) };
+    }
+
+    /// The bytes of argument `arg`, a userdata with the metatable
+    /// registered as `name`; raises an error for another value.
+    pub(crate) fn check_userdata(&self, arg: c_int, name: &CStr) -> &[u8] {
+        let arg = self.arg(arg);
+        // SAFETY: as in check_integer().
+        let data = unsafe { luaL_checkudata(self.l, arg, name.as_ptr()) }.cast::<u8>();
+        // SAFETY: the state is live and the slot a userdata.
+        let len = unsafe { lua_objlen(self.l, arg) };
+        // SAFETY: the userdata's len bytes, which live while the slot holds
+        // it, which the borrow of the Stack keeps; only
+        // push_userdata_with() writes one, as it makes it.
+        unsafe { ffi::slice(data, len) }
+    }
+
+    /// Raises an error that argument `arg` is bad, saying `msg`.
+    pub(crate) fn arg_error(&self, arg: c_int, msg: &CStr) -> ! {
+        // SAFETY: the state is live.
+        unsafe { luaL_argerror(self.l, arg, msg.as_ptr()) }
+    }
+
     pub(crate) fn push_nil(&mut self) {
         // SAFETY: the state is live; LuaJIT grows the stack.
         unsafe { lua_pushnil(self.l) };
@@ -329,9 +387,10 @@ impl Stack<'_> {
         unsafe { lua_pushboolean(self.l, c_int::from(b)) };
     }
 
-    pub(crate) fn push_integer(&mut self, n: isize) {
-        // SAFETY: as in push_nil().
-        unsafe { lua_pushinteger(self.l, n) };
+    pub(crate) fn push_integer(&mut self, n: i32) {
+        // SAFETY: as in push_nil(); a lua_Integer is a ptrdiff_t, which
+        // holds an i32 on every target LuaJIT runs on.
+        unsafe { lua_pushinteger(self.l, n as LuaInteger) };
     }
 
     pub(crate) fn push_number(&mut self, n: f64) {
@@ -368,6 +427,21 @@ impl Stack<'_> {
         fill(unsafe { ffi::bytes_mut(data, len) })
     }
 
+    /// Pushes field `k` of the value at `idx`, as `t[k]` reads it,
+    /// metamethods and all.
+    pub(crate) fn get_field(&mut self, idx: c_int, k: &CStr) {
+        let target = self.slot_or_none(idx);
+        // SAFETY: as in type_of(); LuaJIT raises an error for a value it
+        // cannot index.
+        unsafe { lua_getfield(self.l, target, k.as_ptr()) };
+    }
+
+    /// Pushes the metatable registered as `name`, or nil.
+    pub(crate) fn push_metatable(&mut self, name: &CStr) {
+        // SAFETY: the state is live, and its registry always there.
+        unsafe { lua_getfield(self.l, LUA_REGISTRYINDEX, name.as_ptr()) };
+    }
+
     /// Pushes element `n` of the table at `idx`, without metamethods.
     pub(crate) fn raw_get_index(&mut self, idx: c_int, n: c_int) {
         let table = self.table(idx);
@@ -401,6 +475,20 @@ impl Stack<'_> {
         self.need(1);
         // SAFETY: the state is live, the slot a table and a value on top.
         unsafe { lua_rawseti(self.l, table, n) };
+    }
+
+    /// Pops the table or nil on top as the metatable of the value at
+    /// `idx`.
+    pub(crate) fn set_metatable(&mut self, idx: c_int) {
+        self.need(1);
+        match (self.abs_index(idx), self.type_of(-1)) {
+            (Some(target), LuaType::Table | LuaType::Nil) => {
+                // SAFETY: the state is live, the slot one of its frame, and
+                // a table or nil on top.
+                unsafe { lua_setmetatable(self.l, target) };
+            }
+            _ => self.error(c"no metatable for a value at the stack index"),
+        }
     }
 
     /// Removes the value at `idx` above the split, those above it moving
@@ -449,6 +537,13 @@ pub(crate) struct Held<'h> {
 }
 
 impl<'h> Held<'h> {
+    /// The string at `idx`, or the number there made one in its slot.
+    pub(crate) fn to_bytes(&self, idx: c_int) -> Option<&'h [u8]> {
+        // SAFETY: the state is live and the slot one of its frame, which
+        // holds the value while the split lasts.
+        unsafe { bytes_at(self.l, self.slot(idx)?) }
+    }
+
     /// The held slot `idx` names, counted from 1 up, or from -1 down at
     /// the split.
     fn slot(&self, idx: c_int) -> Option<c_int> {
@@ -545,14 +640,4 @@ pub unsafe fn lua_setglobal(l: *mut LuaState, name: *const c_char) {
 pub unsafe fn lua_getglobal(l: *mut LuaState, name: *const c_char) {
     // SAFETY: the caller's state and C string.
     unsafe { lua_getfield(l, LUA_GLOBALSINDEX, name) };
-}
-
-/// luaL_getmetatable().
-///
-/// # Safety
-///
-/// `l` is a state; `name` a C string.
-pub unsafe fn lual_getmetatable(l: *mut LuaState, name: *const c_char) {
-    // SAFETY: the caller's state and C string.
-    unsafe { lua_getfield(l, LUA_REGISTRYINDEX, name) };
 }

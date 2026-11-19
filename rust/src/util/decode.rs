@@ -12,6 +12,7 @@
 
 use core::cell::Cell;
 use core::ffi::{CStr, c_int, c_void};
+use core::ops::Range;
 use core::ptr;
 use std::ffi::CString;
 use std::os::fd::AsRawFd;
@@ -20,15 +21,12 @@ use crate::errno::{E2BIG, EINVAL, ENAMETOOLONG, ENODATA, ENOENT, ENOMEM, ERANGE,
 use crate::ffi;
 use crate::sys::libc::{explicit_bzero, snprintf};
 use crate::sys::luajit::{
-    Allocator, LUA_MASKCOUNT, LUA_REGISTRYINDEX, LUA_TFUNCTION, LUA_TSTRING, LUA_TTABLE,
-    LUAJIT_MODE_ENGINE, LUAJIT_MODE_OFF, Lua, LuaDebug, LuaState, LuaType, Stack, lua_getfield,
-    lua_getglobal, lua_gettop, lua_newtable, lua_newuserdata, lua_objlen, lua_pcall, lua_pop,
-    lua_pushcclosure, lua_pushcfunction, lua_pushinteger, lua_pushlightuserdata, lua_pushlstring,
-    lua_pushnil, lua_pushnumber, lua_pushstring, lua_pushvalue, lua_rawgeti, lua_rawseti,
-    lua_remove, lua_setfield, lua_setglobal, lua_sethook, lua_setmetatable, lua_tolstring,
-    lua_tonumber, lua_touserdata, lua_type, lua_upvalueindex, luaJIT_setmode, luaL_argerror,
-    luaL_checkinteger, luaL_checklstring, luaL_checktype, luaL_checkudata, luaL_error,
-    luaL_loadbufferx, luaL_newmetatable, luaL_openlibs, lual_getmetatable,
+    Allocator, LUA_MASKCOUNT, LUA_TFUNCTION, LUA_TSTRING, LUA_TTABLE, LUAJIT_MODE_ENGINE,
+    LUAJIT_MODE_OFF, Lua, LuaDebug, LuaState, LuaType, Stack, lua_getfield, lua_getglobal,
+    lua_newtable, lua_pcall, lua_pop, lua_pushcclosure, lua_pushcfunction, lua_pushlightuserdata,
+    lua_pushnil, lua_pushstring, lua_pushvalue, lua_remove, lua_setfield, lua_setglobal,
+    lua_sethook, lua_tolstring, lua_touserdata, lua_type, lua_upvalueindex, luaJIT_setmode,
+    luaL_error, luaL_loadbufferx, luaL_newmetatable, luaL_openlibs,
 };
 use crate::sys::upatch_maps::MapView;
 use crate::text::cstr;
@@ -76,19 +74,6 @@ fn printf_double(fmt: &CStr, v: f64) -> Vec<u8> {
     // SAFETY: the room for the text and a format of one double.
     let n = unsafe { snprintf(buf.as_mut_ptr().cast(), buf.len(), fmt.as_ptr(), v) };
     buf[..(n.max(0) as usize).min(buf.len() - 1)].to_vec()
-}
-
-/// lua_absindex(), which the 5.1 API lacks.
-///
-/// # Safety
-///
-/// `l` is a state.
-unsafe fn absindex(l: *mut LuaState, idx: c_int) -> c_int {
-    if idx > 0 || idx <= LUA_REGISTRYINDEX {
-        return idx;
-    }
-    // SAFETY: the caller's state.
-    unsafe { lua_gettop(l) + idx + 1 }
 }
 
 /// The string at `idx` and its length, or None.
@@ -381,431 +366,355 @@ fn otel_table(s: &mut Stack<'_>, idx: c_int, e: &mut JsonEmit, depth: c_int) {
     e.obj_close();
 }
 
-/// The hex at `hex` decoded into a userdata pushed on the stack, which
-/// the collector frees: a Lua error raised while the bytes are in use
-/// would leak a buffer of our own. Blanks between digits are skipped.
-///
-/// # Safety
-///
-/// `l` is a state; `hex` stays valid meanwhile.
-unsafe fn hex_decode_push(l: *mut LuaState, hex: &[u8]) -> Option<(*const u8, usize)> {
-    let digits = hex.iter().filter(|&&c| !is_c_space(c)).count();
-    if digits % 2 != 0 {
-        return None;
+/// Pushes the hex at `hex` decoded into a userdata, which the collector
+/// frees: a Lua error raised while the bytes are in use would leak a
+/// buffer of our own. Blanks between digits are skipped. False, with
+/// nothing pushed, for what is not an even run of digits.
+fn hex_decode_push(s: &mut Stack<'_>, hex: &[u8]) -> bool {
+    let n_digits = hex.iter().filter(|&&c| !is_c_space(c)).count();
+    if n_digits % 2 != 0 {
+        return false;
     }
-    // SAFETY: the caller's state; a userdata of digits / 2 bytes.
-    let buf = unsafe { lua_newuserdata(l, digits / 2) }.cast::<u8>();
-    let (mut i, mut off) = (0, 0);
-    let skip = |i: &mut usize| {
-        while *i < hex.len() && is_c_space(hex[*i]) {
-            *i += 1;
-        }
+    let decoded = s.push_userdata_with(n_digits / 2, |bytes| {
+        let mut digits = hex.iter().copied().filter(|&c| !is_c_space(c));
+        bytes.iter_mut().all(|b| {
+            let hi = digits.next().and_then(hex_nibble);
+            let lo = digits.next().and_then(hex_nibble);
+            let (Some(hi), Some(lo)) = (hi, lo) else {
+                return false;
+            };
+            *b = hi << 4 | lo;
+            true
+        })
+    });
+    if !decoded {
+        s.pop(1);
+    }
+    decoded
+}
+
+/// Pushes a slot: a userdata of the record's length and its bytes.
+fn push_slot(s: &mut Stack<'_>, record: &[u8]) {
+    let Ok(len) = u32::try_from(record.len()) else {
+        s.error(c"invalid slot size");
     };
-    loop {
-        skip(&mut i);
-        if i >= hex.len() {
-            break;
-        }
-        let hi = hex_nibble(hex[i]);
-        i += 1;
-        skip(&mut i);
-        let lo = if i < hex.len() {
-            hex_nibble(hex[i])
-        } else {
-            None
-        };
-        let (Some(hi), Some(lo)) = (hi, lo) else {
-            // SAFETY: the userdata pushed above.
-            unsafe { lua_pop(l, 1) };
-            return None;
-        };
-        i += 1;
-        // SAFETY: within the digits / 2 bytes of the userdata.
-        unsafe { *buf.add(off) = hi << 4 | lo };
-        off += 1;
-    }
-    Some((buf, off))
+    let len = len.to_ne_bytes();
+    s.push_userdata_with(len.len() + record.len(), |slot| {
+        let (head, body) = slot.split_at_mut(len.len());
+        head.copy_from_slice(&len);
+        body.copy_from_slice(record);
+    });
+    s.push_metatable(SLOT_MT);
+    s.set_metatable(-2);
 }
 
-/// A slot: a userdata of a length and the bytes of one record.
-///
-/// # Safety
-///
-/// `l` is a state.
-unsafe fn push_slot(l: *mut LuaState, data: *const u8, len: usize) {
-    // SAFETY: the caller's state; a userdata of the length and the bytes,
-    // given the slot metatable.
-    unsafe {
-        let slot = lua_newuserdata(l, 4 + len).cast::<u8>();
-        slot.cast::<u32>().write_unaligned(len as u32);
-        ptr::copy_nonoverlapping(data, slot.add(4), len);
-        lual_getmetatable(l, SLOT_MT.as_ptr());
-        lua_setmetatable(l, -2);
-    }
+/// A slot's record: the bytes after its length.
+fn slot_record(slot: &[u8]) -> &[u8] {
+    let Some((len, record)) = slot.split_first_chunk::<4>() else {
+        return &[];
+    };
+    let len = usize::try_from(u32::from_ne_bytes(*len)).unwrap_or(0);
+    record.get(..len).unwrap_or(record)
 }
 
-/// The slot the method is called on, its bytes.
-///
-/// # Safety
-///
-/// `l` is a state in a slot method; raises when argument 1 is not one.
-unsafe fn check_slot<'a>(l: *mut LuaState) -> &'a [u8] {
-    // SAFETY: the caller's state; a slot userdata, its length first.
-    unsafe {
-        let slot = luaL_checkudata(l, 1, SLOT_MT.as_ptr()).cast::<u8>();
-        let len = slot.cast::<u32>().read_unaligned() as usize;
-        crate::ffi::slice(slot.add(4), len)
-    }
+/// The record of the slot a method is called on, raising an error when
+/// argument 1 is not a slot.
+fn check_slot<'a>(s: &'a Stack<'_>) -> &'a [u8] {
+    slot_record(s.check_userdata(1, SLOT_MT))
 }
 
-/// An int argument, raising for one out of range.
-///
-/// # Safety
-///
-/// `l` is a state in a C function.
-unsafe fn check_c_int(l: *mut LuaState, arg: c_int) -> c_int {
-    // SAFETY: the caller's state.
-    let v = unsafe { luaL_checkinteger(l, arg) };
-    if v < c_int::MIN as isize || v > c_int::MAX as isize {
-        // SAFETY: as above; this raises.
-        unsafe { luaL_argerror(l, arg, c"integer out of range".as_ptr()) }
-    }
-    v as c_int
+/// An int argument, raising an error for one out of range.
+fn check_c_int(s: &Stack<'_>, arg: c_int) -> c_int {
+    let v = s.check_integer(arg);
+    c_int::try_from(v).unwrap_or_else(|_| s.arg_error(arg, c"integer out of range"))
 }
 
-fn read_le(bytes: &[u8]) -> u64 {
-    bytes.iter().rev().fold(0u64, |v, &b| v << 8 | u64::from(b))
-}
-
-/// The `width` bytes at `off` of the slot, little-endian, or 0 past it.
-fn slot_word(slot: &[u8], off: c_int, width: usize) -> u64 {
-    if off < 0 || off as i64 > slot.len() as i64 - width as i64 {
-        return 0;
-    }
-    read_le(&slot[off as usize..off as usize + width])
+/// The `N` bytes at offset argument 2 of the slot a method is called on,
+/// zeros past its record.
+fn slot_word<const N: usize>(s: &Stack<'_>) -> [u8; N] {
+    let record = check_slot(s);
+    let off = check_c_int(s, 2);
+    usize::try_from(off)
+        .ok()
+        .and_then(|off| record.get(off..)?.first_chunk::<N>().copied())
+        .unwrap_or([0; N])
 }
 
 unsafe extern "C-unwind" fn slot_u8(l: *mut LuaState) -> c_int {
-    // SAFETY: the method's state.
-    unsafe {
-        let slot = check_slot(l);
-        let off = check_c_int(l, 2);
-        lua_pushinteger(l, slot_word(slot, off, 1) as isize);
-    }
+    // SAFETY: LuaJIT called this C function with the state, and this is
+    // the one Stack of its frame.
+    let mut s = unsafe { Stack::from_raw(l) };
+    let v = u8::from_le_bytes(slot_word(&s));
+    s.push_integer(i32::from(v));
     1
 }
 
 unsafe extern "C-unwind" fn slot_u16(l: *mut LuaState) -> c_int {
-    // SAFETY: the method's state.
-    unsafe {
-        let slot = check_slot(l);
-        let off = check_c_int(l, 2);
-        lua_pushinteger(l, slot_word(slot, off, 2) as isize);
-    }
+    // SAFETY: as in slot_u8().
+    let mut s = unsafe { Stack::from_raw(l) };
+    let v = u16::from_le_bytes(slot_word(&s));
+    s.push_integer(i32::from(v));
     1
 }
 
 unsafe extern "C-unwind" fn slot_u32(l: *mut LuaState) -> c_int {
-    // SAFETY: the method's state.
-    unsafe {
-        let slot = check_slot(l);
-        let off = check_c_int(l, 2);
-        lua_pushnumber(l, slot_word(slot, off, 4) as f64);
-    }
+    // SAFETY: as in slot_u8().
+    let mut s = unsafe { Stack::from_raw(l) };
+    let v = u32::from_le_bytes(slot_word(&s));
+    s.push_number(f64::from(v));
     1
 }
 
 unsafe extern "C-unwind" fn slot_u64(l: *mut LuaState) -> c_int {
-    // SAFETY: the method's state.
-    unsafe {
-        let slot = check_slot(l);
-        let off = check_c_int(l, 2);
-        push_u64_string(&mut Stack::from_raw(l), slot_word(slot, off, 8));
-    }
+    // SAFETY: as in slot_u8().
+    let mut s = unsafe { Stack::from_raw(l) };
+    let v = u64::from_le_bytes(slot_word(&s));
+    push_u64_string(&mut s, v);
     1
 }
 
-/// The NUL-terminated string at `off`, of `len` bytes at most and of
-/// `max` when `len` is not in 1 to `max`, within the slot.
+/// Where in the record the NUL-terminated string at `off` lies, of
+/// `len` bytes at most and of `max` when `len` is not in 1 to `max`.
+fn cstring_span(record: &[u8], off: c_int, len: c_int, max: c_int) -> Range<usize> {
+    let Some(off) = usize::try_from(off).ok().filter(|&off| off < record.len()) else {
+        return 0..0;
+    };
+    if max <= 0 {
+        return 0..0;
+    }
+    let len = if len <= 0 || len > max { max } else { len };
+    let Ok(len) = usize::try_from(len) else {
+        return 0..0;
+    };
+    let text = record.get(off..).unwrap_or_default();
+    let n = text.iter().take(len).position(|&c| c == 0);
+    off..off + n.unwrap_or(len.min(text.len()))
+}
+
+/// `slot:cstring(off, len, max)`: the string cstring_span() finds.
 unsafe extern "C-unwind" fn slot_cstring(l: *mut LuaState) -> c_int {
-    // SAFETY: the method's state.
-    unsafe {
-        let slot = check_slot(l);
-        let off = check_c_int(l, 2);
-        let mut len = if lua_gettop(l) >= 3 {
-            check_c_int(l, 3)
-        } else {
-            0
-        };
-        let max = if lua_gettop(l) >= 4 {
-            check_c_int(l, 4)
+    // SAFETY: as in slot_u8().
+    let mut s = unsafe { Stack::from_raw(l) };
+    let span = {
+        let record = check_slot(&s);
+        let off = check_c_int(&s, 2);
+        let len = if s.top() >= 3 { check_c_int(&s, 3) } else { 0 };
+        let max = if s.top() >= 4 {
+            check_c_int(&s, 4)
         } else {
             len
         };
-        if off < 0 || off as usize >= slot.len() || max <= 0 {
-            lua_pushlstring(l, c"".as_ptr(), 0);
-            return 1;
-        }
-        if len <= 0 || len > max {
-            len = max;
-        }
-        let len = (len as usize).min(slot.len() - off as usize);
-        let s = &slot[off as usize..off as usize + len];
-        let n = s.iter().position(|&c| c == 0).unwrap_or(len);
-        lua_pushlstring(l, s.as_ptr().cast(), n);
-    }
+        cstring_span(record, off, len, max)
+    };
+    let (held, mut above) = s.split();
+    let record = slot_record(held.userdata(1).unwrap_or_default());
+    above.push_bytes(record.get(span).unwrap_or_default());
     1
 }
 
-/// A page's numeric field, 0 unless it is a whole number a double holds
-/// exactly.
-///
-/// # Safety
-///
-/// `l` is a state with a table at `idx`.
-unsafe fn page_u64(l: *mut LuaState, idx: c_int, field: &CStr) -> u64 {
-    // SAFETY: the caller's state and table.
-    let n = unsafe {
-        let idx = absindex(l, idx);
-        lua_getfield(l, idx, field.as_ptr());
-        let n = lua_tonumber(l, -1);
-        lua_pop(l, 1);
-        n
-    };
-    if !n.is_finite() || !(0.0..=MAX_EXACT).contains(&n) {
-        0
-    } else {
+/// A page's numeric field, its fraction dropped: 0 unless it lies from 0
+/// to the largest whole number a double holds exactly.
+fn page_u64(s: &mut Stack<'_>, idx: c_int, field: &CStr) -> u64 {
+    s.get_field(idx, field);
+    let n = s.to_number(-1);
+    s.pop(1);
+    if n.is_finite() && (0.0..=MAX_EXACT).contains(&n) {
         n as u64
+    } else {
+        0
     }
 }
 
-/// The record at absolute index `abs` into the slots table.
-///
-/// # Safety
-///
-/// `l` is a state with the slots table at `slots`; raises for an index
-/// past an int.
-unsafe fn store_slot(l: *mut LuaState, slots: c_int, abs: u64, data: *const u8, size: usize) {
-    // SAFETY: the caller's state.
-    unsafe {
-        if abs >= c_int::MAX as u64 {
-            luaL_error(l, c"slot index too large".as_ptr());
-        }
-        push_slot(l, data, size);
-        lua_rawseti(l, slots, abs as c_int + 1);
-    }
+/// Whether the value is a string, or a number that makes one.
+fn is_text(t: LuaType) -> bool {
+    matches!(t, LuaType::String | LuaType::Number)
+}
+
+/// The record at absolute index `abs` into the slots table at `slots`,
+/// raising an error for an index past an int.
+fn store_slot(s: &mut Stack<'_>, slots: c_int, abs: u64, record: &[u8]) {
+    let Some(n) = c_int::try_from(abs).ok().and_then(|abs| abs.checked_add(1)) else {
+        s.error(c"slot index too large");
+    };
+    push_slot(s, record);
+    s.raw_set_index(slots, n);
 }
 
 /// A page's records into the slots table by their absolute index: the
 /// serializer packs whole records into each chunk, so a record size that
 /// does not divide the chunk leaves a gap at each chunk's end.
-///
-/// # Safety
-///
-/// `l` is a state with the slots table at `slots`; `data` holds `len`
-/// bytes.
-unsafe fn split_page_slots(
-    l: *mut LuaState,
+fn split_page_slots(
+    s: &mut Stack<'_>,
     slots: c_int,
-    data: *const u8,
-    len: usize,
+    data: &[u8],
     cursor: u64,
     chunks: u64,
     size: usize,
 ) {
     let per_chunk = CHUNK_PAYLOAD / size;
-    // SAFETY: the caller's state, table and bytes.
-    unsafe {
-        if chunks > 1 && per_chunk > 0 && CHUNK_PAYLOAD % size != 0 {
-            let mut off = 0;
-            let mut chunk = 0u64;
-            while chunk < chunks && off < len {
-                let chunk_bytes = (len - off).min(CHUNK_PAYLOAD);
-                let local = (chunk_bytes / size).min(per_chunk);
-                for i in 0..local {
-                    let page_slot = chunk * per_chunk as u64 + i as u64;
-                    if page_slot == 0 {
-                        continue;
-                    }
-                    store_slot(
-                        l,
-                        slots,
-                        cursor.wrapping_add(page_slot),
-                        data.add(off + i * size),
-                        size,
-                    );
+    if chunks > 1 && per_chunk > 0 && CHUNK_PAYLOAD % size != 0 {
+        for (chunk, bytes) in (0..chunks).zip(data.chunks(CHUNK_PAYLOAD)) {
+            for (i, record) in (0..).zip(bytes.chunks_exact(size).take(per_chunk)) {
+                let page_slot = chunk * per_chunk as u64 + i;
+                if page_slot != 0 {
+                    store_slot(s, slots, cursor.wrapping_add(page_slot), record);
                 }
-                off += chunk_bytes;
-                chunk += 1;
             }
-            return;
         }
-        let mut i = 0;
-        while i + size <= len {
-            store_slot(
-                l,
-                slots,
-                cursor.wrapping_add((i / size) as u64),
-                data.add(i),
-                size,
-            );
-            i += size;
-        }
+        return;
     }
+    for (i, record) in (0..).zip(data.chunks_exact(size)) {
+        store_slot(s, slots, cursor.wrapping_add(i), record);
+    }
+}
+
+/// A page's records in order: of each chunk, as many as the chunk holds
+/// whole, up to the first chunk that holds none.
+fn page_records(data: &[u8], chunks: u64, size: usize) -> impl Iterator<Item = &[u8]> {
+    let (chunk, per_chunk) = if chunks > 1 {
+        (CHUNK_PAYLOAD, CHUNK_PAYLOAD / size)
+    } else {
+        (data.len().max(1), usize::MAX)
+    };
+    data.chunks(chunk)
+        .map_while(move |bytes| {
+            let records = bytes.chunks_exact(size).take(per_chunk);
+            (records.len() > 0).then_some(records)
+        })
+        .flatten()
 }
 
 /// `shirudo.page_slots(page, size)`: one page's records, in order.
 unsafe extern "C-unwind" fn page_slots(l: *mut LuaState) -> c_int {
-    // SAFETY: the function's state.
-    unsafe {
-        luaL_checktype(l, 1, LUA_TTABLE);
-        let size = check_c_int(l, 2);
-        if size <= 0 || size as usize > CHUNK_PAYLOAD {
-            luaL_error(l, c"invalid slot size".as_ptr());
-        }
-        let size = size as usize;
-        let chunks = page_u64(l, 1, c"chunks");
-        lua_getfield(l, 1, c"data_hex".as_ptr());
-        let Some(hex) = to_bytes(l, -1) else {
-            lua_pop(l, 1);
-            lua_newtable(l);
-            return 1;
-        };
-        let Some((data, len)) = hex_decode_push(l, hex) else {
-            luaL_error(l, c"invalid page data_hex".as_ptr());
-        };
-        let per_chunk = CHUNK_PAYLOAD / size;
-        lua_newtable(l);
-        let (mut off, mut n) = (0usize, 0 as c_int);
-        while off < len {
-            let mut chunk_bytes = len - off;
-            if chunks > 1 && chunk_bytes > CHUNK_PAYLOAD {
-                chunk_bytes = CHUNK_PAYLOAD;
-            }
-            let mut local = chunk_bytes / size;
-            if chunks > 1 && local > per_chunk {
-                local = per_chunk;
-            }
-            for i in 0..local {
-                push_slot(l, data.add(off + i * size), size);
-                n += 1;
-                lua_rawseti(l, -2, n);
-            }
-            if local == 0 {
-                break;
-            }
-            off += chunk_bytes;
-        }
+    // SAFETY: as in slot_u8().
+    let mut s = unsafe { Stack::from_raw(l) };
+    s.check_table(1);
+    let size = check_c_int(&s, 2);
+    let Some(size) = usize::try_from(size)
+        .ok()
+        .filter(|size| (1..=CHUNK_PAYLOAD).contains(size))
+    else {
+        s.error(c"invalid slot size");
+    };
+    let chunks = page_u64(&mut s, 1, c"chunks");
+    s.get_field(1, c"data_hex");
+    if !is_text(s.type_of(-1)) {
+        s.pop(1);
+        s.new_table();
+        return 1;
+    }
+    let (held, mut above) = s.split();
+    if !hex_decode_push(&mut above, held.to_bytes(-1).unwrap_or_default()) {
+        above.error(c"invalid page data_hex");
+    }
+    let (data, mut above) = above.split();
+    let data = data.userdata(-1).unwrap_or_default();
+    above.new_table();
+    for (n, record) in (1..=c_int::MAX).zip(page_records(data, chunks, size)) {
+        push_slot(&mut above, record);
+        above.raw_set_index(-2, n);
     }
     1
 }
 
-/// A decimal u64 string argument, raising for anything else.
-///
-/// # Safety
-///
-/// `l` is a state in a C function.
-unsafe fn check_u64_string(l: *mut LuaState, arg: c_int) -> u64 {
-    let mut len = 0usize;
-    // SAFETY: the caller's state; the string lives on its stack.
-    let s = unsafe { crate::ffi::slice(luaL_checklstring(l, arg, &mut len).cast::<u8>(), len) };
-    match crate::text::parse_u64(s, u64::MAX) {
+/// A decimal u64 string argument, raising an error for anything else.
+fn check_u64_string(s: &Stack<'_>, arg: c_int) -> u64 {
+    match crate::text::parse_u64(s.check_bytes(arg), u64::MAX) {
         Ok(v) => v,
-        // SAFETY: as above; these raise.
-        Err(err) if err == -ERANGE => unsafe {
-            luaL_argerror(l, arg, c"u64 string out of range".as_ptr())
-        },
-        // SAFETY: as above.
-        Err(_) => unsafe { luaL_argerror(l, arg, c"expected a decimal u64 string".as_ptr()) },
+        Err(err) if err == -ERANGE => s.arg_error(arg, c"u64 string out of range"),
+        Err(_) => s.arg_error(arg, c"expected a decimal u64 string"),
     }
 }
 
 /// `shirudo.u64_add(a, b)`: exact, saturating; Lua numbers lose
 /// nanoseconds.
 unsafe extern "C-unwind" fn u64_add(l: *mut LuaState) -> c_int {
-    // SAFETY: the function's state.
-    unsafe {
-        let a = check_u64_string(l, 1);
-        let b = check_u64_string(l, 2);
-        push_u64_string(&mut Stack::from_raw(l), a.saturating_add(b));
-    }
+    // SAFETY: as in slot_u8().
+    let mut s = unsafe { Stack::from_raw(l) };
+    let a = check_u64_string(&s, 1);
+    let b = check_u64_string(&s, 2);
+    push_u64_string(&mut s, a.saturating_add(b));
     1
 }
 
 /// `shirudo.u64_sub(a, b)`: exact, at least 0.
 unsafe extern "C-unwind" fn u64_sub(l: *mut LuaState) -> c_int {
-    // SAFETY: the function's state.
-    unsafe {
-        let a = check_u64_string(l, 1);
-        let b = check_u64_string(l, 2);
-        push_u64_string(&mut Stack::from_raw(l), a.saturating_sub(b));
-    }
+    // SAFETY: as in slot_u8().
+    let mut s = unsafe { Stack::from_raw(l) };
+    let a = check_u64_string(&s, 1);
+    let b = check_u64_string(&s, 2);
+    push_u64_string(&mut s, a.saturating_sub(b));
     1
 }
 
-/// `shirudo.hex_u64(hex, off)`: the little-endian u64 at byte `off` of
-/// the hex, "0" when it is not there or not hex.
-unsafe extern "C-unwind" fn hex_u64(l: *mut LuaState) -> c_int {
-    // SAFETY: the function's state; the string lives on its stack.
-    unsafe {
-        let off = check_c_int(l, 2);
-        let mut len = 0usize;
-        let hex = crate::ffi::slice(luaL_checklstring(l, 1, &mut len).cast::<u8>(), len);
-        let start = (off as usize).wrapping_mul(2);
-        if off < 0 || start + 16 > hex.len() {
-            push_u64_string(&mut Stack::from_raw(l), 0);
-            return 1;
-        }
-        let mut v = 0u64;
-        for i in (0..8).rev() {
-            let p = &hex[start + i * 2..];
-            match (hex_nibble(p[0]), hex_nibble(p[1])) {
-                (Some(hi), Some(lo)) => v = v << 8 | u64::from(hi << 4 | lo),
-                _ => {
-                    push_u64_string(&mut Stack::from_raw(l), 0);
-                    return 1;
-                }
-            }
-        }
-        push_u64_string(&mut Stack::from_raw(l), v);
+/// The little-endian u64 at byte `off` of the hex, 0 when it is not
+/// there or not hex.
+fn hex_word(hex: &[u8], off: c_int) -> u64 {
+    let mut word = [0; 8];
+    let digits = usize::try_from(off)
+        .ok()
+        .and_then(|off| hex.get(off.checked_mul(2)?..)?.get(..16));
+    match digits.map(|digits| crate::util::hex::decode(digits, &mut word)) {
+        Some(Ok(())) => u64::from_le_bytes(word),
+        _ => 0,
     }
+}
+
+/// `shirudo.hex_u64(hex, off)`: hex_word() as a decimal string.
+unsafe extern "C-unwind" fn hex_u64(l: *mut LuaState) -> c_int {
+    // SAFETY: as in slot_u8().
+    let mut s = unsafe { Stack::from_raw(l) };
+    let off = check_c_int(&s, 2);
+    let v = hex_word(s.check_bytes(1), off);
+    push_u64_string(&mut s, v);
     1
+}
+
+/// Decodes the hex on top into a userdata pushed above it, and its
+/// records into the slots table at `slots`: false, with nothing pushed,
+/// for what is not hex.
+fn add_page_slots(s: &mut Stack<'_>, slots: c_int, cursor: u64, chunks: u64, size: usize) -> bool {
+    let (held, mut above) = s.split();
+    if !hex_decode_push(&mut above, held.to_bytes(-1).unwrap_or_default()) {
+        return false;
+    }
+    let (data, mut above) = above.split();
+    let data = data.userdata(-1).unwrap_or_default();
+    split_page_slots(&mut above, slots, data, cursor, chunks, size);
+    true
 }
 
 /// `shirudo.fixed_records(pages, size)`: the records of every page by
 /// their absolute index, from each page's cursor.
 unsafe extern "C-unwind" fn fixed_records(l: *mut LuaState) -> c_int {
-    // SAFETY: the function's state.
-    unsafe {
-        luaL_checktype(l, 1, LUA_TTABLE);
-        let size = check_c_int(l, 2);
-        if size <= 0 {
-            luaL_error(l, c"invalid slot size".as_ptr());
+    // SAFETY: as in slot_u8().
+    let mut s = unsafe { Stack::from_raw(l) };
+    s.check_table(1);
+    let size = check_c_int(&s, 2);
+    let Some(size) = usize::try_from(size).ok().filter(|&size| size > 0) else {
+        s.error(c"invalid slot size");
+    };
+    s.new_table();
+    let slots = s.top();
+    let pages = c_int::try_from(s.length(1)).unwrap_or(c_int::MAX);
+    for i in 1..=pages {
+        s.raw_get_index(1, i);
+        if s.type_of(-1) != LuaType::Table {
+            s.pop(1);
+            continue;
         }
-        let pages = absindex(l, 1);
-        lua_newtable(l);
-        let slots = absindex(l, -1);
-        let n_pages = lua_objlen(l, pages);
-        for i in 1..=n_pages {
-            lua_rawgeti(l, pages, i as c_int);
-            if lua_type(l, -1) != LUA_TTABLE {
-                lua_pop(l, 1);
-                continue;
-            }
-            let cursor = page_u64(l, -1, c"cursor");
-            let chunks = page_u64(l, -1, c"chunks");
-            lua_getfield(l, -1, c"data_hex".as_ptr());
-            let Some(hex) = to_bytes(l, -1) else {
-                lua_pop(l, 2);
-                continue;
-            };
-            let Some((data, len)) = hex_decode_push(l, hex) else {
-                lua_pop(l, 2);
-                luaL_error(l, c"invalid page data_hex".as_ptr());
-            };
-            split_page_slots(l, slots, data, len, cursor, chunks, size as usize);
-            lua_pop(l, 3);
+        let cursor = page_u64(&mut s, -1, c"cursor");
+        let chunks = page_u64(&mut s, -1, c"chunks");
+        s.get_field(-1, c"data_hex");
+        if !is_text(s.type_of(-1)) {
+            s.pop(2);
+            continue;
         }
+        if !add_page_slots(&mut s, slots, cursor, chunks, size) {
+            s.pop(2);
+            s.error(c"invalid page data_hex");
+        }
+        s.pop(3);
     }
     1
 }
