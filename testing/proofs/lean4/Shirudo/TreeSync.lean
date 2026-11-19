@@ -70,7 +70,7 @@ theorems. `Assumptions` states what the code cannot show.
 The model also assumes what review of the C shows: only sync writes these
 files, which the seal ensures; a write is whole or absent, as
 `seal::write_file()` renames and `append_line()` drops a line it did not
-finish, and `tree_outcome_append()` appends the same way, with every reader
+finish, and `outcome_append()` appends the same way, with every reader
 of the record skipping a last line without its newline; syncs run one at a
 time under the BPM lock; the unlink of
 `pending.json`, whose result sync ignores, succeeds; and an extend with its
@@ -145,13 +145,13 @@ structure State (T M D : Type) where
   manifest : Option M
   headSeq : Int
 
-/-- A line `tree_event_append()` adds to the tree eventlog. -/
+/-- A line `event_append()` adds to the tree eventlog. -/
 structure Line (D : Type) where
   seq : Int
   digest : D
   root : D
 
-/-- A line `tree_outcome_append()` adds to the outcomes record: the
+/-- A line `outcome_append()` adds to the outcomes record: the
 operation's number, whether its selector matched, and the projection root
 after it. `matched` is outcome 1 or 3, which the install's answer tells
 apart and no write of the model depends on, and its absence outcome 2. The
@@ -173,10 +173,10 @@ structure Node (T M I D : Type) where
   measured : List (Int × D)
   outcomes : List (OLine D)
 
-/-- The writes of a sync, each atomic: `tree_pending_write()`, the extend
-and eventlog record of `tree_measure_operation()`, `tree_event_append()`,
-`tree_outcome_append()`, `tree_state_write()`, the unlink of `pending.json`
-and `tree_outcomes_resume()`, which keeps the first `k` lines. -/
+/-- The writes of a sync, each atomic: `pending_write()`, the extend and
+eventlog record of `tree_measure_operation()`, `event_append()`,
+`outcome_append()`, `state_write()`, the unlink of `pending.json` and
+`outcomes_resume()`, which keeps the first `k` lines. -/
 inductive Write (T M I D : Type) where
   | pending (o : Op I D)
   | measure (seq : Int) (d : D)
@@ -387,7 +387,7 @@ theorem along_one {P : Node T M I D → Prop}
 section replay
 variable [DecidableEq D] (H : D → D → D) (init : D)
 
-/-- The loop of `tree_event_replay()`, from the previous line's sequence
+/-- The loop of `event_replay()`, from the previous line's sequence
 number and the chain: each line above the one before, and the root it
 records the chain. -/
 def replayFrom : Int → D → List (Line D) → Option (Int × D)
@@ -396,13 +396,13 @@ def replayFrom : Int → D → List (Line D) → Option (Int × D)
     if s < l.seq ∧ l.root = H c l.digest then replayFrom l.seq (H c l.digest) ls
     else none
 
-/-- What `tree_event_replay()` returns: `-ENOENT`, `-EINVAL` or the root. -/
+/-- What `event_replay()` returns: `-ENOENT`, `-EINVAL` or the root. -/
 inductive Replay (D : Type) where
   | missing
   | bad
   | ok (root : D)
 
-/-- `tree_event_replay()`. sync never writes an empty tree eventlog, and
+/-- `event_replay()`. sync never writes an empty tree eventlog, and
 `append_line()` drops a line an append did not finish, so the lines it
 appended are what the file holds. -/
 def replay : List (Line D) → Replay D
@@ -1998,7 +1998,7 @@ theorem state_is_fold {Signed : Pub T M I D → M → Prop}
   · exact Or.inl hc
   · exact Or.inr ⟨p, L0, hp, hlt, hl, hroot, hbelow⟩
 
-/-- `tree_event_replay()` never refuses the tree eventlog of a reachable
+/-- `event_replay()` never refuses the tree eventlog of a reachable
 node, so recovery never fails on it. -/
 theorem replay_not_bad {Signed : Pub T M I D → M → Prop}
     (ha : Assumptions H init Signed)

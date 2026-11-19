@@ -140,7 +140,7 @@ print(len(lines), last["seq"], last["outcome"])
 ' "$OUTCOMES"
 }
 
-# Hold the lock tree_event_append() takes, so that a sync stops where it
+# Hold the lock event_append() takes, so that a sync stops where it
 # appends an operation's line: after the register extend, before the
 # outcomes line and the state.
 hold_tree_eventlog()

@@ -10,8 +10,8 @@ use std::os::fd::{AsFd, BorrowedFd};
 use std::sync::OnceLock;
 
 use super::{
-    OUTCOME_LINE_MAX, Outcomes, TreeState, event_replay, eventlog_matches_at, kconfig_read,
-    outcome_emit, outcome_parse, outcome_valid, state_read,
+    OUTCOME_LINE_MAX, Outcomes, event_replay_at, eventlog_matches_at, kconfig_read, outcome_emit,
+    outcome_parse, outcome_valid, state_read_at,
 };
 
 use crate::util::bpm_tree::{MAX_LABELS, TreeKv, TreeSelector, TreeSelectorKv};
@@ -25,19 +25,11 @@ use crate::fuzzing::{fuzz_target, input_file};
 /// record, follows the line before it and is written again as a line it
 /// takes the same. It aborts where one does not hold.
 fn check_file(path: &CStr, fd: BorrowedFd<'_>, size: usize) {
-    let mut state = TreeState::zeroed();
-    let mut root = [0u8; 32];
-
-    // SAFETY: a C string, and rooms for a state and 32 bytes.
-    let (rc, ret) = unsafe {
-        (
-            state_read(path.as_ptr(), &mut state),
-            event_replay(path.as_ptr(), root.as_mut_ptr()),
-        )
-    };
-    let held = match eventlog_matches_at(path, &state, rc) {
-        Ok((again, matches)) => ret == 0 && again == root && !(rc != 0 && matches),
-        Err(err) => err == ret,
+    let state = state_read_at(path);
+    let replay = event_replay_at(path);
+    let held = match eventlog_matches_at(path, state.as_ref().ok()) {
+        Ok((again, matches)) => replay == Ok(again) && !(state.is_err() && matches),
+        Err(err) => replay == Err(err),
     };
     if !held {
         std::process::abort();

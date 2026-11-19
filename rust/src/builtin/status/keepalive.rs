@@ -13,7 +13,7 @@ use super::{Report, hex, print, strerr, version_id};
 use crate::errno::EBADMSG;
 use crate::util::bpm_tree::{TreeState, build_limit};
 use crate::util::bpm_tree_state::{
-    eventlog_matches, tree_outcomes_read, tree_pending_exists, tree_state_read, tree_status_path,
+    eventlog_matches, outcomes_read, state_read, tree_pending_exists, tree_status_path,
 };
 use crate::util::chain::{self, MeasuredUpatch};
 use crate::util::conditions::{self, CONDITIONS_MAX, Condition, ConditionsInput};
@@ -50,7 +50,6 @@ fn log_err(text: &[u8]) {
 struct View {
     base_seq: i64,
     outcomes_rc: c_int,
-    codes: [u8; MASK_OPS],
     base_root: Vec<u8>,
     mask: Vec<u8>,
     log_mismatch: bool,
@@ -64,7 +63,6 @@ impl View {
     /// segment's base into the segments before it, whose outcomes the
     /// record keeps from seq 1.
     fn window(&mut self, s: &TreeState) {
-        self.codes = [0; MASK_OPS];
         if s.last_seq < 0 || s.last_seq > s.head_seq {
             self.outcomes_rc = -EBADMSG;
             return;
@@ -74,24 +72,18 @@ impl View {
             self.outcomes_rc = -EBADMSG;
             return;
         }
-        let (mut projection, mut history) = ([0u8; 32], [0u8; 32]);
-        // SAFETY: room for the outcomes up to last_seq, at most the
-        // window, and for the two roots.
-        self.outcomes_rc = unsafe {
-            tree_outcomes_read(
-                self.base_seq,
-                s.last_seq,
-                self.codes.as_mut_ptr(),
-                &mut projection,
-                &mut history,
-            )
+        let (mut codes, (projection, _)) = match outcomes_read(self.base_seq, s.last_seq) {
+            Ok(read) => read,
+            Err(err) => {
+                self.outcomes_rc = err;
+                return;
+            }
         };
-        if self.outcomes_rc == 0 {
-            let mut b64 = [0u8; MASK_B64_MAX];
-            let n = (s.head_seq - self.base_seq) as usize;
-            self.outcomes_rc = keepalive::mask(&self.codes[..n], &mut b64);
-            self.mask = crate::text::cstr(&b64).to_vec();
-        }
+        let mut b64 = [0u8; MASK_B64_MAX];
+        // The operations past last_seq up to the head have no outcome yet.
+        codes.resize((s.head_seq - self.base_seq) as usize, 0);
+        self.outcomes_rc = keepalive::mask(&codes, &mut b64);
+        self.mask = crate::text::cstr(&b64).to_vec();
         if self.outcomes_rc == 0 {
             self.base_root = hex(&projection);
         }
@@ -136,26 +128,25 @@ impl View {
 }
 
 impl SnapshotOps for View {
-    fn read_state(&mut self, state: &mut TreeState) -> c_int {
-        // SAFETY: room for a state.
-        unsafe { tree_state_read(state) }
+    fn read_state(&mut self) -> Result<TreeState, c_int> {
+        state_read()
     }
 
     fn pending(&mut self) -> bool {
         tree_pending_exists()
     }
 
-    fn collect(&mut self, state: &TreeState, state_rc: c_int) -> c_int {
-        if state_rc == 0 {
-            self.window(state);
+    fn collect(&mut self, state: Option<&TreeState>) -> c_int {
+        if let Some(s) = state {
+            self.window(s);
         }
         // eventlog_matches_state of the status document, false only.
-        self.log_mismatch = matches!(eventlog_matches(state, state_rc), Ok((_, false)));
+        self.log_mismatch = matches!(eventlog_matches(state), Ok((_, false)));
         self.loaded_set()
     }
 }
 
-fn flags(r: &Report, v: &View, state_rc: c_int) -> u32 {
+fn flags(r: &Report, v: &View, state_read: bool) -> u32 {
     let c = &r.cst;
     let mut flags = 0;
     if c.rebound {
@@ -164,7 +155,7 @@ fn flags(r: &Report, v: &View, state_rc: c_int) -> u32 {
     if c.logged && !c.init.initrd {
         flags |= BOUND_LATE;
     }
-    if v.log_mismatch || (state_rc == 0 && v.outcomes_rc != 0) {
+    if v.log_mismatch || (state_read && v.outcomes_rc != 0) {
         flags |= TREE_LOG_MISMATCH;
     }
     if r.tamper.is_err() {
@@ -182,7 +173,6 @@ fn body(r: &Report, cin: &ConditionsInput, config_root: Option<&[u8]>) -> Result
     let mut v = View {
         base_seq: 0,
         outcomes_rc: 0,
-        codes: [0; MASK_OPS],
         base_root: Vec::new(),
         mask: Vec::new(),
         log_mismatch: false,
@@ -190,13 +180,9 @@ fn body(r: &Report, cin: &ConditionsInput, config_root: Option<&[u8]>) -> Result
         count: 0,
         not_ok: 0,
     };
-    let mut state = TreeState::zeroed();
-    let (mut state_rc, mut flags_read) = (0, 0);
-    let ret = keepalive::snapshot(&mut v, &mut state, &mut state_rc, &mut flags_read);
-    if ret != 0 {
+    let snap = keepalive::snapshot(&mut v).inspect_err(|&ret| {
         log_err(&[b"status: read the keepalive inputs: ", strerr(-ret)].concat());
-        return Err(ret);
-    }
+    })?;
     // SAFETY: an all-zero sysinfo is an empty one.
     let mut si: Box<Sysinfo> = Box::new(unsafe { core::mem::zeroed() });
     sysinfo::gather(&mut si);
@@ -208,7 +194,7 @@ fn body(r: &Report, cin: &ConditionsInput, config_root: Option<&[u8]>) -> Result
     let text = |b: &[u8]| crate::text::cstr(b).to_vec();
     let (boot_id, kernel_release) = (text(&si.boot_id), text(&si.kernel_release));
     let (id, version, root) = (text(&img.id), text(&img.version), text(&img.root));
-    let tree = (state_rc == 0).then(|| Tree {
+    let tree = snap.state.as_ref().ok().map(|state| Tree {
         tree_id: Some(crate::text::cstr(&state.tree_id)),
         generation: state.generation as u64,
         base_seq: v.base_seq as u64,
@@ -227,7 +213,7 @@ fn body(r: &Report, cin: &ConditionsInput, config_root: Option<&[u8]>) -> Result
         image_root: Some(&root),
         verdict: Some(conditions::status_verdict(cin).to_bytes()),
         cond: keepalive::cond(&conds[..nc]),
-        flags: flags_read | flags(r, &v, state_rc),
+        flags: snap.flags | flags(r, &v, snap.state.is_ok()),
         tamper: r.tamper.as_ref().ok().map(|t| &t.count),
         integrity: r.integrity.as_ref().ok().map(|t| &t.count),
         tree,

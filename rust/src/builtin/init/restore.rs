@@ -14,12 +14,10 @@ use crate::builtin::upatch::loader;
 use crate::errno::{EACCES, EEXIST, EINVAL, ENAMETOOLONG, ENODEV, ENOENT, ENOSPC, EPERM};
 use crate::sys::libc::explicit_bzero;
 use crate::text::{cstr, name_has_suffix};
-use crate::util::bpm_tree::TreeState;
-use crate::util::bpm_tree_state::tree_state_read;
+use crate::util::bpm_tree_state::state_read;
 use crate::util::chain::{self, ChainInitInfo, MeasuredUpatch};
 use crate::util::config::{self, Config};
 use crate::util::eventlog;
-use crate::util::hex::hex_decode;
 use crate::util::json::JsonEmit;
 use crate::util::keys;
 use crate::util::measured::{MeasuredSet, measured_upatch_of};
@@ -297,24 +295,15 @@ fn append_init_event(
 }
 
 /// The upatch tree's projection root at boot, zero without a tree.
-fn tree_root_at_boot(out: &mut [u8; 32]) -> c_int {
-    // SAFETY: an all-zero state is room for one.
-    let mut s: Box<TreeState> = Box::new(unsafe { mem::zeroed() });
+fn tree_root_at_boot() -> Result<[u8; 32], c_int> {
+    let mut root = [0; 32];
+    let s = match state_read() {
+        Err(err) if err == -ENOENT => return Ok(root),
+        s => s?,
+    };
 
-    out.fill(0);
-    // SAFETY: the state to fill.
-    let mut ret = unsafe { tree_state_read(&mut *s) };
-    if ret == -ENOENT {
-        return 0;
-    }
-    if ret == 0 {
-        // SAFETY: the root, a C string, and room for 32 bytes.
-        ret = unsafe { hex_decode(s.projection_root.as_ptr().cast(), out.as_mut_ptr(), 32) };
-    }
-    if ret != 0 {
-        out.fill(0);
-    }
-    ret
+    crate::util::hex::decode(cstr(&s.projection_root), &mut root)?;
+    Ok(root)
 }
 
 /// The digests the init event is made of, and the event.
@@ -384,15 +373,17 @@ pub(super) fn bind_register(init: &Init, set: &mut [MeasuredUpatch]) -> c_int {
     // init_event = SHA256("shirudo-init\0" || cert_sha256 || set_digest
     //                     || tree_root), the formula the operator's
     // predictor shares (`shirudo attest predict`).
-    let ret = tree_root_at_boot(&mut d.tree_root);
-    if ret != 0 {
-        error(&cat!(
-            "chain: cannot read the upatch tree state ",
-            BPM_TREE_STATE_PATH,
-            ": ",
-            strerr(-ret)
-        ));
-        return ret;
+    match tree_root_at_boot() {
+        Ok(root) => d.tree_root = root,
+        Err(ret) => {
+            error(&cat!(
+                "chain: cannot read the upatch tree state ",
+                BPM_TREE_STATE_PATH,
+                ": ",
+                strerr(-ret)
+            ));
+            return ret;
+        }
     }
     let ret = chain::init_event(
         &d.cert,

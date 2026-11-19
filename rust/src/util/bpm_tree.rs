@@ -150,18 +150,16 @@ pub(crate) struct TreePublication {
     pub(crate) head_seq: i64,
 }
 
-/// `struct tree_pending`.
-#[repr(C)]
-pub struct TreePending {
+/// The operation a sync started, recorded until it is through.
+pub(crate) struct TreePending {
     pub(crate) seq: i64,
     pub(crate) id: Text,
     pub(crate) operation_digest: [u8; 128],
 }
 
-/// `struct tree_state`.
-#[repr(C)]
-pub struct TreeState {
-    pub(crate) schema: c_int,
+/// Where a node is in its tree.
+pub(crate) struct TreeState {
+    pub(crate) schema: i64,
     pub(crate) tree_id: Text,
     pub(crate) generation: i64,
     pub(crate) last_seq: i64,
@@ -172,13 +170,6 @@ pub struct TreeState {
     pub(crate) segment_base_seq: i64,
 }
 
-impl TreeState {
-    pub(crate) fn zeroed() -> Self {
-        // SAFETY: an all-zero state is an empty one.
-        unsafe { mem::zeroed() }
-    }
-}
-
 /// `struct tree_kv`.
 #[repr(C)]
 pub struct TreeKv {
@@ -187,8 +178,6 @@ pub struct TreeKv {
 }
 
 const _: () = assert!(size_of::<TreeKv>() == 512);
-const _: () = assert!(size_of::<TreePending>() == 392);
-const _: () = assert!(size_of::<TreeState>() == 560);
 
 /// What a publisher adds to the operation of an index, into its open
 /// object: the fixes, which no node reads.
@@ -282,6 +271,32 @@ impl Default for TreePublication {
             history_root: [0; 65],
             operations: Vec::new(),
             head_seq: 0,
+        }
+    }
+}
+
+impl Default for TreePending {
+    fn default() -> Self {
+        TreePending {
+            seq: 0,
+            id: [0; STRING_MAX],
+            operation_digest: [0; 128],
+        }
+    }
+}
+
+impl Default for TreeState {
+    fn default() -> Self {
+        TreeState {
+            schema: 0,
+            tree_id: [0; STRING_MAX],
+            generation: 0,
+            last_seq: 0,
+            projection_root: [0; 65],
+            projection_root_tpm: [0; 65],
+            manifest_digest: [0; 128],
+            head_seq: 0,
+            segment_base_seq: 0,
         }
     }
 }

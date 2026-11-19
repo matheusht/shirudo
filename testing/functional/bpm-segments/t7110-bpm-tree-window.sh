@@ -134,7 +134,7 @@ elif flags & (TREE_LOG_MISMATCH | TREE_OP_PENDING | SNAPSHOT_UNSETTLED):
 PY
 }
 
-# Hold the lock tree_event_append() takes, so that a sync stops after an
+# Hold the lock event_append() takes, so that a sync stops after an
 # operation's load and register extend, before its outcomes line.
 hold_tree_eventlog()
 {

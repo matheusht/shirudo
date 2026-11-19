@@ -668,19 +668,24 @@ struct FakeNode {
 const MOVING_FROM: i64 = 100;
 
 impl SnapshotOps for FakeNode {
-    fn read_state(&mut self, state: &mut TreeState) -> c_int {
+    fn read_state(&mut self) -> Result<TreeState, c_int> {
         let read = self.reads;
         self.reads += 1;
-        *state = TreeState::zeroed();
-        state.schema = 1;
-        state.generation = 1;
-        state.head_seq = MASK_OPS as i64;
+        if self.state_rc != 0 {
+            return Err(self.state_rc);
+        }
+        let mut state = TreeState {
+            schema: 1,
+            generation: 1,
+            head_seq: MASK_OPS as i64,
+            ..TreeState::default()
+        };
         state.tree_id[..10].copy_from_slice(b"fleet-base");
         state.last_seq = match self.seqs.last() {
             None => MOVING_FROM + read as i64,
             Some(last) => *self.seqs.get(read).unwrap_or(last),
         };
-        self.state_rc
+        Ok(state)
     }
 
     fn pending(&mut self) -> bool {
@@ -689,19 +694,20 @@ impl SnapshotOps for FakeNode {
         self.pending.get(call).copied().unwrap_or(false)
     }
 
-    fn collect(&mut self, _: &TreeState, _: c_int) -> c_int {
+    fn collect(&mut self, _: Option<&TreeState>) -> c_int {
         self.collects += 1;
         self.collect_ret
     }
 }
 
 /// A snapshot of `node`: its flags and the state it gives.
-fn snapshot_of(node: &mut FakeNode) -> (u32, Box<TreeState>) {
-    let mut state = Box::new(TreeState::zeroed());
-    let (mut state_rc, mut flags) = (1, 0);
-    assert_eq!(snapshot(node, &mut state, &mut state_rc, &mut flags), 0);
-    assert_eq!(state_rc, node.state_rc);
-    (flags, state)
+fn snapshot_of(node: &mut FakeNode) -> (u32, Result<TreeState, c_int>) {
+    let snap = snapshot(node).unwrap();
+    assert_eq!(
+        snap.state.as_ref().err().copied().unwrap_or(0),
+        node.state_rc
+    );
+    (snap.flags, snap.state)
 }
 
 fn node(seqs: &[i64], pending: &[bool]) -> FakeNode {
@@ -717,7 +723,10 @@ fn snapshot_of_a_still_tree_reads_it_twice() {
     let mut n = node(&[7], &[]);
     let (flags, state) = snapshot_of(&mut n);
 
-    assert_eq!((flags, n.reads, n.collects, state.last_seq), (0, 2, 1, 7));
+    assert_eq!(
+        (flags, n.reads, n.collects, state.unwrap().last_seq),
+        (0, 2, 1, 7)
+    );
 }
 
 #[test]
@@ -725,7 +734,10 @@ fn snapshot_tries_again_after_a_state_that_moved() {
     let mut n = node(&[7, 8], &[]);
     let (flags, state) = snapshot_of(&mut n);
 
-    assert_eq!((flags, n.reads, n.collects, state.last_seq), (0, 4, 2, 8));
+    assert_eq!(
+        (flags, n.reads, n.collects, state.unwrap().last_seq),
+        (0, 4, 2, 8)
+    );
 }
 
 #[test]
@@ -737,7 +749,7 @@ fn snapshot_gives_up_on_a_state_that_keeps_moving() {
     assert_eq!((n.reads, n.collects), (2 * SNAPSHOT_TRIES, SNAPSHOT_TRIES));
     // The first read of the last try is what the body sends.
     assert_eq!(
-        state.last_seq,
+        state.unwrap().last_seq,
         MOVING_FROM + 2 * (SNAPSHOT_TRIES as i64 - 1)
     );
 }
@@ -784,12 +796,6 @@ fn snapshot_stops_at_a_failed_collect() {
         collect_ret: -crate::errno::ENOMEM,
         ..FakeNode::default()
     };
-    let mut state = Box::new(TreeState::zeroed());
-    let (mut state_rc, mut flags) = (0, 0);
-
-    assert_eq!(
-        snapshot(&mut n, &mut state, &mut state_rc, &mut flags),
-        -crate::errno::ENOMEM
-    );
-    assert_eq!((n.reads, flags), (1, 0));
+    assert_eq!(snapshot(&mut n).err(), Some(-crate::errno::ENOMEM));
+    assert_eq!(n.reads, 1);
 }

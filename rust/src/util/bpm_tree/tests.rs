@@ -385,10 +385,12 @@ fn segment_names_its_base() {
 }
 
 fn state(generation: i64, last_seq: i64, head_seq: i64) -> TreeState {
-    let mut s = TreeState::zeroed();
-    s.generation = generation;
-    s.last_seq = last_seq;
-    s.head_seq = head_seq;
+    let mut s = TreeState {
+        generation,
+        last_seq,
+        head_seq,
+        ..TreeState::default()
+    };
     set(&mut s.tree_id, "t");
     set(&mut s.manifest_digest, "m5");
     s

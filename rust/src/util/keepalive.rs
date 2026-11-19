@@ -278,18 +278,19 @@ pub(crate) fn body(i: &Input<'_>) -> Result<Vec<u8>, c_int> {
 }
 
 /// The reads of a snapshot: the tree state, whether an operation is
-/// pending, and what follows the state, the outcomes up to its last_seq
-/// and the loaded set, which fails the snapshot with a nonzero return.
+/// pending, and what follows the state, None where it could not be read:
+/// the outcomes up to its last_seq and the loaded set, which fails the
+/// snapshot with a nonzero return.
 pub(crate) trait SnapshotOps {
-    fn read_state(&mut self, state: &mut TreeState) -> c_int;
+    fn read_state(&mut self) -> Result<TreeState, c_int>;
     fn pending(&mut self) -> bool;
-    fn collect(&mut self, state: &TreeState, state_rc: c_int) -> c_int;
+    fn collect(&mut self, state: Option<&TreeState>) -> c_int;
 }
 
-fn state_same(a: &TreeState, a_rc: c_int, b: &TreeState, b_rc: c_int) -> bool {
-    if a_rc != 0 || b_rc != 0 {
-        return a_rc == b_rc;
-    }
+fn state_same(a: &Result<TreeState, c_int>, b: &Result<TreeState, c_int>) -> bool {
+    let (Ok(a), Ok(b)) = (a, b) else {
+        return a.as_ref().err() == b.as_ref().err();
+    };
     a.schema == b.schema
         && a.generation == b.generation
         && a.last_seq == b.last_seq
@@ -301,43 +302,44 @@ fn state_same(a: &TreeState, a_rc: c_int, b: &TreeState, b_rc: c_int) -> bool {
         && cstr(&a.manifest_digest) == cstr(&b.manifest_digest)
 }
 
+/// One point of the tree and the loaded set: the first state read of the
+/// last try, and TREE_OP_PENDING when that try saw an operation pending
+/// and SNAPSHOT_UNSETTLED when the tries ran out.
+pub(crate) struct Snapshot {
+    pub(crate) state: Result<TreeState, c_int>,
+    pub(crate) flags: u32,
+}
+
 /// Reads the tree keys and the loaded set of one point without the tree
 /// lock, which a sync holds for minutes: the state, whether an operation
 /// is pending, what collect() reads, pending again and the state again,
 /// over again while the second state differs from the first, at most
-/// SNAPSHOT_TRIES times. `state` and `state_rc` are the first read of
-/// the last try and its return; TREE_OP_PENDING goes into `flags` when
-/// that try saw an operation pending and SNAPSHOT_UNSETTLED when the
-/// tries ran out. 0, or what collect() returned.
-pub(crate) fn snapshot(
-    ops: &mut dyn SnapshotOps,
-    state: &mut TreeState,
-    state_rc: &mut c_int,
-    flags: &mut u32,
-) -> c_int {
-    let (mut pending, mut settled) = (false, false);
-    for _ in 0..SNAPSHOT_TRIES {
-        *state_rc = ops.read_state(state);
-        pending = ops.pending();
-        let ret = ops.collect(state, *state_rc);
+/// SNAPSHOT_TRIES times. The snapshot, or what collect() returned.
+pub(crate) fn snapshot(ops: &mut dyn SnapshotOps) -> Result<Snapshot, c_int> {
+    let mut tries = 0;
+
+    loop {
+        let state = ops.read_state();
+        let mut pending = ops.pending();
+        let ret = ops.collect(state.as_ref().ok());
         if ret != 0 {
-            return ret;
+            return Err(ret);
         }
         pending = ops.pending() || pending;
-        let mut again = TreeState::zeroed();
-        let again_rc = ops.read_state(&mut again);
-        settled = state_same(state, *state_rc, &again, again_rc);
-        if settled {
-            break;
+        let again = ops.read_state();
+        let settled = state_same(&state, &again);
+        tries += 1;
+        if settled || tries == SNAPSHOT_TRIES {
+            let mut flags = 0;
+            if pending {
+                flags |= TREE_OP_PENDING;
+            }
+            if !settled {
+                flags |= SNAPSHOT_UNSETTLED;
+            }
+            return Ok(Snapshot { state, flags });
         }
     }
-    if pending {
-        *flags |= TREE_OP_PENDING;
-    }
-    if !settled {
-        *flags |= SNAPSHOT_UNSETTLED;
-    }
-    0
 }
 
 /// `struct keepalive_input`.

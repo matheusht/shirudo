@@ -20,14 +20,13 @@ use crate::text::{cstr, strscpy};
 use crate::util::bpm_oci::Client;
 use crate::util::bpm_package::fetch_publication;
 use crate::util::bpm_tree::{
-    MAX_JOIN_OPS, MAX_WALK_OPS, TreeOperation, TreePending, TreePublication, TreeState,
-    digest_bytes, history_at, publication_follows, publication_verify, segment_precedes,
-    walk_within,
+    MAX_JOIN_OPS, MAX_WALK_OPS, TreeOperation, TreePublication, TreeState, digest_bytes,
+    history_at, publication_follows, publication_verify, segment_precedes, walk_within,
 };
 use crate::util::bpm_tree_state::{
-    OUTCOME_APPLIED, OUTCOME_MODULE_ABSENT, OUTCOME_UNMATCHED, outcome_append, outcome_roots,
-    outcomes_resume, selector_matches, tree_configured, tree_event_append, tree_event_replay,
-    tree_pending_read, tree_pending_write, tree_state_read, tree_state_write,
+    OUTCOME_APPLIED, OUTCOME_MODULE_ABSENT, OUTCOME_UNMATCHED, configured, event_append,
+    event_replay, outcome_append, outcome_roots, outcomes_resume, pending_read, pending_write,
+    selector_matches, state_read, state_write,
 };
 use crate::util::chain::{
     chain_bound, chain_extend, chain_tree_event, history_step, memneq_explicit, sha256_2,
@@ -241,15 +240,10 @@ fn recover_pending(
     state: &mut TreeState,
     history_root: &mut [u8; 32],
 ) -> Result {
-    // SAFETY: an all-zero record is an empty one.
-    let mut pending: TreePending = unsafe { core::mem::zeroed() };
-
-    // SAFETY: room for the record.
-    match unsafe { tree_pending_read(&mut pending) } {
-        0 => {}
-        err if err == -ENOENT => return Ok(()),
-        err => return Err(err),
-    }
+    let pending = match pending_read() {
+        Err(err) if err == -ENOENT => return Ok(()),
+        pending => pending?,
+    };
     let ops = &p.operations;
     let Some(op) = ops.iter().find(|op| {
         op.seq == pending.seq
@@ -269,18 +263,16 @@ fn recover_pending(
         return Err(-EINVAL);
     };
     let next = hash2(&previous, &digest)?;
-    let mut replay = [0; 32];
     let (mut applied, mut event_present) = (false, false);
-    // SAFETY: room for the replayed root.
-    match unsafe { tree_event_replay(replay.as_mut_ptr()) } {
-        0 if !memneq_explicit(&replay, &next) => {
+    match event_replay() {
+        Ok(replay) if !memneq_explicit(&replay, &next) => {
             applied = true;
             event_present = true;
         }
-        0 if memneq_explicit(&replay, &previous) => return Err(-EKEYREJECTED),
-        0 => {}
-        err if err == -ENOENT => {}
-        _ => return Err(-EKEYREJECTED),
+        Ok(replay) if memneq_explicit(&replay, &previous) => return Err(-EKEYREJECTED),
+        Ok(_) => {}
+        Err(err) if err == -ENOENT => {}
+        Err(_) => return Err(-EKEYREJECTED),
     }
     if !applied {
         match eventlog::tree_op_measured(op.seq, cstr(&op.operation_digest)) {
@@ -291,10 +283,7 @@ fn recover_pending(
         }
     }
     if !event_present {
-        // SAFETY: the operation's NUL-terminated digest and the root.
-        status(unsafe {
-            tree_event_append(op.seq, op.operation_digest.as_ptr().cast(), next.as_ptr())
-        })?;
+        event_append(op.seq, cstr(&op.operation_digest), &next)?;
     }
     // The operations between the cursor and the pending one had no
     // match in the sync that stopped: it would have committed the cursor
@@ -315,8 +304,7 @@ fn recover_pending(
     hex_into(&next, &mut state.projection_root);
     hex_into(&next, &mut state.projection_root_tpm);
     state.last_seq = op.seq;
-    // SAFETY: the state.
-    status(unsafe { tree_state_write(state) })?;
+    state_write(state)?;
     status_update(cstr(&op.id), absent)?;
     remove(TREE_PENDING_PATH);
     Ok(())
@@ -567,14 +555,9 @@ impl Sync {
         if self.dry_run {
             return Ok(());
         }
-        // SAFETY: the state.
-        match unsafe { tree_state_write(st) } {
-            0 => Ok(()),
-            ret => {
-                report_error(b"tree_state_commit_accept", None, ret);
-                Err(ret)
-            }
-        }
+        state_write(st).inspect_err(|&ret| {
+            report_error(b"tree_state_commit_accept", None, ret);
+        })
     }
 
     /// Applies one selected operation: recorded as pending, its artifact
@@ -591,9 +574,7 @@ impl Sync {
         let Some(digest) = digest_bytes(&op.operation_digest) else {
             return failed(b"operation_digest_parse", -EINVAL);
         };
-        // SAFETY: the operation.
-        let ret = unsafe { tree_pending_write(op) };
-        if ret != 0 {
+        if let Err(ret) = pending_write(op) {
             return failed(b"pending_write", ret);
         }
         let artifact = match super::fetch::tree_artifact(op) {
@@ -626,11 +607,7 @@ impl Sync {
         let st = &mut self.state;
         hex_into(&next, &mut st.projection_root);
         hex_into(&next, &mut st.projection_root_tpm);
-        // SAFETY: the operation's NUL-terminated digest and the root.
-        let ret = unsafe {
-            tree_event_append(op.seq, op.operation_digest.as_ptr().cast(), next.as_ptr())
-        };
-        if ret != 0 {
+        if let Err(ret) = event_append(op.seq, cstr(&op.operation_digest), &next) {
             return failed(b"tree_event_append", ret);
         }
         let outcome = if skipped_module {
@@ -643,9 +620,7 @@ impl Sync {
         }
         st.last_seq = op.seq;
         self.counts.applied += 1;
-        // SAFETY: the state.
-        let ret = unsafe { tree_state_write(st) };
-        if ret != 0 {
+        if let Err(ret) = state_write(st) {
             return failed(b"tree_state_commit", ret);
         }
         if let Err(err) = status_update(id, skipped_module) {
@@ -812,18 +787,20 @@ fn sync(dry_run: bool, report: Option<&[u8]>) -> Result {
         cfg => cfg?,
     };
     let mut sync = Sync {
-        state: TreeState::zeroed(),
+        state: TreeState::default(),
         have_state: false,
         history_root: [0; 32],
         dry_run,
         dry_seq: 0,
         counts: Counts::default(),
     };
-    // SAFETY: room for the state.
-    match unsafe { tree_state_read(&mut sync.state) } {
-        0 => sync.have_state = true,
-        err if err == -ENOENT => {}
-        err => return Err(err),
+    match state_read() {
+        Ok(state) => {
+            sync.state = state;
+            sync.have_state = true;
+        }
+        Err(err) if err == -ENOENT => {}
+        Err(err) => return Err(err),
     }
     let mut src = Source::open(&cfg)?;
     let against = if src.trusted.is_some() {
@@ -861,12 +838,9 @@ fn sync(dry_run: bool, report: Option<&[u8]>) -> Result {
     sync.walk_forward(&mut src, &walk, p, &tag_digest)?;
     // A run of operations without a match at the end moved the cursor.
     if !dry_run {
-        // SAFETY: the state.
-        let ret = unsafe { tree_state_write(&sync.state) };
-        if ret != 0 {
+        state_write(&sync.state).inspect_err(|&ret| {
             report_error(b"tree_state_commit_final", None, ret);
-            return Err(ret);
-        }
+        })?;
     } else {
         sync.state.last_seq = sync.dry_seq;
     }
@@ -878,7 +852,7 @@ fn sync(dry_run: bool, report: Option<&[u8]>) -> Result {
 /// `shirudo bpm tree sync`, which takes the bpm lock only once a tree is
 /// configured, so that a node without one needs no writable state.
 pub(super) fn sync_cmd(dry_run: bool, report: Option<&[u8]>) -> c_int {
-    if !tree_configured() {
+    if !configured() {
         return 0;
     }
     if !curl_ready() {

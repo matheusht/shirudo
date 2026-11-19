@@ -8,8 +8,9 @@
 
 use core::ffi::{CStr, c_char, c_int};
 use core::ptr;
-use std::ffi::CString;
+use std::ffi::{CString, OsStr};
 use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileExt;
 
 use crate::errno::{E2BIG, EBADMSG, EINTR, EINVAL, EIO, ENAMETOOLONG, ENOENT, ENOSPC, text};
@@ -23,11 +24,10 @@ use crate::sys::libc::{
 use crate::text::{cstr, find, strscpy};
 use crate::util::bpm_tree::{
     MAX_KCONFIG, MAX_LABELS, STRING_MAX, TreeKv, TreeOperation, TreePending, TreeSelector,
-    TreeSelectorKv, TreeState,
+    TreeSelectorKv, TreeState, digest_bytes,
 };
 use crate::util::crypto_openssl::sha256_into;
-use crate::util::gzip;
-use crate::util::hex::{self, hex_decode, hex_encode, sha256_digest_decode};
+use crate::util::hex;
 use crate::util::image_config;
 use crate::util::io::lock_exclusive;
 use crate::util::io::{read, read_text_line};
@@ -35,7 +35,7 @@ use crate::util::json::{JsonEmit, JsonField, MAX_BYTES, parse_schema};
 use crate::util::kernel_build_id::read_build_id;
 use crate::util::kernel_release::prefix_matches;
 use crate::util::seal;
-use crate::util::upatch::upatch_name_valid;
+use crate::util::{gzip, upatch};
 
 /// The open-addressed index of a selector's kconfig keys.
 const HASH_SIZE: usize = 128;
@@ -140,11 +140,16 @@ fn kv_value<'a>(v: &'a [TreeKv], key: &[u8]) -> Option<&'a [u8]> {
         .map(|kv| cstr(&kv.value))
 }
 
+/// Whether access(2) lets this process read `path`.
+fn readable(path: &CStr) -> bool {
+    // SAFETY: a C string and a mode.
+    unsafe { access(path.as_ptr(), R_OK) == 0 }
+}
+
 /// Whether a tree is configured, in the config image when one is active.
-fn configured() -> bool {
+pub(crate) fn configured() -> bool {
     if !image_config::active() {
-        // SAFETY: a C string and a mode.
-        return unsafe { access(TREE_ETC_PATH.as_ptr(), R_OK) } == 0;
+        return readable(TREE_ETC_PATH);
     }
     let fd = image_config::open(image_config::TREE_CONF, O_RDONLY);
 
@@ -540,17 +545,14 @@ pub(crate) fn selector_matches(s: &TreeSelector) -> Result<bool, c_int> {
 
 /// A record as its document holds it: the document's schema version
 /// apart.
-struct Versioned<'r, T> {
+struct Versioned<T> {
     schema: i64,
-    record: &'r mut T,
+    record: T,
 }
 
 /// Whether `hex` is exactly 64 hex digits: a SHA-256 digest.
 fn hex32_valid(hex: &[u8; 65]) -> bool {
-    let mut raw = [0u8; 32];
-
-    // SAFETY: a C string, and room for 32 bytes.
-    unsafe { hex_decode(hex.as_ptr().cast(), raw.as_mut_ptr(), raw.len()) == 0 }
+    hex::decode(cstr(hex), &mut [0; 32]).is_ok()
 }
 
 /// Whether the 32 bytes differ, in a time that does not depend on where:
@@ -565,21 +567,12 @@ fn differ(a: &[u8; 32], b: &[u8; 32]) -> bool {
     neq != 0
 }
 
-/// The pending record in the `len` bytes at `body`: 0, or -EINVAL for one
-/// that lacks its schema, sequence number, upatch name or digest.
-///
-/// # Safety
-///
-/// `body` holds `len` bytes, and `out` is room for a record.
-unsafe fn pending_parse(body: *const c_char, len: usize, out: *mut TreePending) -> c_int {
-    // SAFETY: the caller's room, all of whose bits zeroed are a record.
-    let out = unsafe {
-        out.write_bytes(0, 1);
-        &mut *out
-    };
+/// The pending record `body` holds: -EINVAL for one that lacks its
+/// schema, sequence number, upatch name or digest.
+fn pending_parse(body: &[u8]) -> Result<TreePending, c_int> {
     let mut pending = Versioned {
         schema: 0,
-        record: out,
+        record: TreePending::default(),
     };
     let fields = [
         JsonField::int(c"schema", |p: &mut Versioned<TreePending>| &mut p.schema),
@@ -587,47 +580,26 @@ unsafe fn pending_parse(body: *const c_char, len: usize, out: *mut TreePending) 
         JsonField::string(c"id", |p| &mut p.record.id),
         JsonField::string(c"operation_digest", |p| &mut p.record.operation_digest),
     ];
-    // SAFETY: the caller's bytes.
-    let body = unsafe { ffi::slice(body.cast(), len) };
-    let mut ret = parse_schema(body, &fields, &mut pending).err().unwrap_or(0);
-    let Versioned {
-        schema,
-        record: out,
-    } = pending;
 
-    if ret == 0 {
-        let mut digest = [0u8; 32];
-        // SAFETY: the record's C strings, and room for a digest.
-        let bad = unsafe {
-            schema != 1
-                || out.seq <= 0
-                || !upatch_name_valid(out.id.as_ptr().cast())
-                || sha256_digest_decode(out.operation_digest.as_ptr().cast(), digest.as_mut_ptr())
-                    != 0
-        };
-        if bad {
-            ret = -EINVAL;
-        }
+    parse_schema(body, &fields, &mut pending)?;
+    let Versioned { schema, record } = pending;
+    if schema != 1
+        || record.seq <= 0
+        || !upatch::name_valid(Some(cstr(&record.id)))
+        || digest_bytes(&record.operation_digest).is_none()
+    {
+        return Err(-EINVAL);
     }
-    ret
+    Ok(record)
 }
 
 /// The pending record, -ENOENT for none.
-///
-/// # Safety
-///
-/// `out` is room for a record.
-unsafe fn pending_read(out: *mut TreePending) -> c_int {
-    let body = match read(&tree_path(PENDING), 64 * 1024) {
-        Ok(body) => body,
-        Err(err) => return err,
-    };
-    // SAFETY: the record's bytes, and the caller's room.
-    unsafe { pending_parse(body.as_ptr().cast(), body.len(), out) }
+pub(crate) fn pending_read() -> Result<TreePending, c_int> {
+    pending_parse(&read(&tree_path(PENDING), 64 * 1024)?)
 }
 
-/// The operation a sync starts recorded as pending: 0 or -errno.
-fn pending_write(op: &TreeOperation) -> c_int {
+/// The operation a sync starts recorded as pending.
+pub(crate) fn pending_write(op: &TreeOperation) -> Result<(), c_int> {
     let mut buf = [0u8; 1024];
     let mut e = JsonEmit::fixed(&mut buf);
 
@@ -638,34 +610,18 @@ fn pending_write(op: &TreeOperation) -> c_int {
     e.kv_string(b"operation_digest", cstr(&op.operation_digest));
     e.obj_close();
     if e.err() != 0 {
-        return e.err();
+        return Err(e.err());
     }
-    seal::mkdir_p(tree_path(b"").to_bytes(), 0o700)
-        .and_then(|()| seal::write_file(tree_path(PENDING).to_bytes(), e.output(), 0o600))
-        .err()
-        .unwrap_or(0)
+    seal::mkdir_p(tree_path(b"").to_bytes(), 0o700)?;
+    seal::write_file(tree_path(PENDING).to_bytes(), e.output(), 0o600)
 }
 
-/// The tree state at `path` into `out`, which keeps what was read of it
-/// on an error: 0, or -errno.
-///
-/// # Safety
-///
-/// `path` is a C string, and `out` room for a state.
-unsafe fn state_read(path: *const c_char, out: *mut TreeState) -> c_int {
-    // SAFETY: the caller's room, all of whose bits zeroed are a state.
-    let out = unsafe {
-        out.write_bytes(0, 1);
-        &mut *out
-    };
-    // SAFETY: the caller's C string.
-    let body = match read(unsafe { CStr::from_ptr(path) }, MAX_BYTES) {
-        Ok(body) => body,
-        Err(err) => return err,
-    };
+/// The tree state at `path`.
+fn state_read_at(path: &CStr) -> Result<TreeState, c_int> {
+    let body = read(path, MAX_BYTES)?;
     let mut state = Versioned {
         schema: 0,
-        record: out,
+        record: TreeState::default(),
     };
     let f = [
         JsonField::int(c"schema", |s: &mut Versioned<TreeState>| &mut s.schema),
@@ -680,36 +636,31 @@ unsafe fn state_read(path: *const c_char, out: *mut TreeState) -> c_int {
         JsonField::int(c"head_seq", |s| &mut s.record.head_seq),
         JsonField::int(c"segment_base_seq", |s| &mut s.record.segment_base_seq),
     ];
-    let mut ret = parse_schema(&body, &f, &mut state).err().unwrap_or(0);
-    let Versioned {
-        schema,
-        record: out,
-    } = state;
     // tree_id, last_seq, both projection roots, head and segment base.
     let required = [1, 3, 4, 5, 7, 8];
 
-    if ret == 0 && (schema != 1 || !required.iter().all(|&i| f[i].seen())) {
-        ret = -EINVAL;
+    parse_schema(&body, &f, &mut state)?;
+    let Versioned { schema, mut record } = state;
+    if schema != 1 || !required.iter().all(|&i| f[i].seen()) {
+        return Err(-EINVAL);
     }
-    if ret == 0 && (!hex32_valid(&out.projection_root) || !hex32_valid(&out.projection_root_tpm)) {
-        ret = -EINVAL;
+    if !hex32_valid(&record.projection_root) || !hex32_valid(&record.projection_root_tpm) {
+        return Err(-EINVAL);
     }
-    if ret == 0 && out.manifest_digest[0] != 0 {
-        let mut digest = [0u8; 32];
-
-        // SAFETY: a C string, and room for a digest.
-        if unsafe { sha256_digest_decode(out.manifest_digest.as_ptr().cast(), digest.as_mut_ptr()) }
-            != 0
-        {
-            ret = -EINVAL;
-        }
+    if record.manifest_digest[0] != 0 && digest_bytes(&record.manifest_digest).is_none() {
+        return Err(-EINVAL);
     }
-    out.schema = schema as c_int;
-    ret
+    record.schema = schema;
+    Ok(record)
 }
 
-/// The tree state written whole in place of what was there: 0 or -errno.
-fn state_write(s: &TreeState) -> c_int {
+/// The node's tree state, -ENOENT for none.
+pub(crate) fn state_read() -> Result<TreeState, c_int> {
+    state_read_at(&tree_path(STATE))
+}
+
+/// The tree state written whole in place of what was there.
+pub(crate) fn state_write(s: &TreeState) -> Result<(), c_int> {
     let mut buf = [0u8; 4096];
     let mut e = JsonEmit::fixed(&mut buf);
 
@@ -725,7 +676,7 @@ fn state_write(s: &TreeState) -> c_int {
     e.kv_int(b"segment_base_seq", s.segment_base_seq);
     e.obj_close();
     if e.err() != 0 {
-        return e.err();
+        return Err(e.err());
     }
     let dir = tree_path(b"");
 
@@ -739,52 +690,37 @@ fn state_write(s: &TreeState) -> c_int {
             ]
             .concat(),
         );
-        return ret;
+        return Err(ret);
     }
     seal::write_file(tree_path(STATE).to_bytes(), e.output(), 0o600)
-        .err()
-        .unwrap_or(0)
 }
 
-/// An operation applied, appended to the tree eventlog with the
-/// projection root it leads to: 0 or -errno.
-///
-/// # Safety
-///
-/// `operation_digest` is NULL or a C string, and `projection_root` 32
-/// bytes.
-unsafe fn event_append(
+/// An operation applied, appended to the tree eventlog with its digest,
+/// "sha256:" and 64 hex digits, and the projection root it leads to.
+pub(crate) fn event_append(
     seq: i64,
-    operation_digest: *const c_char,
-    projection_root: *const u8,
-) -> c_int {
-    let mut digest = [0u8; 32];
-    let mut root = [0 as c_char; 65];
+    operation_digest: &[u8],
+    projection_root: &[u8; 32],
+) -> Result<(), c_int> {
+    let operation_digest = cstr(operation_digest);
     let mut buf = [0u8; 1024];
 
-    // SAFETY: the caller's string, and room for a digest.
-    if unsafe { sha256_digest_decode(operation_digest, digest.as_mut_ptr()) } != 0 {
-        return -EINVAL;
+    if digest_bytes(operation_digest).is_none() {
+        return Err(-EINVAL);
     }
-    // SAFETY: the caller's 32 bytes, and room for their hex digits.
-    unsafe { hex_encode(projection_root, 32, root.as_mut_ptr()) };
     let mut e = JsonEmit::fixed(&mut buf);
 
     e.obj_open();
     e.kv_int(b"schema", 1);
     e.kv_int(b"seq", seq);
-    // SAFETY: the caller's C string, a digest just decoded.
-    e.kv_string(b"digest", unsafe { ffi::c_str(operation_digest) });
-    // SAFETY: the hex digits hex_encode() terminated.
-    e.kv_string(b"projection_root", unsafe { ffi::c_str(root.as_ptr()) });
+    e.kv_string(b"digest", operation_digest);
+    e.kv_string(b"projection_root", &hex::encode(projection_root));
     e.obj_close();
     if e.err() != 0 {
-        return e.err();
+        return Err(e.err());
     }
-    seal::mkdir_p(tree_path(b"").to_bytes(), 0o700)
-        .and_then(|()| seal::append(&tree_path(EVENTLOG), e.output()))
-        .err()
-        .unwrap_or(0)
+    seal::mkdir_p(tree_path(b"").to_bytes(), 0o700)?;
+    seal::append(&tree_path(EVENTLOG), e.output())
 }
 
 /// What a line of the eventlog gives.
@@ -794,28 +730,17 @@ struct EventLine {
     projection: [u8; 65],
 }
 
-/// What the eventlog's records, whole lines in order, chain to: each
-/// SHA-256 of the chain so far and the record's operation digest, which
-/// must be the projection root it recorded. Its root into `out`: 0, or
-/// -errno with `out` unchanged.
-///
-/// # Safety
-///
-/// `path` is a C string, and `out` room for 32 bytes.
-unsafe fn event_replay(path: *const c_char, out: *mut u8) -> c_int {
-    // SAFETY: the caller's C string.
-    let body = match read(unsafe { CStr::from_ptr(path) }, MAX_BYTES) {
-        Ok(body) => body,
-        Err(err) => return err,
-    };
-    let mut ret = 0;
-    let text = &body[..];
+/// What the eventlog at `path`, its whole lines in order, chains to:
+/// each SHA-256 of the chain so far and the record's operation digest,
+/// which must be the projection root it recorded.
+fn event_replay_at(path: &CStr) -> Result<[u8; 32], c_int> {
+    let text = read(path, MAX_BYTES)?;
     let mut chain = [0u8; 32];
     let mut previous_seq = 0i64;
 
     // A NUL would end the walk early and replay a shorter chain.
     if text.contains(&0) {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
     // Whole lines only: a record cut short at the end is not one yet.
     let whole = text.iter().rposition(|&c| c == b'\n').map_or(0, |i| i + 1);
@@ -834,7 +759,6 @@ unsafe fn event_replay(path: *const c_char, out: *mut u8) -> c_int {
             JsonField::string(c"digest", |r| &mut r.digest),
             JsonField::string(c"projection_root", |r| &mut r.projection),
         ];
-        let mut d = [0u8; 32];
         let mut recorded = [0u8; 32];
         let parsed = parse_schema(line, &f, &mut record);
         let EventLine {
@@ -843,44 +767,36 @@ unsafe fn event_replay(path: *const c_char, out: *mut u8) -> c_int {
             projection,
         } = record;
 
-        let bad = parsed.is_err()
+        if parsed.is_err()
             || !f[0].seen()
             || !f[1].seen()
             || !f[2].seen()
             || seq <= previous_seq
-            || cstr(&projection).len() != 64;
-
-        // SAFETY: the record's projection root, a C string, and room for
-        // 32 bytes.
-        if bad || unsafe { hex_decode(projection.as_ptr().cast(), recorded.as_mut_ptr(), 32) } != 0
+            || cstr(&projection).len() != 64
+            || hex::decode(cstr(&projection), &mut recorded).is_err()
         {
-            ret = -EINVAL;
-            break;
+            return Err(-EINVAL);
         }
         previous_seq = seq;
-        // SAFETY: the record's digest, a C string, and room for 32 bytes.
-        if unsafe { sha256_digest_decode(digest.as_ptr().cast(), d.as_mut_ptr()) } != 0 {
-            ret = -EINVAL;
-            break;
-        }
+        let d = digest_bytes(&digest).ok_or(-EINVAL)?;
         let mut next = [0u8; 64];
 
         next[..32].copy_from_slice(&chain);
         next[32..].copy_from_slice(&d);
-        ret = sha256_into(&next, &mut chain);
-        if ret != 0 {
-            break;
+        match sha256_into(&next, &mut chain) {
+            0 => {}
+            err => return Err(err),
         }
         if differ(&chain, &recorded) {
-            ret = -EINVAL;
-            break;
+            return Err(-EINVAL);
         }
     }
-    if ret == 0 {
-        // SAFETY: the caller's room for 32 bytes.
-        unsafe { ptr::copy_nonoverlapping(chain.as_ptr(), out, 32) };
-    }
-    ret
+    Ok(chain)
+}
+
+/// What the node's tree eventlog chains to.
+pub(crate) fn event_replay() -> Result<[u8; 32], c_int> {
+    event_replay_at(&tree_path(EVENTLOG))
 }
 
 /// What a sync did of an operation on this node.
@@ -1073,50 +989,41 @@ pub(crate) fn outcome_append(
         .unwrap_or(0)
 }
 
+/// The projection and history roots after an operation.
+pub(crate) type Roots = ([u8; 32], [u8; 32]);
+
 /// What the record holds of the operations of seq `from` + 1 through
-/// `to`: their outcomes onto `codes` and the roots at `from` into
-/// `roots`, each as soon as it is read. -ENOENT without a record unless
-/// it asks for no line, -EBADMSG for one that ends early or is out of
-/// order.
-fn outcomes_read(
-    from: i64,
-    to: i64,
-    codes: &mut Vec<u8>,
-    roots: &mut Option<([u8; 32], [u8; 32])>,
-) -> c_int {
+/// `to`: their outcomes and the roots at `from`. -ENOENT without a
+/// record unless it asks for no line, -EBADMSG for one that ends early
+/// or is out of order.
+pub(crate) fn outcomes_read(from: i64, to: i64) -> Result<(Vec<u8>, Roots), c_int> {
     if from < 0 || to < from {
-        return -EINVAL;
+        return Err(-EINVAL);
     }
     let fd = match seal::open_read(tree_path(OUTCOMES).to_bytes()) {
         Ok(fd) => fd,
-        Err(err) if err == -ENOENT && to == 0 => {
-            *roots = Some(([0; 32], [0; 32]));
-            return 0;
-        }
-        Err(err) => return err,
+        Err(err) if err == -ENOENT && to == 0 => return Ok((Vec::new(), ([0; 32], [0; 32]))),
+        Err(err) => return Err(err),
     };
     let mut o = Outcomes::new(fd);
     let read = (|| {
+        let mut codes = Vec::new();
+
         o.seek(from)?;
-        *roots = Some((o.line.projection_root, o.line.history_root));
+        let roots = (o.line.projection_root, o.line.history_root);
         while o.line.seq < to {
             o.next()?;
-            codes.push(o.line.outcome as u8);
+            codes.push(u8::try_from(o.line.outcome).map_err(|_| -EBADMSG)?);
         }
-        Ok(())
+        Ok((codes, roots))
     })();
     let _ = o.close();
-    read.err().unwrap_or(0)
+    read
 }
 
 /// The projection and history roots the record holds at `seq`.
-pub(crate) fn outcome_roots(seq: i64) -> Result<([u8; 32], [u8; 32]), c_int> {
-    let (mut codes, mut roots) = (Vec::new(), None);
-
-    match outcomes_read(seq, seq, &mut codes, &mut roots) {
-        0 => roots.ok_or(-EINVAL),
-        err => Err(err),
-    }
+pub(crate) fn outcome_roots(seq: i64) -> Result<Roots, c_int> {
+    outcomes_read(seq, seq).map(|(_, roots)| roots)
 }
 
 /// The history root at `last_seq`, the lines past it dropped, which a
@@ -1143,58 +1050,43 @@ pub(crate) fn outcomes_resume(last_seq: i64) -> Result<[u8; 32], c_int> {
 }
 
 /// The eventlog replayed, and whether it matches the projection root of
-/// `s`, which tree_state_read() returned `state_rc` for: a state that
-/// could not be read matches no replay.
-pub(crate) fn eventlog_matches(s: &TreeState, state_rc: c_int) -> Result<([u8; 32], bool), c_int> {
-    eventlog_matches_at(&tree_path(EVENTLOG), s, state_rc)
+/// `state`: no state, one that could not be read, matches no replay.
+pub(crate) fn eventlog_matches(state: Option<&TreeState>) -> Result<([u8; 32], bool), c_int> {
+    eventlog_matches_at(&tree_path(EVENTLOG), state)
 }
 
 /// [`eventlog_matches`] of the eventlog at `path`.
-fn eventlog_matches_at(
-    path: &CStr,
-    s: &TreeState,
-    state_rc: c_int,
-) -> Result<([u8; 32], bool), c_int> {
-    let mut replay = [0u8; 32];
+fn eventlog_matches_at(path: &CStr, state: Option<&TreeState>) -> Result<([u8; 32], bool), c_int> {
+    let replay = event_replay_at(path)?;
     let mut live = [0u8; 32];
+    let matches = state.is_some_and(|s| {
+        hex::decode(cstr(&s.projection_root), &mut live).is_ok() && !differ(&live, &replay)
+    });
 
-    // SAFETY: a C string, and room for 32 bytes.
-    let ret = unsafe { event_replay(path.as_ptr(), replay.as_mut_ptr()) };
-    if ret != 0 {
-        return Err(ret);
-    }
-    let matches = state_rc == 0
-        && hex::decode(cstr(&s.projection_root), &mut live).is_ok()
-        && !differ(&live, &replay);
     Ok((replay, matches))
 }
 
 /// The tree's part of `shirudo status --json`: whether one is configured
 /// and an operation pending, its state, and whether the eventlog replays
 /// to the projection root the state recorded.
-fn emit_status(e: &mut JsonEmit) {
-    let mut s = TreeState::zeroed();
+pub(crate) fn emit_status(e: &mut JsonEmit) {
     let configured = configured();
 
     e.obj_open_key(b"upatch_tree");
     e.kv_bool(b"configured", configured);
-    // SAFETY: a C string and a mode.
-    e.kv_bool(
-        b"pending",
-        unsafe { access(tree_path(PENDING).as_ptr(), R_OK) } == 0,
-    );
-    // SAFETY: a C string, and room for a state.
-    let state_rc = unsafe { state_read(tree_path(STATE).as_ptr(), &mut s) };
-    if state_rc == 0 {
-        e.kv_string(b"tree_id", cstr(&s.tree_id));
-        e.kv_int(b"generation", s.generation);
-        e.kv_int(b"last_seq", s.last_seq);
-        e.kv_string(b"projection_root", cstr(&s.projection_root));
-        e.kv_string(b"manifest_digest", cstr(&s.manifest_digest));
-    } else {
-        e.kv_null(b"state");
+    e.kv_bool(b"pending", readable(&tree_path(PENDING)));
+    let state = state_read().ok();
+    match &state {
+        Some(s) => {
+            e.kv_string(b"tree_id", cstr(&s.tree_id));
+            e.kv_int(b"generation", s.generation);
+            e.kv_int(b"last_seq", s.last_seq);
+            e.kv_string(b"projection_root", cstr(&s.projection_root));
+            e.kv_string(b"manifest_digest", cstr(&s.manifest_digest));
+        }
+        None => e.kv_null(b"state"),
     }
-    match eventlog_matches(&s, state_rc) {
+    match eventlog_matches(state.as_ref()) {
         Ok((replay, matches)) => {
             e.kv_string(b"eventlog_projection_root", &hex::encode(&replay));
             e.kv_bool(b"eventlog_matches_state", matches);
@@ -1217,16 +1109,9 @@ fn kconfig_read(path: &CStr, s: &TreeSelector, gz: bool) -> Result<Vec<Option<Ve
     Ok(kv.values)
 }
 
-pub(crate) use capi::{
-    tree_configured, tree_emit_status, tree_event_append, tree_event_replay, tree_outcomes_read,
-    tree_pending_read, tree_pending_write, tree_state_read, tree_state_write,
-};
-
 /// Whether an operation is pending: pending.json exists.
 pub(crate) fn tree_pending_exists() -> bool {
-    use std::os::unix::ffi::OsStrExt;
-
-    std::fs::metadata(std::ffi::OsStr::from_bytes(tree_path(PENDING).to_bytes())).is_ok()
+    std::fs::metadata(OsStr::from_bytes(tree_path(PENDING).to_bytes())).is_ok()
 }
 
 /// The status file in which the tree says why it left upatch `name`
@@ -1240,99 +1125,3 @@ mod tests;
 
 #[cfg(shirudo_fuzz)]
 mod fuzz;
-
-mod capi {
-    use core::ffi::{c_char, c_int};
-
-    use super::{TreeOperation, TreePending, TreeState};
-    use crate::util::json::JsonEmit;
-
-    /// # Safety
-    ///
-    /// `codes` has room for `to` - `from` outcomes, and the roots for 32
-    /// bytes each.
-    pub unsafe extern "C" fn tree_outcomes_read(
-        from: i64,
-        to: i64,
-        codes: *mut u8,
-        projection_root: *mut [u8; 32],
-        history_root: *mut [u8; 32],
-    ) -> c_int {
-        let (mut read, mut roots) = (Vec::new(), None);
-        let ret = super::outcomes_read(from, to, &mut read, &mut roots);
-        // SAFETY: the caller's rooms, which take what was read.
-        unsafe {
-            if let Some((projection, history)) = roots {
-                *projection_root = projection;
-                *history_root = history;
-            }
-            core::ptr::copy_nonoverlapping(read.as_ptr(), codes, read.len());
-        }
-        ret
-    }
-
-    pub extern "C" fn tree_configured() -> bool {
-        super::configured()
-    }
-
-    /// # Safety
-    ///
-    /// `out` is room for a record.
-    pub unsafe extern "C" fn tree_pending_read(out: *mut TreePending) -> c_int {
-        // SAFETY: the caller passes room for a record.
-        unsafe { super::pending_read(out) }
-    }
-
-    /// # Safety
-    ///
-    /// `op` is an operation.
-    pub unsafe extern "C" fn tree_pending_write(op: *const TreeOperation) -> c_int {
-        // SAFETY: the caller passes an operation.
-        super::pending_write(unsafe { &*op })
-    }
-
-    /// # Safety
-    ///
-    /// `out` is room for a state.
-    pub unsafe extern "C" fn tree_state_read(out: *mut TreeState) -> c_int {
-        // SAFETY: a C string, and the caller's room.
-        unsafe { super::state_read(super::tree_path(super::STATE).as_ptr(), out) }
-    }
-
-    /// # Safety
-    ///
-    /// `state` is a state.
-    pub unsafe extern "C" fn tree_state_write(state: *const TreeState) -> c_int {
-        // SAFETY: the caller passes a state.
-        super::state_write(unsafe { &*state })
-    }
-
-    /// # Safety
-    ///
-    /// `operation_digest` is NULL or a C string, and `projection_root` 32
-    /// bytes.
-    pub unsafe extern "C" fn tree_event_append(
-        seq: i64,
-        operation_digest: *const c_char,
-        projection_root: *const u8,
-    ) -> c_int {
-        // SAFETY: the caller passes a string and 32 bytes.
-        unsafe { super::event_append(seq, operation_digest, projection_root) }
-    }
-
-    /// # Safety
-    ///
-    /// `out` is room for 32 bytes.
-    pub unsafe extern "C" fn tree_event_replay(out: *mut u8) -> c_int {
-        // SAFETY: a C string, and the caller's room.
-        unsafe { super::event_replay(super::tree_path(super::EVENTLOG).as_ptr(), out) }
-    }
-
-    /// # Safety
-    ///
-    /// `e` is an emitter.
-    pub unsafe extern "C" fn tree_emit_status(e: *mut JsonEmit) {
-        // SAFETY: the caller passes an emitter.
-        super::emit_status(unsafe { &mut *e })
-    }
-}

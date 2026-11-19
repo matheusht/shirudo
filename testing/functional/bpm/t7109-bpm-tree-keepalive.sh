@@ -64,7 +64,7 @@ cleanup()
 }
 trap cleanup EXIT
 
-# Hold the lock tree_event_append() takes, so that a sync stops where it
+# Hold the lock event_append() takes, so that a sync stops where it
 # appends an operation's line: after its load and the register extend,
 # before the outcomes line and the state.
 hold_tree_eventlog()

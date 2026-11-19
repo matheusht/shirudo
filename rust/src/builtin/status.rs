@@ -24,7 +24,7 @@ use crate::sys::libc::{
 use crate::sys::version::shirudo_version_id;
 use crate::text::{cstr, name_has_suffix};
 use crate::util::bpf_sys::bpf_obj_get;
-use crate::util::bpm_tree_state::tree_emit_status;
+use crate::util::bpm_tree_state;
 use crate::util::chain::{self, ChainStatus};
 use crate::util::conditions::{self, CONDITIONS_MAX, Condition, ConditionsInput};
 use crate::util::config::{self, Config};
@@ -1461,8 +1461,7 @@ impl Report {
             sysinfo::emit_json(e, si);
         }
         self.emit_tpm(e, include_eventlog);
-        // SAFETY: the emitter.
-        unsafe { tree_emit_status(e) };
+        bpm_tree_state::emit_status(e);
         e.obj_close();
     }
 

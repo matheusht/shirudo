@@ -1145,8 +1145,8 @@ pub(crate) unsafe fn specs_parse(
 
 pub(crate) use capi::{
     upatch_close, upatch_data, upatch_decoder_view, upatch_header_name, upatch_loader,
-    upatch_member_valid, upatch_metadata, upatch_name_valid, upatch_open, upatch_open_fd,
-    upatch_open_memory, upatch_select, upatch_signature,
+    upatch_member_valid, upatch_metadata, upatch_open, upatch_open_fd, upatch_open_memory,
+    upatch_select, upatch_signature,
 };
 
 #[cfg(test)]
@@ -1275,14 +1275,6 @@ mod capi {
         }
         // SAFETY: the caller passes a container and the room.
         unsafe { super::decoder_view(&*u, idx, &mut *out) }
-    }
-
-    /// # Safety
-    ///
-    /// `name` is NULL or a C string.
-    pub unsafe extern "C" fn upatch_name_valid(name: *const c_char) -> bool {
-        // SAFETY: the caller passes NULL or a C string.
-        super::name_valid((!name.is_null()).then(|| unsafe { ffi::c_str(name) }))
     }
 
     /// # Safety

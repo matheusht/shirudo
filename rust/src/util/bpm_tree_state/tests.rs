@@ -111,13 +111,7 @@ const PENDING_DIGEST: &str =
     "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 
 fn pending(doc: &str) -> Result<TreePending, c_int> {
-    // SAFETY: a record of numbers and texts, for which zeros are a value.
-    let mut p: TreePending = unsafe { core::mem::zeroed() };
-    // SAFETY: the document's bytes and room for the record.
-    match unsafe { pending_parse(doc.as_ptr().cast(), doc.len(), &mut p) } {
-        0 => Ok(p),
-        err => Err(err),
-    }
+    pending_parse(doc.as_bytes())
 }
 
 #[test]
@@ -226,20 +220,10 @@ fn append_outcome(seq: i64, outcome: i64) {
     assert_eq!(outcome_append(seq, outcome, &projection, &history), 0);
 }
 
-/// tree_outcomes_read() from `from` to `to`: the codes and the roots of
+/// outcomes_read() from `from` to `to`: the codes and the roots of
 /// `from`, or the error.
-/// The codes of the lines read, and the projection and history roots.
-type Outcomes = (Vec<u8>, ([u8; 32], [u8; 32]));
-
-fn outcomes(from: i64, to: i64) -> Result<Outcomes, c_int> {
-    let mut codes = vec![0u8; (to - from).max(0) as usize];
-    let (mut projection, mut history) = ([0xffu8; 32], [0xffu8; 32]);
-    // SAFETY: room for a code of each line asked for and for two roots.
-    match unsafe { tree_outcomes_read(from, to, codes.as_mut_ptr(), &mut projection, &mut history) }
-    {
-        0 => Ok((codes, (projection, history))),
-        err => Err(err),
-    }
+fn outcomes(from: i64, to: i64) -> Result<(Vec<u8>, Roots), c_int> {
+    outcomes_read(from, to)
 }
 
 fn outcome_line(seq: i64, outcome: i64) -> String {
@@ -409,17 +393,11 @@ fn state_head() -> String {
     )
 }
 
-fn read_state() -> Result<Box<TreeState>, c_int> {
-    // SAFETY: a state of numbers and texts, for which zeros are a value.
-    let mut s: Box<TreeState> = Box::new(unsafe { core::mem::zeroed() });
-    // SAFETY: room for the state.
-    match unsafe { tree_state_read(&mut *s) } {
-        0 => Ok(s),
-        err => Err(err),
-    }
+fn read_state() -> Result<TreeState, c_int> {
+    state_read()
 }
 
-fn state_of(text: &str) -> Result<Box<TreeState>, c_int> {
+fn state_of(text: &str) -> Result<TreeState, c_int> {
     write_text(STATE, text.as_bytes(), false);
     read_state()
 }
@@ -443,8 +421,7 @@ fn state_names_its_publication_head_and_base() {
     assert_eq!((s.last_seq, s.head_seq, s.segment_base_seq), (5, 7, 2));
     s.head_seq = 9;
     s.segment_base_seq = 4;
-    // SAFETY: the state just read.
-    assert_eq!(unsafe { tree_state_write(&*s) }, 0);
+    assert_eq!(state_write(&s), Ok(()));
     let back = read_state().unwrap();
     assert_eq!(cstr(&back.tree_id), b"prod");
     assert_eq!(
@@ -494,26 +471,22 @@ fn state_needs_both_projection_roots() {
 fn eventlog_matches_only_a_state_read() {
     let dir = TempDir::new();
     use_tree(&dir);
-    // SAFETY: a state of numbers and texts, for which zeros are a value.
-    let mut s: Box<TreeState> = Box::new(unsafe { core::mem::zeroed() });
+    let mut s = TreeState::default();
 
-    assert_eq!(eventlog_matches(&s, 0), Err(-ENOENT));
+    assert_eq!(eventlog_matches(Some(&s)), Err(-ENOENT));
     let mut next = [0u8; 64];
     crate::util::hex::decode(&PENDING_DIGEST.as_bytes()[7..], &mut next[32..]).unwrap();
     let root = crate::util::crypto_openssl::sha256(&next).unwrap();
-    let digest = std::ffi::CString::new(PENDING_DIGEST).unwrap();
-    // SAFETY: a C string and a root of 32 bytes.
-    let ret = unsafe { tree_event_append(1, digest.as_ptr(), root.as_ptr()) };
-    assert_eq!(ret, 0);
+    assert_eq!(event_append(1, PENDING_DIGEST.as_bytes(), &root), Ok(()));
     s.projection_root[..64].copy_from_slice(&crate::util::hex::encode(&root));
-    assert_eq!(eventlog_matches(&s, 0), Ok((root, true)));
-    assert_eq!(eventlog_matches(&s, -EINVAL).map(|r| r.1), Ok(false));
+    assert_eq!(eventlog_matches(Some(&s)), Ok((root, true)));
+    assert_eq!(eventlog_matches(None).map(|r| r.1), Ok(false));
     s.projection_root[0] = if s.projection_root[0] == b'0' {
         b'1'
     } else {
         b'0'
     };
-    assert_eq!(eventlog_matches(&s, 0).map(|r| r.1), Ok(false));
+    assert_eq!(eventlog_matches(Some(&s)).map(|r| r.1), Ok(false));
     s.projection_root[0] = 0;
-    assert_eq!(eventlog_matches(&s, 0).map(|r| r.1), Ok(false));
+    assert_eq!(eventlog_matches(Some(&s)).map(|r| r.1), Ok(false));
 }
