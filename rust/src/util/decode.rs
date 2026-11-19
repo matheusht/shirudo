@@ -1092,9 +1092,9 @@ fn decode(
     if !call.found {
         log_err(
             &[
-                &b"upatch map: decoder entrypoint "[..],
+                &b"upatch map: decoder entrypoint '"[..],
                 entrypoint.to_bytes(),
-                b" not found",
+                b"' not found",
             ]
             .concat(),
         );
