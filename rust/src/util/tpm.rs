@@ -114,6 +114,12 @@ impl<T> EsysOut<T> {
         // room(), which stays until drop() frees it.
         unsafe { self.0.as_ref() }
     }
+
+    /// The output to change, as get() gives it to read.
+    fn get_mut(&mut self) -> Option<&mut T> {
+        // SAFETY: as get(), and borrowed through this one's &mut alone.
+        unsafe { self.0.as_mut() }
+    }
 }
 
 impl<T> Drop for EsysOut<T> {
@@ -1132,6 +1138,7 @@ impl Tpm {
         let mut in_pub = Tpm2bPublic::zeroed();
         let outside = Tpm2bData::zeroed();
         let mut handle = ESYS_TR_NONE;
+        let auth = self.config_owner_auth()?;
         let p = &mut in_pub.publicArea;
         let mut rsa = Tpm2bPublicKeyRsa::zeroed();
 
@@ -1147,7 +1154,6 @@ impl Tpm {
         rsa.size = DIGEST_LEN as u16;
         rsa.buffer[..DIGEST_LEN].copy_from_slice(seed);
         p.unique.rsa = rsa;
-        let auth = self.config_owner_auth()?;
         // SAFETY: the context, handles, the templates, and room for the
         // handle and public area.
         let ret = unsafe {
@@ -1169,6 +1175,9 @@ impl Tpm {
             )
         };
         drop(auth);
+        scrub(&mut rsa.buffer);
+        // SAFETY: the RSA variant, which the template was filled with.
+        scrub(unsafe { &mut in_pub.publicArea.unique.rsa.buffer });
         if ret != RC_SUCCESS {
             crate::log::err(format!("tpm: CreatePrimary(NV writer): rc=0x{ret:08x}").as_bytes());
             return Err(if rc_is_auth_failure(ret) {
@@ -1936,12 +1945,17 @@ impl Tpm {
                 -EIO
             });
         }
-        let c = cert_info.get().ok_or(-EPROTO)?;
+        let credential = cert_info.get().ok_or(-EPROTO).and_then(|c| {
+            c.buffer
+                .get(..usize::from(c.size))
+                .map(<[u8]>::to_vec)
+                .ok_or(-E2BIG)
+        });
 
-        c.buffer
-            .get(..usize::from(c.size))
-            .map(<[u8]>::to_vec)
-            .ok_or(-E2BIG)
+        if let Some(c) = cert_info.get_mut() {
+            scrub(&mut c.buffer);
+        }
+        credential
     }
 
     /// The whole of an NV index, in chunks the TPM takes: -E2BIG for one
