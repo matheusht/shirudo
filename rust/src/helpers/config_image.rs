@@ -20,13 +20,7 @@ fn open_root(prefix: &CStr, root_hex: &CStr) -> c_int {
     if crate::util::hex::decode(root_hex.to_bytes(), &mut root).is_err() {
         return -EINVAL;
     }
-    match ConfigImageOpen::open(prefix, Some(&root)) {
-        Ok(mut op) => {
-            op.close();
-            0
-        }
-        Err(err) => err,
-    }
+    ConfigImageOpen::open(prefix, Some(&root)).map_or_else(|e| e, |_| 0)
 }
 
 fn decode(path: &CStr) -> c_int {

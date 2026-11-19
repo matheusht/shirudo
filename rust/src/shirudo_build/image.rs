@@ -78,8 +78,8 @@ fn build(args: &[&CStr]) -> c_int {
 
 /// Runs veritysetup on the very data and hash descriptors the image
 /// reader checked. Only the child clears close-on-exec.
-fn verify_verity(img: &Opened, root: &[u8]) -> Result<(), c_int> {
-    let (data_fd, hash_fd) = (img.0.data_fd, img.0.hash_fd);
+fn verify_verity(img: &ConfigImageOpen, root: &[u8]) -> Result<(), c_int> {
+    let (data_fd, hash_fd) = (img.data_fd, img.hash_fd);
     let (data, hash) = (
         format!("/proc/self/fd/{data_fd}"),
         format!("/proc/self/fd/{hash_fd}"),
@@ -151,57 +151,45 @@ fn verify_root_signature(
     if ret == 0 { Ok(()) } else { Err(ret) }
 }
 
-/// The open parts of an image, closed when it goes.
-struct Opened(ConfigImageOpen);
-
-impl Opened {
-    fn signature(&self) -> Result<Vec<u8>, c_int> {
-        let mut bytes = vec![0u8; SIG_MAX + 1];
-        let mut size = 0;
-        while size < bytes.len() {
-            let offset = i64::try_from(size).map_err(|_| -EIO)?;
-            let rest = &mut bytes[size..];
-            // SAFETY: the image owns the fd and rest is writable for its length.
-            let n = unsafe {
-                pread(
-                    self.0.signature_fd,
-                    rest.as_mut_ptr().cast(),
-                    rest.len(),
-                    offset,
-                )
-            };
-            if n < 0 {
-                let err = super::last_err();
-                if err == -EINTR {
-                    continue;
-                }
-                return Err(err);
+/// The signature the image holds, at most SIG_MAX bytes.
+fn read_signature(img: &ConfigImageOpen) -> Result<Vec<u8>, c_int> {
+    let mut bytes = vec![0u8; SIG_MAX + 1];
+    let mut size = 0;
+    while size < bytes.len() {
+        let offset = i64::try_from(size).map_err(|_| -EIO)?;
+        let rest = &mut bytes[size..];
+        // SAFETY: the image owns the fd and rest is writable for its length.
+        let n = unsafe {
+            pread(
+                img.signature_fd,
+                rest.as_mut_ptr().cast(),
+                rest.len(),
+                offset,
+            )
+        };
+        if n < 0 {
+            let err = super::last_err();
+            if err == -EINTR {
+                continue;
             }
-            if n == 0 {
-                break;
-            }
-            size += usize::try_from(n).map_err(|_| -EIO)?;
+            return Err(err);
         }
-        if size == 0 || size > SIG_MAX {
-            return Err(-EINVAL);
+        if n == 0 {
+            break;
         }
-        bytes.truncate(size);
-        Ok(bytes)
+        size += usize::try_from(n).map_err(|_| -EIO)?;
     }
-}
-
-impl Drop for Opened {
-    fn drop(&mut self) {
-        self.0.close();
+    if size == 0 || size > SIG_MAX {
+        return Err(-EINVAL);
     }
+    bytes.truncate(size);
+    Ok(bytes)
 }
 
 fn verify(prefix: &CStr, cert: &CStr) -> Result<(), c_int> {
-    let img = Opened(ConfigImageOpen::open(prefix, None)?);
-    let signature = img.signature()?;
-    let root: [u8; 64] = hex(&img.0.image.root_hash)
-        .try_into()
-        .map_err(|_| -EINVAL)?;
+    let img = ConfigImageOpen::open(prefix, None)?;
+    let signature = read_signature(&img)?;
+    let root: [u8; 64] = hex(&img.image.root_hash).try_into().map_err(|_| -EINVAL)?;
     verify_root_signature(&root, &signature, &super::Certificate::open(cert)?)?;
     verify_verity(&img, &root)?;
     print(true, &[&root[..], b"\n"].concat());

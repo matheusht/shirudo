@@ -71,31 +71,23 @@ impl ConfigImageOpen {
         if prefix.is_empty() {
             return Err(-EINVAL);
         }
-        let mut image = Self::closed();
-        let ret = open_image(prefix, expected_root, &mut image);
-        if ret != 0 {
-            image.close();
-            return Err(ret);
-        }
-        Ok(image)
+        let (image, data, hash, signature) = open_parts(prefix.to_bytes(), expected_root)?;
+        Ok(ConfigImageOpen {
+            image,
+            data_fd: data.into_raw_fd(),
+            hash_fd: hash.into_raw_fd(),
+            signature_fd: signature.map_or(-1, IntoRawFd::into_raw_fd),
+        })
     }
+}
 
-    pub(crate) const fn closed() -> Self {
-        ConfigImageOpen {
-            image: ConfigImage::zeroed(),
-            data_fd: -1,
-            hash_fd: -1,
-            signature_fd: -1,
-        }
-    }
-
-    pub(crate) fn close(&mut self) {
-        for fd in [&mut self.data_fd, &mut self.hash_fd, &mut self.signature_fd] {
-            if *fd >= 0 {
+impl Drop for ConfigImageOpen {
+    fn drop(&mut self) {
+        for fd in [self.data_fd, self.hash_fd, self.signature_fd] {
+            if fd >= 0 {
                 // SAFETY: an fd this image opened, closed once, here.
-                unsafe { close(*fd) };
+                unsafe { close(fd) };
             }
-            *fd = -1;
         }
     }
 }
@@ -262,26 +254,9 @@ fn read_root(prefix: &[u8], root: &mut [u8; 32]) -> c_int {
 }
 
 /// The image at `prefix`, its parts open and checked against each other
-/// and its root against `expected_root`, or else signed.
-fn open_image(
-    prefix: &CStr,
-    expected_root: Option<&[u8; 32]>,
-    image: &mut ConfigImageOpen,
-) -> c_int {
-    match open_parts(prefix.to_bytes(), expected_root) {
-        Ok((header, data, hash, signature)) => {
-            image.image = header;
-            image.data_fd = data.into_raw_fd();
-            image.hash_fd = hash.into_raw_fd();
-            image.signature_fd = signature.map_or(-1, IntoRawFd::into_raw_fd);
-            0
-        }
-        Err(e) => e,
-    }
-}
-
-/// open_image() of `prefix`: the image, its data and hash files, and
-/// its signature unless `expected_root` names the root.
+/// and its root against `expected_root`, or else signed: the image, its
+/// data and hash files, and its signature unless `expected_root` names
+/// the root.
 fn open_parts(
     prefix: &[u8],
     expected_root: Option<&[u8; 32]>,
@@ -309,20 +284,5 @@ fn open_parts(
         Ok(size) if size > SIG_MAX => Err(-EINVAL),
         Ok(_) => Ok((header, data, hash, Some(signature))),
         Err(e) => Err(e),
-    }
-}
-
-/// `opened` into `image`, or a closed image in its place when it failed:
-/// 0 or -errno, for the callers that keep an image across steps.
-pub(crate) fn place(opened: Result<ConfigImageOpen, c_int>, image: &mut ConfigImageOpen) -> c_int {
-    match opened {
-        Ok(opened) => {
-            *image = opened;
-            0
-        }
-        Err(err) => {
-            *image = ConfigImageOpen::closed();
-            err
-        }
     }
 }

@@ -35,7 +35,7 @@ use crate::sys::libc::{
 use crate::text::cstr;
 use crate::util::bpf_sys::{bpf_map_get_next_key, bpf_map_lookup_elem, bpf_obj_get};
 use crate::util::config::{self, CONF_PATH, Config};
-use crate::util::config_image::{self, ConfigImageOpen};
+use crate::util::config_image::ConfigImageOpen;
 use crate::util::config_update::{
     BootIdentity, ConfigUpdate, ConfigUpdateOps, ConfigUpdateRecord, ConfigUpdateTarget,
 };
@@ -101,7 +101,7 @@ const EXT4_ROOT_INO: u64 = 2;
 struct State {
     boot_target: ConfigUpdateTarget,
     boot_runtime: DmVerity,
-    candidate: ConfigImageOpen,
+    candidate: Option<ConfigImageOpen>,
     candidate_device: DmVerity,
     bootstrap_config: Config,
     bootstrap: ImageBootstrap,
@@ -120,7 +120,7 @@ impl State {
         State {
             boot_target: ConfigUpdateTarget::zeroed(),
             boot_runtime: DmVerity::empty(),
-            candidate: ConfigImageOpen::closed(),
+            candidate: None,
             candidate_device: DmVerity::empty(),
             // SAFETY: as above.
             bootstrap_config: unsafe { core::mem::zeroed() },
@@ -285,8 +285,12 @@ fn read_config_certificate(s: &mut State, index: usize, device: u64) -> c_int {
 /// Whether a config verification certificate signed the root hash of the
 /// image `opened`: 0, -ENOKEY without a certificate or a signature,
 /// -EKEYREJECTED when none did.
-fn verify_config_root(s: &State, opened: &ConfigImageOpen) -> c_int {
-    if s.bootstrap.n_certificates == 0 || opened.signature_fd < 0 {
+fn verify_config_root(
+    bootstrap: &ImageBootstrap,
+    certificates: &[ConfigCertificate],
+    opened: &ConfigImageOpen,
+) -> c_int {
+    if bootstrap.n_certificates == 0 || opened.signature_fd < 0 {
         return -ENOKEY;
     }
     let sig = match read_whole(
@@ -303,7 +307,7 @@ fn verify_config_root(s: &State, opened: &ConfigImageOpen) -> c_int {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    let signed = s.certificates[..s.bootstrap.n_certificates.min(s.certificates.len())]
+    let signed = certificates[..bootstrap.n_certificates.min(certificates.len())]
         .iter()
         .any(|c| verify_detached_x509(root.as_bytes(), &sig, &c.x509) == 0);
     if signed { 0 } else { -EKEYREJECTED }
@@ -482,40 +486,37 @@ fn mount_runtime(s: &mut State, trusted_boot: bool) -> c_int {
     {
         return load_runtime_config(s, trusted_boot);
     }
-    let mut opened = ConfigImageOpen::closed();
     let mut device = DmVerity::empty();
     let mut created = false;
     let mut step = "open runtime image";
-    let mut ret = config_image::place(
-        ConfigImageOpen::open(
-            CStr::from_bytes_until_nul(&s.bootstrap.runtime).unwrap_or_default(),
-            Some(&s.bootstrap.runtime_root),
-        ),
-        &mut opened,
+    let opened = ConfigImageOpen::open(
+        CStr::from_bytes_until_nul(&s.bootstrap.runtime).unwrap_or_default(),
+        Some(&s.bootstrap.runtime_root),
     );
-    if ret == 0 {
+    let mut ret = opened.as_ref().err().copied().unwrap_or(0);
+    if let Ok(image) = &opened {
         step = "prepare runtime mountpoint";
         ret = mkdir_owned(RUNTIME_DIR);
-    }
-    if ret == 0 {
-        step = "create runtime dm-verity mapping";
-        ret = dm_verity::place(dm_verity::create(&opened, RUNTIME_MAPPING), &mut device);
-        created = ret == 0;
-    }
-    if ret == -EEXIST {
-        step = "inspect runtime dm-verity mapping";
-        ret = dm_verity::place(
-            dm_verity::inspect(RUNTIME_MAPPING, &opened.image),
-            &mut device,
-        );
-    }
-    if ret == 0 {
-        step = "verify runtime image";
-        ret = dm_verity::verify(&device, &opened);
-    }
-    if ret == 0 {
-        step = "mount runtime image";
-        ret = dm_verity::mount_at(&device, RUNTIME_DIR, true);
+        if ret == 0 {
+            step = "create runtime dm-verity mapping";
+            ret = dm_verity::place(dm_verity::create(image, RUNTIME_MAPPING), &mut device);
+            created = ret == 0;
+        }
+        if ret == -EEXIST {
+            step = "inspect runtime dm-verity mapping";
+            ret = dm_verity::place(
+                dm_verity::inspect(RUNTIME_MAPPING, &image.image),
+                &mut device,
+            );
+        }
+        if ret == 0 {
+            step = "verify runtime image";
+            ret = dm_verity::verify(&device, image);
+        }
+        if ret == 0 {
+            step = "mount runtime image";
+            ret = dm_verity::mount_at(&device, RUNTIME_DIR, true);
+        }
     }
     if ret != 0 && created {
         let cleanup = dm_verity::remove(&mut device, false);
@@ -530,7 +531,7 @@ fn mount_runtime(s: &mut State, trusted_boot: bool) -> c_int {
     if ret == 0 && trusted_boot {
         s.boot_runtime = device;
     }
-    opened.close();
+    drop(opened);
     if ret == 0 {
         step = "load runtime config";
         ret = load_runtime_config(s, trusted_boot);
@@ -601,7 +602,7 @@ fn close_candidate(s: &mut State, journal_open: bool) {
         }
     }
     dm_verity::close_loops(&mut s.candidate_device);
-    s.candidate.close();
+    s.candidate = None;
 }
 
 /// `remove` until it is not -EBUSY, 100 times at most and 10 ms apart:
@@ -695,20 +696,18 @@ fn prepare_config(s: &mut State, target: &ConfigUpdateTarget, purpose: Prepare) 
     if !prefix.starts_with(&cache) || !path_valid(prefix) {
         return -EPERM;
     }
-    let ret = config_image::place(
-        ConfigImageOpen::open(
-            CStr::from_bytes_until_nul(&target.prefix).unwrap_or_default(),
-            None,
-        ),
-        &mut s.candidate,
-    );
-    if ret != 0 {
-        return ret;
-    }
-    if target.root_hash != s.candidate.image.root_hash {
+    let opened = match ConfigImageOpen::open(
+        CStr::from_bytes_until_nul(&target.prefix).unwrap_or_default(),
+        None,
+    ) {
+        Ok(opened) => opened,
+        Err(err) => return err,
+    };
+    let candidate = &*s.candidate.insert(opened);
+    if target.root_hash != candidate.image.root_hash {
         return -EKEYREJECTED;
     }
-    let ret = verify_config_root(s, &s.candidate);
+    let ret = verify_config_root(&s.bootstrap, &s.certificates, candidate);
     if ret != 0 {
         return ret;
     }
@@ -716,23 +715,20 @@ fn prepare_config(s: &mut State, target: &ConfigUpdateTarget, purpose: Prepare) 
     let mut created = false;
     // SAFETY: a C string, the candidate image and its mapping to fill.
     let mut ret = dm_verity::place(
-        dm_verity::inspect(&name, &s.candidate.image),
+        dm_verity::inspect(&name, &candidate.image),
         &mut s.candidate_device,
     );
     if ret == -ENXIO || ret == -ENODEV || ret == -ENOENT {
-        ret = dm_verity::place(
-            dm_verity::create(&s.candidate, &name),
-            &mut s.candidate_device,
-        );
+        ret = dm_verity::place(dm_verity::create(candidate, &name), &mut s.candidate_device);
         created = ret == 0;
     }
     if ret == 0 {
-        ret = dm_verity::verify(&s.candidate_device, &s.candidate);
+        ret = dm_verity::verify(&s.candidate_device, candidate);
     }
     if ret == 0 && !trusted_boot {
         ret = device_observed(
             s.candidate_device.device,
-            Some(&s.candidate.image.root_hash),
+            Some(&candidate.image.root_hash),
             DEVICE_CONFIG,
         );
     }
@@ -914,21 +910,14 @@ fn boot_target() -> Result<ConfigUpdateTarget, c_int> {
         None => with_state(|s| cstr(&s.bootstrap.config).to_vec()),
     };
     let prefix_c = CString::new(prefix.clone()).unwrap_or_default();
-    let mut opened = ConfigImageOpen::closed();
-    let ret = config_image::place(ConfigImageOpen::open(&prefix_c, None), &mut opened);
-    if ret != 0 {
-        return Err(ret);
+    let opened = ConfigImageOpen::open(&prefix_c, None)?;
+    if previous.is_some_and(|p| p.target.root_hash != opened.image.root_hash) {
+        return Err(-EKEYREJECTED);
     }
-    let target = if previous.is_some_and(|p| p.target.root_hash != opened.image.root_hash) {
-        Err(-EKEYREJECTED)
-    } else {
-        let mut target = ConfigUpdateTarget::zeroed();
-        copy_str(&mut target.prefix, &prefix);
-        target.root_hash = opened.image.root_hash;
-        Ok(target)
-    };
-    opened.close();
-    target
+    let mut target = ConfigUpdateTarget::zeroed();
+    copy_str(&mut target.prefix, &prefix);
+    target.root_hash = opened.image.root_hash;
+    Ok(target)
 }
 
 fn boot_keys_error(step: &str, ret: c_int) -> c_int {
@@ -1155,7 +1144,7 @@ pub(crate) fn boot_keys_close() -> c_int {
                 }
             }
             if let Some(image) = image {
-                image.close();
+                *image = None;
             }
         }
         s.boot_keys_open = false;
@@ -1197,17 +1186,14 @@ pub(crate) fn boot() -> c_int {
 /// a mapping the guards watched being made, and so the config the image
 /// config reads: 0, -EUCLEAN or -errno.
 fn config_mount_check(s: &State, record: &ConfigUpdateRecord) -> c_int {
-    let mut opened = ConfigImageOpen::closed();
-    let mut ret = config_image::place(
-        ConfigImageOpen::open(
-            CStr::from_bytes_until_nul(&record.target.prefix).unwrap_or_default(),
-            None,
-        ),
-        &mut opened,
-    );
-    if ret != 0 {
-        return ret;
-    }
+    let opened = match ConfigImageOpen::open(
+        CStr::from_bytes_until_nul(&record.target.prefix).unwrap_or_default(),
+        None,
+    ) {
+        Ok(opened) => opened,
+        Err(err) => return err,
+    };
+    let mut ret = 0;
     if record.target.root_hash != opened.image.root_hash {
         ret = -EKEYREJECTED;
     }
@@ -1216,7 +1202,7 @@ fn config_mount_check(s: &State, record: &ConfigUpdateRecord) -> c_int {
         let name = mapping_name(&record.target.root_hash);
         ret = dm_verity::place(dm_verity::inspect(&name, &opened.image), &mut device);
     }
-    opened.close();
+    drop(opened);
     if ret != 0 {
         return ret;
     }
@@ -1463,7 +1449,7 @@ pub(crate) fn update(prefix: &CStr) -> c_int {
     }
     if ret == 0 {
         ret = fetch_verified(prefix, &mut target, |image| {
-            with_state(|s| verify_config_root(s, image))
+            with_state(|s| verify_config_root(&s.bootstrap, &s.certificates, image))
         });
     }
     if ret == 0 {
@@ -1487,7 +1473,7 @@ pub(crate) fn stage(prefix: &CStr) -> c_int {
     }
     if ret == 0 {
         ret = fetch_verified(prefix, &mut target, |image| {
-            with_state(|s| verify_config_root(s, image))
+            with_state(|s| verify_config_root(&s.bootstrap, &s.certificates, image))
         });
     }
     if ret == 0 {

@@ -23,7 +23,7 @@ use super::{err, out, real_syscall, set_syscall_hook, strerror};
 use crate::skel::bpf2::ExpectedRoot;
 use crate::sys::identity::{DEVICE_CONFIG, DeviceAuthority};
 use crate::util::bpf_sys::Attr;
-use crate::util::config_image::{self, ConfigImageOpen};
+use crate::util::config_image::ConfigImageOpen;
 use crate::util::dm_verity::{self, DmVerity};
 use crate::util::io::kernel_dev;
 
@@ -277,17 +277,13 @@ fn config_root_test(mode: &[u8], prefix: &CStr) -> c_int {
         _ => return 2,
     };
     ROOT_MODE.store(mode, Ordering::Relaxed);
-    // SAFETY: an image of nothing open and a mapping of nothing, which
-    // the calls fill; what they open closed and removed after.
-    let ret = unsafe {
-        let mut opened: ConfigImageOpen = core::mem::zeroed();
-        let mut ret = config_image::place(ConfigImageOpen::open(prefix, None), &mut opened);
-        if ret == 0 {
+    let ret = match ConfigImageOpen::open(prefix, None) {
+        Ok(opened) => {
             let mut device = Box::new(DmVerity::empty());
             let name =
                 std::ffi::CString::new(format!("shirudo-verify-root-test-{}", std::process::id()))
                     .unwrap_or_default();
-            ret = dm_verity::place(dm_verity::create(&opened, &name), &mut device);
+            let mut ret = dm_verity::place(dm_verity::create(&opened, &name), &mut device);
             let created = ret == 0;
             let consumed = i32::from(mode == ROOT_WRONG);
             if ret == 0
@@ -313,9 +309,9 @@ fn config_root_test(mode: &[u8], prefix: &CStr) -> c_int {
                     ret = cleanup;
                 }
             }
-            opened.close();
+            ret
         }
-        ret
+        Err(e) => e,
     };
     if ret != 0 {
         err(&format!("config root test: {}\n", strerror(-ret)));
