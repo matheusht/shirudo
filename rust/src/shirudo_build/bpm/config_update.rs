@@ -501,6 +501,6 @@ fn name_matches(load: &[u8], expected: &[u8]) -> Result<(), c_int> {
     let n = expected.len().min(name.len());
     let same =
         name[..n] == expected[..n] && (expected.len() >= name.len() || name[expected.len()] == 0);
-    let bad = upatch::is_unload(&u) || !same;
+    let bad = u.is_unload() || !same;
     if bad { Err(-EINVAL) } else { Ok(()) }
 }

@@ -1049,8 +1049,8 @@ fn open_sandbox(s: &mut Stack<'_>) -> Result<(), c_int> {
 
 /// The decoder's Lua source.
 fn decoder_source(d: &DecoderView) -> &[u8] {
-    // SAFETY: decoder_view() points a view's source at source_len bytes of
-    // the open container, which outlives the view's use.
+    // SAFETY: DecoderView::of() points a view's source at source_len bytes
+    // of the open container, which outlives the view's use.
     unsafe { ffi::slice(d.source.cast::<u8>(), view_len(u64::from(d.source_len))) }
 }
 
@@ -1177,11 +1177,7 @@ fn open_artifact(path: &CStr, archived: bool, v: &MapView) -> Result<Opened, c_i
 /// The decoders of the open artifact, each as a view, the bad ones left
 /// out.
 fn decoders(u: &Opened) -> impl Iterator<Item = DecoderView> + '_ {
-    (0..u.nr_decoders).filter_map(move |i| {
-        // SAFETY: an all-zero view, which the call fills.
-        let mut d: DecoderView = unsafe { core::mem::zeroed() };
-        (upatch::decoder_view(u, i, &mut d) == 0).then_some(d)
-    })
+    u.decoders().filter_map(|d| DecoderView::of(&d))
 }
 
 fn decode_open(

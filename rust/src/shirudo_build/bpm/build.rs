@@ -536,19 +536,12 @@ pub(super) fn record_payload(
     let Ok(u) = upatch::Opened::open(&p) else {
         return Err(-EINVAL);
     };
-    let refused = upatch::is_unload(&u) || (!update && u.hdr.name[0] == 0);
-    let mut name = [0u8; upatch::NAME_MAX + 1];
-    if !refused {
-        upatch::header_name(&u, &mut name);
-    }
-    let digest = u.hdr.payload_sha256;
-    drop(u);
-    if refused {
+    if u.is_unload() || (!update && u.hdr.name[0] == 0) {
         return Err(-EINVAL);
     }
     let up = &mut spec.upatches[i];
-    up.name = crate::text::cstr(&name).to_vec();
-    up.payload_sha256 = hex(&digest);
+    up.name = u.name().to_vec();
+    up.payload_sha256 = hex(&u.hdr.payload_sha256);
     up.ty = b"bpf".to_vec();
     Ok(())
 }

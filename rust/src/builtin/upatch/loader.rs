@@ -47,9 +47,9 @@ use crate::util::report::OpReport;
 use crate::util::upatch::{
     self, ATTACH_CGROUP_SKB_EGRESS, ATTACH_CGROUP_SKB_INGRESS, ATTACH_FMOD_RET, ATTACH_KPROBE,
     ATTACH_KRETPROBE, ATTACH_NETFILTER_IPV6_PRE_ROUTING, ATTACH_RAW_TRACEPOINT, ATTACH_UPROBE,
-    ATTACH_UPROBE_MULTI, ATTACH_URETPROBE, ATTACH_URETPROBE_MULTI, ATTACH_XDP, MAPS_MAX, NAME_MAX,
-    Opened, POLICY_LABEL_ENTRY, POLICY_LABEL_HEADER, ProgSpec, ROLE_ATTACH, ROLE_SERIALIZER,
-    ROLE_TEST_RUN, Upatch, kind_has_uprobe_target,
+    ATTACH_UPROBE_MULTI, ATTACH_URETPROBE, ATTACH_URETPROBE_MULTI, ATTACH_XDP, MAPS_MAX, Opened,
+    POLICY_LABEL_ENTRY, POLICY_LABEL_HEADER, ProgSpec, ROLE_ATTACH, ROLE_SERIALIZER, ROLE_TEST_RUN,
+    Upatch, kind_has_uprobe_target,
 };
 use crate::util::upatch_pins::{LINK_PIN_PREFIX, xdp_prog_pin};
 use crate::util::upatch_resolve::{BPFFS_UPATCHES_DIR, XATTR_PAYLOAD, pin_path};
@@ -1260,15 +1260,8 @@ fn set_pin_payload(name: &[u8], payload: &[u8; 32]) -> Result<(), c_int> {
 /// the copy the kernel checked, not from the file again, which may hold
 /// other labels by now.
 fn apply_policy_labels(u: &Upatch) {
-    if u.map.is_null() || u.signed_policy_labels.is_null() {
+    let Some(labels) = u.policy_labels().map(|p| p.labels) else {
         return;
-    }
-    // SAFETY: the signed section within the container, of its length.
-    let labels = unsafe {
-        crate::ffi::slice(
-            u.signed_policy_labels.cast::<u8>(),
-            u.signed_policy_labels_len as usize,
-        )
     };
     let count = u32::from_le_bytes([labels[8], labels[9], labels[10], labels[11]]) as usize;
     for e in labels[POLICY_LABEL_HEADER..]
@@ -1386,16 +1379,6 @@ pub(crate) fn trust_anchor(rep: Option<&mut OpReport>) -> Result<(i32, i32), ()>
     Ok((keyring::KEY_SPEC_BPF_KEYRING, ring))
 }
 
-/// The section of the container at `off`, `len` bytes long, which the
-/// parser bounded.
-fn section(u: &Upatch, off: u32, len: u32) -> &[u8] {
-    if u.map.is_null() {
-        return &[];
-    }
-    // SAFETY: a section within the container, which the parser checked.
-    unsafe { core::slice::from_raw_parts(u.map.add(off as usize), len as usize) }
-}
-
 /// Opens the upatch at `path` and applies it: boot restore's way in.
 pub(crate) fn apply_path(
     path: &CStr,
@@ -1427,7 +1410,7 @@ pub(crate) fn apply(
     rep: Option<&mut OpReport>,
 ) -> Result<(), ()> {
     let mut rep = Rep(rep);
-    if !verify_only && upatch::is_unload(u) {
+    if !verify_only && u.is_unload() {
         log_err(
             &[
                 &b"upatch load: "[..],
@@ -1441,26 +1424,22 @@ pub(crate) fn apply(
     }
     let (keyring, serial) = trust_anchor(rep.0.as_deref_mut())?;
     let h = &u.hdr;
-    let insns = section(u, h.loader_insns_off, h.loader_insns_len);
-    let sig = section(u, h.signature_off, h.signature_len);
-    let data = section(u, h.data_off, h.data_len);
-    let insn_cnt = h.loader_insns_len as usize / 8;
+    let (insns, sig, data) = (u.loader(), u.signature(), u.data());
+    let insn_cnt = insns.len() / 8;
     let mut prog_name = [0u8; 16];
-    upatch::prog_name(u, &mut prog_name);
+    u.prog_name(&mut prog_name);
 
     // The pin directory, the archive and unload share the raw name. Boot
     // restore reaches here without the command's check, so it is checked
     // again; and the header's copy, which everything else reads, must be
     // the one the signature covers.
-    let mut name = [0u8; NAME_MAX + 1];
-    upatch::header_name(u, &mut name);
-    let name = till_nul(&name);
+    let name = u.name();
     if !upatch::name_valid(Some(name)) {
         log_err(&[&b"upatch: refusing unsafe upatch name '"[..], name, b"'"].concat());
         rep.fail(c"parse", c"parser_rejected", 0, b"unsafe upatch name");
         return Err(());
     }
-    if !upatch::name_signed(u) {
+    if !u.name_signed() {
         log_err(
             &[
                 &b"upatch: the name of '"[..],
@@ -1513,7 +1492,7 @@ pub(crate) fn apply(
     // one from the sites it names.
     let mut specs = None;
     if !verify_only {
-        if u.map.is_null() || u.signed_attach.is_null() {
+        let Some(meta) = u.signed_attach() else {
             log_err(
                 &[
                     &b"upatch: the attach metadata of '"[..],
@@ -1529,9 +1508,7 @@ pub(crate) fn apply(
                 b"attach metadata not signed",
             );
             return Err(());
-        }
-        // SAFETY: the signed section within the container, of its length.
-        let meta = unsafe { crate::ffi::slice(u.signed_attach, u.signed_attach_len as usize) };
+        };
         let mut parsed = match Specs::parse(meta, h.nr_maps, h.nr_progs) {
             Ok(s) => s,
             Err(e) => {
@@ -1733,8 +1710,8 @@ pub(crate) fn apply(
     };
     let mut skip = [MAPS_MAX; 2];
     let mut policy: Option<[c_int; 2]> = None;
-    if !u.signed_policy_labels.is_null() {
-        skip = [u.signed_policy_map_idx, u.signed_socket_policy_map_idx];
+    if let Some(p) = u.policy_labels() {
+        skip = [p.map_idx, p.socket_map_idx];
         let task =
             match open_shared_policy_map(POLICY_PIN, MAP_TYPE_TASK_STORAGE, 16, F_NO_PREALLOC) {
                 Ok(fd) => fd,

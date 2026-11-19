@@ -32,7 +32,7 @@ use crate::util::upatch::{
     POLICY_LABEL_ENTRY, POLICY_LABEL_HEADER, POLICY_LABELS_MAGIC, POLICY_LABELS_VERSION,
     SECTION_ATTACH, SECTION_DECODERS, SECTION_NAME, SECTION_POLICY_LABELS, SECTION_UNLOAD,
     SIGNED_SECTION, SIGNED_SECTIONS_MAX, SIGNED_TRAILER, SIGNED_TRAILER_MAGIC, SIGNED_VERSION,
-    TYPE_BPF, Upatch, VERSION, upatch_metadata,
+    TYPE_BPF, Upatch, VERSION,
 };
 use crate::util::upatch_rodata::{self, RodataRange};
 
@@ -159,59 +159,12 @@ fn sign(insns: &[u8], data: &[u8], keys: (&CStr, &CStr)) -> Result<(Vec<u8>, [u8
     super::sign::cms_sign(insns, data, MAX_SIG_SIZE, keys.0, keys.1)
 }
 
-/// The parts of an open container.
-///
-/// An opened container and its checked sections.
-struct Opened(upatch::Opened);
-
-impl Opened {
-    fn open(path: &CStr) -> Result<Self, c_int> {
-        upatch::Opened::open(path).map(Self)
-    }
-
-    fn section(&self, offset: u32, len: u32) -> &[u8] {
-        if len == 0 {
-            return &[];
-        }
-        // SAFETY: Opened owns the container bytes until it is dropped.
-        let bytes = unsafe { crate::ffi::slice(self.0.map, self.0.map_size) };
-        usize::try_from(offset)
-            .ok()
-            .zip(usize::try_from(len).ok())
-            .and_then(|(start, len)| bytes.get(start..)?.get(..len))
-            .unwrap_or_default()
-    }
-
-    fn loader(&self) -> &[u8] {
-        self.section(self.0.hdr.loader_insns_off, self.0.hdr.loader_insns_len)
-    }
-
-    fn data(&self) -> &[u8] {
-        self.section(self.0.hdr.data_off, self.0.hdr.data_len)
-    }
-
-    fn signature(&self) -> &[u8] {
-        self.section(self.0.hdr.signature_off, self.0.hdr.signature_len)
-    }
-
-    fn metadata(&self) -> &[u8] {
-        let len = usize::try_from(self.0.hdr.metadata_len).unwrap_or_default();
-        // SAFETY: the container is live and the parser bounds the metadata.
-        let metadata = unsafe { upatch_metadata(&*self.0) };
-        // SAFETY: a missing section is NULL and zero length.
-        unsafe { crate::ffi::slice(metadata.cast(), len) }
-    }
-
-    fn is_unload(&self) -> bool {
-        upatch::is_unload(&self.0)
-    }
-
-    fn symbol_range(&self, symbol: &CStr) -> Result<RodataRange, c_int> {
-        let mut range = RodataRange { offset: 0, size: 0 };
-        match upatch_rodata::symbol_range(&self.0, symbol, &mut range) {
-            0 => Ok(range),
-            err => Err(err),
-        }
+/// Where the variable `symbol` lies in the .rodata of the container `u`.
+fn symbol_range(u: &Upatch, symbol: &CStr) -> Result<RodataRange, c_int> {
+    let mut range = RodataRange { offset: 0, size: 0 };
+    match upatch_rodata::symbol_range(u, symbol, &mut range) {
+        0 => Ok(range),
+        err => Err(err),
     }
 }
 
@@ -246,13 +199,13 @@ impl<'a> MemoryUpatch<'a> {
 
 /// The CMS covers the loader and data. The payload digest in the
 /// unsigned header must also match those bytes.
-fn verify_payload(u: &Opened, cert: &CStr) -> Result<(), c_int> {
+fn verify_payload(u: &Upatch, cert: &CStr) -> Result<(), c_int> {
     let payload = [u.loader(), u.data()].concat();
     let ret = verify_cms(&payload, u.signature(), cert);
     if ret != 0 {
         return Err(ret);
     }
-    if sha256(&payload).map_err(|_| -EBADMSG)? != u.0.hdr.payload_sha256 {
+    if sha256(&payload).map_err(|_| -EBADMSG)? != u.hdr.payload_sha256 {
         return Err(-EBADMSG);
     }
     Ok(())
@@ -272,7 +225,7 @@ fn output_is_input(out: &std::fs::File, input: &CStr) -> bool {
 /// Signs `data` with the loader of `src` into `output`, a package with
 /// the header of `src` but for where its parts lie and its digest.
 fn write_signed(
-    src: &Opened,
+    src: &Upatch,
     input: &CStr,
     data: &[u8],
     output: &CStr,
@@ -280,7 +233,7 @@ fn write_signed(
 ) -> Result<(), SetFailed> {
     let (sig, digest) =
         sign(src.loader(), data, (&keys.pkey, &keys.cert)).map_err(SetFailed::Output)?;
-    let (sh, insns_len, meta) = (&src.0.hdr, src.loader().len(), src.metadata());
+    let (sh, insns_len, meta) = (&src.hdr, src.loader().len(), src.metadata());
     let loader_off = HEADER_SIZE;
     let sig_off = loader_off + insns_len;
     let data_off = sig_off + sig.len();
@@ -291,10 +244,8 @@ fn write_signed(
     if meta_off + meta.len() > FILE_MAX {
         return Err(SetFailed::Output(-E2BIG));
     }
-    let mut name = [0u8; NAME_MAX + 1];
-    upatch::header_name(&src.0, &mut name);
     let hdr = Header {
-        name: crate::text::cstr(&name),
+        name: src.name(),
         ty: sh.ty,
         flags: sh.flags,
         payload_sha256: &digest,
@@ -388,7 +339,7 @@ pub(super) fn set_rodata(
     if let Some(i) = twice {
         return Err(SetFailed::Twice(i));
     }
-    let src = Opened::open(input).map_err(SetFailed::Package)?;
+    let src = upatch::Opened::open(input).map_err(SetFailed::Package)?;
     if src.is_unload() {
         return Err(SetFailed::Package(-EINVAL));
     }
@@ -398,9 +349,7 @@ pub(super) fn set_rodata(
     let mut data = src.data().to_vec();
     let mut placed = Vec::with_capacity(values.len());
     for (i, &(symbol, value)) in values.iter().enumerate() {
-        let r = src
-            .symbol_range(symbol)
-            .map_err(|e| SetFailed::Symbol(i, e))?;
+        let r = symbol_range(&src, symbol).map_err(|e| SetFailed::Symbol(i, e))?;
         if value.is_empty() || Some(value.len()) != usize::try_from(r.size).ok() {
             return Err(SetFailed::Size(i, r.size));
         }
@@ -432,7 +381,7 @@ pub(super) fn patch_rodata(
 }
 
 pub(super) fn verify_package(input: &CStr, cert: &CStr) -> Result<(), c_int> {
-    let u = Opened::open(input)?;
+    let u = upatch::Opened::open(input)?;
     if u.is_unload() {
         return Err(-EINVAL);
     }
@@ -719,19 +668,14 @@ fn finalize(mut obj: Object, out: &CStr, c: &Contents, keys: (&CStr, &CStr)) -> 
     }
     let insns = &insns[..];
     let signed = compose_signed_data(&data, &sections)?;
-    let loader_data = [insns, &signed].concat();
-    // SAFETY: an all-zero container, given the loader and its data.
-    let mut view: Upatch = unsafe { core::mem::zeroed() };
-    view.map = loader_data.as_ptr();
-    view.hdr.loader_insns_len = u32::try_from(insns.len()).map_err(|_| -E2BIG)?;
-    view.hdr.data_off = view.hdr.loader_insns_len;
-    view.hdr.data_len = u32::try_from(signed.len()).map_err(|_| -E2BIG)?;
-    let mut rodata_data_off = 0;
-    match upatch_rodata::data_offset(&view, &mut rodata_data_off) {
-        0 => {}
-        err if err == -ENOENT => rodata_data_off = 0,
-        err => return Err(err),
+    if u32::try_from(insns.len()).is_err() || u32::try_from(signed.len()).is_err() {
+        return Err(-E2BIG);
     }
+    let rodata_data_off = match upatch_rodata::loader_data_offset(insns, &signed) {
+        Ok(off) => off,
+        Err(err) if err == -ENOENT => 0,
+        Err(err) => return Err(err),
+    };
     let (sig, digest) = match sign(insns, &signed, keys) {
         Ok(s) => s,
         Err(err) => {

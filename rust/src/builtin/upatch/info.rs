@@ -14,7 +14,7 @@ use crate::text::{cstr, sanitize};
 use crate::util::help::{Help, HelpSection};
 use crate::util::json::JsonEmit;
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
-use crate::util::upatch::{self, DecoderView, NAME_MAX, Opened, Upatch};
+use crate::util::upatch::{Opened, Upatch};
 /// UPATCH_DECODER_LANG_LUA, _INPUT_MAP_V1, _EXPORT_LOG and _METRIC.
 const LANG_LUA: u32 = 1;
 const INPUT_MAP_V1: u32 = 1;
@@ -56,46 +56,21 @@ fn unverified(e: &mut JsonEmit, key: &[u8], val: &[u8]) {
     e.str_lossy(cstr(val));
 }
 
-/// The container's decoders, each that reads as a view.
-fn decoders(u: &Upatch) -> Vec<DecoderView> {
-    (0..u.nr_decoders)
-        .filter_map(|i| {
-            // SAFETY: an all-zero view, which the call fills.
-            let mut d: DecoderView = unsafe { core::mem::zeroed() };
-            (upatch::decoder_view(u, i, &mut d) == 0).then_some(d)
-        })
-        .collect()
+/// A length within a container, as JSON takes a number.
+fn json_len(len: usize) -> i64 {
+    i64::try_from(len).unwrap_or(i64::MAX)
 }
 
-/// The container's signed name, its header's size of it.
-fn signed_name(u: &Upatch, name: &mut [u8; NAME_MAX + 1]) -> bool {
-    let p = upatch::signed_name(u);
-    if p.is_null() {
-        return false;
-    }
-    // SAFETY: the signed section's name of the header's size.
-    let signed = unsafe { crate::ffi::slice(p.cast::<u8>(), NAME_MAX) };
-    name[..NAME_MAX].copy_from_slice(signed);
-    true
-}
-
-fn json(u: &Upatch, path: &[u8], name: &mut [u8; NAME_MAX + 1]) -> c_int {
+fn json(u: &Upatch, path: &[u8]) -> c_int {
     let mut e = JsonEmit::growing(JSON_MAX);
     let h = &u.hdr;
 
     e.obj_open();
     e.kv_int(b"schema", 1);
     unverified(&mut e, b"path", path);
-    unverified(&mut e, b"name", name);
-    e.kv_string(
-        b"type",
-        if upatch::is_unload(u) {
-            b"unload"
-        } else {
-            b"load"
-        },
-    );
-    e.kv_string(b"payload_type", upatch::payload_type(u));
+    unverified(&mut e, b"name", u.name());
+    e.kv_string(b"type", if u.is_unload() { b"unload" } else { b"load" });
+    e.kv_string(b"payload_type", u.payload_type());
     e.kv_int(b"version", i64::from(h.version));
     e.kv_string(b"payload_sha256", &hex(&h.payload_sha256));
     e.kv_int(b"loader_insns_len", i64::from(h.loader_insns_len));
@@ -103,32 +78,31 @@ fn json(u: &Upatch, path: &[u8], name: &mut [u8; NAME_MAX + 1]) -> c_int {
     e.kv_int(b"metadata_len", i64::from(h.metadata_len));
     e.kv_int(b"data_len", i64::from(h.data_len));
     e.kv_int(b"log_buf_sz", i64::from(h.log_buf_sz));
-    e.kv_int(b"file_size", u.map_size as i64);
-    if signed_name(u, name) {
-        unverified(&mut e, b"signed_name", name);
-    } else {
-        e.kv_null(b"signed_name");
+    e.kv_int(b"file_size", json_len(u.bytes().len()));
+    match u.signed_name() {
+        Some(name) => unverified(&mut e, b"signed_name", name),
+        None => e.kv_null(b"signed_name"),
     }
     e.kv_int(
         b"attach_metadata_len",
-        i64::from(upatch::signed_attach_len(u)),
+        json_len(u.signed_attach().map_or(0, <[u8]>::len)),
     );
-    match upatch::signed_unload_payload(u) {
+    match u.signed_unload_payload() {
         Some(p) => e.kv_string(b"unload_payload_sha256", &hex(p)),
         None => e.kv_null(b"unload_payload_sha256"),
     }
     e.arr_open(b"decoders");
-    for d in decoders(u) {
+    for d in u.decoders() {
         e.obj_open();
         e.kv_string(b"language", language(d.language));
         e.kv_int(b"api_version", i64::from(d.api_version));
         e.kv_string(b"input_format", input(d.input_format));
         e.kv_string(b"export_signal", signal(d.export_signal));
-        unverified(&mut e, b"upatch", &d.upatch);
-        unverified(&mut e, b"map", &d.map);
-        unverified(&mut e, b"source_file", &d.source_name);
-        unverified(&mut e, b"entrypoint", &d.entrypoint);
-        e.kv_int(b"source_len", i64::from(d.source_len));
+        unverified(&mut e, b"upatch", d.upatch);
+        unverified(&mut e, b"map", d.map);
+        unverified(&mut e, b"source_file", d.source_name);
+        unverified(&mut e, b"entrypoint", d.entrypoint);
+        e.kv_int(b"source_len", json_len(d.source.len()));
         e.obj_close();
     }
     e.arr_close();
@@ -144,27 +118,26 @@ fn section(label: &str, value: &[u8]) -> Vec<u8> {
     [format!("  {label:<22} ").as_bytes(), value, b"\n"].concat()
 }
 
-fn text(u: &Upatch, path: &[u8], name: &mut [u8; NAME_MAX + 1]) {
+fn text(u: &Upatch, path: &[u8]) {
     let h = &u.hdr;
-    let attach_len = upatch::signed_attach_len(u);
     let mut t = Vec::new();
 
     t.extend(line("File:", &printable(path)));
-    t.extend(line("Name:", &printable(name)));
+    t.extend(line("Name:", &printable(u.name())));
     t.extend(line(
         "Type:",
-        if upatch::is_unload(u) {
+        if u.is_unload() {
             b"UNLOAD-directive"
         } else {
             b"LOAD"
         },
     ));
-    t.extend(line("Payload type:", upatch::payload_type(u)));
+    t.extend(line("Payload type:", u.payload_type()));
     t.extend(line("Version:", h.version.to_string().as_bytes()));
     t.extend(line("Payload sha256:", &hex(&h.payload_sha256)));
     t.extend(line(
         "File size:",
-        format!("{} bytes", u.map_size).as_bytes(),
+        format!("{} bytes", u.bytes().len()).as_bytes(),
     ));
 
     t.extend_from_slice(b"\nLoader:\n");
@@ -196,30 +169,28 @@ fn text(u: &Upatch, path: &[u8], name: &mut [u8; NAME_MAX + 1]) {
     ));
 
     t.extend_from_slice(b"\nSigned sections:\n");
-    if signed_name(u, name) {
-        t.extend(section("Name:", &printable(name)));
-    } else {
-        t.extend(section("Name:", b"(none)"));
+    match u.signed_name() {
+        Some(name) => t.extend(section("Name:", &printable(name))),
+        None => t.extend(section("Name:", b"(none)")),
     }
-    let attach = if attach_len != 0 {
-        format!("{attach_len} bytes")
-    } else {
-        "(none)".into()
+    let attach = match u.signed_attach() {
+        Some(a) => format!("{} bytes", a.len()),
+        None => "(none)".into(),
     };
     t.extend(section("Attach metadata:", attach.as_bytes()));
-    match upatch::signed_unload_payload(u) {
+    match u.signed_unload_payload() {
         Some(p) => t.extend(section("Unload payload:", &hex(p))),
         None => t.extend(section("Unload payload:", b"(none)")),
     }
 
     t.extend_from_slice(b"\nDecoders:\n");
-    if !upatch::has_decoders(u) {
+    if !u.has_decoders() {
         t.extend_from_slice(b"  (none)\n");
     } else {
-        for d in decoders(u) {
+        for d in u.decoders() {
             t.extend(section(
                 "Target:",
-                &[&printable(&d.upatch)[..], b"/", &printable(&d.map)].concat(),
+                &[&printable(d.upatch)[..], b"/", &printable(d.map)].concat(),
             ));
             let sub =
                 |label: &str, v: &[u8]| [format!("    {label:<20} ").as_bytes(), v, b"\n"].concat();
@@ -236,10 +207,10 @@ fn text(u: &Upatch, path: &[u8], name: &mut [u8; NAME_MAX + 1]) {
             t.extend(sub(
                 "Source:",
                 &[
-                    &printable(&d.source_name)[..],
+                    &printable(d.source_name)[..],
                     b":",
-                    &printable(&d.entrypoint),
-                    format!(" ({} bytes)", d.source_len).as_bytes(),
+                    &printable(d.entrypoint),
+                    format!(" ({} bytes)", d.source.len()).as_bytes(),
                 ]
                 .concat(),
             ));
@@ -306,12 +277,10 @@ pub(super) fn run(args: &[&CStr]) -> c_int {
             return 1;
         }
     };
-    let mut name = [0u8; NAME_MAX + 1];
-    upatch::header_name(&u, &mut name);
     if json_out {
-        json(&u, path, &mut name)
+        json(&u, path)
     } else {
-        text(&u, path, &mut name);
+        text(&u, path);
         0
     }
 }

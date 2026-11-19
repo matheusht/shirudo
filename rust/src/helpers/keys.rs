@@ -21,7 +21,7 @@ use crate::errno::{EFBIG, EINVAL, EIO};
 use crate::util::crypto_openssl::{Cert, cert_free, cert_read_file, cms_signed_by};
 use crate::util::hex::encode;
 use crate::util::keys::{TrustedSet, cert_path, load, load_image_at, members, verify_signature};
-use crate::util::upatch::{Opened, upatch_signature};
+use crate::util::upatch::Opened;
 
 helper_main!(shirudo_helper_test_keys, run);
 
@@ -86,14 +86,10 @@ fn signer(upatch: &CStr, cert_file: &CStr) -> c_int {
     if unsafe { cert_read_file(cert_file.as_ptr(), &mut cert) } != 0 {
         return 2;
     }
-    // SAFETY: the upatch's signature, its header's length of it, and the
-    // certificate, freed after.
+    let sig = u.signature();
+    // SAFETY: the upatch's signature and the certificate, freed after.
     let ret = unsafe {
-        let ret = cms_signed_by(
-            upatch_signature(&*u).cast(),
-            u.hdr.signature_len as usize,
-            &cert,
-        );
+        let ret = cms_signed_by(sig.as_ptr().cast(), sig.len(), &cert);
         cert_free(&mut cert);
         ret
     };

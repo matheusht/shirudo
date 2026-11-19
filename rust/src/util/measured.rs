@@ -14,7 +14,7 @@ use crate::util::chain::MeasuredUpatch;
 use crate::util::eventlog::{self, UPATCH_INIT, UPATCH_UNLOAD};
 use crate::util::hex::{self, hex_encode};
 use crate::util::seal;
-use crate::util::upatch::{NAME_MAX, Opened, PAYLOAD_HASH_LEN, Upatch, header_name, member_valid};
+use crate::util::upatch::{NAME_MAX, Opened, PAYLOAD_HASH_LEN, Upatch, member_valid};
 
 /// `MEASURED_MAX`: the most upatches a set holds.
 const MEASURED_MAX: usize = 4096;
@@ -114,9 +114,9 @@ const NO_MEMBER: MeasuredUpatch = MeasuredUpatch {
 /// and its payload digest in hex.
 pub(crate) fn upatch_of(u: &Upatch) -> MeasuredUpatch {
     let mut member = NO_MEMBER;
-    let payload_hex = hex::encode(&u.hdr.payload_sha256);
+    let (name, payload_hex) = (u.name(), hex::encode(&u.hdr.payload_sha256));
 
-    header_name(u, &mut member.name);
+    member.name[..name.len()].copy_from_slice(name);
     member.payload_hex[..payload_hex.len()].copy_from_slice(&payload_hex);
     member
 }

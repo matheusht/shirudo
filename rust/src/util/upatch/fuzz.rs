@@ -46,23 +46,11 @@ fuzz_target!(shirudo_fuzz_upatch, shirudo_fuzz_upatch_init, |data| {
     let Ok(u) = super::Opened::open(&input.path) else {
         return;
     };
-    let u: &super::Upatch = &u;
-    if !u.map.is_null() && !u.signed_attach.is_null() {
-        // SAFETY: the open container's signed attach section, which it
-        // holds.
-        let attach = unsafe {
-            crate::ffi::slice(u.signed_attach.cast::<u8>(), u.signed_attach_len as usize)
-        };
+    if let Some(attach) = u.signed_attach() {
         specs(attach, u.hdr.nr_maps, u.hdr.nr_progs);
     }
-    super::signed_name(u);
-    super::is_unload(u);
-    if super::has_decoders(u) {
-        // SAFETY: a view of nothing, for which zeros are the value.
-        let mut d: super::DecoderView = unsafe { core::mem::zeroed() };
-        let mut i = 0;
-        while super::decoder_view(u, i, &mut d) == 0 {
-            i += 1;
-        }
+    core::hint::black_box((u.signed_name(), u.is_unload(), u.policy_labels()));
+    for d in u.decoders() {
+        core::hint::black_box(d);
     }
 });

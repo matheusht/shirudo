@@ -103,22 +103,18 @@ fn named(name: &[u8]) -> Upatch {
 }
 
 #[test]
-fn header_name_is_terminated() {
-    let mut out = [0xffu8; NAME_MAX + 1];
-
-    header_name(&named(b"kernel-obs"), &mut out);
-    assert_eq!(cstr(&out), b"kernel-obs");
-    header_name(&named(&[b'a'; NAME_MAX]), &mut out);
-    assert_eq!(cstr(&out).len(), NAME_MAX);
+fn name_stops_at_its_nul() {
+    assert_eq!(named(b"kernel-obs").name(), b"kernel-obs");
+    assert_eq!(named(&[b'a'; NAME_MAX]).name().len(), NAME_MAX);
 }
 
 #[test]
 fn prog_name_is_what_the_kernel_takes() {
     let mut out = [0xffu8; 16];
 
-    prog_name(&named(b"fix-cve.2026"), &mut out);
+    named(b"fix-cve.2026").prog_name(&mut out);
     assert_eq!(cstr(&out), b"fix_cve.2026");
-    prog_name(&named(&[b'a'; NAME_MAX]), &mut out);
+    named(&[b'a'; NAME_MAX]).prog_name(&mut out);
     assert_eq!(cstr(&out).len(), 15);
 }
 
@@ -129,11 +125,11 @@ fn name_signed_is_the_header_name() {
 
     signed[..3].copy_from_slice(b"fix");
     u.map = signed.as_ptr();
-    assert!(!name_signed(&u));
+    assert!(!u.name_signed());
     u.signed_name = signed.as_ptr().cast();
-    assert!(name_signed(&u));
+    assert!(u.name_signed());
     u.hdr.name[2] = b'y';
-    assert!(!name_signed(&u));
+    assert!(!u.name_signed());
 }
 
 #[test]

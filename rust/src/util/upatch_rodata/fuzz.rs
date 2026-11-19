@@ -6,7 +6,7 @@
 //! stdout that the setup sends to /dev/null.
 
 use super::RodataRange;
-use super::{data_offset, print, symbol_range};
+use super::{Loader, print, rodata_offset, symbol_range};
 use crate::fuzzing::fuzz_target;
 use crate::util::upatch::{Upatch, upatch_close, upatch_open_memory};
 
@@ -32,8 +32,7 @@ fuzz_target!(
             if upatch_open_memory(data.as_ptr().cast(), data.len(), &mut *u) != 0 {
                 return;
             }
-            let mut offset = 0u32;
-            if data_offset(&u, &mut offset) == 0 && offset != u.hdr.rodata_data_off {
+            if rodata_offset(&Loader::of(&u)).is_ok_and(|off| off != u.hdr.rodata_data_off) {
                 std::process::abort();
             }
             let mut range = RodataRange { offset: 0, size: 0 };

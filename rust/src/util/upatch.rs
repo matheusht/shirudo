@@ -8,11 +8,12 @@
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
-use crate::errno::{EFBIG, EINTR, EINVAL, EIO, ENOENT, ENOMEM, EOPNOTSUPP, EOVERFLOW};
+use crate::errno::{EFBIG, EINTR, EINVAL, EIO, ENOMEM, EOPNOTSUPP, EOVERFLOW};
 use crate::ffi;
 use crate::heap::{xcalloc, xfree, xmalloc, xstrfree, xstrndup};
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{O_CLOEXEC, O_RDONLY, S_IFMT, S_IFREG, Statx, close, errno, open, pread};
+use crate::text::cstr;
 use crate::util::hex;
 use crate::util::io::stat_fd;
 
@@ -120,33 +121,29 @@ pub struct UpatchHostHeader {
     pub(crate) reserved1: u32,
 }
 
-/// `struct upatch`: a container opened, its bytes owned when read from
-/// a file, which upatch_close() releases.
-#[repr(C)]
+/// A container opened, its bytes owned when read from a file, which
+/// upatch_close() releases, and its sections, which its methods hand
+/// out.
 pub struct Upatch {
     pub(crate) hdr: UpatchHostHeader,
-    pub(crate) map: *const u8,
-    pub(crate) map_size: usize,
-    pub(crate) owned: bool,
-    pub(crate) rodata_offset_in_header: bool,
-    pub(crate) decoder_blob: *const c_void,
-    pub(crate) decoder_blob_len: u32,
+    map: *const u8,
+    map_size: usize,
+    owned: bool,
+    decoder_blob: *const c_void,
+    decoder_blob_len: u32,
     pub(crate) nr_decoders: u32,
-    pub(crate) signed_name: *const c_char,
-    pub(crate) signed_attach: *const u8,
-    pub(crate) signed_attach_len: u32,
-    pub(crate) signed_unload_payload: *const u8,
-    pub(crate) signed_policy_labels: *const c_void,
-    pub(crate) signed_policy_labels_len: u32,
-    pub(crate) signed_policy_map_idx: u32,
-    pub(crate) signed_socket_policy_map_idx: u32,
+    signed_name: *const c_char,
+    signed_attach: *const u8,
+    signed_attach_len: u32,
+    signed_unload_payload: *const u8,
+    signed_policy_labels: *const c_void,
+    signed_policy_labels_len: u32,
+    signed_policy_map_idx: u32,
+    signed_socket_policy_map_idx: u32,
 }
 
 const _: () = assert!(size_of::<UpatchHostHeader>() == HEADER_SIZE);
 const _: () = assert!(core::mem::offset_of!(UpatchHostHeader, payload_sha256) == 272);
-const _: () = assert!(size_of::<Upatch>() == 456);
-const _: () = assert!(core::mem::offset_of!(Upatch, decoder_blob) == 384);
-const _: () = assert!(core::mem::offset_of!(Upatch, signed_unload_payload) == 424);
 
 /// `struct upatch_decoder_view`: a decoder of the signed blob, its
 /// source within the container.
@@ -165,6 +162,45 @@ pub struct DecoderView {
 }
 
 const _: () = assert!(size_of::<DecoderView>() == 208);
+
+impl DecoderView {
+    /// The view of `d`, none for a source a u32 cannot measure.
+    pub(crate) fn of(d: &Decoder<'_>) -> Option<Self> {
+        Some(DecoderView {
+            language: d.language,
+            api_version: d.api_version,
+            input_format: d.input_format,
+            export_signal: d.export_signal,
+            upatch: *d.upatch,
+            map: *d.map,
+            source_name: *d.source_name,
+            entrypoint: *d.entrypoint,
+            source: d.source.as_ptr().cast(),
+            source_len: u32::try_from(d.source.len()).ok()?,
+        })
+    }
+}
+
+/// A decoder of the signed DECODERS section: what it reads and exports,
+/// and its source, all within the container.
+pub(crate) struct Decoder<'a> {
+    pub(crate) language: u32,
+    pub(crate) api_version: u32,
+    pub(crate) input_format: u32,
+    pub(crate) export_signal: u32,
+    pub(crate) upatch: &'a [u8; 64],
+    pub(crate) map: &'a [u8; 16],
+    pub(crate) source_name: &'a [u8; 64],
+    pub(crate) entrypoint: &'a [u8; 32],
+    pub(crate) source: &'a [u8],
+}
+
+/// The signed POLICY_LABELS section, and the two maps it names.
+pub(crate) struct PolicyLabels<'a> {
+    pub(crate) labels: &'a [u8],
+    pub(crate) map_idx: u32,
+    pub(crate) socket_map_idx: u32,
+}
 
 /// `struct stat` of the C library, which a program's spec carries for
 /// its callers.
@@ -532,7 +568,6 @@ unsafe fn parse(data: *const u8, size: usize, out: *mut Upatch) -> c_int {
     u.map_size = size;
     let mut ret = parse_header(map, &mut u.hdr);
     if ret == 0 {
-        u.rodata_offset_in_header = true;
         ret = validate_bounds(&u.hdr, size);
     }
     if ret != 0 {
@@ -636,95 +671,183 @@ pub(crate) fn close_upatch(u: &mut Upatch) {
     }
 }
 
-/// The header's name, NUL-terminated.
-pub(crate) fn header_name(u: &Upatch, out: &mut [u8; NAME_MAX + 1]) {
-    out[..NAME_MAX].copy_from_slice(&u.hdr.name);
-    out[NAME_MAX] = 0;
-}
-
-pub(crate) fn signed_name(u: &Upatch) -> *const c_char {
-    if u.map.is_null() {
-        ptr::null()
-    } else {
-        u.signed_name
+impl Upatch {
+    /// The container's bytes, none of a closed one.
+    pub(crate) fn bytes(&self) -> &[u8] {
+        if self.map.is_null() {
+            return &[];
+        }
+        // SAFETY: the bytes of the open container.
+        unsafe { ffi::slice(self.map, self.map_size) }
     }
-}
 
-pub(crate) fn name_signed(u: &Upatch) -> bool {
-    let name = signed_name(u);
+    /// The `len` bytes at `off`, which validate_bounds() kept within the
+    /// container, none of a closed one.
+    fn section(&self, off: u32, len: u32) -> &[u8] {
+        self.bytes()
+            .get(off as usize..)
+            .and_then(|b| b.get(..len as usize))
+            .unwrap_or_default()
+    }
 
-    // SAFETY: a signed name lies within the open container, NAME_MAX
-    // bytes of it.
-    !name.is_null() && unsafe { ffi::slice(name.cast::<u8>(), NAME_MAX) } == u.hdr.name
+    /// The loader's instructions.
+    pub(crate) fn loader(&self) -> &[u8] {
+        self.section(self.hdr.loader_insns_off, self.hdr.loader_insns_len)
+    }
+
+    /// The loader's signature.
+    pub(crate) fn signature(&self) -> &[u8] {
+        self.section(self.hdr.signature_off, self.hdr.signature_len)
+    }
+
+    /// The unsigned metadata, none when there is none.
+    pub(crate) fn metadata(&self) -> &[u8] {
+        self.section(self.hdr.metadata_off, self.hdr.metadata_len)
+    }
+
+    /// The loader's data, the signed sections behind it.
+    pub(crate) fn data(&self) -> &[u8] {
+        self.section(self.hdr.data_off, self.hdr.data_len)
+    }
+
+    /// The header's name, up to its NUL.
+    pub(crate) fn name(&self) -> &[u8] {
+        cstr(&self.hdr.name)
+    }
+
+    /// The signed NAME section, the header's size of a name.
+    pub(crate) fn signed_name(&self) -> Option<&[u8; NAME_MAX]> {
+        if self.map.is_null() || self.signed_name.is_null() {
+            return None;
+        }
+        // SAFETY: a signed section within the open container, NAME_MAX
+        // bytes of it.
+        let name = unsafe { ffi::slice(self.signed_name.cast::<u8>(), NAME_MAX) };
+        name.try_into().ok()
+    }
+
+    /// Whether the header's name is the one the signature covers, every
+    /// byte of its field.
+    pub(crate) fn name_signed(&self) -> bool {
+        self.signed_name() == Some(&self.hdr.name)
+    }
+
+    /// The header's name as a program name: up to `out`'s room less one,
+    /// any other byte than `[A-Za-z0-9_.]` as '_', and zeros after.
+    pub(crate) fn prog_name(&self, out: &mut [u8]) {
+        let name = self.name();
+
+        if out.is_empty() {
+            return;
+        }
+        out.fill(0);
+        let n = name.len().min(out.len() - 1);
+        for (o, &c) in out.iter_mut().zip(&name[..n]) {
+            *o = if prog_name_char(c) { c } else { b'_' };
+        }
+    }
+
+    /// The signed attach metadata.
+    pub(crate) fn signed_attach(&self) -> Option<&[u8]> {
+        if self.map.is_null() || self.signed_attach.is_null() {
+            return None;
+        }
+        // SAFETY: a signed section within the open container, of its
+        // length.
+        Some(unsafe { ffi::slice(self.signed_attach, self.signed_attach_len as usize) })
+    }
+
+    /// The signed digest of the payload an unload directive unloads.
+    pub(crate) fn signed_unload_payload(&self) -> Option<&[u8; PAYLOAD_HASH_LEN]> {
+        if self.map.is_null() || self.signed_unload_payload.is_null() {
+            return None;
+        }
+        // SAFETY: a signed section within the open container, its 32
+        // bytes.
+        let payload = unsafe { ffi::slice(self.signed_unload_payload, PAYLOAD_HASH_LEN) };
+        payload.try_into().ok()
+    }
+
+    /// The signed policy labels, which parse_policy_labels() checked.
+    pub(crate) fn policy_labels(&self) -> Option<PolicyLabels<'_>> {
+        if self.map.is_null() || self.signed_policy_labels.is_null() {
+            return None;
+        }
+        // SAFETY: a signed section within the open container, of its
+        // length.
+        let labels = unsafe {
+            ffi::slice(
+                self.signed_policy_labels.cast::<u8>(),
+                self.signed_policy_labels_len as usize,
+            )
+        };
+        Some(PolicyLabels {
+            labels,
+            map_idx: self.signed_policy_map_idx,
+            socket_map_idx: self.signed_socket_policy_map_idx,
+        })
+    }
+
+    /// The signed DECODERS section, which parse_decoders() checked.
+    fn decoder_blob(&self) -> &[u8] {
+        if self.map.is_null() || self.decoder_blob.is_null() {
+            return &[];
+        }
+        // SAFETY: a signed section within the open container, of its
+        // length.
+        unsafe {
+            ffi::slice(
+                self.decoder_blob.cast::<u8>(),
+                self.decoder_blob_len as usize,
+            )
+        }
+    }
+
+    pub(crate) fn has_decoders(&self) -> bool {
+        !self.decoder_blob().is_empty() && self.nr_decoders > 0
+    }
+
+    /// Decoder `idx` of the signed DECODERS section.
+    pub(crate) fn decoder(&self, idx: u32) -> Option<Decoder<'_>> {
+        if !self.has_decoders() || idx >= self.nr_decoders {
+            return None;
+        }
+        let blob = self.decoder_blob();
+        let d = blob
+            .get(DECODER_BLOB + idx as usize * DECODER_ENTRY..)?
+            .get(..DECODER_ENTRY)?;
+        let source_off = le32(d, 192) as usize;
+        let source_len = le32(d, 196) as usize;
+        Some(Decoder {
+            language: le32(d, 0),
+            api_version: le32(d, 4),
+            input_format: le32(d, 8),
+            export_signal: le32(d, 12),
+            upatch: d[16..80].try_into().ok()?,
+            map: d[80..96].try_into().ok()?,
+            source_name: d[96..160].try_into().ok()?,
+            entrypoint: d[160..192].try_into().ok()?,
+            source: blob.get(source_off..)?.get(..source_len)?,
+        })
+    }
+
+    /// The decoders of the signed DECODERS section, in order.
+    pub(crate) fn decoders(&self) -> impl Iterator<Item = Decoder<'_>> {
+        (0..self.nr_decoders).filter_map(|i| self.decoder(i))
+    }
+
+    pub(crate) fn is_unload(&self) -> bool {
+        self.hdr.flags & DIRECTIVE_UNLOAD != 0
+    }
+
+    /// What the payload is: a BPF program, the one kind there is.
+    pub(crate) fn payload_type(&self) -> &'static [u8] {
+        b"bpf"
+    }
 }
 
 fn prog_name_char(c: u8) -> bool {
     c.is_ascii_alphanumeric() || c == b'_' || c == b'.'
-}
-
-/// The header's name as a program name: up to `out`'s room less one,
-/// any other byte than `[A-Za-z0-9_.]` as '_', and zeros after.
-pub(crate) fn prog_name(u: &Upatch, out: &mut [u8]) {
-    let n = u.hdr.name.iter().position(|&c| c == 0).unwrap_or(NAME_MAX);
-
-    if out.is_empty() {
-        return;
-    }
-    out.fill(0);
-    let n = n.min(out.len() - 1);
-    for (o, &c) in out.iter_mut().zip(&u.hdr.name[..n]) {
-        *o = if prog_name_char(c) { c } else { b'_' };
-    }
-}
-
-fn at(u: &Upatch, off: u32) -> *const c_void {
-    // SAFETY: an offset validate_bounds() kept within the container.
-    unsafe { u.map.add(off as usize) }.cast()
-}
-
-pub(crate) fn decoder_view(u: &Upatch, idx: u32, out: &mut DecoderView) -> c_int {
-    // SAFETY: the view, every byte of it.
-    unsafe { ptr::write_bytes(ptr::from_mut(out), 0, 1) };
-    if !has_decoders(u) || idx >= u.nr_decoders {
-        return -ENOENT;
-    }
-    // SAFETY: the blob parse_decoders() checked, its entries within it.
-    let bp = unsafe { ffi::slice(u.decoder_blob.cast::<u8>(), u.decoder_blob_len as usize) };
-    let d = &bp[DECODER_BLOB + idx as usize * DECODER_ENTRY..][..DECODER_ENTRY];
-    out.language = le32(d, 0);
-    out.api_version = le32(d, 4);
-    out.input_format = le32(d, 8);
-    out.export_signal = le32(d, 12);
-    out.upatch.copy_from_slice(&d[16..80]);
-    out.map.copy_from_slice(&d[80..96]);
-    out.source_name.copy_from_slice(&d[96..160]);
-    out.entrypoint.copy_from_slice(&d[160..192]);
-    out.source = bp[le32(d, 192) as usize..].as_ptr().cast();
-    out.source_len = le32(d, 196);
-    0
-}
-
-/// The length of the signed attach metadata, 0 for none.
-pub(crate) fn signed_attach_len(u: &Upatch) -> u32 {
-    if u.map.is_null() {
-        0
-    } else {
-        u.signed_attach_len
-    }
-}
-
-/// The signed digest of the payload an unload directive unloads.
-pub(crate) fn signed_unload_payload(u: &Upatch) -> Option<&[u8]> {
-    if u.map.is_null() || u.signed_unload_payload.is_null() {
-        return None;
-    }
-    // SAFETY: a signed section within the open container, its 32 bytes.
-    Some(unsafe { ffi::slice(u.signed_unload_payload, PAYLOAD_HASH_LEN) })
-}
-
-/// What the payload is: a BPF program, the one kind there is.
-pub(crate) fn payload_type(_u: &Upatch) -> &'static [u8] {
-    b"bpf"
 }
 
 /// The bpffs name of upatch `name`: bpffs reserves dots in a path
@@ -801,14 +924,6 @@ impl Drop for Opened {
         // SAFETY: the container opened, closed once.
         unsafe { capi::upatch_close(&mut *self.0) };
     }
-}
-
-pub(crate) fn is_unload(u: &Upatch) -> bool {
-    u.hdr.flags & DIRECTIVE_UNLOAD != 0
-}
-
-pub(crate) fn has_decoders(u: &Upatch) -> bool {
-    !u.map.is_null() && !u.decoder_blob.is_null() && u.nr_decoders > 0
 }
 
 /// An upatch name: `[A-Za-z0-9._-]+`, not starting with '.', whose pin
@@ -1139,10 +1254,7 @@ pub(crate) unsafe fn specs_parse(
     0
 }
 
-pub(crate) use capi::{
-    upatch_close, upatch_data, upatch_loader, upatch_metadata, upatch_open, upatch_open_fd,
-    upatch_open_memory, upatch_signature,
-};
+pub(crate) use capi::{upatch_close, upatch_open, upatch_open_fd, upatch_open_memory};
 
 #[cfg(test)]
 mod tests;
@@ -1152,9 +1264,8 @@ mod fuzz;
 
 mod capi {
     use core::ffi::{c_char, c_int, c_void};
-    use core::ptr;
 
-    use super::{Upatch, at};
+    use super::Upatch;
 
     /// # Safety
     ///
@@ -1191,57 +1302,5 @@ mod capi {
     pub unsafe extern "C" fn upatch_close(u: *mut Upatch) {
         // SAFETY: the caller passes a container.
         super::close_upatch(unsafe { &mut *u });
-    }
-
-    /// # Safety
-    ///
-    /// `u` is a container.
-    pub unsafe extern "C" fn upatch_loader(u: *const Upatch) -> *const c_void {
-        // SAFETY: the caller passes a container.
-        let u = unsafe { &*u };
-
-        if u.map.is_null() {
-            return ptr::null();
-        }
-        at(u, u.hdr.loader_insns_off)
-    }
-
-    /// # Safety
-    ///
-    /// `u` is a container.
-    pub unsafe extern "C" fn upatch_signature(u: *const Upatch) -> *const c_void {
-        // SAFETY: the caller passes a container.
-        let u = unsafe { &*u };
-
-        if u.map.is_null() {
-            return ptr::null();
-        }
-        at(u, u.hdr.signature_off)
-    }
-
-    /// # Safety
-    ///
-    /// `u` is a container.
-    pub unsafe extern "C" fn upatch_metadata(u: *const Upatch) -> *const c_void {
-        // SAFETY: the caller passes a container.
-        let u = unsafe { &*u };
-
-        if u.map.is_null() || u.hdr.metadata_len == 0 {
-            return ptr::null();
-        }
-        at(u, u.hdr.metadata_off)
-    }
-
-    /// # Safety
-    ///
-    /// `u` is a container.
-    pub unsafe extern "C" fn upatch_data(u: *const Upatch) -> *const c_void {
-        // SAFETY: the caller passes a container.
-        let u = unsafe { &*u };
-
-        if u.map.is_null() || u.hdr.data_len == 0 {
-            return ptr::null();
-        }
-        at(u, u.hdr.data_off)
     }
 }

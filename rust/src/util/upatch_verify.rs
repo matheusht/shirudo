@@ -17,9 +17,8 @@ use crate::errno::{
 use crate::util::chain::{memneq_explicit, sha256_2};
 use crate::util::measured::MeasuredSet;
 use crate::util::upatch::{
-    ATTACH_XDP, NAME_MAX, ProgSpec, ROLE_ATTACH, Upatch, header_name, name_signed,
-    signed_attach_len, specs_free, specs_parse, upatch_close, upatch_data, upatch_loader,
-    upatch_open, upatch_open_fd,
+    ATTACH_XDP, ProgSpec, ROLE_ATTACH, Upatch, specs_free, specs_parse, upatch_close, upatch_open,
+    upatch_open_fd,
 };
 use crate::util::upatch_pins::{
     PAYLOAD_HASH_LEN, Pins, each_pinned, pin_payload, xdp_prog_open, xdp_prog_pin,
@@ -55,15 +54,16 @@ fn archive_path(name: &[u8]) -> Result<CString, c_int> {
 /// payload_sha256 claims and the pin directory, the register and an
 /// unload directive record.
 pub(crate) fn payload_digest(u: &Upatch) -> Result<[u8; PAYLOAD_HASH_LEN], c_int> {
+    let (loader, data) = (u.loader(), u.data());
     let mut out = [0u8; PAYLOAD_HASH_LEN];
-    // SAFETY: the open container's loader and data, of the lengths its
-    // header gives, and room for the digest.
+    // SAFETY: the open container's loader and data, and room for the
+    // digest.
     let ret = unsafe {
         sha256_2(
-            upatch_loader(u).cast(),
-            u.hdr.loader_insns_len as usize,
-            upatch_data(u).cast(),
-            u.hdr.data_len as usize,
+            loader.as_ptr().cast(),
+            loader.len(),
+            data.as_ptr().cast(),
+            data.len(),
             out.as_mut_ptr(),
         )
     };
@@ -121,9 +121,7 @@ pub(crate) fn archive_verify(
     if ret != 0 {
         return ret;
     }
-    let mut header = [0u8; NAME_MAX + 1];
-    header_name(out, &mut header);
-    if crate::text::cstr(&header) != name || !name_signed(out) {
+    if out.name() != name || !out.name_signed() {
         // SAFETY: the container opened above.
         unsafe { upatch_close(out) };
         return -ESTALE;
@@ -155,16 +153,19 @@ impl Drop for Specs {
 /// The specs of an open container: -ESTALE for metadata that does not
 /// parse, -ENOMEM; `u` stays open.
 pub(crate) fn verified_specs(u: &Upatch) -> Result<Specs, c_int> {
-    if u.signed_attach.is_null() {
+    let Some((attach, len)) = u
+        .signed_attach()
+        .and_then(|a| Some((a, u32::try_from(a.len()).ok()?)))
+    else {
         return Err(-ESTALE);
-    }
+    };
     let mut ptr: *mut ProgSpec = core::ptr::null_mut();
     // SAFETY: the signed metadata of the open container, and room for the
     // specs.
     let ret = unsafe {
         specs_parse(
-            u.signed_attach.cast(),
-            signed_attach_len(u),
+            attach.as_ptr().cast(),
+            len,
             u.hdr.nr_maps,
             u.hdr.nr_progs,
             &mut ptr,

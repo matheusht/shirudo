@@ -83,8 +83,7 @@ fn header_ok(raw: &[u8], nr_progs: u32) -> bool {
 }
 
 fn signed_attach(u: &Upatch) -> &[u8] {
-    // SAFETY: the signed metadata of the open container, of its length.
-    unsafe { crate::ffi::slice(u.signed_attach, u.signed_attach_len as usize) }
+    u.signed_attach().unwrap_or_default()
 }
 
 fn expect_attach(u: &Upatch, kind: u32, target: Option<&[u8]>, offset: u64) -> Check {
@@ -338,14 +337,7 @@ fn expect_policy_labels(u: &Upatch) -> Check {
         b"/tmp/shirudo-policy-label-test/match-*",
     ];
     const BITS: [u64; 5] = [1, 2, 4, 16, 32];
-    // SAFETY: the signed policy labels of the open container, of their
-    // length.
-    let raw = unsafe {
-        crate::ffi::slice(
-            u.signed_policy_labels.cast::<u8>(),
-            u.signed_policy_labels_len as usize,
-        )
-    };
+    let raw = u.policy_labels().map_or(&[][..], |p| p.labels);
     if raw.is_empty() || raw.len() != POLICY_LABEL_HEADER + BITS.len() * POLICY_LABEL_ENTRY {
         return Err("policy label section length mismatch");
     }

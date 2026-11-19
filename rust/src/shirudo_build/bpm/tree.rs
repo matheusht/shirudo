@@ -196,13 +196,15 @@ struct Specs {
 impl Specs {
     fn parse(parsed: &super::super::package::MemoryUpatch<'_>) -> Result<Self, c_int> {
         let u = parsed.parsed();
+        let attach = u.signed_attach().unwrap_or_default();
+        let len = u32::try_from(attach.len()).map_err(|_| -EINVAL)?;
         let mut programs = ptr::null_mut();
-        // SAFETY: the parsed artifact owns the attach slice, or it is absent.
-        // The parser allocates its own specifications and initializes programs.
+        // SAFETY: the signed attach metadata of the parsed artifact, and
+        // room for the specifications the parser allocates.
         let ret = unsafe {
             specs_parse(
-                u.signed_attach.cast(),
-                u.signed_attach_len,
+                attach.as_ptr().cast(),
+                len,
                 u.hdr.nr_maps,
                 u.hdr.nr_progs,
                 &mut programs,
@@ -984,17 +986,16 @@ impl Append<'_> {
             ));
         })?;
         let u = parsed.parsed();
-        let mut name = [0u8; upatch::NAME_MAX + 1];
-        upatch::header_name(u, &mut name);
+        let name = u.name();
         let payload = u.hdr.payload_sha256;
-        let is_unload = upatch::is_unload(u);
-        if cstr(&name) != id || is_unload != self.unload {
+        let is_unload = u.is_unload();
+        if name != id || is_unload != self.unload {
             err(format!(
                 "bpm tree append: the {} artifact for {} is {} directive named {}",
                 if self.unload { "unload" } else { "load" },
                 lossy(id),
                 if is_unload { "an unload" } else { "a load" },
-                lossy(cstr(&name))
+                lossy(name)
             ));
             return Err(-EKEYREJECTED);
         }

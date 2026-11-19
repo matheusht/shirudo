@@ -22,7 +22,7 @@ use crate::sys::libc::{STDOUT_FILENO, fwrite, printf, putchar, stdout};
 use crate::text::strsprintf;
 use crate::util::io::write_complete;
 use crate::util::json::{JsonEmit, MAX_BYTES};
-use crate::util::upatch::{NAME_MAX, Upatch, header_name, is_unload};
+use crate::util::upatch::{NAME_MAX, Upatch};
 
 const MAPS_MAX: usize = 64;
 const JSON_MAX_DEPTH: u32 = 8;
@@ -100,30 +100,21 @@ struct Insn {
     imm: i32,
 }
 
-/// The loader's instructions and its data, as bytes.
+/// The loader's instructions and its data, as bytes, and where the
+/// header of their container says the .rodata starts in the data.
 struct Loader<'a> {
     insns: &'a [u8],
     data: &'a [u8],
+    header_rodata_off: Option<u32>,
 }
 
 impl<'a> Loader<'a> {
     /// The loader and data of `u`, none of a closed container.
     fn of(u: &'a Upatch) -> Self {
-        if u.map.is_null() {
-            return Loader {
-                insns: &[],
-                data: &[],
-            };
-        }
-        // SAFETY: the sections the reader kept inside the container.
-        unsafe {
-            Loader {
-                insns: ffi::slice(
-                    u.map.add(u.hdr.loader_insns_off as usize),
-                    u.hdr.loader_insns_len as usize,
-                ),
-                data: ffi::slice(u.map.add(u.hdr.data_off as usize), u.hdr.data_len as usize),
-            }
+        Loader {
+            insns: u.loader(),
+            data: u.data(),
+            header_rodata_off: Some(u.hdr.rodata_data_off),
         }
     }
 
@@ -296,15 +287,11 @@ fn map_name_rodata(name: &[u8]) -> bool {
 
 /// The `.rodata` the loader fills with the BTF's DATASEC `datasec_id`:
 /// the bytes of the map update of a `.rodata` map it creates.
-fn find_rodata_data(u: &Upatch, btf: &Btf, datasec_id: u32, view: &mut View) -> c_int {
+fn find_rodata_data(l: &Loader<'_>, btf: &Btf, datasec_id: u32, view: &mut View) -> c_int {
     let mut maps = [(0u32, false); MAPS_MAX];
-    let l = Loader::of(u);
     let count = l.count();
 
-    if !btf.has(datasec_id)
-        || btf.kind(datasec_id) != KIND_DATASEC
-        || u.hdr.loader_insns_len % 8 != 0
-    {
+    if !btf.has(datasec_id) || btf.kind(datasec_id) != KIND_DATASEC || l.insns.len() % 8 != 0 {
         return -EINVAL;
     }
     let sec_size = btf.size_or_type(datasec_id);
@@ -357,14 +344,13 @@ fn find_rodata_data(u: &Upatch, btf: &Btf, datasec_id: u32, view: &mut View) -> 
 
 /// The BTF the loader's one BPF_BTF_LOAD loads: the offset in data it
 /// stores into attr.btf, and the attr.btf_size beside it.
-fn loader_btf(u: &Upatch) -> Result<(u32, u32), c_int> {
-    let l = Loader::of(u);
+fn loader_btf(l: &Loader<'_>) -> Result<(u32, u32), c_int> {
     let mut found = None;
 
-    if u.map.is_null() || u.hdr.data_len == 0 {
+    if l.data.is_empty() {
         return Err(-ENOENT);
     }
-    if u.hdr.loader_insns_len % 8 != 0 {
+    if l.insns.len() % 8 != 0 {
         return Err(-EINVAL);
     }
     for i in 4..l.count() {
@@ -396,12 +382,12 @@ fn loader_btf(u: &Upatch) -> Result<(u32, u32), c_int> {
     found.ok_or(-ENOENT)
 }
 
-fn btf_rodata_btf(u: &Upatch, view: &mut View) -> c_int {
-    let (btf_off, btf_size) = match loader_btf(u) {
+fn btf_rodata_btf(l: &Loader<'_>, view: &mut View) -> c_int {
+    let (btf_off, btf_size) = match loader_btf(l) {
         Ok(found) => found,
         Err(ret) => return ret,
     };
-    let data = Loader::of(u).data;
+    let data = l.data;
     // loader_btf() kept the btf_size bytes at btf_off inside the data.
     let Ok(btf) = Btf::parse(&data[btf_off as usize..][..btf_size as usize]) else {
         return -ENOENT;
@@ -415,24 +401,35 @@ fn btf_rodata_btf(u: &Upatch, view: &mut View) -> c_int {
     // The header is not signed: .rodata is where the signed loader
     // takes it from, and a header that names another offset would aim a
     // rewrite the operator then signs at other bytes.
-    let ret = find_rodata_data(u, &btf, id, view);
+    let ret = find_rodata_data(l, &btf, id, view);
     view.btf = Some(btf);
-    if ret == 0 && u.rodata_offset_in_header && view.data_offset != u.hdr.rodata_data_off {
+    if ret == 0
+        && l.header_rodata_off
+            .is_some_and(|off| view.data_offset != off)
+    {
         return -EINVAL;
     }
     ret
 }
 
-/// Where the .rodata of the container `u` starts in its data, into
-/// `offset`: 0 or -errno.
-pub(crate) fn data_offset(u: &Upatch, offset: &mut u32) -> c_int {
+/// Where the .rodata of `l` starts in its data, or -errno.
+fn rodata_offset(l: &Loader<'_>) -> Result<u32, c_int> {
     let mut view = View::new();
-    let ret = btf_rodata_btf(u, &mut view);
 
-    if ret == 0 {
-        *offset = view.data_offset;
+    match btf_rodata_btf(l, &mut view) {
+        0 => Ok(view.data_offset),
+        err => Err(err),
     }
-    ret
+}
+
+/// Where the .rodata of the loader `insns` starts in its `data`, before
+/// a header names it, or -errno.
+pub(crate) fn loader_data_offset(insns: &[u8], data: &[u8]) -> Result<u32, c_int> {
+    rodata_offset(&Loader {
+        insns,
+        data,
+        header_rodata_off: None,
+    })
 }
 
 /// The variables of the DATASEC `sec`: (type, offset, size) each.
@@ -455,7 +452,7 @@ pub(crate) fn symbol_range(u: &Upatch, symbol: &CStr, range: &mut RodataRange) -
     let mut view = View::new();
     let mut found = false;
 
-    let ret = btf_rodata_btf(u, &mut view);
+    let ret = btf_rodata_btf(&Loader::of(u), &mut view);
     if ret != 0 {
         return ret;
     }
@@ -1050,8 +1047,8 @@ unsafe fn print_rodata_text(u: &Upatch, path: &CStr, view: &View) -> c_int {
     let mut ret = 0;
 
     let (vars, types) = (secinfo(btf, view.type_id), btf.type_cnt());
-    header_name(u, &mut name);
-    let len = name.iter().position(|&c| c == 0).unwrap_or(NAME_MAX);
+    let len = u.name().len();
+    name[..len].copy_from_slice(u.name());
     // SAFETY: the name, a C string of len bytes, sanitised in place; the
     // C's format with C strings and integers.
     unsafe {
@@ -1074,8 +1071,7 @@ unsafe fn print_rodata_text(u: &Upatch, path: &CStr, view: &View) -> c_int {
     ];
     // The container's mapping, which the variables' bytes lie in and the
     // dumper reads past a bitfield into, as libbpf's did.
-    // SAFETY: the mapping of the open container.
-    let mem = unsafe { ffi::slice(u.map, u.map_size) };
+    let mem = u.bytes();
     let mut dump = Dump::new(btf);
     for var in &vars {
         let mut type_name = [0u8; 256];
@@ -1141,15 +1137,13 @@ unsafe fn print_rodata_text(u: &Upatch, path: &CStr, view: &View) -> c_int {
 /// `view` holds a BTF with its DATASEC.
 unsafe fn print_rodata_json(u: &Upatch, path: &CStr, view: &View) -> c_int {
     let mut e = JsonEmit::growing(MAX_BYTES);
-    let mut name = [0u8; NAME_MAX + 1];
     let mut ret = 0;
 
     let Some(btf) = view.btf.as_ref() else {
         return -EINVAL;
     };
     let vars = secinfo(btf, view.type_id);
-    header_name(u, &mut name);
-    let name = &name[..name.iter().position(|&c| c == 0).unwrap_or(NAME_MAX)];
+    let name = u.name();
     e.obj_open();
     e.kv_int(b"schema", 1);
     e.key(b"upatch");
@@ -1220,10 +1214,10 @@ unsafe fn print_rodata_json(u: &Upatch, path: &CStr, view: &View) -> c_int {
 pub(crate) fn print(u: &Upatch, path: &CStr, json: bool) -> c_int {
     let mut view = View::new();
 
-    if is_unload(u) {
+    if u.is_unload() {
         return -EINVAL;
     }
-    let ret = btf_rodata_btf(u, &mut view);
+    let ret = btf_rodata_btf(&Loader::of(u), &mut view);
     if ret != 0 {
         return ret;
     }

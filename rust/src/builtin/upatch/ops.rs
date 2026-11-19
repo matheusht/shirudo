@@ -46,9 +46,7 @@ use crate::util::measured::MeasuredSet;
 use crate::util::options::{EXIT_USAGE, OPT_ARG, OPT_DONE, OPT_END, OptParser, OptSpec};
 use crate::util::report::{OpReport, report_emit};
 use crate::util::seal;
-use crate::util::upatch::{
-    self, NAME_MAX, Opened, Upatch, name_valid, pin_name, upatch_open_memory, upatch_signature,
-};
+use crate::util::upatch::{self, Opened, Upatch, name_valid, pin_name, upatch_open_memory};
 use crate::util::upatch_resolve::XATTR_PAYLOAD;
 use crate::util::upatch_verify::archive_verify;
 
@@ -919,12 +917,6 @@ fn read_artifact(file: &CStr, rep: &mut OpReport, op: &[u8]) -> Result<Artifact,
     })
 }
 
-fn header_name(u: &Upatch) -> Vec<u8> {
-    let mut name = [0u8; NAME_MAX + 1];
-    upatch::header_name(u, &mut name);
-    cstr(&name).to_vec()
-}
-
 fn set_payload_hex(rep: &mut OpReport, payload: &[u8]) {
     for (d, &s) in rep
         .payload_hex
@@ -964,7 +956,7 @@ fn load_steps(a: &OpArgs, file: &CStr, rep: &mut OpReport, name_out: &mut CStrin
     let Ok(u) = read_artifact(file, rep, b"load") else {
         return 1;
     };
-    let name = header_name(&u);
+    let name = u.name().to_vec();
     let payload = u.hdr.payload_sha256;
     set_payload_hex(rep, &payload);
     *name_out = CString::new(name.clone()).unwrap_or_default();
@@ -1157,7 +1149,7 @@ fn unload_steps(a: &OpArgs, file: &CStr, rep: &mut OpReport, name_out: &mut CStr
     let Ok(u) = read_artifact(file, rep, b"unload") else {
         return 1;
     };
-    if !upatch::is_unload(&u) {
+    if !u.is_unload() {
         log_err(
             &[
                 b"upatch unload: ",
@@ -1172,8 +1164,8 @@ fn unload_steps(a: &OpArgs, file: &CStr, rep: &mut OpReport, name_out: &mut CStr
     // The target's name and the payload it is expected to carry are the
     // directive's signed sections; the header's name must be the same,
     // since status and the package tooling read it.
-    let payload = match upatch::signed_unload_payload(&u).filter(|_| upatch::name_signed(&u)) {
-        Some(p) => <[u8; DIGEST_LEN]>::try_from(p).unwrap_or_default(),
+    let payload = match u.signed_unload_payload().filter(|_| u.name_signed()) {
+        Some(&p) => p,
         None => {
             log_err(
                 &[
@@ -1193,7 +1185,7 @@ fn unload_steps(a: &OpArgs, file: &CStr, rep: &mut OpReport, name_out: &mut CStr
             return 1;
         }
     };
-    let name = header_name(&u);
+    let name = u.name().to_vec();
     *name_out = CString::new(name.clone()).unwrap_or_default();
     rep.name = Some(name_out.clone());
     set_payload_hex(rep, &payload);
@@ -1458,15 +1450,9 @@ fn purge_locked(name: &[u8], signer: *const Cert, reason: &[u8]) -> c_int {
         Ok(u) => u,
         Err(err) => return err,
     };
-    // SAFETY: the container's signature, of its header's length, and the
-    // caller's certificate.
-    let ret = unsafe {
-        cms_signed_by(
-            upatch_signature(&*u).cast(),
-            u.hdr.signature_len as usize,
-            signer,
-        )
-    };
+    let sig = u.signature();
+    // SAFETY: the container's signature and the caller's certificate.
+    let ret = unsafe { cms_signed_by(sig.as_ptr().cast(), sig.len(), signer) };
     let payload = u.hdr.payload_sha256;
     drop(u);
     if ret != 1 {

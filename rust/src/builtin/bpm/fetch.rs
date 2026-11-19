@@ -29,7 +29,7 @@ use crate::util::crypto_openssl::{
 };
 use crate::util::io::{memfd, read_file};
 use crate::util::seal;
-use crate::util::upatch::{self, Upatch, is_unload, upatch_close, upatch_open};
+use crate::util::upatch::{Upatch, upatch_close, upatch_open};
 
 /// The most layers a package manifest names that bpm reads.
 const LAYERS_MAX: usize = 8;
@@ -395,16 +395,14 @@ pub(super) fn find_entry(
 fn verify_upatch(path: &CStr, expected: &[u8], id: Option<&[u8]>, unload: bool) -> Result {
     // SAFETY: an all-zero container is the closed one upatch_open() fills.
     let mut u: Upatch = unsafe { core::mem::zeroed() };
-    let mut name = [0u8; upatch::NAME_MAX + 1];
     let mut actual = [0; 65];
 
     // SAFETY: a C string and a container to fill.
     status(unsafe { upatch_open(path.as_ptr(), &mut u) })?;
-    upatch::header_name(&u, &mut name);
     sha256_hex_of(&u.hdr.payload_sha256, &mut actual);
     let ret = if !digest_matches(expected, cstr(&actual))
-        || id.is_some_and(|id| cstr(&name) != id)
-        || is_unload(&u) != unload
+        || id.is_some_and(|id| u.name() != id)
+        || u.is_unload() != unload
     {
         Err(-EKEYREJECTED)
     } else {

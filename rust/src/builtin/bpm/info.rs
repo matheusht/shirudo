@@ -17,9 +17,7 @@ use crate::util::bpm_package::{
 };
 use crate::util::io::write_complete;
 use crate::util::json::MAX_BYTES;
-use crate::util::upatch::{
-    FILE_MAX as UPATCH_FILE_MAX, Upatch, is_unload, upatch_close, upatch_open_memory,
-};
+use crate::util::upatch::{FILE_MAX as UPATCH_FILE_MAX, Upatch, upatch_close, upatch_open_memory};
 use crate::util::upatch_rodata;
 
 /// The most a Beefile takes.
@@ -177,7 +175,7 @@ pub(super) fn data(source: &[u8], member: &[u8], json: bool) -> Result {
     // SAFETY: the member's bytes, which outlive the container, and the
     // container to fill.
     let ret = match unsafe { upatch_open_memory(data.as_ptr().cast(), data.len(), &mut u) } {
-        0 if is_unload(&u) => {
+        0 if u.is_unload() => {
             error(&[b"bpm info data: ", member, b" is an unload directive"]);
             Err(-EINVAL)
         }
