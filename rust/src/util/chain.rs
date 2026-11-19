@@ -6,7 +6,6 @@
 //! the digests every measuring path shares.
 
 use core::ffi::{CStr, c_int, c_void};
-use core::ptr;
 
 use crate::errno::{
     E2BIG, EACCES, EEXIST, EINVAL, EIO, EKEYREJECTED, ENODEV, ENOENT, EPROTO, text,
@@ -18,7 +17,7 @@ use crate::util::config::{self, Scrubbed};
 use crate::util::crypto_openssl::{
     Sha256Ctx, sha256_final, sha256_free, sha256_init, sha256_into, sha256_update,
 };
-use crate::util::eventlog::{EventlogInit, NV_INDEX, eventlog_boot_init};
+use crate::util::eventlog::{EventlogInit, NV_INDEX, boot_init};
 use crate::util::initrd::in_initrd;
 use crate::util::nv_writer;
 use crate::util::tpm::{Branches, NvInfo, REGISTER_ATTRS, Tpm};
@@ -77,6 +76,43 @@ pub struct ChainStatus {
     pub(crate) init: EventlogInit,
 }
 
+impl ChainInitInfo {
+    /// No binding, for init() to fill.
+    const fn zeroed() -> Self {
+        ChainInitInfo {
+            writer_public: [0; NV_RSA_BYTES],
+            reused: false,
+            initrd: false,
+            reset_count: 0,
+            value: [0; DIGEST_LEN],
+            pcr_before: [0; DIGEST_LEN],
+            phase_before: [0; DIGEST_LEN],
+            name: [0; NAME_LEN],
+            name_len: 0,
+            anchor: [0; ANCHOR_MAX],
+            anchor_digest: [0; DIGEST_LEN],
+        }
+    }
+}
+
+impl ChainStatus {
+    /// No status, for status() to fill.
+    const fn zeroed() -> Self {
+        ChainStatus {
+            tpm: false,
+            defined: false,
+            written: false,
+            logged: false,
+            anchored: false,
+            rebound: false,
+            value: [0; DIGEST_LEN],
+            name: [0; NAME_LEN],
+            name_len: 0,
+            init: EventlogInit::zeroed(),
+        }
+    }
+}
+
 const _: () = assert!(size_of::<MeasuredUpatch>() == 322);
 const _: () = assert!(size_of::<ChainInitInfo>() == 696);
 const _: () = assert!(core::mem::offset_of!(ChainInitInfo, reset_count) == 388);
@@ -86,7 +122,7 @@ const _: () = assert!(size_of::<ChainStatus>() == 624);
 const _: () = assert!(core::mem::offset_of!(ChainStatus, name_len) == 72);
 const _: () = assert!(core::mem::offset_of!(ChainStatus, init) == 80);
 
-/// memneq_explicit() of include/shirudo/string.h: whether the two
+/// memneq_explicit(): whether the two
 /// differ, in a time that depends on their length alone.
 /// The history root of a tree after one more operation, whatever its
 /// outcome on this node: SHA-256 of "shirudo-tree-history" with its NUL,
@@ -401,18 +437,10 @@ fn register_writer(tpm: &mut Tpm) -> Result<[u8; NV_RSA_BYTES], c_int> {
     set.map(|()| public)
 }
 
-/// A structure of integers, bools and arrays of them, all of whose bits
-/// zeroed are a value.
-fn zeroed<T>() -> T {
-    // SAFETY: only for EventlogInit here, which is such.
-    unsafe { core::mem::zeroed() }
-}
-
 /// Bind the register to this boot and write `event` as its first event,
 /// or find the binding a run before made: chain_init().
 pub(crate) fn init(event: &[u8; DIGEST_LEN], info: &mut ChainInitInfo) -> c_int {
-    // SAFETY: the caller's structure, all of whose bits zeroed are one.
-    unsafe { ptr::from_mut(info).write_bytes(0, 1) };
+    *info = ChainInitInfo::zeroed();
     let Ok(mut tpm) = Tpm::open() else {
         return -ENODEV;
     };
@@ -423,7 +451,7 @@ pub(crate) fn init(event: &[u8; DIGEST_LEN], info: &mut ChainInitInfo) -> c_int 
 /// chain_init() on the connection `tpm`.
 fn bind(tpm: &mut Tpm, event: &[u8; DIGEST_LEN], info: &mut ChainInitInfo) -> Result<(), c_int> {
     let mut e = Expectation::new();
-    let mut rec: EventlogInit = zeroed();
+    let mut rec = EventlogInit::zeroed();
 
     info.reset_count = tpm.reset_count()?;
     let mut nv = tpm.nv_info(NV_INDEX)?;
@@ -433,8 +461,7 @@ fn bind(tpm: &mut Tpm, event: &[u8; DIGEST_LEN], info: &mut ChainInitInfo) -> Re
     // keeps it; anything else is refused, as binding again would restart
     // the history the record vouches for. A log that cannot be read may
     // hold such a record.
-    // SAFETY: the record to fill.
-    let ret = unsafe { eventlog_boot_init(&mut rec) };
+    let ret = boot_init(&mut rec);
     if ret != 0 && ret != -ENOENT {
         crate::log::err(
             &[
@@ -566,10 +593,9 @@ fn rebind(
 /// its value then into `out_chain` when given.
 pub(crate) fn extend(event: &[u8; DIGEST_LEN], out_chain: Option<&mut [u8; DIGEST_LEN]>) -> c_int {
     let mut e = Expectation::new();
-    let mut rec: EventlogInit = zeroed();
+    let mut rec = EventlogInit::zeroed();
 
-    // SAFETY: the record to fill.
-    if unsafe { eventlog_boot_init(&mut rec) } != 0 {
+    if boot_init(&mut rec) != 0 {
         return -ENODEV;
     }
     let ret = expectation_policy(
@@ -692,10 +718,8 @@ pub(crate) fn bound() -> bool {
 
 /// The register as the TPM and this boot's records show it: chain_status().
 pub(crate) fn status(st: &mut ChainStatus) -> c_int {
-    // SAFETY: the caller's structure, all of whose bits zeroed are one.
-    unsafe { ptr::from_mut(st).write_bytes(0, 1) };
-    // SAFETY: the record to fill.
-    st.logged = unsafe { eventlog_boot_init(&mut st.init) } == 0;
+    *st = ChainStatus::zeroed();
+    st.logged = boot_init(&mut st.init) == 0;
     st.rebound = st.logged && st.init.records_epoch > 1;
     let Ok(tpm) = Tpm::open_quiet() else {
         return -ENODEV;
@@ -862,27 +886,6 @@ mod capi {
     ) -> c_int {
         // SAFETY: the caller passes a digest and the room.
         unsafe { super::tree_event(seq, digest(operation_digest), room(event)) }
-    }
-
-    /// # Safety
-    ///
-    /// `prev` and `operation_digest` hold 32 bytes, and `out` has room for
-    /// 32, which may be `prev`'s.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn chain_history_step(
-        prev: *const [u8; 32],
-        operation_digest: *const [u8; 32],
-        out: *mut [u8; 32],
-    ) -> c_int {
-        // SAFETY: the caller's 32 bytes at each, read before out is
-        // written.
-        let (ret, root) = match unsafe { super::history_step(&*prev, &*operation_digest) } {
-            Ok(root) => (0, root),
-            Err(err) => (err, [0; 32]),
-        };
-        // SAFETY: the caller's room.
-        unsafe { *out = root };
-        ret
     }
 
     /// # Safety

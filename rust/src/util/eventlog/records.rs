@@ -47,6 +47,26 @@ pub struct EventlogInit {
 
 const _: () = assert!(size_of::<EventlogInit>() == 544);
 
+impl EventlogInit {
+    /// No record, for boot_init() to fill.
+    pub(crate) const fn zeroed() -> Self {
+        EventlogInit {
+            writer_public: [0; NV_RSA_BYTES],
+            pcr: 0,
+            initrd: false,
+            pcr_before: [0; 32],
+            phase_before: [0; 32],
+            name: [0; NAME_LEN],
+            name_len: 0,
+            anchor_digest: [0; 32],
+            have_reset_count: false,
+            reset_count: 0,
+            records: 0,
+            records_epoch: 0,
+        }
+    }
+}
+
 /// `hex` decoded into `out`, as hex_decode() takes it: 0 or -EINVAL.
 fn decode(hex: &[u8], out: &mut [u8]) -> c_int {
     // SAFETY: hex ends in a NUL the parser wrote, and out has room for

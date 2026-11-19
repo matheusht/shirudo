@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright (c) 2026 Authors of shirudo
 
+use core::ptr;
+
 use super::*;
 use crate::util::crypto_openssl::sha256_buffer;
 

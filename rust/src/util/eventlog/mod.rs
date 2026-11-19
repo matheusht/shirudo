@@ -7,12 +7,10 @@
 //! initrd left pending, and hands each line on, terminated in place as
 //! strtok_r() left it.
 
-mod capi;
 #[cfg(shirudo_fuzz)]
 mod fuzz;
 mod records;
 
-pub(crate) use capi::eventlog_boot_init;
 #[cfg(test)]
 pub(crate) use records::UPATCH_LOAD;
 pub(crate) use records::{
