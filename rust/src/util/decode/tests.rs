@@ -153,6 +153,22 @@ fn decoder_cannot_reach_unbudgeted_code() {
 }
 
 #[test]
+fn decoder_entrypoint_lookup_is_protected() {
+    assert_eq!(
+        decoded("return setmetatable({}, {__index = function() error('lookup', 0) end})"),
+        Err(-EINVAL)
+    );
+    assert_eq!(
+        decoded("return setmetatable({}, {__index = function() while true do end end})"),
+        Err(-EINVAL)
+    );
+    assert_eq!(
+        decoded("setmetatable(_G, {__index = function() error('global', 0) end})"),
+        Err(-EINVAL)
+    );
+}
+
+#[test]
 fn decoder_error_is_sanitized() {
     let _serial = serial();
     let dir = TempDir::new();

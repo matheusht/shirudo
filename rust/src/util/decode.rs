@@ -873,13 +873,17 @@ fn get_entrypoint(s: &mut Stack<'_>, entrypoint: &CStr) -> bool {
 /// What the closure a decoder runs in reads and writes.
 struct Call<'a, 'b> {
     view: &'a MapView,
+    entrypoint: &'a CStr,
     e: &'a mut JsonEmit<'b>,
     otel: bool,
+    found: bool,
 }
 
-/// The closure the decoder runs in: its entrypoint, upvalue 2, called
-/// with the input of the view of the call, upvalue 1. The result is
-/// encoded under the same pcall, as that may run out of memory.
+/// The closure the decoder runs in: its entrypoint, found from what its
+/// chunk returned, upvalue 2, called with the input of the view of the
+/// call, upvalue 1. The lookup, which may run the decoder's metamethods,
+/// and the encoding of the result, which may run out of memory, are
+/// under the same pcall: an error raised past it ends the process.
 unsafe extern "C-unwind" fn call_decoder(l: *mut LuaState) -> c_int {
     // SAFETY: LuaJIT called this C function with the state, and this is
     // the one Stack of its frame.
@@ -891,6 +895,10 @@ unsafe extern "C-unwind" fn call_decoder(l: *mut LuaState) -> c_int {
     let call = unsafe { &mut *call };
     // SAFETY: the frame is this C closure's.
     unsafe { s.push_upvalue(2) };
+    call.found = get_entrypoint(&mut s, call.entrypoint);
+    if !call.found {
+        return 0;
+    }
     push_map_input(&mut s, call.view);
     s.call(1, 1);
     if call.otel {
@@ -1063,7 +1071,25 @@ fn decode(
         report(s, "decoder load failed");
         return Err(-EINVAL);
     }
-    if !get_entrypoint(s, &entrypoint) {
+    let mut call = Call {
+        view: v,
+        entrypoint: &entrypoint,
+        e,
+        otel,
+        found: false,
+    };
+    s.push_pointer(&mut call);
+    s.push_value(-2);
+    // SAFETY: call_decoder() finds the call, which lives across the pcall
+    // below, in its first upvalue, and what the chunk returned in its
+    // second.
+    unsafe { s.push_closure(call_decoder, 2) };
+    s.remove(-2);
+    if !s.pcall(0, 0) {
+        report(s, "decoder failed");
+        return Err(-EINVAL);
+    }
+    if !call.found {
         log_err(
             &[
                 &b"upatch map: decoder entrypoint "[..],
@@ -1073,17 +1099,6 @@ fn decode(
             .concat(),
         );
         return Err(-ENOENT);
-    }
-    let mut call = Call { view: v, e, otel };
-    s.push_pointer(&mut call);
-    s.push_value(-2);
-    // SAFETY: call_decoder() finds the call, which lives across the pcall
-    // below, in its first upvalue, and the entrypoint in its second.
-    unsafe { s.push_closure(call_decoder, 2) };
-    s.remove(-2);
-    if !s.pcall(0, 0) {
-        report(s, "decoder failed");
-        return Err(-EINVAL);
     }
     match call.e.err() {
         0 => Ok(()),
