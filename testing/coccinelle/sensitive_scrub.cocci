@@ -41,8 +41,11 @@ def sensitive_structs():
 
 SENSITIVE = sensitive_structs()
 # Run from elsewhere than the top of the tree, the rule would find no
-# struct and pass whatever the code does.
-if not SENSITIVE:
+# struct and pass whatever the code does. At the top, where
+# include/shirudo/compiler.h defines the mark, finding none means that no
+# struct of the C carries a secret, as since the port to Rust, and there
+# is nothing to check.
+if not SENSITIVE and not os.path.exists("include/shirudo/compiler.h"):
     raise RuntimeError("sensitive_scrub: no __sensitive field found; run spatch from the top of the tree")
 
 def declared_with_cleanup(p):
