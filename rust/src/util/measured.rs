@@ -16,8 +16,7 @@ use crate::util::eventlog::{self, UPATCH_INIT, UPATCH_UNLOAD};
 use crate::util::hex::hex_encode;
 use crate::util::seal;
 use crate::util::upatch::{
-    NAME_MAX, PAYLOAD_HASH_LEN, Upatch, upatch_close, upatch_header_name, upatch_member_valid,
-    upatch_open,
+    NAME_MAX, PAYLOAD_HASH_LEN, Upatch, member_valid, upatch_close, upatch_header_name, upatch_open,
 };
 
 /// `MEASURED_MAX`: the most upatches a set holds.
@@ -145,7 +144,7 @@ unsafe fn upatch_of(e: *mut MeasuredUpatch, u: *const Upatch) {
 }
 
 /// `name` with `payload_hex` added to the `*n` members of `set`, room for
-/// `max`: 0, -EINVAL for a member upatch_member_valid() refuses, -EEXIST
+/// `max`: 0, -EINVAL for a member member_valid() refuses, -EEXIST
 /// for a name held, or -E2BIG when the set is full or a string too long.
 ///
 /// # Safety
@@ -159,14 +158,13 @@ unsafe fn set_add(
     name: *const c_char,
     payload_hex: *const c_char,
 ) -> c_int {
-    // SAFETY: the caller's strings.
-    if !unsafe { upatch_member_valid(name, payload_hex) } {
+    // SAFETY: the caller's C strings.
+    let (name_c, payload_c) = unsafe { (CStr::from_ptr(name), CStr::from_ptr(payload_hex)) };
+    if !member_valid(name_c.to_bytes(), payload_c.to_bytes()) {
         return -EINVAL;
     }
     // SAFETY: the caller's count.
     let count = unsafe { *n };
-    // SAFETY: the caller's C string.
-    let name_c = unsafe { CStr::from_ptr(name) };
     for i in 0..count {
         // SAFETY: a member held, its name terminated within its room.
         let held = unsafe { &(*set.add(i)).name };
@@ -546,9 +544,7 @@ mod verified {
                     )
                 }
                 b"upatch_load" | b"upatch_unload" => {
-                    if !r.upatch
-                        || !member_valid(r.name.as_ptr().cast(), r.payload_hex.as_ptr().cast())
-                    {
+                    if !r.upatch || !member_valid(cstr(&r.name), cstr(&r.payload_hex)) {
                         return Err(-EINVAL);
                     }
                     let payload = decode32(&r.payload_hex)?;

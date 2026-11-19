@@ -13,7 +13,7 @@ use crate::ffi;
 use crate::heap::{xcalloc, xfree, xmalloc, xstrfree, xstrndup};
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{O_CLOEXEC, O_RDONLY, S_IFMT, S_IFREG, Statx, close, errno, open, pread};
-use crate::util::hex::hex_decode;
+use crate::util::hex;
 use crate::util::io::stat_fd;
 
 pub(crate) const NAME_MAX: usize = 256;
@@ -833,16 +833,12 @@ pub(crate) fn name_valid(name: Option<&[u8]>) -> bool {
     true
 }
 
-/// # Safety
-///
-/// `name` and `payload_hex` are NULL or C strings.
-pub(crate) unsafe fn member_valid(name: *const c_char, payload_hex: *const c_char) -> bool {
+/// A member of a measured set: an upatch name and the hex of a payload
+/// digest, two digits a byte.
+pub(crate) fn member_valid(name: &[u8], payload_hex: &[u8]) -> bool {
     let mut payload = [0u8; PAYLOAD_HASH_LEN];
 
-    // SAFETY: the caller's C strings, and the room of payload.
-    name_valid((!name.is_null()).then(|| unsafe { ffi::c_str(name) }))
-        && !payload_hex.is_null()
-        && unsafe { hex_decode(payload_hex, payload.as_mut_ptr(), payload.len()) } == 0
+    name_valid(Some(name)) && hex::decode(payload_hex, &mut payload).is_ok()
 }
 
 /// # Safety
@@ -1144,9 +1140,8 @@ pub(crate) unsafe fn specs_parse(
 }
 
 pub(crate) use capi::{
-    upatch_close, upatch_data, upatch_header_name, upatch_loader, upatch_member_valid,
-    upatch_metadata, upatch_open, upatch_open_fd, upatch_open_memory, upatch_select,
-    upatch_signature,
+    upatch_close, upatch_data, upatch_header_name, upatch_loader, upatch_metadata, upatch_open,
+    upatch_open_fd, upatch_open_memory, upatch_select, upatch_signature,
 };
 
 #[cfg(test)]
@@ -1259,17 +1254,6 @@ mod capi {
             return ptr::null();
         }
         at(u, u.hdr.data_off)
-    }
-
-    /// # Safety
-    ///
-    /// `name` and `payload_hex` are NULL or C strings.
-    pub unsafe extern "C" fn upatch_member_valid(
-        name: *const c_char,
-        payload_hex: *const c_char,
-    ) -> bool {
-        // SAFETY: the caller passes NULL or C strings.
-        unsafe { super::member_valid(name, payload_hex) }
     }
 
     /// # Safety

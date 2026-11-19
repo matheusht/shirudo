@@ -5,14 +5,14 @@
 //! binding of its init record, a tree operation measured, and the
 //! upatches loaded and unloaded.
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{CStr, c_int};
 
 use super::{sha256_into, walk_boot, walk_log};
 use crate::errno::{EINVAL, ENOENT};
 use crate::text::cstr;
 use crate::util::hex::hex_decode;
 use crate::util::json::{JsonField, parse_schema};
-use crate::util::upatch::{NAME_MAX, PAYLOAD_HASH_LEN, upatch_member_valid};
+use crate::util::upatch::{NAME_MAX, PAYLOAD_HASH_LEN, member_valid};
 
 const NAME_LEN: usize = 34;
 const NV_RSA_BYTES: usize = 384;
@@ -264,11 +264,7 @@ fn notify(u: &mut UpatchSink<'_>, event: c_int) -> c_int {
 
 /// An entry of an init record's set: a load boot restore made.
 fn take_set_entry(u: &mut UpatchSink<'_>) -> Result<(), c_int> {
-    let name = u.name.as_ptr().cast::<c_char>();
-    let payload = u.payload_hex.as_ptr().cast::<c_char>();
-
-    // SAFETY: name and payload_hex are terminated within their room.
-    if !unsafe { upatch_member_valid(name, payload) } {
+    if !member_valid(cstr(&u.name), cstr(&u.payload_hex)) {
         return Err(-EINVAL);
     }
     u.ret = notify(u, UPATCH_LOAD);
@@ -345,10 +341,7 @@ fn upatches_line(u: &mut UpatchSink<'_>, line: &CStr, is_init: bool) -> c_int {
     if t != b"upatch_load" && t != b"upatch_unload" {
         return 0;
     }
-    let name = u.name.as_ptr().cast::<c_char>();
-    let payload = u.payload_hex.as_ptr().cast::<c_char>();
-    // SAFETY: name and payload_hex are terminated within their room.
-    if !f[2].seen() || !unsafe { upatch_member_valid(name, payload) } {
+    if !f[2].seen() || !member_valid(cstr(&u.name), cstr(&u.payload_hex)) {
         return -EINVAL;
     }
     let event = if t[7] == b'l' {

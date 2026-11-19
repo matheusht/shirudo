@@ -3,7 +3,6 @@
 
 use super::*;
 use crate::text::cstr;
-use core::ffi::CStr;
 
 #[test]
 fn bpffs_name_round_trips() {
@@ -139,20 +138,16 @@ fn name_signed_is_the_header_name() {
 
 #[test]
 fn member_is_a_name_and_a_payload() {
-    let payload = c"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
-    let long = c"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff0";
-    let valid = |name: &CStr, payload: *const c_char| {
-        // SAFETY: a C string, and NULL or another.
-        unsafe { member_valid(name.as_ptr(), payload) }
-    };
+    let payload = b"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    let long = b"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff0";
 
-    assert!(valid(c"fix", payload.as_ptr()));
-    for name in [c"a\nb", c"../fix", c""] {
-        assert!(!valid(name, payload.as_ptr()), "{name:?}");
+    assert!(member_valid(b"fix", payload));
+    for name in [&b"a\nb"[..], b"../fix", b""] {
+        assert!(!member_valid(name, payload), "{name:?}");
     }
-    assert!(!valid(c"fix", long.as_ptr()));
-    assert!(!valid(c"fix", c"00".as_ptr()));
-    assert!(!valid(c"fix", ptr::null()));
+    assert!(!member_valid(b"fix", long));
+    assert!(!member_valid(b"fix", b"00"));
+    assert!(!member_valid(b"fix", b""));
 }
 
 /// A name's pin directory spells each dot in two bytes, within the
