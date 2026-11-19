@@ -12,25 +12,24 @@ use core::ffi::{CStr, c_char, c_int, c_long};
 use crate::errno::ENOENT;
 use crate::sys::libc::Zeroed;
 use crate::sys::libc::{
-    SC_NPROCESSORS_ONLN, Statvfs, Utsname, fclose, fgets, fopen, gethostname, sscanf, statvfs,
-    sysconf, uname,
+    SC_NPROCESSORS_ONLN, Statvfs, Utsname, bytes, fclose, fgets, fopen, gethostname, sscanf,
+    statvfs, sysconf, uname,
 };
-use crate::text::{cstr, digits, parse_u64, strscpy, strsprintf};
+use crate::text::{cstr, digits, parse_u64, strsprintf};
 use crate::util::json::JsonEmit;
 use crate::util::kernel_build_id::read_build_id;
 use std::os::unix::ffi::OsStrExt;
 
-/// `struct sysinfo`.
-#[repr(C)]
+/// The host's facts: a text that cannot be read is empty, a count -1.
 pub struct Sysinfo {
-    pub(crate) hostname: [u8; 256],
-    pub(crate) os_pretty: [u8; 256],
-    pub(crate) kernel_release: [u8; 96],
-    pub(crate) kernel_version: [u8; 256],
-    pub(crate) kernel_build_id: [u8; 129],
-    pub(crate) machine: [u8; 96],
-    pub(crate) machine_id: [u8; 64],
-    pub(crate) boot_id: [u8; 64],
+    pub(crate) hostname: Vec<u8>,
+    pub(crate) os_pretty: Vec<u8>,
+    pub(crate) kernel_release: Vec<u8>,
+    pub(crate) kernel_version: Vec<u8>,
+    pub(crate) kernel_build_id: Vec<u8>,
+    pub(crate) machine: Vec<u8>,
+    pub(crate) machine_id: Vec<u8>,
+    pub(crate) boot_id: Vec<u8>,
     pub(crate) nproc: c_long,
     pub(crate) mem_total_kb: c_long,
     pub(crate) mem_avail_kb: c_long,
@@ -39,73 +38,46 @@ pub struct Sysinfo {
     pub(crate) disk_used_kb: c_long,
 }
 
-const _: () = assert!(size_of::<Sysinfo>() == 1272);
-const _: () = assert!(core::mem::offset_of!(Sysinfo, nproc) == 1224);
-
-/// The start of the file at `path` in all of `buf` but its last byte,
-/// read until that is full or the file ends: how many bytes, or None
-/// where it cannot be opened or read.
-fn read_start(path: &CStr, buf: &mut [u8]) -> Option<usize> {
-    use std::io::{ErrorKind, Read};
-
-    let mut f = std::fs::File::open(std::ffi::OsStr::from_bytes(path.to_bytes())).ok()?;
-    let room = buf.len() - 1;
-    let mut n = 0;
-    // A read may return less than the file holds, and a line too long
-    // for the room is told only by filling it.
-    while n < room {
-        match f.read(&mut buf[n..room]) {
-            Ok(0) => break,
-            Ok(k) => n += k,
-            Err(e) if e.kind() == ErrorKind::Interrupted => {}
-            Err(_) => return None,
-        }
-    }
-    Some(n)
-}
-
-/// The first line of the file at `path`, without its line end, or "".
-fn read_first_line(path: &CStr, buf: &mut [u8]) {
-    buf[0] = 0;
-    let n = match read_start(path, buf) {
-        Some(n) if n > 0 => n,
-        _ => return,
-    };
-
-    buf[n] = 0;
-    let end = buf[..n]
-        .iter()
-        .position(|&c| matches!(c, b'\r' | b'\n' | 0))
-        .unwrap_or(n);
-    buf[end] = 0;
-}
-
-/// `SYSINFO_IMAGE_VALUE_MAX` and `SYSINFO_IMAGE_ROOT_MAX`.
-const IMAGE_VALUE_MAX: usize = 256;
-const IMAGE_ROOT_MAX: usize = 65;
+/// gethostname()'s room, its NUL included.
+const HOSTNAME_ROOM: usize = 256;
+/// The longest machine ID and boot ID shown; either is 36 bytes or less.
+const ID_LEN_MAX: usize = 63;
+const UPTIME_LEN_MAX: usize = 63;
+const OS_RELEASE_VALUE_MAX: usize = 255;
+const IMAGE_ROOT_LEN: usize = 64;
 const OS_RELEASE_SIZE_MAX: usize = 64 * 1024;
 /// Above the COMMAND_LINE_SIZE of every architecture.
 const CMDLINE_SIZE_MAX: usize = 8192;
 
-/// `struct sysinfo_image`: the identity of the booted image, each field
-/// "" when absent or refused.
-#[repr(C)]
-pub struct SysinfoImage {
-    pub(crate) id: [u8; IMAGE_VALUE_MAX],
-    pub(crate) version: [u8; IMAGE_VALUE_MAX],
-    pub(crate) root: [u8; IMAGE_ROOT_MAX],
+/// The first `max` bytes of the file at `path`, or all of a shorter
+/// one, or None where it cannot be opened or read.
+fn read_start(path: &CStr, max: usize) -> Option<Vec<u8>> {
+    use std::io::Read;
+
+    let f = std::fs::File::open(std::ffi::OsStr::from_bytes(path.to_bytes())).ok()?;
+    let mut text = Vec::with_capacity(max);
+    f.take(max as u64).read_to_end(&mut text).ok()?;
+    Some(text)
 }
 
-const _: () = assert!(size_of::<SysinfoImage>() == 577);
+/// The first line of the first `max` bytes of the file at `path`,
+/// without its line end, or "".
+fn read_first_line(path: &CStr, max: usize) -> Vec<u8> {
+    let mut text = read_start(path, max).unwrap_or_default();
+    let end = text
+        .iter()
+        .position(|&c| matches!(c, b'\r' | b'\n' | 0))
+        .unwrap_or(text.len());
+    text.truncate(end);
+    text
+}
 
-impl SysinfoImage {
-    pub(crate) const fn zeroed() -> Self {
-        SysinfoImage {
-            id: [0; IMAGE_VALUE_MAX],
-            version: [0; IMAGE_VALUE_MAX],
-            root: [0; IMAGE_ROOT_MAX],
-        }
-    }
+/// The identity of the booted image, each field "" when absent or
+/// refused.
+pub struct SysinfoImage {
+    pub(crate) id: Vec<u8>,
+    pub(crate) version: Vec<u8>,
+    pub(crate) root: Vec<u8>,
 }
 
 /// The value of an os-release assignment unquoted as os-release(5)
@@ -131,7 +103,7 @@ fn os_release_unquote(mut value: &[u8]) -> Option<Vec<u8>> {
             i += 1;
         }
         let c = value[i];
-        if !(0x20..=0x7e).contains(&c) || out.len() == IMAGE_VALUE_MAX - 1 {
+        if !(0x20..=0x7e).contains(&c) || out.len() == OS_RELEASE_VALUE_MAX {
             return None;
         }
         out.push(c);
@@ -162,14 +134,6 @@ fn read_os_release(path: &CStr, fallback: &CStr) -> Result<Vec<u8>, c_int> {
     }
 }
 
-/// `value` into the C string field `out`, or "" for none.
-fn set_field(out: &mut [u8], value: Option<&[u8]>) {
-    out.fill(0);
-    if let Some(v) = value {
-        let _ = strscpy(out, v);
-    }
-}
-
 /// The image's root hash on the kernel command line: roothash=, else
 /// usrhash=, the last of each, 64 hex digits in lowercase, or none.
 fn cmdline_image_root(cmdline: &[u8]) -> Option<Vec<u8>> {
@@ -183,7 +147,7 @@ fn cmdline_image_root(cmdline: &[u8]) -> Option<Vec<u8>> {
         }
     }
     let hash = roothash.or(usrhash)?;
-    (hash.len() == IMAGE_ROOT_MAX - 1 && hash.iter().all(u8::is_ascii_hexdigit))
+    (hash.len() == IMAGE_ROOT_LEN && hash.iter().all(u8::is_ascii_hexdigit))
         .then(|| hash.to_ascii_lowercase())
 }
 
@@ -192,21 +156,19 @@ fn cmdline_image_root(cmdline: &[u8]) -> Option<Vec<u8>> {
 /// and the root hash of the command line at `cmdline`, none from one that
 /// does not fit.
 pub(crate) fn image_read_at(os_release: &CStr, fallback: &CStr, cmdline: &CStr) -> SysinfoImage {
-    let mut img = SysinfoImage::zeroed();
-    if let Ok(text) = read_os_release(os_release, fallback) {
-        set_field(&mut img.id, os_release_value(&text, b"IMAGE_ID").as_deref());
-        set_field(
-            &mut img.version,
-            os_release_value(&text, b"IMAGE_VERSION").as_deref(),
-        );
+    let text = read_os_release(os_release, fallback).unwrap_or_default();
+    let value = |key: &[u8]| os_release_value(&text, key).unwrap_or_default();
+    let line = read_first_line(cmdline, CMDLINE_SIZE_MAX - 1);
+    let root = if line.len() < CMDLINE_SIZE_MAX - 1 {
+        cmdline_image_root(&line).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    SysinfoImage {
+        id: value(b"IMAGE_ID"),
+        version: value(b"IMAGE_VERSION"),
+        root,
     }
-    let mut line = vec![0u8; CMDLINE_SIZE_MAX];
-    read_first_line(cmdline, &mut line);
-    let line = cstr(&line);
-    if line.len() < CMDLINE_SIZE_MAX - 1 {
-        set_field(&mut img.root, cmdline_image_root(line).as_deref());
-    }
-    img
 }
 
 /// image_read_at() of this system.
@@ -216,15 +178,12 @@ pub(crate) fn image_read() -> SysinfoImage {
 
 /// The whole seconds of /proc/uptime, or -1.
 fn read_uptime_sec() -> c_long {
-    let mut buf = [0u8; 64];
-
-    let n = match read_start(c"/proc/uptime", &mut buf) {
-        Some(n) if n > 0 => n,
+    let text = match read_start(c"/proc/uptime", UPTIME_LEN_MAX) {
+        Some(text) if !text.is_empty() => text,
         _ => return -1,
     };
-    let text = &buf[..n];
 
-    match parse_u64(&text[..digits(text)], c_long::MAX as u64) {
+    match parse_u64(&text[..digits(&text)], c_long::MAX as u64) {
         Ok(sec) => sec as c_long,
         Err(_) => -1,
     }
@@ -243,52 +202,52 @@ fn scan_long(line: &[u8], fmt: &CStr) -> Option<c_long> {
 
 /// MemTotal and MemAvailable of /proc/meminfo in KiB, -1 for one it
 /// lacks.
-fn read_mem(total_kb: &mut c_long, avail_kb: &mut c_long) {
+fn read_mem() -> (c_long, c_long) {
+    let (mut total_kb, mut avail_kb) = (-1, -1);
     let mut line = [0u8; 256];
 
-    *total_kb = -1;
-    *avail_kb = -1;
     // SAFETY: a path and a mode.
     let f = unsafe { fopen(c"/proc/meminfo".as_ptr(), c"re".as_ptr()) };
     if f.is_null() {
-        return;
+        return (total_kb, avail_kb);
     }
     // SAFETY: the room of line, and the stream fopen() gave.
     while !unsafe { fgets(line.as_mut_ptr().cast(), line.len() as c_int, f) }.is_null() {
-        if *total_kb < 0
+        if total_kb < 0
             && let Some(kb) = scan_long(&line, c"MemTotal: %ld kB")
         {
-            *total_kb = kb;
-        } else if *avail_kb < 0
+            total_kb = kb;
+        } else if avail_kb < 0
             && let Some(kb) = scan_long(&line, c"MemAvailable: %ld kB")
         {
-            *avail_kb = kb;
+            avail_kb = kb;
         }
-        if *total_kb >= 0 && *avail_kb >= 0 {
+        if total_kb >= 0 && avail_kb >= 0 {
             break;
         }
     }
     // SAFETY: the stream fopen() gave, closed once.
     unsafe { fclose(f) };
+    (total_kb, avail_kb)
 }
 
 /// The size and the used space of the root file system in KiB, as df
 /// counts them, or -1.
-fn read_root_disk(total_kb: &mut c_long, used_kb: &mut c_long) {
+fn read_root_disk() -> (c_long, c_long) {
     let mut s = Statvfs::zeroed();
 
-    *total_kb = -1;
-    *used_kb = -1;
     // SAFETY: a C string and a struct statvfs to fill.
     if unsafe { statvfs(c"/".as_ptr(), &mut s) } != 0 {
-        return;
+        return (-1, -1);
     }
     // f_frsize is the unit statvfs counts its blocks in.
     let tot_b = s.f_blocks.wrapping_mul(s.f_frsize);
     let free_b = s.f_bfree.wrapping_mul(s.f_frsize);
 
-    *total_kb = (tot_b / 1024) as c_long;
-    *used_kb = (tot_b.wrapping_sub(free_b) / 1024) as c_long;
+    (
+        (tot_b / 1024) as c_long,
+        (tot_b.wrapping_sub(free_b) / 1024) as c_long,
+    )
 }
 
 fn is_space(c: u8) -> bool {
@@ -403,74 +362,74 @@ fn kernel_config(release: &[u8]) -> Option<Vec<(Vec<u8>, Vec<u8>)>> {
     Some(options)
 }
 
-/// The system's facts into `si`, zeroed whole first.
-pub(crate) fn gather(si: &mut Sysinfo) {
-    let room: *mut Sysinfo = si;
-    // SAFETY: the caller's sysinfo, all of whose bits zeroed are one.
-    unsafe { room.write_bytes(0, 1) };
-    fill(si);
+/// gethostname(), or "" where it fails.
+fn read_hostname() -> Vec<u8> {
+    let mut name = [0u8; HOSTNAME_ROOM];
+
+    // SAFETY: the room of name.
+    if unsafe { gethostname(name.as_mut_ptr().cast(), name.len()) } != 0 {
+        return Vec::new();
+    }
+    cstr(&name[..HOSTNAME_ROOM - 1]).to_vec()
 }
 
-fn fill(si: &mut Sysinfo) {
+/// The system's facts.
+pub(crate) fn gather() -> Sysinfo {
     let mut u = Utsname::zeroed();
-
-    si.nproc = -1;
-    si.mem_total_kb = -1;
-    si.mem_avail_kb = -1;
-    si.uptime_sec = -1;
-    si.disk_total_kb = -1;
-    si.disk_used_kb = -1;
-    // SAFETY: the room of the hostname.
-    if unsafe { gethostname(si.hostname.as_mut_ptr().cast(), si.hostname.len()) } != 0 {
-        si.hostname[0] = 0;
-    }
-    si.hostname[255] = 0;
     // SAFETY: a struct utsname to fill.
-    if unsafe { uname(&mut u) } == 0 {
-        let _ = strscpy(
-            &mut si.kernel_release,
-            cstr(crate::sys::libc::bytes(&u.release)),
-        );
-        let _ = strscpy(
-            &mut si.kernel_version,
-            cstr(crate::sys::libc::bytes(&u.version)),
-        );
-        let _ = strscpy(&mut si.machine, cstr(crate::sys::libc::bytes(&u.machine)));
-        if si.hostname[0] == 0 {
-            let _ = strscpy(&mut si.hostname, cstr(crate::sys::libc::bytes(&u.nodename)));
+    let have_uts = unsafe { uname(&mut u) } == 0;
+    let uts = |field: &[c_char]| {
+        if have_uts {
+            cstr(bytes(field)).to_vec()
+        } else {
+            Vec::new()
         }
+    };
+    let mut hostname = read_hostname();
+    if hostname.is_empty() {
+        hostname = uts(&u.nodename);
     }
-    let pretty = read_os_release(c"/etc/os-release", c"/usr/lib/os-release")
+    let os_pretty = read_os_release(c"/etc/os-release", c"/usr/lib/os-release")
         .ok()
-        .and_then(|text| os_release_value(&text, b"PRETTY_NAME"));
-    set_field(&mut si.os_pretty, pretty.as_deref());
-    read_first_line(c"/etc/machine-id", &mut si.machine_id);
-    read_first_line(c"/proc/sys/kernel/random/boot_id", &mut si.boot_id);
-    if let Ok(id) = read_build_id() {
-        let _ = strscpy(&mut si.kernel_build_id, &id);
+        .and_then(|text| os_release_value(&text, b"PRETTY_NAME"))
+        .unwrap_or_default();
+    let (mem_total_kb, mem_avail_kb) = read_mem();
+    let (disk_total_kb, disk_used_kb) = read_root_disk();
+
+    Sysinfo {
+        hostname,
+        os_pretty,
+        kernel_release: uts(&u.release),
+        kernel_version: uts(&u.version),
+        kernel_build_id: read_build_id().unwrap_or_default(),
+        machine: uts(&u.machine),
+        machine_id: read_first_line(c"/etc/machine-id", ID_LEN_MAX),
+        boot_id: read_first_line(c"/proc/sys/kernel/random/boot_id", ID_LEN_MAX),
+        // SAFETY: a call that takes no pointer.
+        nproc: unsafe { sysconf(SC_NPROCESSORS_ONLN) },
+        mem_total_kb,
+        mem_avail_kb,
+        uptime_sec: read_uptime_sec(),
+        disk_total_kb,
+        disk_used_kb,
     }
-    // SAFETY: a call that takes no pointer.
-    si.nproc = unsafe { sysconf(SC_NPROCESSORS_ONLN) };
-    read_mem(&mut si.mem_total_kb, &mut si.mem_avail_kb);
-    read_root_disk(&mut si.disk_total_kb, &mut si.disk_used_kb);
-    si.uptime_sec = read_uptime_sec();
 }
 
 pub(crate) fn emit_json(e: &mut JsonEmit, si: &Sysinfo) {
     e.obj_open_key(b"system");
-    e.kv_string(b"hostname", cstr(&si.hostname));
-    e.kv_string(b"os", cstr(&si.os_pretty));
-    e.kv_string(b"kernel_release", cstr(&si.kernel_release));
-    e.kv_string(b"kernel_version", cstr(&si.kernel_version));
-    e.kv_string(b"kernel_build_id", cstr(&si.kernel_build_id));
+    e.kv_string(b"hostname", &si.hostname);
+    e.kv_string(b"os", &si.os_pretty);
+    e.kv_string(b"kernel_release", &si.kernel_release);
+    e.kv_string(b"kernel_version", &si.kernel_version);
+    e.kv_string(b"kernel_build_id", &si.kernel_build_id);
     e.obj_open_key(b"kernel_config");
-    for (key, value) in kernel_config(cstr(&si.kernel_release)).unwrap_or_default() {
+    for (key, value) in kernel_config(&si.kernel_release).unwrap_or_default() {
         e.kv_string(&key, &value);
     }
     e.obj_close();
-    e.kv_string(b"architecture", cstr(&si.machine));
-    e.kv_string(b"machine_id", cstr(&si.machine_id));
-    e.kv_string(b"boot_id", cstr(&si.boot_id));
+    e.kv_string(b"architecture", &si.machine);
+    e.kv_string(b"machine_id", &si.machine_id);
+    e.kv_string(b"boot_id", &si.boot_id);
     e.kv_int(b"nproc", si.nproc);
     e.kv_int(b"mem_total_kb", si.mem_total_kb);
     e.kv_int(b"mem_avail_kb", si.mem_avail_kb);

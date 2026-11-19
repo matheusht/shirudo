@@ -330,15 +330,15 @@ fn print_system(si: &Sysinfo) {
     let field = |label: &[u8], value: &[u8]| row(b"  ", label, value);
 
     print(b"\nSystem:\n");
-    field(b"OS:", cstr(&si.os_pretty));
-    field(b"Kernel:", cstr(&si.kernel_release));
-    if si.kernel_version[0] != 0 {
-        field(b"Kernel version:", cstr(&si.kernel_version));
+    field(b"OS:", &si.os_pretty);
+    field(b"Kernel:", &si.kernel_release);
+    if !si.kernel_version.is_empty() {
+        field(b"Kernel version:", &si.kernel_version);
     }
-    if si.kernel_build_id[0] != 0 {
-        field(b"Kernel build ID:", cstr(&si.kernel_build_id));
+    if !si.kernel_build_id.is_empty() {
+        field(b"Kernel build ID:", &si.kernel_build_id);
     }
-    field(b"Architecture:", cstr(&si.machine));
+    field(b"Architecture:", &si.machine);
     if si.nproc > 0 {
         field(b"CPUs:", si.nproc.to_string().as_bytes());
     }
@@ -366,11 +366,11 @@ fn print_system(si: &Sysinfo) {
         );
         field(b"Uptime:", up.as_bytes());
     }
-    if si.machine_id[0] != 0 {
-        field(b"Machine ID:", cstr(&si.machine_id));
+    if !si.machine_id.is_empty() {
+        field(b"Machine ID:", &si.machine_id);
     }
-    if si.boot_id[0] != 0 {
-        field(b"Boot ID:", cstr(&si.boot_id));
+    if !si.boot_id.is_empty() {
+        field(b"Boot ID:", &si.boot_id);
     }
 }
 
@@ -1142,17 +1142,12 @@ struct Report {
     eventlog: Option<(i64, i64)>,
     /// Whether the register equals this boot's records replayed.
     matches: Option<bool>,
-    sysinfo: Option<Box<Sysinfo>>,
+    sysinfo: Option<Sysinfo>,
 }
 
 impl Report {
     fn gather(include_system: bool) -> Self {
-        let sysinfo = include_system.then(|| {
-            // SAFETY: an all-zero sysinfo is an empty one.
-            let mut si: Box<Sysinfo> = Box::new(unsafe { mem::zeroed() });
-            sysinfo::gather(&mut si);
-            si
-        });
+        let sysinfo = include_system.then(sysinfo::gather);
         let mut host = [0u8; 256];
         // SAFETY: room for the name.
         if unsafe { gethostname(host.as_mut_ptr().cast(), host.len()) } != 0 {

@@ -3,7 +3,6 @@
 
 use super::*;
 use crate::testutil::TempDir;
-use crate::text::cstr;
 
 const ROOT_LOWER: &str = "a3c3f1b0e4c2d7f09e3b6b2a8b1d5e7c4f6a9d0b2c8e1f3a5b7d9c0e2f4a6b8c";
 const ROOT_UPPER: &str = "A3C3F1B0E4C2D7F09E3B6B2A8B1D5E7C4F6A9D0B2C8E1F3A5B7D9C0E2F4A6B8C";
@@ -30,8 +29,8 @@ fn image_of(etc: Option<&[u8]>, usr: Option<&[u8]>, cmdline: Option<&[u8]>) -> I
         &dir.cpath("usr-lib-os-release"),
         &dir.cpath("cmdline"),
     );
-    let text = |f: &[u8]| String::from_utf8(cstr(f).to_vec()).unwrap();
-    (text(&img.id), text(&img.version), text(&img.root))
+    let text = |f: Vec<u8>| String::from_utf8(f).unwrap();
+    (text(img.id), text(img.version), text(img.root))
 }
 
 fn os_release(text: &str) -> Image {
@@ -231,4 +230,19 @@ fn command_line_that_does_not_fit_is_absent() {
     let mut at_start = vec![b'x'; LEN - 1];
     at_start[..hash.len()].copy_from_slice(format!("roothash={ROOT_LOWER} ").as_bytes());
     assert_eq!(image_of(None, None, Some(&at_start)).2, "");
+}
+
+#[test]
+fn first_line_stops_at_its_end_or_the_cap() {
+    let dir = TempDir::new();
+    let path = dir.cpath("id");
+
+    std::fs::write(dir.join("id"), b"0123456789abcdef\r\nsecond\n").unwrap();
+    assert_eq!(read_first_line(&path, ID_LEN_MAX), b"0123456789abcdef");
+    std::fs::write(dir.join("id"), "x".repeat(ID_LEN_MAX + 1)).unwrap();
+    assert_eq!(
+        read_first_line(&path, ID_LEN_MAX),
+        "x".repeat(ID_LEN_MAX).as_bytes()
+    );
+    assert_eq!(read_first_line(&dir.cpath("none"), ID_LEN_MAX), b"");
 }

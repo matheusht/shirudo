@@ -24,7 +24,7 @@ use crate::util::keepalive::{
 use crate::util::keepalive_quote;
 use crate::util::measured::name_from_bpffs;
 use crate::util::otel::{OtelOpts, send_log_string, status_severity};
-use crate::util::sysinfo::{self, Sysinfo};
+use crate::util::sysinfo;
 use crate::util::upatch_resolve::{BPFFS_UPATCHES_DIR, payload_sha256};
 
 /// The body reports the last this many operations up to the head of the
@@ -183,17 +183,12 @@ fn body(r: &Report, cin: &ConditionsInput, config_root: Option<&[u8]>) -> Result
     let snap = keepalive::snapshot(&mut v).inspect_err(|&ret| {
         log_err(&[b"status: read the keepalive inputs: ", strerr(-ret)].concat());
     })?;
-    // SAFETY: an all-zero sysinfo is an empty one.
-    let mut si: Box<Sysinfo> = Box::new(unsafe { core::mem::zeroed() });
-    sysinfo::gather(&mut si);
+    let si = sysinfo::gather();
     let img = sysinfo::image_read();
     // SAFETY: plain data, whose NULL strings nothing reads before
     // conditions() sets them.
     let mut conds: [Condition; CONDITIONS_MAX] = unsafe { core::mem::zeroed() };
     let nc = conditions::conditions(cin, &mut conds);
-    let text = |b: &[u8]| crate::text::cstr(b).to_vec();
-    let (boot_id, kernel_release) = (text(&si.boot_id), text(&si.kernel_release));
-    let (id, version, root) = (text(&img.id), text(&img.version), text(&img.root));
     let tree = snap.state.as_ref().ok().map(|state| Tree {
         tree_id: Some(crate::text::cstr(&state.tree_id)),
         generation: state.generation as u64,
@@ -204,13 +199,13 @@ fn body(r: &Report, cin: &ConditionsInput, config_root: Option<&[u8]>) -> Result
         mask: (v.outcomes_rc == 0).then_some(&v.mask[..]),
     });
     let input = Input {
-        boot_id: Some(&boot_id),
+        boot_id: Some(&si.boot_id),
         version_id: Some(version_id()),
         config_root,
-        kernel_release: Some(&kernel_release),
-        image_id: Some(&id),
-        image_version: Some(&version),
-        image_root: Some(&root),
+        kernel_release: Some(&si.kernel_release),
+        image_id: Some(&img.id),
+        image_version: Some(&img.version),
+        image_root: Some(&img.root),
         verdict: Some(conditions::status_verdict(cin).to_bytes()),
         cond: keepalive::cond(&conds[..nc]),
         flags: snap.flags | flags(r, &v, snap.state.is_ok()),
