@@ -11,6 +11,7 @@
 
 cd "$(dirname "$0")/../.."
 . ./test-lib.sh
+. ./package-notices-lib.sh
 
 command -v rpmbuild >/dev/null 2>&1 || test_skip_all "no rpmbuild"
 command -v rpm >/dev/null 2>&1 || test_skip_all "no rpm"
@@ -18,6 +19,7 @@ command -v cc >/dev/null 2>&1 || test_skip_all "no C compiler"
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT HUP INT TERM
+setup_package_notices "$WORK/notices"
 REPO=$(cd .. && pwd)
 ARCH=$(rpm --eval '%{_arch}')
 
@@ -59,16 +61,17 @@ stage_target "$WORK/target"
 stage_operator "$WORK/operator"
 
 test_expect_success 'buildrpm.sh builds the target package' '
-	../packaging/rpm/buildrpm.sh target "$WORK/target" 1.2.3 1.5.gabc123 "$ARCH" \
-		"Test <test@example.invalid>" "$WORK/target.rpm" >"$WORK/target.out" 2>&1 &&
+	with_package_notices ../packaging/rpm/buildrpm.sh target "$WORK/target" \
+		1.2.3 1.5.gabc123 "$ARCH" "Test <test@example.invalid>" "$WORK/target.rpm" >"$WORK/target.out" &&
 	test -s "$WORK/target.rpm" &&
 	grep -q "built .*target.rpm (shirudo-target 1.2.3-1.5.gabc123 $ARCH)" "$WORK/target.out"
 '
 
 test_expect_success 'target package metadata names, conflicts and version' '
-	rpm -qp --qf "%{NAME} %{VERSION} %{RELEASE} %{ARCH} %{LICENSE}\n" "$WORK/target.rpm" \
+	rpm -qp --qf "%{NAME} %{VERSION} %{RELEASE} %{ARCH}\n" "$WORK/target.rpm" \
 		>"$WORK/target.info" 2>/dev/null &&
-	grep -qx "shirudo-target 1.2.3 1.5.gabc123 $ARCH BSD-2-Clause" "$WORK/target.info" &&
+	grep -qx "shirudo-target 1.2.3 1.5.gabc123 $ARCH" "$WORK/target.info" &&
+	rpm -qp --qf "%{LICENSE}\n" "$WORK/target.rpm" | grep -q "^BSD-2-Clause AND " &&
 	rpm -qp --conflicts "$WORK/target.rpm" | grep -qx "shirudo-operator" &&
 	rpm -qp --qf "%{PACKAGER}\n" "$WORK/target.rpm" | grep -q "test@example.invalid"
 '
@@ -82,7 +85,11 @@ test_expect_success 'target package lists the binary, every unit and the complet
 	grep -qx /usr/share/bash-completion/completions/shirudo "$WORK/target.files" &&
 	! grep -qx /usr/bin "$WORK/target.files" &&
 	! grep -q "libexec/shirudo" "$WORK/target.files" &&
-	test "$(wc -l <"$WORK/target.files")" -eq 11
+	for notice in LICENSE THIRD-PARTY-LICENSES rust-library-COPYRIGHT.html; do
+		grep -qx "/usr/share/licenses/shirudo-target/$notice" "$WORK/target.files" ||
+			exit 1
+	done &&
+	test "$(wc -l <"$WORK/target.files")" -eq 15
 '
 
 test_expect_success 'library requirements come from the ELF dependency generator' '
@@ -109,8 +116,8 @@ test_expect_success 'target scriptlets enable units on install and remove them s
 '
 
 test_expect_success 'buildrpm.sh gives the operator its compiler and verity tool requirements' '
-	../packaging/rpm/buildrpm.sh operator "$WORK/operator" 1.2.3 1 "$ARCH" \
-		"Test <test@example.invalid>" "$WORK/operator.rpm" >/dev/null 2>&1 &&
+	with_package_notices ../packaging/rpm/buildrpm.sh operator "$WORK/operator" \
+		1.2.3 1 "$ARCH" "Test <test@example.invalid>" "$WORK/operator.rpm" >/dev/null &&
 	rpm -qp --qf "%{NAME} %{VERSION} %{RELEASE}\n" "$WORK/operator.rpm" |
 		grep -qx "shirudo-operator 1.2.3 1" &&
 	rpm -qp --conflicts "$WORK/operator.rpm" | grep -qx "shirudo-target" &&
@@ -129,10 +136,10 @@ test_expect_success 'buildrpm.sh gives the operator its compiler and verity tool
 if command -v dpkg-deb >/dev/null 2>&1; then
 	test_expect_success 'Debian packages require clang 23 and veritysetup only for the operator' '
 		arch=$(dpkg --print-architecture) &&
-		../packaging/deb/builddeb.sh target "$WORK/target" 1.2.3 "$arch" \
-			"Test <test@example.invalid>" "$WORK/target.deb" >/dev/null &&
-		../packaging/deb/builddeb.sh operator "$WORK/operator" 1.2.3 "$arch" \
-			"Test <test@example.invalid>" "$WORK/operator.deb" >/dev/null &&
+		with_package_notices ../packaging/deb/builddeb.sh target "$WORK/target" \
+			1.2.3 "$arch" "Test <test@example.invalid>" "$WORK/target.deb" >/dev/null &&
+		with_package_notices ../packaging/deb/builddeb.sh operator "$WORK/operator" \
+			1.2.3 "$arch" "Test <test@example.invalid>" "$WORK/operator.deb" >/dev/null &&
 		dpkg-deb -f "$WORK/target.deb" Depends >"$WORK/target.deb.requires" &&
 		dpkg-deb -f "$WORK/operator.deb" Depends >"$WORK/operator.deb.requires" &&
 		! grep -q cryptsetup "$WORK/target.deb.requires" &&
@@ -188,9 +195,9 @@ test_expect_success 'only the Debian helper runs clang 23 from /usr/lib/llvm-23'
 test_expect_success 'static PIE target packages do not require a shared runtime or loader' '
 	cc -static-pie -static-libgcc -o "$WORK/static-stub" "$WORK/stub.c" &&
 	install -m 0755 "$WORK/static-stub" "$WORK/target/usr/bin/shirudo" &&
-	../packaging/rpm/buildrpm.sh target "$WORK/target" 1.2.3 1 "$ARCH" \
-		"Test <test@example.invalid>" "$WORK/static.rpm" \
-		>"$WORK/static.out" 2>&1 &&
+	with_package_notices ../packaging/rpm/buildrpm.sh target "$WORK/target" \
+		1.2.3 1 "$ARCH" "Test <test@example.invalid>" "$WORK/static.rpm" \
+		>"$WORK/static.out" &&
 	rpm -qp --requires "$WORK/static.rpm" >"$WORK/static.requires" 2>/dev/null &&
 	! grep -Eq "^lib.*\\.so|^rtld\\(" "$WORK/static.requires"
 '
