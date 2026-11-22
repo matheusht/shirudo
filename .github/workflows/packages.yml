@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - rusting
     tags:
       - '*'
       - '!test-kernel-*'

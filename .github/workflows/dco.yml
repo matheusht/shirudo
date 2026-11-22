@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - rusting
   pull_request:
 
 permissions:
@@ -25,9 +26,9 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Every commit a pull request adds, or a push brings to main, needs
-      # a subject, a body and its author's sign-off; ci-commit-range.sh
-      # picks the commits the event covers.
+      # Every commit a pull request adds, or a push brings to either
+      # branch, needs a subject, a body and its author's sign-off;
+      # ci-commit-range.sh picks the commits the event covers.
       - name: Check the sign-off of every commit
         env:
           EVENT_NAME: ${{ github.event_name }}
