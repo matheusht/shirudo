@@ -80,6 +80,48 @@ jobs:
             . build/vm-toolchain.env
             .github/scripts/check-sparse.sh
 
+  clippy:
+    name: Clippy and rustfmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The four Cargo target directories keep vendored dependencies compiled
+      # between runs. The toolchain script also reuses its OpenSSL and libtpms
+      # builds, which otherwise dominate a warm lint run.
+      - name: Cache Rust lint dependencies and host toolchain
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            build/rust-clippy
+            build/rust-clippy-test
+            build/rust-clippy-helpers
+            build/rust-clippy-fuzz
+            build/host-openssl
+            build/host-libtpms
+          key: rust-lint-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust/Cargo.lock', '.github/scripts/vm-toolchain.sh', '.github/scripts/install-libtpms.sh') }}
+
+      # The BPF inputs embedded by the Rust crate need the signed-BPF
+      # kernel BTF, so lint in the same LVH guest as the build jobs.
+      - name: Run Rust format and Clippy checks in LVH VM
+        uses: cilium/little-vm-helper@c8b0bfbae3bdda7bc69fb9cd370e4b74ce84986d # v0.0.33
+        with:
+          test-name: shirudo-clippy
+          image: kind
+          image-version: bpf-next-20260603.072225
+          kernel-version: bpf-next-main
+          host-mount: ${{ github.workspace }}
+          images-folder-parent: ${{ github.workspace }}/../lvh
+          install-dependencies: true
+          cmd: |
+            cd /host
+            .github/scripts/vm-toolchain.sh rust-clippy rustfmt
+            . build/vm-toolchain.env
+            .github/scripts/check-rust-lints.sh
+
   coccinelle:
     name: Coccinelle
     runs-on: ubuntu-latest
