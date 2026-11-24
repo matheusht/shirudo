@@ -219,10 +219,7 @@ pub(crate) struct PolicyLabels<'a> {
 
 /// `struct stat` of the C library, which a program's spec carries for
 /// its callers.
-#[cfg(target_arch = "x86_64")]
-const STAT_SIZE: usize = 144;
-#[cfg(target_arch = "aarch64")]
-const STAT_SIZE: usize = 128;
+const STAT_SIZE: usize = size_of::<libc::stat>();
 
 /// `struct prog_spec`: a program of the metadata, what attaches it, and
 /// for a uprobe the binary's path, build ID and offsets.

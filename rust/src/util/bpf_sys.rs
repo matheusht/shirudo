@@ -12,11 +12,6 @@ use std::os::fd::{FromRawFd, OwnedFd};
 use crate::errno::E2BIG;
 use crate::sys::libc::{close, errno, fcntl, set_errno, syscall};
 
-#[cfg(target_arch = "x86_64")]
-const SYS_BPF: c_long = 321;
-#[cfg(target_arch = "aarch64")]
-const SYS_BPF: c_long = 280;
-
 /// The bpf() commands shirudo issues.
 pub(crate) const BPF_MAP_CREATE: c_long = 0;
 const BPF_MAP_LOOKUP_ELEM: c_long = 1;
@@ -78,7 +73,14 @@ impl Attr {
     pub(crate) fn call(&mut self, cmd: c_long) -> Result<c_int, c_int> {
         // SAFETY: an attribute of the size the kernel takes, its
         // pointers to what the caller keeps live across the call.
-        let ret = unsafe { syscall(SYS_BPF, cmd, self.0.as_mut_ptr(), Self::SIZE as c_long) };
+        let ret = unsafe {
+            syscall(
+                libc::SYS_bpf,
+                cmd,
+                self.0.as_mut_ptr(),
+                Self::SIZE as c_long,
+            )
+        };
         if ret < 0 {
             Err(errno())
         } else {

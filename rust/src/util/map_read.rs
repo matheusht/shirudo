@@ -206,11 +206,6 @@ const MAP_BTF_ID: usize = 64;
 const MAP_BTF_KEY_TYPE_ID: usize = 68;
 const MAP_BTF_VALUE_TYPE_ID: usize = 72;
 
-#[cfg(target_arch = "x86_64")]
-const SYS_SCHED_GETAFFINITY: c_long = 204;
-#[cfg(target_arch = "aarch64")]
-const SYS_SCHED_GETAFFINITY: c_long = 123;
-
 /// The name status and the table give BPF_MAP_TYPE_* `ty`.
 pub(crate) fn map_type_name(ty: u32) -> &'static CStr {
     match ty {
@@ -293,7 +288,14 @@ fn nproc_possible() -> Result<u32, c_int> {
 fn affinity_mask(mask: &mut [u8]) -> Result<usize, c_int> {
     let len = c_long::try_from(mask.len()).map_err(|_| -EINVAL)?;
     // SAFETY: the raw syscall, with room for the mask's bytes.
-    let n = unsafe { syscall(SYS_SCHED_GETAFFINITY, 0 as c_long, len, mask.as_mut_ptr()) };
+    let n = unsafe {
+        syscall(
+            libc::SYS_sched_getaffinity,
+            0 as c_long,
+            len,
+            mask.as_mut_ptr(),
+        )
+    };
     match usize::try_from(n) {
         Ok(bytes) if bytes > 0 => Ok(bytes.min(mask.len())),
         _ => Err(-errno()),

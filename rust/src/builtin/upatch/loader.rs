@@ -59,11 +59,6 @@ use crate::util::xdp::{self, XdpDevice};
 const SIG_KEYRING_BPF: u32 = 5;
 const POLICY_NAME_MAX: usize = 64;
 
-#[cfg(target_arch = "x86_64")]
-const SYS_PERF_EVENT_OPEN: c_long = 298;
-#[cfg(target_arch = "aarch64")]
-const SYS_PERF_EVENT_OPEN: c_long = 241;
-
 const MAP_TYPE_SK_STORAGE: u32 = 24;
 const MAP_TYPE_TASK_STORAGE: u32 = 29;
 const F_NO_PREALLOC: u32 = 1;
@@ -393,7 +388,7 @@ fn perf_event_open_probe(
     // SAFETY: the attribute, of its size, and the name it points to.
     let fd = unsafe {
         syscall(
-            SYS_PERF_EVENT_OPEN,
+            libc::SYS_perf_event_open,
             a.0.as_mut_ptr(),
             -1 as c_long,
             0 as c_long,
