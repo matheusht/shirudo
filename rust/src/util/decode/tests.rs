@@ -7,6 +7,7 @@ use crate::util::upatch::{
     DECODER_MAGIC, HEADER_SIZE, MAGIC, SECTION_DECODERS, SIGNED_TRAILER_MAGIC, TYPE_BPF,
 };
 use std::os::fd::AsRawFd;
+use std::sync::{Mutex, MutexGuard};
 
 /// The container testing/unit/upatch_decode.c built as a struct: a
 /// header, one exiting instruction, a signature, then the data: a decoder
@@ -72,9 +73,21 @@ fn container(source: &str) -> Vec<u8> {
     b
 }
 
+/// Held while a decoder runs, so the tests run one at a time, as shirudo
+/// does: one decoder per process. On riscv64, LuaJIT (Debian's OpenResty
+/// 2.1 build, under qemu-user in CI) crashes when Lua states on two threads
+/// raise errors at once; a C program with no Rust in it, four threads each
+/// making a state, a count hook that raises and a C function that raises,
+/// crashes the same way, so the fault is not this crate's.
+fn one_decoder() -> MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// What the decoder of `source` makes of map "records": its JSON, or the
 /// error.
 fn decoded(source: &str) -> Result<Vec<u8>, c_int> {
+    let _one = one_decoder();
     let dir = TempDir::new();
     std::fs::write(dir.join("u"), container(source)).unwrap();
     let mut view = MapView {
@@ -89,7 +102,6 @@ fn decoded(source: &str) -> Result<Vec<u8>, c_int> {
 }
 
 #[test]
-
 fn decoder_initializes_and_returns_json() {
     assert_eq!(
         decoded("function decode(input) return {value = 42} end"),
