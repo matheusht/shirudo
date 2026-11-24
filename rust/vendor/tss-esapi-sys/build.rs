@@ -29,6 +29,7 @@ fn main() {
         match (target.architecture, target.operating_system) {
             (Architecture::Arm(_), OperatingSystem::Linux) => {}
             (Architecture::Aarch64(_), OperatingSystem::Linux) => {}
+            (Architecture::Riscv64(_), OperatingSystem::Linux) => {}
             (Architecture::X86_64, OperatingSystem::Darwin) => {}
             (Architecture::X86_64, OperatingSystem::Linux) => {}
             (arch, os) => {
