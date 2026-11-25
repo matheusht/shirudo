@@ -166,6 +166,62 @@ fn signed_sections_are_once_each() {
     assert_eq!((u.signed_attach(), u.signed_unload_payload()), (None, None));
 }
 
+/// One signed byte string holds a second directory where a header that
+/// ends the loader 16 bytes earlier would otherwise find it.
+fn split_container(shift: usize) -> Vec<u8> {
+    let words = |w: &[u32]| w.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>();
+    let at = HEADER_SIZE as u32;
+    let insns = [b'x'; 32];
+    let mut name = [0u8; NAME_MAX];
+    name[..3].copy_from_slice(b"fix");
+    let directory = words(&[SECTION_NAME, 0, 0, NAME_MAX as u32]);
+    let trailer = words(&[
+        SIGNED_TRAILER_MAGIC,
+        SIGNED_VERSION,
+        (NAME_MAX + SIGNED_SECTION) as u32,
+        1,
+    ]);
+    let data = [&name[..], &directory, &directory, &trailer].concat();
+    let mut c = [&MAGIC.to_le_bytes()[..], &words(&[VERSION, 0]), b"fix"].concat();
+
+    c.resize(304, 0);
+    c.extend(words(&[
+        at,
+        8,
+        at + 8,
+        (insns.len() - shift) as u32,
+        0,
+        0,
+        at + 8 + insns.len() as u32 - shift as u32,
+        data.len() as u32 + shift as u32,
+        0,
+        0,
+        0,
+        0,
+        TYPE_BPF,
+        0,
+    ]));
+    c.resize(HEADER_SIZE + 8, 0);
+    c.extend(insns);
+    c.extend(data);
+    c
+}
+
+#[test]
+fn one_signature_keeps_its_sections_in_one_split() {
+    assert!(
+        Upatch::from_bytes(&split_container(0))
+            .unwrap()
+            .name_signed()
+    );
+    assert!(
+        Upatch::from_bytes(&split_container(16))
+            .unwrap()
+            .signed_name()
+            .is_none()
+    );
+}
+
 /// What does not fit the container, or is not one, is refused.
 #[test]
 fn a_cut_container_is_refused() {

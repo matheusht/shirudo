@@ -443,9 +443,16 @@ fn parse_decoders(bp: &[u8]) -> Option<u32> {
 
 /// The signed sections behind the loader data `data`, which starts at
 /// `data_off` in the container. Each lies below the directory, the
-/// directory below the trailer, and each tag appears once; a directory
-/// that breaks any of that is taken for none, so a load or unload
-/// refuses for what it then lacks.
+/// directory ends where the trailer begins, and each tag appears once; a
+/// directory that breaks any of that is taken for none, so a load or
+/// unload refuses for what it then lacks.
+///
+/// The signature covers insns followed by data with nothing between
+/// them, while the header that divides the two is unsigned. The trailer
+/// is last whichever split the header names. Requiring the directory to
+/// end at it makes the directory offset and count bind that split: of
+/// all the ways to divide one signed byte string, only the signer's keeps
+/// its sections.
 fn parse_signed_sections(data: &[u8], data_off: usize, nr_maps: u32) -> Option<Signed> {
     let data_len = data.len();
 
@@ -462,7 +469,7 @@ fn parse_signed_sections(data: &[u8], data_off: usize, nr_maps: u32) -> Option<S
     if nr == 0
         || nr > SIGNED_SECTIONS_MAX
         || u64::from(dir_off) > end
-        || u64::from(nr) * SIGNED_SECTION as u64 > end - u64::from(dir_off)
+        || u64::from(nr) * SIGNED_SECTION as u64 != end - u64::from(dir_off)
     {
         return None;
     }
