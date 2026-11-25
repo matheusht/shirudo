@@ -21,6 +21,7 @@ use crate::ffi;
 use crate::heap::{xfree, xmalloc};
 use crate::sys::libc::{fwrite, printf, putchar, stdout};
 use crate::text::strsprintf;
+use crate::util::format::fputs_sanitized;
 use crate::util::io::write_complete;
 use crate::util::json::{JsonEmit, MAX_BYTES};
 use crate::util::upatch::{NAME_MAX, Upatch};
@@ -1054,13 +1055,14 @@ unsafe fn print_rodata_text(u: &Upatch, path: &CStr, view: &View) -> c_int {
     let len = u.name().len();
     name[..len].copy_from_slice(u.name());
     // SAFETY: the name, a C string of len bytes, sanitised in place; the
-    // C's format with C strings and integers.
+    // path printed through the terminal-safe formatter; the C's formats
+    // with C strings and integers.
     unsafe {
         crate::text::sanitize(&mut name[..len], false);
+        printf(c"upatch %s (".as_ptr(), name.as_ptr());
+        fputs_sanitized(path.to_bytes(), stdout);
         printf(
-            c"upatch %s (%s) .rodata: %u bytes at data+%u, file+%u\n".as_ptr(),
-            name.as_ptr(),
-            path.as_ptr(),
+            c") .rodata: %u bytes at data+%u, file+%u\n".as_ptr(),
             view.size,
             view.data_offset,
             u.hdr.data_off.wrapping_add(view.data_offset),
