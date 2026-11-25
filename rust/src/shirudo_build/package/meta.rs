@@ -13,16 +13,18 @@ use core::ffi::c_int;
 use super::{error, strerr};
 use crate::bpf::MAP_ARRAY;
 use crate::bpf::object::{Object, Prog};
-use crate::errno::{EINVAL, ENAMETOOLONG, ENOENT, EOPNOTSUPP, EOVERFLOW, ERANGE};
+use crate::errno::{E2BIG, EEXIST, EINVAL, ENAMETOOLONG, ENOENT, EOPNOTSUPP, EOVERFLOW, ERANGE};
 use crate::text::{parse_u64, parse_x64};
 use crate::util::elf_target::{self, Target};
 use crate::util::upatch::{
     ATTACH_CGROUP_SKB_EGRESS, ATTACH_CGROUP_SKB_INGRESS, ATTACH_FMOD_RET, ATTACH_KPROBE,
-    ATTACH_KRETPROBE, ATTACH_NETFILTER_IPV6_PRE_ROUTING, ATTACH_RAW_TRACEPOINT, ATTACH_TARGET_MAX,
-    ATTACH_UPROBE, ATTACH_UPROBE_MULTI, ATTACH_URETPROBE, ATTACH_URETPROBE_MULTI, ATTACH_XDP,
+    ATTACH_KPROBE_MULTI, ATTACH_KRETPROBE, ATTACH_KRETPROBE_MULTI,
+    ATTACH_NETFILTER_IPV6_PRE_ROUTING, ATTACH_RAW_TRACEPOINT, ATTACH_TARGET_MAX, ATTACH_UPROBE,
+    ATTACH_UPROBE_MULTI, ATTACH_URETPROBE, ATTACH_URETPROBE_MULTI, ATTACH_XDP, KPROBE_SYM_MAX,
+    KPROBE_SYMS_MAX, KPROBE_TARGET, KPROBE_TARGET_MAGIC, KPROBE_TARGET_VERSION, KPROBE_TARGETS,
     PROG_ENTRY, PROG_MAGIC, PROG_MAP_MAX, PROG_METADATA, PROG_VERSION, ROLE_ATTACH,
     ROLE_SERIALIZER, ROLE_TEST_RUN, UPROBE_PATH_MAX, UPROBE_TARGET, UPROBE_TARGET_MAGIC,
-    UPROBE_TARGET_VERSION, UPROBE_TARGETS, XDP_ALL,
+    UPROBE_TARGET_VERSION, UPROBE_TARGETS, XDP_ALL, kprobe_sym_valid,
 };
 
 const SERIALIZER_PREFIX: &[u8] = b"shirudo_serialize__";
@@ -43,7 +45,17 @@ fn after<'a>(s: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]> {
     s.strip_prefix(prefix).filter(|rest| !rest.is_empty())
 }
 
+/// The kprobe multi forms of a section, and their comma-separated names.
+fn kprobe_multi_section(sec: &[u8]) -> Option<(u32, &[u8])> {
+    after(sec, b"kprobe.multi/")
+        .map(|target| (ATTACH_KPROBE_MULTI, target))
+        .or_else(|| after(sec, b"kretprobe.multi/").map(|target| (ATTACH_KRETPROBE_MULTI, target)))
+}
+
 fn unsupported_kprobe(sec: &[u8]) -> bool {
+    if kprobe_multi_section(sec).is_some() {
+        return false;
+    }
     matches!(sec, b"kprobe" | b"kretprobe" | b"kprobe/" | b"kretprobe/")
         || sec.starts_with(b"kprobe.multi")
         || sec.starts_with(b"kretprobe.multi")
@@ -130,6 +142,9 @@ fn attach_kind(sec: &[u8]) -> (u32, Option<&[u8]>) {
     }
     if let Some(t) = after(sec, b"kretprobe/") {
         return (ATTACH_KRETPROBE, Some(t));
+    }
+    if let Some((kind, t)) = kprobe_multi_section(sec) {
+        return (kind, Some(t));
     }
     if let Some((kind, t)) = uprobe_section(sec) {
         return (kind, Some(t));
@@ -245,17 +260,55 @@ struct UprobeTarget {
     elf: Target,
 }
 
+/// A kprobe multi program's sorted, distinct function names.
+struct KprobeTarget {
+    prog_idx: u32,
+    syms: Vec<Vec<u8>>,
+}
+
 /// What the attaching programs of one object gather: the uprobe
-/// targets, and the XDP device classes taken so far, as a device takes
-/// one native XDP program at a time.
+/// targets, kprobe multi targets, and the XDP device classes taken so
+/// far, as a device takes one native XDP program at a time.
 #[derive(Default)]
 struct Attach {
     uprobes: Vec<UprobeTarget>,
+    kprobes: Vec<KprobeTarget>,
     xdp_classes: u32,
 }
 
 fn lossy(s: &[u8]) -> String {
     String::from_utf8_lossy(s).into_owned()
+}
+
+/// A comma-separated kprobe multi target into distinct names in signed
+/// lexical order.
+fn split_kprobe_multi_target(src: &[u8]) -> Result<Vec<Vec<u8>>, c_int> {
+    if src.iter().any(|&c| c == b'*' || c == b'?') {
+        return Err(-EOPNOTSUPP);
+    }
+    let nr_syms = 1usize + src.iter().filter(|&&c| c == b',').count();
+    if nr_syms > KPROBE_SYMS_MAX as usize
+        || src
+            .len()
+            .checked_add(1)
+            .is_none_or(|n| n > u32::MAX as usize)
+    {
+        return Err(-E2BIG);
+    }
+    let mut syms = Vec::new();
+    syms.try_reserve_exact(nr_syms)
+        .map_err(|_| -crate::errno::ENOMEM)?;
+    for sym in src.split(|&c| c == b',') {
+        if !kprobe_sym_valid(sym) {
+            return Err(-EINVAL);
+        }
+        syms.push(sym.to_vec());
+    }
+    syms.sort_unstable();
+    if syms.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(-EEXIST);
+    }
+    Ok(syms)
 }
 
 /// The device classes of an `xdp/<mask>` section into `entry`, each
@@ -362,7 +415,7 @@ fn attach_entry(sec: &[u8], i: usize, entry: &mut [u8], a: &mut Attach) -> Resul
     let unsupported: [Rule; 6] = [
         (
             unsupported_kprobe,
-            "unsupported kprobe section '{}'; use kprobe/<symbol> or kretprobe/<symbol>",
+            "unsupported kprobe section '{}'; use kprobe/<symbol>, kretprobe/<symbol>, kprobe.multi/<symbol>[,<symbol>...] or kretprobe.multi/<symbol>[,<symbol>...]",
         ),
         (
             unsupported_uprobe,
@@ -395,7 +448,7 @@ fn attach_entry(sec: &[u8], i: usize, entry: &mut [u8], a: &mut Attach) -> Resul
     }
     let (kind, target) = attach_kind(s);
     if kind == ATTACH_RAW_TRACEPOINT && !default_attach(s) {
-        error(format!("unsupported section '{shown_sec}'; supported are fentry, fexit, fmod_ret, lsm, tp_btf, kprobe, kretprobe, uprobe[.s], uretprobe[.s], uprobe.multi[.s], uretprobe.multi[.s], cgroup_skb, netfilter and xdp/<mask>").as_bytes());
+        error(format!("unsupported section '{shown_sec}'; supported are fentry, fexit, fmod_ret, lsm, tp_btf, kprobe, kretprobe, kprobe.multi, kretprobe.multi, uprobe[.s], uretprobe[.s], uprobe.multi[.s], uretprobe.multi[.s], cgroup_skb, netfilter and xdp/<mask>").as_bytes());
         return Err(-EOPNOTSUPP);
     }
     put32(entry, 0, ROLE_ATTACH);
@@ -454,6 +507,30 @@ fn attach_entry(sec: &[u8], i: usize, entry: &mut [u8], a: &mut Attach) -> Resul
             error(msg.as_bytes());
             return Err(err);
         }
+    } else if matches!(kind, ATTACH_KPROBE_MULTI | ATTACH_KRETPROBE_MULTI) {
+        let syms = match split_kprobe_multi_target(target.unwrap_or_default()) {
+            Ok(syms) => syms,
+            Err(err) => {
+                let msg = if err == -EOPNOTSUPP {
+                    format!(
+                        "invalid kprobe multi section '{shown_sec}': globs are unsupported; name each function"
+                    )
+                } else if err == -EEXIST {
+                    format!("invalid kprobe multi section '{shown_sec}': a function is named twice")
+                } else {
+                    format!(
+                        "invalid kprobe multi section '{shown_sec}'; expected a comma-separated list of 1 to {KPROBE_SYMS_MAX} function names of at most {} bytes",
+                        KPROBE_SYM_MAX - 1
+                    )
+                };
+                error(msg.as_bytes());
+                return Err(err);
+            }
+        };
+        a.kprobes.push(KprobeTarget {
+            prog_idx: u32::try_from(i).map_err(|_| -EOVERFLOW)?,
+            syms,
+        });
     } else if let Some(target) = target {
         let (symbol, off) = match split_probe_target(target) {
             Ok(t) => t,
@@ -502,6 +579,50 @@ fn append_uprobes(md: &mut Vec<u8>, uprobes: &[UprobeTarget]) -> Result<(), c_in
         md.extend_from_slice(&t.elf.build_id);
         for off in &t.elf.offsets {
             md.extend_from_slice(&off.to_le_bytes());
+        }
+    }
+    Ok(())
+}
+
+/// The UPKS block after any UPUT block: one sorted NUL-terminated name
+/// list for every kprobe multi program.
+fn append_kprobes(md: &mut Vec<u8>, kprobes: &[KprobeTarget]) -> Result<(), c_int> {
+    let mut added = KPROBE_TARGETS;
+    for target in kprobes {
+        let syms_len = target
+            .syms
+            .iter()
+            .try_fold(0usize, |n, sym| n.checked_add(sym.len() + 1))
+            .ok_or(-EOVERFLOW)?;
+        added = added
+            .checked_add(KPROBE_TARGET)
+            .and_then(|n| n.checked_add(syms_len))
+            .ok_or(-EOVERFLOW)?;
+    }
+    if md
+        .len()
+        .checked_add(added)
+        .is_none_or(|len| len > u32::MAX as usize)
+    {
+        return Err(-EOVERFLOW);
+    }
+    md.try_reserve_exact(added)
+        .map_err(|_| -crate::errno::ENOMEM)?;
+    let mut head = [0u8; KPROBE_TARGETS];
+    put32(&mut head, 0, KPROBE_TARGET_MAGIC);
+    put32(&mut head, 4, KPROBE_TARGET_VERSION);
+    put32(&mut head, 8, kprobes.len() as u32);
+    md.extend_from_slice(&head);
+    for target in kprobes {
+        let syms_len = target.syms.iter().map(|sym| sym.len() + 1).sum::<usize>();
+        let mut record = [0u8; KPROBE_TARGET];
+        put32(&mut record, 0, target.prog_idx);
+        put32(&mut record, 4, target.syms.len() as u32);
+        put32(&mut record, 8, syms_len as u32);
+        md.extend_from_slice(&record);
+        for sym in &target.syms {
+            md.extend_from_slice(sym);
+            md.push(0);
         }
     }
     Ok(())
@@ -593,6 +714,9 @@ pub(super) fn prog_metadata(obj: &Object, nr_maps: u32, nr_progs: u32) -> Result
     }
     if !attach.uprobes.is_empty() {
         append_uprobes(&mut md, &attach.uprobes)?;
+    }
+    if !attach.kprobes.is_empty() {
+        append_kprobes(&mut md, &attach.kprobes)?;
     }
     Ok(md)
 }

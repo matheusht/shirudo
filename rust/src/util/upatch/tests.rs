@@ -56,6 +56,111 @@ fn prog_specs_refuse_another_header_count() {
     }
 }
 
+/// Metadata of one kprobe multi program and its UPKS name block.
+fn one_kprobe_multi(kind: u32, names: &[u8], nr_syms: u32) -> Vec<u8> {
+    let words = |values: &[u32]| {
+        values
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect::<Vec<u8>>()
+    };
+    let mut md = metadata(0, &[entry(kind, 0)]);
+
+    md.extend(words(&[KPROBE_TARGET_MAGIC, KPROBE_TARGET_VERSION, 1, 0]));
+    md.extend(words(&[0, nr_syms, names.len() as u32]));
+    md.extend_from_slice(names);
+    md
+}
+
+fn parse_one_kprobe(md: &[u8]) -> Result<Specs, c_int> {
+    Specs::parse(md, 0, 1)
+}
+
+#[test]
+fn kprobe_multi_names_are_parsed_in_order() {
+    let specs = parse_one_kprobe(&one_kprobe_multi(
+        ATTACH_KRETPROBE_MULTI,
+        b"vfs_a\0vfs_b\0",
+        2,
+    ))
+    .unwrap();
+    let spec = &specs.as_slice()[0];
+    // SAFETY: the parser's array of its two owned C strings.
+    let syms = unsafe { crate::ffi::slice(spec.kprobe_syms, spec.nr_kprobe_syms as usize) };
+    let names: Vec<Vec<u8>> = syms
+        .iter()
+        // SAFETY: every parser-produced pointer names a string in its
+        // owned symbol buffer.
+        .map(|&sym| unsafe { crate::ffi::c_str(sym) }.to_vec())
+        .collect();
+
+    assert_eq!(spec.kind, ATTACH_KRETPROBE_MULTI);
+    assert_eq!(names, [b"vfs_a".to_vec(), b"vfs_b".to_vec()]);
+}
+
+#[test]
+fn kprobe_multi_refuses_a_malformed_list() {
+    for (names, count) in [
+        (&b"b\0a\0"[..], 2),
+        (b"a\0a\0", 2),
+        (b"a\0b\0", 1),
+        (b"a\0", 0),
+        (b"a*\0", 1),
+        (b"\0a\0", 1),
+        (b"abc", 1),
+    ] {
+        assert_eq!(
+            parse_one_kprobe(&one_kprobe_multi(ATTACH_KPROBE_MULTI, names, count)).err(),
+            Some(-EINVAL),
+            "{names:?}, {count}"
+        );
+    }
+}
+
+#[test]
+fn kprobe_multi_block_is_exact() {
+    let valid = one_kprobe_multi(ATTACH_KPROBE_MULTI, b"a\0", 1);
+    assert!(parse_one_kprobe(&valid).is_ok());
+
+    let mut missing = valid.clone();
+    missing.truncate(PROG_METADATA + PROG_ENTRY);
+    let mut cut = valid.clone();
+    cut.pop();
+    let mut trailing = valid.clone();
+    trailing.push(0);
+    let mut bad_magic = valid.clone();
+    bad_magic[PROG_METADATA + PROG_ENTRY] ^= 1;
+    let mut target = valid.clone();
+    target[PROG_METADATA + 16] = b'a';
+    let mut offset = valid.clone();
+    offset[PROG_METADATA + 8] = 1;
+
+    for malformed in [missing, cut, trailing, bad_magic, target, offset] {
+        assert_eq!(parse_one_kprobe(&malformed).err(), Some(-EINVAL));
+    }
+}
+
+#[test]
+fn kprobe_symbol_is_one_plain_name() {
+    for good in [&b"vfs_read"[..], b"foo.cold.1", &[b'a'; KPROBE_SYM_MAX - 1]] {
+        assert!(kprobe_sym_valid(good), "{good:?}");
+    }
+    for bad in [
+        &b""[..],
+        b"a,b",
+        b"a*",
+        b"a?",
+        b"a|b",
+        b"a b",
+        b"a\n",
+        b"a\x7f",
+        b"a\xc3",
+        &[b'a'; KPROBE_SYM_MAX],
+    ] {
+        assert!(!kprobe_sym_valid(bad), "{bad:?}");
+    }
+}
+
 /// A container named `name` of an 8-byte loader and signature, whose
 /// data is the signed `sections`, each a tag and its bytes, then their
 /// directory and its trailer.

@@ -15,7 +15,7 @@ use std::os::unix::fs::FileExt;
 
 use crate::errno::{EFBIG, EINVAL, EIO, ENOMEM, EOPNOTSUPP, EOVERFLOW};
 use crate::ffi;
-use crate::heap::{xcalloc, xfree, xstrfree, xstrndup};
+use crate::heap::{xcalloc, xfree, xmalloc, xstrfree, xstrndup};
 use crate::sys::libc::close;
 use crate::text::cstr;
 use crate::util::hex;
@@ -60,6 +60,10 @@ pub(crate) const UPROBE_TARGET_VERSION: u32 = 1;
 pub(crate) const UPROBE_PATH_MAX: u32 = 4096;
 pub(crate) const BUILD_ID_MAX: usize = 64;
 const UPROBE_OFFSETS_MAX: u32 = 1 << 20;
+pub(crate) const KPROBE_TARGET_MAGIC: u32 = 0x534b_5055;
+pub(crate) const KPROBE_TARGET_VERSION: u32 = 1;
+pub(crate) const KPROBE_SYM_MAX: usize = 512;
+pub(crate) const KPROBE_SYMS_MAX: u32 = 1 << 20;
 
 pub(crate) const ATTACH_RAW_TRACEPOINT: u32 = 0;
 pub(crate) const ATTACH_KPROBE: u32 = 1;
@@ -73,6 +77,8 @@ pub(crate) const ATTACH_XDP: u32 = 8;
 pub(crate) const ATTACH_URETPROBE_MULTI: u32 = 9;
 pub(crate) const ATTACH_UPROBE: u32 = 10;
 pub(crate) const ATTACH_URETPROBE: u32 = 11;
+pub(crate) const ATTACH_KPROBE_MULTI: u32 = 12;
+pub(crate) const ATTACH_KRETPROBE_MULTI: u32 = 13;
 
 /// `enum upatch_xdp_device_class`: the classes of device an XDP program
 /// attaches to. Bit 4 is none: loopback has no native XDP, so nothing
@@ -99,6 +105,8 @@ pub(crate) const PROG_METADATA: usize = 16;
 pub(crate) const PROG_ENTRY: usize = 16 + ATTACH_TARGET_MAX + PROG_MAP_MAX;
 pub(crate) const UPROBE_TARGETS: usize = 16;
 pub(crate) const UPROBE_TARGET: usize = 16;
+pub(crate) const KPROBE_TARGETS: usize = 16;
+pub(crate) const KPROBE_TARGET: usize = 12;
 
 /// `struct upatch_host_header`: the container's header in host order.
 #[repr(C)]
@@ -238,12 +246,16 @@ pub struct ProgSpec {
     pub(crate) build_id_len: u32,
     pub(crate) uprobe_offsets: *mut u64,
     pub(crate) nr_uprobe_offsets: u32,
+    pub(crate) kprobe_sym_buf: *mut c_char,
+    pub(crate) kprobe_sym_buf_len: usize,
+    pub(crate) kprobe_syms: *mut *const c_char,
+    pub(crate) nr_kprobe_syms: u32,
     pub(crate) target_fd: c_int,
     pub(crate) target_stat: [u64; STAT_SIZE / 8],
 }
 
-const _: () = assert!(core::mem::offset_of!(ProgSpec, target_stat) == 264);
-const _: () = assert!(size_of::<ProgSpec>() == 264 + STAT_SIZE);
+const _: () = assert!(core::mem::offset_of!(ProgSpec, target_stat) == 296);
+const _: () = assert!(size_of::<ProgSpec>() == 296 + STAT_SIZE);
 
 /// uprobe.multi and uretprobe.multi: a glob over a binary's functions.
 pub(crate) fn kind_is_uprobe_multi(kind: u32) -> bool {
@@ -258,6 +270,21 @@ pub(crate) fn kind_is_uprobe_single(kind: u32) -> bool {
 /// The kinds that attach to a userspace binary named in the UPUT block.
 pub(crate) fn kind_has_uprobe_target(kind: u32) -> bool {
     kind_is_uprobe_multi(kind) || kind_is_uprobe_single(kind)
+}
+
+/// kprobe.multi and kretprobe.multi: a signed list of kernel functions.
+pub(crate) fn kind_is_kprobe_multi(kind: u32) -> bool {
+    kind == ATTACH_KPROBE_MULTI || kind == ATTACH_KRETPROBE_MULTI
+}
+
+/// A function name accepted by BPF kprobe multi: one to 511 printable
+/// ASCII bytes, without list or glob metacharacters.
+pub(crate) fn kprobe_sym_valid(sym: &[u8]) -> bool {
+    !sym.is_empty()
+        && sym.len() < KPROBE_SYM_MAX
+        && sym
+            .iter()
+            .all(|&c| c > b' ' && c < 0x7f && !matches!(c, b',' | b'*' | b'?' | b'|'))
 }
 
 /// Every device class an XDP program among the specs selects.
@@ -828,6 +855,11 @@ unsafe fn specs_free(specs: *mut ProgSpec, nr_progs: u32) {
                 spec.uprobe_offsets.cast(),
                 spec.nr_uprobe_offsets as usize * size_of::<u64>(),
             );
+            xfree(spec.kprobe_sym_buf.cast(), spec.kprobe_sym_buf_len);
+            xfree(
+                spec.kprobe_syms.cast(),
+                spec.nr_kprobe_syms as usize * size_of::<*const c_char>(),
+            );
         }
         xfree(specs.cast(), nr_progs as usize * size_of::<ProgSpec>());
     }
@@ -837,8 +869,9 @@ unsafe fn specs_free(specs: *mut ProgSpec, nr_progs: u32) {
 /// target from its entry `e`, or an XDP program's device classes, each
 /// class one program's of the upatch, as `xdp_classes` gathers them: a
 /// device runs one native XDP program at a time. Ok(true) for a uprobe,
-/// whose binary comes after, Err(()) for an entry that breaks the rules.
-fn attach_spec(spec: &mut ProgSpec, e: &[u8], xdp_classes: &mut u32) -> Result<bool, ()> {
+/// whose binary comes after, or the second true for a kprobe multi whose
+/// names come after; Err(()) for an entry that breaks the rules.
+fn attach_spec(spec: &mut ProgSpec, e: &[u8], xdp_classes: &mut u32) -> Result<(bool, bool), ()> {
     let kind = le32(e, 4);
     let raw_offset = le64(e, 8);
     let target = &e[16..16 + ATTACH_TARGET_MAX];
@@ -864,7 +897,7 @@ fn attach_spec(spec: &mut ProgSpec, e: &[u8], xdp_classes: &mut u32) -> Result<b
             *xdp_classes |= classes;
             spec.device_classes = classes;
             spec.kind = kind;
-            return Ok(false);
+            return Ok((false, false));
         }
         ATTACH_RAW_TRACEPOINT
         | ATTACH_CGROUP_SKB_INGRESS
@@ -875,8 +908,15 @@ fn attach_spec(spec: &mut ProgSpec, e: &[u8], xdp_classes: &mut u32) -> Result<b
             return if target[0] != 0 || raw_offset != 0 {
                 Err(())
             } else {
-                Ok(false)
+                Ok((false, false))
             };
+        }
+        ATTACH_KPROBE_MULTI | ATTACH_KRETPROBE_MULTI => {
+            if target[0] != 0 || raw_offset != 0 {
+                return Err(());
+            }
+            spec.kind = kind;
+            return Ok((false, true));
         }
         ATTACH_KPROBE | ATTACH_KRETPROBE => {}
         ATTACH_UPROBE_MULTI | ATTACH_URETPROBE_MULTI => {
@@ -902,7 +942,7 @@ fn attach_spec(spec: &mut ProgSpec, e: &[u8], xdp_classes: &mut u32) -> Result<b
     if kind_is_uprobe_multi(kind) && spec.target[..len].iter().any(|&c| c == b',' || c == b'|') {
         return Err(());
     }
-    Ok(uprobe)
+    Ok((uprobe, false))
 }
 
 /// The UPUT block at `cursor` of `m`: a target for each of the
@@ -996,10 +1036,119 @@ fn uprobe_targets(
     Ok(cursor)
 }
 
+/// The signed names of one kprobe multi target into `spec`.
+fn kprobe_syms(syms: &[u8], nr_syms: u32, spec: &mut ProgSpec) -> c_int {
+    let mut off = 0usize;
+    let mut previous: Option<&[u8]> = None;
+
+    for _ in 0..nr_syms {
+        if off >= syms.len() {
+            return -EINVAL;
+        }
+        let Some(len) = syms[off..].iter().position(|&c| c == 0) else {
+            return -EINVAL;
+        };
+        let name = &syms[off..off + len];
+        if !kprobe_sym_valid(name) || previous.is_some_and(|p| p >= name) {
+            return -EINVAL;
+        }
+        previous = Some(name);
+        off += len + 1;
+    }
+    if off != syms.len() {
+        return -EINVAL;
+    }
+
+    // SAFETY: allocations of the signed bytes and one pointer per name.
+    let buf = unsafe { xmalloc(syms.len()) }.cast::<u8>();
+    if buf.is_null() {
+        return -ENOMEM;
+    }
+    spec.kprobe_sym_buf = buf.cast();
+    spec.kprobe_sym_buf_len = syms.len();
+    // SAFETY: `buf` owns `syms.len()` writable bytes.
+    unsafe { ffi::bytes_mut(buf, syms.len()) }.copy_from_slice(syms);
+
+    // SAFETY: a count of pointers, bounded by the format.
+    spec.kprobe_syms =
+        unsafe { xcalloc(nr_syms as usize, size_of::<*const c_char>()) }.cast::<*const c_char>();
+    if spec.kprobe_syms.is_null() {
+        return -ENOMEM;
+    }
+    spec.nr_kprobe_syms = nr_syms;
+    // SAFETY: the pointer array just allocated, and each offset was
+    // checked in the identical byte string copied above.
+    let ptrs = unsafe { core::slice::from_raw_parts_mut(spec.kprobe_syms, nr_syms as usize) };
+    off = 0;
+    for ptr in ptrs {
+        // SAFETY: `off` starts each checked name inside the copied buffer.
+        *ptr = unsafe { spec.kprobe_sym_buf.add(off) };
+        let len = syms[off..].iter().position(|&c| c == 0).unwrap_or(0);
+        off += len + 1;
+    }
+    0
+}
+
+/// The UPKS block at `cursor`: a sorted name list for each kprobe multi
+/// program. The block's end, or -errno.
+fn kprobe_targets(
+    m: &[u8],
+    mut cursor: usize,
+    specs: &mut [ProgSpec],
+    nr_kprobe_multis: u32,
+) -> Result<usize, c_int> {
+    if m.len() - cursor < KPROBE_TARGETS {
+        return Err(-EINVAL);
+    }
+    let targets = &m[cursor..cursor + KPROBE_TARGETS];
+    cursor += KPROBE_TARGETS;
+    if le32(targets, 0) != KPROBE_TARGET_MAGIC
+        || le32(targets, 4) != KPROBE_TARGET_VERSION
+        || le32(targets, 8) != nr_kprobe_multis
+        || le32(targets, 12) != 0
+    {
+        return Err(-EINVAL);
+    }
+    for _ in 0..nr_kprobe_multis {
+        if m.len() - cursor < KPROBE_TARGET {
+            return Err(-EINVAL);
+        }
+        let record = &m[cursor..cursor + KPROBE_TARGET];
+        cursor += KPROBE_TARGET;
+        let prog_idx = le32(record, 0) as usize;
+        let nr_syms = le32(record, 4);
+        let syms_len = le32(record, 8) as usize;
+        let Some(spec) = specs.get_mut(prog_idx) else {
+            return Err(-EINVAL);
+        };
+        if !kind_is_kprobe_multi(spec.kind)
+            || !spec.kprobe_syms.is_null()
+            || nr_syms == 0
+            || nr_syms > KPROBE_SYMS_MAX
+            || syms_len / 2 < nr_syms as usize
+            || m.len() - cursor < syms_len
+        {
+            return Err(-EINVAL);
+        }
+        let ret = kprobe_syms(&m[cursor..cursor + syms_len], nr_syms, spec);
+        if ret != 0 {
+            return Err(ret);
+        }
+        cursor += syms_len;
+    }
+    if specs
+        .iter()
+        .any(|s| kind_is_kprobe_multi(s.kind) && s.kprobe_syms.is_null())
+    {
+        return Err(-EINVAL);
+    }
+    Ok(cursor)
+}
+
 /// The programs' specs from the metadata `m` into `specs`, zeroed with
 /// no fds: 0, or -errno with what was set for specs_free().
 fn specs_fill(specs: &mut [ProgSpec], m: &[u8], base_len: usize) -> c_int {
-    let (mut nr_uprobes, mut xdp_classes) = (0u32, 0u32);
+    let (mut nr_uprobes, mut nr_kprobe_multis, mut xdp_classes) = (0u32, 0u32, 0u32);
 
     for (i, spec) in specs.iter_mut().enumerate() {
         let e = &m[PROG_METADATA + i * PROG_ENTRY..][..PROG_ENTRY];
@@ -1007,7 +1156,10 @@ fn specs_fill(specs: &mut [ProgSpec], m: &[u8], base_len: usize) -> c_int {
 
         match le32(e, 0) {
             ROLE_ATTACH => match attach_spec(spec, e, &mut xdp_classes) {
-                Ok(uprobe) => nr_uprobes += u32::from(uprobe),
+                Ok((uprobe, kprobe_multi)) => {
+                    nr_uprobes += u32::from(uprobe);
+                    nr_kprobe_multis += u32::from(kprobe_multi);
+                }
                 Err(()) => return -EINVAL,
             },
             ROLE_SERIALIZER => {
@@ -1030,7 +1182,7 @@ fn specs_fill(specs: &mut [ProgSpec], m: &[u8], base_len: usize) -> c_int {
             _ => return -EINVAL,
         }
     }
-    let end = if nr_uprobes != 0 {
+    let mut end = if nr_uprobes != 0 {
         match uprobe_targets(m, base_len, specs, nr_uprobes) {
             Ok(end) => end,
             Err(err) => return err,
@@ -1038,6 +1190,12 @@ fn specs_fill(specs: &mut [ProgSpec], m: &[u8], base_len: usize) -> c_int {
     } else {
         base_len
     };
+    if nr_kprobe_multis != 0 {
+        end = match kprobe_targets(m, end, specs, nr_kprobe_multis) {
+            Ok(end) => end,
+            Err(err) => return err,
+        };
+    }
     if end != m.len() { -EINVAL } else { 0 }
 }
 
