@@ -26,18 +26,22 @@ fn put32(b: &mut [u8], off: usize, v: u32) {
     b[off..off + 4].copy_from_slice(&v.to_le_bytes());
 }
 
+fn put_bytes(b: &mut [u8], off: usize, s: &[u8]) {
+    b[off..off + s.len()].copy_from_slice(s);
+}
+
 fn put_str(b: &mut [u8], off: usize, s: &str) {
-    b[off..off + s.len()].copy_from_slice(s.as_bytes());
+    put_bytes(b, off, s.as_bytes());
 }
 
 /// A container of one decoder of upatch "unit-decoder" for map
 /// "records", whose Lua is `source`.
-fn container(source: &str) -> Vec<u8> {
+fn container(upatch: &[u8], decoder_upatch: &[u8], source: &str) -> Vec<u8> {
     let mut b = vec![0u8; END];
 
     b[..8].copy_from_slice(&MAGIC.to_le_bytes());
     put32(&mut b, 8, 1);
-    put_str(&mut b, 16, "unit-decoder");
+    put_bytes(&mut b, 16, upatch);
     let header = 16 + 256 + 32;
     for (i, v) in [LOADER, 8, SIGNATURE, 8, 0, 0, DATA, END - DATA]
         .iter()
@@ -55,7 +59,7 @@ fn container(source: &str) -> Vec<u8> {
     for i in 0..4 {
         put32(&mut b, ENTRY + 4 * i, 1);
     }
-    put_str(&mut b, ENTRY + 16, "unit-decoder");
+    put_bytes(&mut b, ENTRY + 16, decoder_upatch);
     put_str(&mut b, ENTRY + 80, "records");
     put_str(&mut b, ENTRY + 96, "unit.lua");
     put_str(&mut b, ENTRY + 160, "decode");
@@ -84,21 +88,25 @@ fn one_decoder() -> MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// What the decoder of `source` makes of map "records": its JSON, or the
-/// error.
-fn decoded(source: &str) -> Result<Vec<u8>, c_int> {
+/// What the decoder of `source`, whose entry names `decoder_upatch`,
+/// makes of map "records" belonging to `upatch`: its JSON, or error.
+fn decoded_named(upatch: &[u8], decoder_upatch: &[u8], source: &str) -> Result<Vec<u8>, c_int> {
     let _one = one_decoder();
     let dir = TempDir::new();
-    std::fs::write(dir.join("u"), container(source)).unwrap();
+    std::fs::write(dir.join("u"), container(upatch, decoder_upatch, source)).unwrap();
     let mut view = MapView {
         serialized: true,
         max_entries: 1,
         type_name: Some(c"array"),
         ..MapView::default()
     };
-    put_str(&mut view.upatch, 0, "unit-decoder");
+    put_bytes(&mut view.upatch, 0, upatch);
     put_str(&mut view.name, 0, "records");
     decode_map(&view, Some(&dir.cpath("u")), false, JSON_MAX)
+}
+
+fn decoded(source: &str) -> Result<Vec<u8>, c_int> {
+    decoded_named(b"unit-decoder", b"unit-decoder", source)
 }
 
 #[test]
@@ -106,6 +114,20 @@ fn decoder_initializes_and_returns_json() {
     assert_eq!(
         decoded("function decode(input) return {value = 42} end"),
         Ok(br#"{"value":42}"#.to_vec())
+    );
+}
+
+#[test]
+fn decoder_of_a_upatch_with_the_longest_name_runs() {
+    let name = [b'n'; crate::util::upatch::NAME_MAX - 1];
+
+    assert_eq!(
+        decoded_named(
+            &name,
+            b"",
+            "function decode(input) return {len = #input.upatch} end"
+        ),
+        Ok(br#"{"len":255}"#.to_vec())
     );
 }
 
@@ -162,6 +184,20 @@ fn decoder_cannot_reach_unbudgeted_code() {
              return {mt = getmetatable(s[1])} end"
         ),
         Ok(br#"{"mt":"shirudo.slot"}"#.to_vec())
+    );
+}
+
+#[test]
+fn fixed_records_keep_the_first_slot_of_a_chunked_page() {
+    assert_eq!(
+        decoded(
+            "function decode(input) local r = shirudo.fixed_records({{\
+             cursor = '0', chunks = '2', \
+             data_hex = '07' .. string.rep('00', 4041)}}, 5) \
+             return {got = tostring(r[1] and r[1]:u8(0)) .. ',' .. \
+             tostring(r[807] ~= nil)} end"
+        ),
+        Ok(br#"{"got":"7,true"}"#.to_vec())
     );
 }
 

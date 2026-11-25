@@ -4,7 +4,7 @@
 //! test-upatch-decode: what the decoder an upatch artifact carries
 //! makes of a map, or the bytecode LuaJIT makes of a decoder's source.
 //!
-//!   test-upatch-decode json|otel|loop|memory|utf8 <file.upatch>
+//!   test-upatch-decode json|otel|loop|memory|utf8 <file.upatch> [<upatch>]
 //!   test-upatch-decode dump <decoder.lua>
 //!
 //! loop, memory and utf8 are JSON decodes of a map whose serialized size
@@ -57,13 +57,12 @@ fn dump(source: &CStr) -> c_int {
 }
 
 fn run(args: &[&CStr]) -> c_int {
-    let (how, file) = match args {
-        [_, how, file] => (how.to_bytes(), *file),
-        _ => (&b""[..], c""),
+    let (how, file, upatch) = match args {
+        [_, how, file] if how.to_bytes() == b"dump" => return dump(file),
+        [_, how, file] => (how.to_bytes(), *file, &b"t3002"[..]),
+        [_, how, file, upatch] => (how.to_bytes(), *file, upatch.to_bytes()),
+        _ => (&b""[..], c"", &b""[..]),
     };
-    if how == b"dump" {
-        return dump(file);
-    }
     let serial_bytes_total = match how {
         b"json" | b"otel" => 0,
         b"memory" => 997,
@@ -74,7 +73,7 @@ fn run(args: &[&CStr]) -> c_int {
                 .first()
                 .map_or("test-upatch-decode".into(), |a| a.to_string_lossy());
             err(&format!(
-                "usage: {me} <json|otel|loop|memory|utf8> <file.upatch>\n       {me} dump <decoder.lua>\n"
+                "usage: {me} <json|otel|loop|memory|utf8> <file.upatch> [<upatch>]\n       {me} dump <decoder.lua>\n"
             ));
             return 2;
         }
@@ -86,7 +85,8 @@ fn run(args: &[&CStr]) -> c_int {
         serial_bytes_total,
         ..MapView::default()
     };
-    view.upatch[..5].copy_from_slice(b"t3002");
+    let name_len = upatch.len().min(view.upatch.len() - 1);
+    view.upatch[..name_len].copy_from_slice(&upatch[..name_len]);
     view.name[..9].copy_from_slice(b"t0005_map");
 
     match decode_map(&view, Some(file), how == b"otel", JSON_MAX) {

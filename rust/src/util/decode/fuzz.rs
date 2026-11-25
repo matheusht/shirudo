@@ -118,7 +118,8 @@ fuzz_target!(
             entries,
             ..MapView::default()
         };
-        v.upatch[..4].copy_from_slice(b"fuzz");
+        // The longest valid name, which the decoder gets in its input.
+        v.upatch[..crate::util::upatch::NAME_MAX - 1].fill(b'u');
         v.name[..8].copy_from_slice(b"fuzz_map");
         for otel in [false, true] {
             let _ = super::run(d, &v, otel, MAX_BYTES);

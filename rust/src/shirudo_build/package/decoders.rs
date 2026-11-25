@@ -42,10 +42,11 @@ fn le16(b: &[u8], off: usize) -> u32 {
     u16::from_le_bytes([b[off], b[off + 1]]).into()
 }
 
-/// A fixed string field: not empty, and NUL-terminated within it.
-fn field(b: &[u8], off: usize, len: usize) -> Option<Vec<u8>> {
+/// A fixed string field, NUL-terminated within it, and nonempty when
+/// `empty` is false.
+fn field(b: &[u8], off: usize, len: usize, empty: bool) -> Option<Vec<u8>> {
     let f = &b[off..off + len];
-    (f[0] != 0 && f.contains(&0)).then(|| cstr(f).to_vec())
+    (f.contains(&0) && (empty || f[0] != 0)).then(|| cstr(f).to_vec())
 }
 
 fn parse_manifest(b: &[u8]) -> Option<Manifest> {
@@ -56,10 +57,10 @@ fn parse_manifest(b: &[u8]) -> Option<Manifest> {
         return None;
     }
     let (upatch, map, source, entrypoint) = (
-        field(b, 16, 64)?,
-        field(b, 80, 16)?,
-        field(b, 96, 64)?,
-        field(b, 160, 32)?,
+        field(b, 16, 64, true)?,
+        field(b, 80, 16, false)?,
+        field(b, 96, 64, false)?,
+        field(b, 160, 32, false)?,
     );
     let m = Manifest {
         language: le16(b, 6),
@@ -152,11 +153,12 @@ fn collect(
             && m.input_format == INPUT_MAP_V1
             && (m.export_signal == EXPORT_LOG || m.export_signal == EXPORT_METRIC);
         let failure = if !abi {
+            let name = String::from_utf8_lossy(upatch_name);
             Some((
-                format!("unsupported decoder ABI for '{u}/{map}'"),
+                format!("unsupported decoder ABI for '{name}/{map}'"),
                 -EOPNOTSUPP,
             ))
-        } else if m.upatch != upatch_name {
+        } else if !m.upatch.is_empty() && m.upatch != upatch_name {
             let name = String::from_utf8_lossy(upatch_name);
             Some((
                 format!("decoder upatch '{u}' does not match package name '{name}'"),
@@ -164,11 +166,9 @@ fn collect(
             ))
         } else if obj.map(&m.map).is_none() {
             Some((format!("decoder manifest for missing map '{map}'"), -EINVAL))
-        } else if out
-            .iter()
-            .any(|d| d.manifest.upatch == m.upatch && d.manifest.map == m.map)
-        {
-            Some((format!("duplicate decoder for '{u}/{map}'"), -EEXIST))
+        } else if out.iter().any(|d| d.manifest.map == m.map) {
+            let name = String::from_utf8_lossy(upatch_name);
+            Some((format!("duplicate decoder for '{name}/{map}'"), -EEXIST))
         } else {
             None
         };

@@ -539,9 +539,7 @@ fn split_page_slots(
         for (chunk, bytes) in (0..chunks).zip(data.chunks(CHUNK_PAYLOAD)) {
             for (i, record) in (0..).zip(bytes.chunks_exact(size).take(per_chunk)) {
                 let page_slot = chunk * per_chunk as u64 + i;
-                if page_slot != 0 {
-                    store_slot(s, slots, cursor.wrapping_add(page_slot), record);
-                }
+                store_slot(s, slots, cursor.wrapping_add(page_slot), record);
             }
         }
         return;
@@ -1115,13 +1113,17 @@ pub(crate) fn run(d: &DecoderView, v: &MapView, otel: bool, max: usize) -> Resul
 }
 
 /// Whether the decoder is a Lua one of API 1 on map input, exporting a
-/// log or metrics, for this upatch's map.
+/// log or metrics, for this map.
 fn matches(d: &DecoderView, v: &MapView) -> bool {
+    // The map alone picks the decoder: the archive it comes from is the
+    // upatch these maps belong to, by the payload the pin directory
+    // recorded, and its signature covers the decoders. The decoder's
+    // upatch field holds 63 of the 255 characters a name may have, or
+    // nothing.
     d.language == LANG_LUA
         && d.api_version == 1
         && d.input_format == INPUT_MAP_V1
         && (d.export_signal == EXPORT_LOG || d.export_signal == EXPORT_METRIC)
-        && cstr(&d.upatch) == cstr(&v.upatch)
         && cstr(&d.map) == cstr(&v.name)
 }
 
