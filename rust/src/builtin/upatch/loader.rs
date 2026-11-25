@@ -18,7 +18,7 @@ use core::ffi::{CStr, c_int, c_long};
 use std::ffi::{CString, OsStr};
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::net::UnixDatagram;
@@ -29,8 +29,11 @@ use crate::errno::{
     E2BIG, EACCES, EBUSY, EEXIST, EINVAL, EIO, ENAMETOOLONG, ENODATA, ENOENT, ENOKEY, ENOPKG,
     ENOTDIR, EOPNOTSUPP, EOVERFLOW, EPERM, ERANGE, ESRCH, ESTALE, EXDEV,
 };
-use crate::sys::libc::{close, errno, fcntl, fgetxattr, fsetxattr, getsockopt, setxattr, syscall};
-use crate::text::{digits, parse_u64};
+use crate::sys::libc::{
+    O_CLOEXEC, O_NOFOLLOW, O_NONBLOCK, O_RDONLY, close, errno, fcntl, fgetxattr, fsetxattr,
+    getsockopt, openat, setxattr, syscall,
+};
+use crate::text::{digits, name_glob_match, parse_u64};
 use crate::util::bpf_info::{Info, LINK_INFO_SIZE, MAP_INFO_SIZE, PROG_INFO_SIZE};
 use crate::util::bpf_sys::{
     Attr, BPF_MAP_CREATE, BPF_MAP_FREEZE, BPF_MAP_UPDATE_ELEM, BPF_OBJ_PIN, BPF_PROG_LOAD,
@@ -40,6 +43,7 @@ use crate::util::chain::{memneq_explicit, sha256_2};
 use crate::util::crypto_openssl::sha256_into;
 use crate::util::elf_target;
 use crate::util::identity;
+use crate::util::io::dir_names_at;
 use crate::util::kernel_btf;
 use crate::util::keyring;
 use crate::util::lskel::{Ctx, F_SLEEPABLE, MAP_TYPE_ARRAY, PROG_TYPE_SYSCALL, VERIFIER_LOG_MAX};
@@ -50,7 +54,7 @@ use crate::util::upatch::{
     ATTACH_NETFILTER_IPV6_PRE_ROUTING, ATTACH_RAW_TRACEPOINT, ATTACH_UPROBE, ATTACH_UPROBE_MULTI,
     ATTACH_URETPROBE, ATTACH_URETPROBE_MULTI, ATTACH_XDP, MAPS_MAX, POLICY_LABEL_ENTRY,
     POLICY_LABEL_HEADER, ProgSpec, ROLE_ATTACH, ROLE_SERIALIZER, ROLE_TEST_RUN, Specs, Upatch,
-    kind_has_uprobe_target, kind_is_kprobe_multi,
+    kind_has_uprobe_target, kind_is_kprobe_multi, policy_path_pattern,
 };
 use crate::util::upatch_pins::{LINK_PIN_PREFIX, xdp_prog_pin};
 use crate::util::upatch_resolve::{BPFFS_UPATCHES_DIR, XATTR_PAYLOAD, pin_path, tracing_link_kind};
@@ -1251,6 +1255,140 @@ fn set_pin_payload(name: &[u8], payload: &[u8; 32]) -> Result<(), c_int> {
     Err(e)
 }
 
+fn warn_label(path: &[u8], policy: &[u8], why: &[u8]) {
+    log_warn(
+        &[
+            &b"upatch: cannot label "[..],
+            path,
+            b" for policy ",
+            policy,
+            b": ",
+            why,
+        ]
+        .concat(),
+    );
+}
+
+/// OR `bit` into the policy label of the file `file` is open on.
+fn label_fd(file: &File, path: &[u8], bit: u64) {
+    let mut current = 0u64;
+    // SAFETY: the file, a C string and room for the value.
+    let n = unsafe {
+        fgetxattr(
+            file.as_raw_fd(),
+            XATTR_POLICY.as_ptr(),
+            (&raw mut current).cast(),
+            8,
+        )
+    };
+    if n < 0 && matches!(errno(), ENODATA | EOPNOTSUPP) {
+        current = 0;
+    } else if n != 8 {
+        let why = if n < 0 {
+            strerr(errno())
+        } else {
+            b"invalid length"
+        };
+        log_warn(
+            &[
+                &b"upatch: cannot read policy label on "[..],
+                path,
+                b": ",
+                why,
+            ]
+            .concat(),
+        );
+        return;
+    }
+    current |= bit;
+    // SAFETY: the file, a C string and the value.
+    if unsafe {
+        fsetxattr(
+            file.as_raw_fd(),
+            XATTR_POLICY.as_ptr(),
+            (&raw const current).cast(),
+            8,
+            0,
+        )
+    } != 0
+    {
+        log_warn(
+            &[
+                &b"upatch: cannot set policy label on "[..],
+                path,
+                b": ",
+                strerr(errno()),
+            ]
+            .concat(),
+        );
+    }
+}
+
+fn label_path(bit: u64, policy: &[u8], path: &[u8]) {
+    match File::open(os(path)) {
+        Ok(file) => label_fd(&file, path, bit),
+        Err(err) => warn_label(path, policy, strerr(io_errno(&err))),
+    }
+}
+
+/*
+ * Root owns the directory and can put a symbolic link under a matching
+ * name to a file the signed pattern does not name. Label regular files
+ * opened relative to the directory, without following the final link.
+ */
+fn label_match(dir: &File, name: &[u8], bit: u64) -> bool {
+    let Ok(name_c) = CString::new(name.to_vec()) else {
+        return false;
+    };
+    // SAFETY: an open directory and an entry name copied from it.
+    let fd = unsafe {
+        openat(
+            dir.as_raw_fd(),
+            name_c.as_ptr(),
+            O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return false;
+    }
+    // SAFETY: openat() returned this owned descriptor.
+    let file = unsafe { File::from_raw_fd(fd) };
+    let regular = file.metadata().is_ok_and(|metadata| metadata.is_file());
+    if regular {
+        label_fd(&file, name, bit);
+    }
+    regular
+}
+
+fn label_pattern(bit: u64, policy: &[u8], path: &[u8], pattern: &[u8]) {
+    let dir_path = &path[..path.len() - pattern.len()];
+    let dir = match OpenOptions::new()
+        .read(true)
+        .custom_flags(O_DIRECTORY)
+        .open(os(dir_path))
+    {
+        Ok(dir) => dir,
+        Err(err) => {
+            warn_label(path, policy, strerr(io_errno(&err)));
+            return;
+        }
+    };
+    let names = match dir_names_at(dir.as_fd(), |name| name_glob_match(pattern, name)) {
+        Ok(names) => names,
+        Err(err) => {
+            warn_label(path, policy, strerr(-err));
+            return;
+        }
+    };
+    let labeled = names
+        .iter()
+        .filter(|name| label_match(&dir, name, bit))
+        .count();
+    if labeled == 0 {
+        warn_label(path, policy, b"no regular file matches");
+    }
+}
+
 /// The policy labels the signature covered, set on their files: from
 /// the copy the kernel checked, not from the file again, which may hold
 /// other labels by now.
@@ -1268,73 +1406,10 @@ fn apply_policy_labels(u: &Upatch) {
         let bit = u64::from_le_bytes(e[..8].try_into().unwrap_or_default());
         let policy = till_nul(&e[8..8 + POLICY_NAME_MAX]);
         let path = till_nul(&e[8 + POLICY_NAME_MAX..]);
-        let file = match File::open(os(path)) {
-            Ok(f) => f,
-            Err(err) => {
-                log_warn(
-                    &[
-                        &b"upatch: cannot label "[..],
-                        path,
-                        b" for policy ",
-                        policy,
-                        b": ",
-                        strerr(io_errno(&err)),
-                    ]
-                    .concat(),
-                );
-                continue;
-            }
-        };
-        let mut current = 0u64;
-        // SAFETY: the file, a C string and room for the value.
-        let n = unsafe {
-            fgetxattr(
-                file.as_raw_fd(),
-                XATTR_POLICY.as_ptr(),
-                (&raw mut current).cast(),
-                8,
-            )
-        };
-        if n < 0 && matches!(errno(), ENODATA | EOPNOTSUPP) {
-            current = 0;
-        } else if n != 8 {
-            let why = if n < 0 {
-                strerr(errno())
-            } else {
-                b"invalid length"
-            };
-            log_warn(
-                &[
-                    &b"upatch: cannot read policy label on "[..],
-                    path,
-                    b": ",
-                    why,
-                ]
-                .concat(),
-            );
-            continue;
-        }
-        current |= bit;
-        // SAFETY: the file, a C string and the value.
-        if unsafe {
-            fsetxattr(
-                file.as_raw_fd(),
-                XATTR_POLICY.as_ptr(),
-                (&raw const current).cast(),
-                8,
-                0,
-            )
-        } != 0
-        {
-            log_warn(
-                &[
-                    &b"upatch: cannot set policy label on "[..],
-                    path,
-                    b": ",
-                    strerr(errno()),
-                ]
-                .concat(),
-            );
+        if let Some(pattern) = policy_path_pattern(path) {
+            label_pattern(bit, policy, path, pattern);
+        } else {
+            label_path(bit, policy, path);
         }
     }
 }

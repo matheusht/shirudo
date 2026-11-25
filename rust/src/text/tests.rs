@@ -110,6 +110,67 @@ fn strscpy_cuts_and_says_so() {
 }
 
 #[test]
+fn name_glob_match_takes_stars_and_question_marks() {
+    let glob = |pattern: &str, name: &str| name_glob_match(pattern.as_bytes(), name.as_bytes());
+
+    for (pattern, name) in [
+        ("php-fpm", "php-fpm"),
+        ("php-fpm*", "php-fpm"),
+        ("php-fpm*", "php-fpm8.3"),
+        ("*.php", "index.php"),
+        ("*.php", ".php"),
+        ("a*c", "ac"),
+        ("a*c", "abcbc"),
+        ("*a*b*", "xaybz"),
+        ("a**b", "ab"),
+        ("php?.?", "php8.3"),
+        ("*", "a"),
+        ("*", ""),
+        ("", ""),
+    ] {
+        assert!(glob(pattern, name), "{pattern:?}, {name:?}");
+    }
+    for (pattern, name) in [
+        ("php-fpm", "php-fpm8"),
+        ("php-fpm8", "php-fpm"),
+        ("php-fpm*", "php-cgi8.3"),
+        ("*.php", "index.php.bak"),
+        ("a*c", "abcb"),
+        ("*a*b*", "xbya"),
+        ("php?.?", "php8.31"),
+        ("php?", "php"),
+        ("?", ""),
+        ("", "a"),
+    ] {
+        assert!(!glob(pattern, name), "{pattern:?}, {name:?}");
+    }
+}
+
+#[test]
+fn name_glob_match_leaves_out_dot_and_dotdot() {
+    for (pattern, name) in [
+        ("*", "."),
+        ("*", ".."),
+        (".", "."),
+        ("?", "."),
+        ("??", ".."),
+    ] {
+        assert!(!name_glob_match(pattern.as_bytes(), name.as_bytes()));
+    }
+    for (pattern, name) in [("*", "..."), (".*", ".profile"), ("??", "a.")] {
+        assert!(name_glob_match(pattern.as_bytes(), name.as_bytes()));
+    }
+}
+
+#[test]
+fn name_glob_match_reads_counted_bytes() {
+    assert!(name_glob_match(b"php*", &b"php-fpm/junk"[..7]));
+    assert!(!name_glob_match(b"*junk", &b"php-fpm/junk"[..7]));
+    assert!(!name_glob_match(b"a", b"a\0b"));
+    assert!(name_glob_match(b"a?b", b"a\0b"));
+}
+
+#[test]
 fn dns_name_is_ldh_labels_and_no_address() {
     for good in [
         "registry.example.com",

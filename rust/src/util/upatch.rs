@@ -47,6 +47,7 @@ pub(crate) const POLICY_LABELS_VERSION: u32 = 1;
 pub(crate) const MAPS_MAX: u32 = 64;
 const POLICY_NAME_MAX: usize = 64;
 const POLICY_PATH_MAX: usize = 4096;
+const POLICY_PATH_LEN_MAX: usize = 255;
 
 pub(crate) const DECODER_MAGIC: u32 = 0x4244_4344;
 pub(crate) const DECODER_VERSION: u32 = 1;
@@ -383,6 +384,34 @@ fn validate_bounds(h: &UpatchHostHeader, n: usize) -> Result<(), c_int> {
     Ok(())
 }
 
+/// Whether `path` is an absolute policy-label path of at most 255 bytes
+/// that does not end in '/', with '*' and '?' in its last component alone.
+pub(crate) fn policy_path_valid(path: &[u8]) -> bool {
+    if path.is_empty()
+        || path.len() > POLICY_PATH_LEN_MAX
+        || path[0] != b'/'
+        || path.contains(&0)
+        || path.last() == Some(&b'/')
+    {
+        return false;
+    }
+    let name = path.iter().rposition(|&c| c == b'/').unwrap_or_default();
+    !path[..name].iter().any(|&c| matches!(c, b'*' | b'?'))
+}
+
+/// The last component of a valid policy path when it is a filename
+/// pattern, or None when the path names one file.
+pub(crate) fn policy_path_pattern(path: &[u8]) -> Option<&[u8]> {
+    let name = path
+        .iter()
+        .rposition(|&c| c == b'/')
+        .map_or(path, |slash| &path[slash + 1..]);
+
+    name.iter()
+        .any(|&c| matches!(c, b'*' | b'?'))
+        .then_some(name)
+}
+
 /// The policy labels section `p`: its map indexes when it holds `count`
 /// well-formed labels for maps the loader has.
 fn parse_policy_labels(p: &[u8], nr_maps: u32) -> Option<(u32, u32)> {
@@ -418,7 +447,7 @@ fn parse_policy_labels(p: &[u8], nr_maps: u32) -> Option<(u32, u32)> {
             || !has_nul(policy)
             || policy[0] == 0
             || !has_nul(path)
-            || path[0] != b'/'
+            || !policy_path_valid(cstr(path))
         {
             return None;
         }

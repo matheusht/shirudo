@@ -161,6 +161,55 @@ fn kprobe_symbol_is_one_plain_name() {
     }
 }
 
+#[test]
+fn policy_path_takes_a_wildcard_in_its_last_component() {
+    for path in [
+        &b"/usr/sbin/httpd"[..],
+        b"/httpd",
+        b"/usr/sbin/php-fpm*",
+        b"/usr/sbin/*fpm?.?",
+        b"/*",
+    ] {
+        assert!(policy_path_valid(path), "{path:?}");
+    }
+    for path in [
+        &b""[..],
+        b"usr/sbin/httpd",
+        b"/",
+        b"/usr/sbin/",
+        b"/usr/sbin/php-fpm*/",
+        b"/opt/*/bin/app",
+        b"/opt/app?/bin/app",
+        b"/*/*",
+    ] {
+        assert!(!policy_path_valid(path), "{path:?}");
+    }
+}
+
+#[test]
+fn policy_path_ends_within_its_limit() {
+    let mut path = vec![b'a'; POLICY_PATH_LEN_MAX];
+    path[0] = b'/';
+
+    assert!(policy_path_valid(&path));
+    path.push(b'a');
+    assert!(!policy_path_valid(&path));
+    path.truncate(POLICY_PATH_LEN_MAX);
+    path.push(0);
+    assert!(!policy_path_valid(&path));
+}
+
+#[test]
+fn policy_path_pattern_is_the_last_component_with_a_wildcard() {
+    let literal = b"/usr/sbin/httpd";
+    let pattern = b"/usr/sbin/php-fpm*";
+    let root = b"/v?";
+
+    assert_eq!(policy_path_pattern(literal), None);
+    assert_eq!(policy_path_pattern(pattern), Some(&b"php-fpm*"[..]));
+    assert_eq!(policy_path_pattern(root), Some(&b"v?"[..]));
+}
+
 /// A container named `name` of an 8-byte loader and signature, whose
 /// data is the signed `sections`, each a tag and its bytes, then their
 /// directory and its trailer.

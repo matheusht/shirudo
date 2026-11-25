@@ -324,7 +324,7 @@ pub(super) fn validate(spec: &Spec, allow_missing_upatch_source: bool) -> Result
             if p.id.is_empty() || p.bit == 0 || p.paths.is_empty() || p.bit & (p.bit - 1) != 0 {
                 return Err(-EINVAL);
             }
-            if p.paths.iter().any(|path| path.first() != Some(&b'/')) {
+            if p.paths.iter().any(|path| !upatch::policy_path_valid(path)) {
                 return Err(-EINVAL);
             }
             for (x, other) in spec.upatches[..=i].iter().enumerate() {

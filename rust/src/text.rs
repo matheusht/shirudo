@@ -155,6 +155,39 @@ pub fn name_has_suffix(name: &[u8], suffix: &[u8]) -> bool {
     name.len() > suffix.len() && name.ends_with(suffix)
 }
 
+/// Whether the counted file `name` matches `pattern`: `*` takes any
+/// run of bytes, `?` takes one byte and every other byte itself. The
+/// directory entries "." and ".." never match.
+pub fn name_glob_match(pattern: &[u8], name: &[u8]) -> bool {
+    if matches!(name, b"." | b"..") {
+        return false;
+    }
+    let (mut p, mut n) = (0usize, 0usize);
+    let mut after_star = None;
+    let mut retry_at = 0usize;
+
+    while n < name.len() {
+        if pattern.get(p) == Some(&b'*') {
+            p += 1;
+            after_star = Some(p);
+            retry_at = n;
+        } else if pattern.get(p).is_some_and(|&c| c == b'?' || c == name[n]) {
+            p += 1;
+            n += 1;
+        } else if let Some(after) = after_star {
+            p = after;
+            retry_at += 1;
+            n = retry_at;
+        } else {
+            return false;
+        }
+    }
+    while pattern.get(p) == Some(&b'*') {
+        p += 1;
+    }
+    p == pattern.len()
+}
+
 /// parse_x64(): parse_u64() of hexadecimal digits of either case.
 pub fn parse_x64(s: &[u8], max: u64) -> Result<u64, c_int> {
     if s.is_empty() || !s.iter().all(u8::is_ascii_hexdigit) {
