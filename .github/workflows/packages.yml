@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - rusting
+      - rusting-rebased
     tags:
       - '*'
       - '!test-kernel-*'
