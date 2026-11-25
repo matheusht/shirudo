@@ -968,7 +968,7 @@ OCI registry. The macOS workflow checks the Lima template with
 Unit suites and fuzz targets
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The unit suites in :src:`testing/unit/` cover 42 of the modules in
+The unit suites in :src:`testing/unit/` cover 43 of the modules in
 :src:`util/`: ``attest``, ``bpm_oci``, ``bpm_package``, ``bpm_state``,
 ``bpm_tree``, ``bpm_tree_overlap``, ``bpm_tree_state``, ``chain``,
 ``chain_history``, ``conditions``, ``config_update``, ``crypto_openssl``,
@@ -978,7 +978,7 @@ The unit suites in :src:`testing/unit/` cover 42 of the modules in
 ``kernel_prereq``, ``kernel_release``, ``keys``, ``log``, ``measured``,
 ``options``,
 ``paths``, ``report``, ``string``, ``sysinfo``, ``timefmt``, ``upatch``,
-``upatch_decode``, ``upatch_pins``, ``upatch_resolve``, ``upatch_verify``
+``upatch_table``, ``upatch_decode``, ``upatch_pins``, ``upatch_resolve``, ``upatch_verify``
 and ``xdp``, and
 ``overflow`` the arithmetic of
 :src:`include/shirudo/overflow.h`. ``jar`` covers the
