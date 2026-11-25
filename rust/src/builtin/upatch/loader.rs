@@ -27,7 +27,7 @@ use super::ops::{fail, remove_pins};
 use super::{log_audit, log_err, log_info, log_warn, strerr};
 use crate::errno::{
     E2BIG, EACCES, EBUSY, EEXIST, EINVAL, EIO, ENAMETOOLONG, ENODATA, ENOENT, ENOKEY, ENOPKG,
-    ENOTDIR, EOPNOTSUPP, EOVERFLOW, EPERM, ERANGE, ESTALE, EXDEV,
+    ENOTDIR, EOPNOTSUPP, EOVERFLOW, EPERM, ERANGE, ESRCH, ESTALE, EXDEV,
 };
 use crate::sys::libc::{close, errno, fcntl, fgetxattr, fsetxattr, getsockopt, setxattr, syscall};
 use crate::text::{digits, parse_u64};
@@ -46,13 +46,14 @@ use crate::util::lskel::{Ctx, F_SLEEPABLE, MAP_TYPE_ARRAY, PROG_TYPE_SYSCALL, VE
 use crate::util::report::OpReport;
 use crate::util::upatch::{
     self, ATTACH_CGROUP_SKB_EGRESS, ATTACH_CGROUP_SKB_INGRESS, ATTACH_FMOD_RET, ATTACH_KPROBE,
-    ATTACH_KRETPROBE, ATTACH_NETFILTER_IPV6_PRE_ROUTING, ATTACH_RAW_TRACEPOINT, ATTACH_UPROBE,
-    ATTACH_UPROBE_MULTI, ATTACH_URETPROBE, ATTACH_URETPROBE_MULTI, ATTACH_XDP, MAPS_MAX,
-    POLICY_LABEL_ENTRY, POLICY_LABEL_HEADER, ProgSpec, ROLE_ATTACH, ROLE_SERIALIZER, ROLE_TEST_RUN,
-    Specs, Upatch, kind_has_uprobe_target,
+    ATTACH_KPROBE_MULTI, ATTACH_KRETPROBE, ATTACH_KRETPROBE_MULTI,
+    ATTACH_NETFILTER_IPV6_PRE_ROUTING, ATTACH_RAW_TRACEPOINT, ATTACH_UPROBE, ATTACH_UPROBE_MULTI,
+    ATTACH_URETPROBE, ATTACH_URETPROBE_MULTI, ATTACH_XDP, MAPS_MAX, POLICY_LABEL_ENTRY,
+    POLICY_LABEL_HEADER, ProgSpec, ROLE_ATTACH, ROLE_SERIALIZER, ROLE_TEST_RUN, Specs, Upatch,
+    kind_has_uprobe_target, kind_is_kprobe_multi,
 };
 use crate::util::upatch_pins::{LINK_PIN_PREFIX, xdp_prog_pin};
-use crate::util::upatch_resolve::{BPFFS_UPATCHES_DIR, XATTR_PAYLOAD, pin_path};
+use crate::util::upatch_resolve::{BPFFS_UPATCHES_DIR, XATTR_PAYLOAD, pin_path, tracing_link_kind};
 use crate::util::xdp::{self, XdpDevice};
 
 /// SIG_KEYRING_BPF: the kind of keyring init froze for signed loads.
@@ -76,6 +77,8 @@ const NETFILTER: u32 = 45;
 const TRACE_UPROBE_MULTI: u32 = 48;
 const F_UPROBE_MULTI_RETURN: u32 = 1;
 const F_UPROBE_MULTI_PATH_FD: u32 = 2;
+const TRACE_KPROBE_MULTI: u32 = 42;
+const F_KPROBE_MULTI_RETURN: u32 = 1;
 /// BPF_XDP and XDP_FLAGS_DRV_MODE: shirudo attaches in driver mode only.
 const ATTACH_TYPE_XDP: u32 = 37;
 const XDP_FLAGS_DRV_MODE: u32 = 1 << 2;
@@ -87,6 +90,7 @@ const LINK_CGROUP: u32 = 3;
 const LINK_PERF_EVENT: u32 = 7;
 const LINK_NETFILTER: u32 = 10;
 const LINK_UPROBE_MULTI: u32 = 12;
+const LINK_KPROBE_MULTI: u32 = 8;
 const LINK_XDP: u32 = 6;
 const PERF_EVENT_UPROBE: u32 = 1;
 const PERF_EVENT_URETPROBE: u32 = 2;
@@ -171,7 +175,7 @@ fn target_category(e: c_int) -> &'static CStr {
 
 fn link_category(e: c_int) -> &'static CStr {
     match e {
-        ENOENT | ENOTDIR => c"attach_target_missing",
+        ENOENT | ENOTDIR | ESRCH => c"attach_target_missing",
         ESTALE => c"binary_mismatch",
         EXDEV => c"attach_scope_mismatch",
         EOPNOTSUPP => c"kernel_abi_unsupported",
@@ -228,11 +232,30 @@ fn kind_name(kind: u32) -> &'static [u8] {
         ATTACH_NETFILTER_IPV6_PRE_ROUTING => b"netfilter/ipv6-pre-routing",
         ATTACH_UPROBE_MULTI => b"uprobe.multi",
         ATTACH_XDP => b"xdp",
+        ATTACH_KPROBE_MULTI => b"kprobe.multi",
+        ATTACH_KRETPROBE_MULTI => b"kretprobe.multi",
         ATTACH_URETPROBE_MULTI => b"uretprobe.multi",
         ATTACH_UPROBE => b"uprobe",
         ATTACH_URETPROBE => b"uretprobe",
         _ => b"unknown",
     }
+}
+
+/*
+ * ATTACH_RAW_TRACEPOINT is the kind of every program the builder gave
+ * none of its own: fentry, fexit, lsm and tp_btf. The link says which.
+ */
+fn link_kind_name(spec: &ProgSpec, link: c_int) -> &'static [u8] {
+    if spec.kind == ATTACH_RAW_TRACEPOINT {
+        let mut info = Info::<LINK_INFO_SIZE>::new();
+
+        if info.read(link).is_ok()
+            && let Some(kind) = tracing_link_kind(&info)
+        {
+            return kind;
+        }
+    }
+    kind_name(spec.kind)
 }
 
 /// The bytes of `b` up to its first NUL.
@@ -484,6 +507,22 @@ fn attach_uprobe_multi(prog: c_int, spec: &ProgSpec) -> Result<OwnedFd, c_int> {
     })
 }
 
+fn attach_kprobe_multi(prog: c_int, spec: &ProgSpec) -> Result<OwnedFd, c_int> {
+    if spec.kprobe_syms.is_null() || spec.nr_kprobe_syms == 0 {
+        return Err(EINVAL);
+    }
+    let flags = if spec.kind == ATTACH_KRETPROBE_MULTI {
+        F_KPROBE_MULTI_RETURN
+    } else {
+        0
+    };
+    link_create(prog, 0, TRACE_KPROBE_MULTI, |a| {
+        a.u32(16, flags)
+            .u32(20, spec.nr_kprobe_syms)
+            .ptr(24, spec.kprobe_syms)
+    })
+}
+
 fn attach(prog: c_int, spec: &ProgSpec) -> Result<OwnedFd, c_int> {
     match spec.kind {
         ATTACH_RAW_TRACEPOINT => attach_default(prog),
@@ -495,6 +534,7 @@ fn attach(prog: c_int, spec: &ProgSpec) -> Result<OwnedFd, c_int> {
                 .u32(20, NF_INET_PRE_ROUTING)
                 .u32(24, NF_IP6_PRI_RAW_BEFORE_DEFRAG as u32)
         }),
+        ATTACH_KPROBE_MULTI | ATTACH_KRETPROBE_MULTI => attach_kprobe_multi(prog, spec),
         ATTACH_UPROBE_MULTI | ATTACH_URETPROBE_MULTI => attach_uprobe_multi(prog, spec),
         ATTACH_KPROBE | ATTACH_KRETPROBE => {
             let perf = perf_event_open_probe(
@@ -615,6 +655,12 @@ fn link_matches_spec(link: c_int, spec: &ProgSpec, ifindex: u32) -> Result<(), c
             ty == LINK_UPROBE_MULTI
                 && info.u32_at(52) == spec.nr_uprobe_offsets
                 && (info.u32_at(56) & F_UPROBE_MULTI_RETURN != 0) == ret
+        }
+        ATTACH_KPROBE_MULTI | ATTACH_KRETPROBE_MULTI => {
+            let ret = spec.kind == ATTACH_KRETPROBE_MULTI;
+            ty == LINK_KPROBE_MULTI
+                && info.u32_at(24) == spec.nr_kprobe_syms
+                && (info.u32_at(28) & F_KPROBE_MULTI_RETURN != 0) == ret
         }
         ATTACH_FMOD_RET => ty == LINK_TRACING && info.u32_at(LINK_U) == MODIFY_RETURN,
         _ => ty == LINK_RAW_TRACEPOINT || ty == LINK_TRACING,
@@ -962,16 +1008,18 @@ fn attach_and_pin(cx: &Ctx, name: &[u8], specs: &[ProgSpec]) -> Result<(), Attac
                     }
                     let kind = kind_name(spec.kind);
                     let target = till_nul(&spec.target);
+                    let site: Vec<u8> = if kind_has_uprobe_target(spec.kind) {
+                        // SAFETY: the spec's C string.
+                        let path = unsafe { CStr::from_ptr(spec.uprobe_path) }.to_bytes();
+                        [&b" "[..], path, b":", target].concat()
+                    } else if kind_is_kprobe_multi(spec.kind) {
+                        format!(", {} symbols", spec.nr_kprobe_syms).into_bytes()
+                    } else if !target.is_empty() {
+                        [&b" "[..], target].concat()
+                    } else {
+                        Vec::new()
+                    };
                     let link = attach(fd, spec).inspect_err(|&e| {
-                        let site: Vec<u8> = if kind_has_uprobe_target(spec.kind) {
-                            // SAFETY: the spec's C string.
-                            let path = unsafe { CStr::from_ptr(spec.uprobe_path) }.to_bytes();
-                            [&b" "[..], path, b":", target].concat()
-                        } else if !target.is_empty() {
-                            [&b" "[..], target].concat()
-                        } else {
-                            Vec::new()
-                        };
                         log_err(
                             &[
                                 &b"attach prog "[..],
@@ -993,14 +1041,14 @@ fn attach_and_pin(cx: &Ctx, name: &[u8], specs: &[ProgSpec]) -> Result<(), Attac
                                 num(i).as_bytes(),
                                 b" (",
                                 kind,
-                                b" ",
-                                target,
+                                site.as_slice(),
                                 b"): the link is not at the site the metadata names: ",
                                 strerr(e),
                             ]
                             .concat(),
                         );
                     })?;
+                    let loaded_kind = link_kind_name(spec, link.as_raw_fd());
                     obj_pin(link.as_raw_fd(), &pin).inspect_err(|&e| {
                         log_err(&[&b"pin "[..], pin.to_bytes(), b": ", strerr(e)].concat());
                     })?;
@@ -1012,7 +1060,7 @@ fn attach_and_pin(cx: &Ctx, name: &[u8], specs: &[ProgSpec]) -> Result<(), Attac
                             &b"upatch load: program "[..],
                             num(i).as_bytes(),
                             b" (",
-                            kind,
+                            loaded_kind,
                             b") pinned at ",
                             pin.to_bytes(),
                         ]

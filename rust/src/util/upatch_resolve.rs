@@ -40,6 +40,8 @@ const LINK_NETFILTER_PF: usize = 16;
 const LINK_NETFILTER_HOOKNUM: usize = 20;
 const LINK_NETFILTER_PRIORITY: usize = 24;
 const LINK_UPROBE_FLAGS: usize = 56;
+const LINK_KPROBE_COUNT: usize = 24;
+const LINK_KPROBE_FLAGS: usize = 28;
 const LINK_XDP_IFINDEX: usize = 16;
 const LINK_PERF_EVENT_TYPE: usize = 16;
 const LINK_PERF_UPROBE_FILE_NAME: usize = 24;
@@ -51,11 +53,13 @@ const PROG_ATTACH_BTF_ID: usize = 224;
 const BPF_LINK_TYPE_TRACING: u32 = 2;
 const BPF_LINK_TYPE_NETFILTER: u32 = 10;
 const BPF_LINK_TYPE_UPROBE_MULTI: u32 = 12;
+const BPF_LINK_TYPE_KPROBE_MULTI: u32 = 8;
 const BPF_LINK_TYPE_XDP: u32 = 6;
 const BPF_LINK_TYPE_PERF_EVENT: u32 = 7;
 const BPF_PERF_EVENT_UPROBE: u32 = 1;
 const BPF_PERF_EVENT_URETPROBE: u32 = 2;
 const BPF_F_UPROBE_MULTI_RETURN: u32 = 1;
+const BPF_F_KPROBE_MULTI_RETURN: u32 = 1;
 const BPF_PROG_TYPE_TRACING: u32 = 26;
 const BPF_PROG_TYPE_LSM: u32 = 29;
 const BPF_PROG_TYPE_NETFILTER: u32 = 32;
@@ -63,6 +67,7 @@ const BPF_TRACE_RAW_TP: u32 = 23;
 const BPF_TRACE_FENTRY: u32 = 24;
 const BPF_TRACE_FEXIT: u32 = 25;
 const BPF_MODIFY_RETURN: u32 = 26;
+const BPF_LSM_MAC: u32 = 27;
 const BPF_TRACE_ITER: u32 = 28;
 /// NFPROTO_IPV6, NF_INET_PRE_ROUTING and NF_IP6_PRI_RAW_BEFORE_DEFRAG.
 const NFPROTO_IPV6: u32 = 10;
@@ -124,6 +129,40 @@ fn sec_prefix(prog_type: u32, attach_type: u32) -> Option<&'static [u8]> {
         (BPF_PROG_TYPE_TRACING, BPF_TRACE_ITER) => Some(b"iter"),
         _ => None,
     }
+}
+
+/// The kind of the program behind a tracing link as a location names it:
+/// fentry, fexit, fmod_ret or lsm. None for another link type.
+pub(crate) fn tracing_link_kind(info: &Info<LINK_INFO_SIZE>) -> Option<&'static [u8]> {
+    if info.u32_at(LINK_TYPE) != BPF_LINK_TYPE_TRACING {
+        return None;
+    }
+    let attach_type = info.u32_at(LINK_TRACING_ATTACH_TYPE);
+    let prog_type = if attach_type == BPF_LSM_MAC {
+        BPF_PROG_TYPE_LSM
+    } else {
+        BPF_PROG_TYPE_TRACING
+    };
+    sec_prefix(prog_type, attach_type)
+}
+
+/// A kprobe-multi link's kind and function count.
+fn kprobe_multi(info: &Info<LINK_INFO_SIZE>, out: &mut [u8]) -> c_int {
+    let kind: &[u8] = if info.u32_at(LINK_KPROBE_FLAGS) & BPF_F_KPROBE_MULTI_RETURN != 0 {
+        b"kretprobe.multi"
+    } else {
+        b"kprobe.multi"
+    };
+    strsprintf(
+        out,
+        &[
+            kind,
+            b" (",
+            info.u32_at(LINK_KPROBE_COUNT).to_string().as_bytes(),
+            b" funcs)",
+        ],
+    )
+    .map_or_else(|e| e, |_| 0)
 }
 
 /// A uprobe-multi link's location: its binary and how many functions.
@@ -299,6 +338,12 @@ pub(crate) fn resolve_location(vbtf: Option<&Btf>, name: &[u8], out: &mut [u8]) 
         return if ret != 0 { ret } else { -EINVAL };
     }
     let link_type = linfo.u32_at(LINK_TYPE);
+    if link_type == BPF_LINK_TYPE_KPROBE_MULTI {
+        let ret = kprobe_multi(&linfo, out);
+        // SAFETY: the link opened above.
+        unsafe { close(link) };
+        return ret;
+    }
     if link_type == BPF_LINK_TYPE_UPROBE_MULTI {
         let ret = uprobe_multi(link, &linfo, out);
         // SAFETY: the link opened above.

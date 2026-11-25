@@ -43,3 +43,33 @@ fn links_of_an_absent_upatch_are_not_read() {
     );
     assert_eq!(calls, 0);
 }
+
+#[test]
+fn a_tracing_link_names_the_kind_of_its_program() {
+    let tracing = |attach_type| {
+        let mut info = Info::<LINK_INFO_SIZE>::new();
+        info.set(LINK_TYPE, &BPF_LINK_TYPE_TRACING.to_ne_bytes());
+        info.set(LINK_TRACING_ATTACH_TYPE, &u32::to_ne_bytes(attach_type));
+        info
+    };
+
+    assert_eq!(
+        tracing_link_kind(&tracing(BPF_TRACE_FENTRY)),
+        Some(&b"fentry"[..])
+    );
+    assert_eq!(
+        tracing_link_kind(&tracing(BPF_TRACE_FEXIT)),
+        Some(&b"fexit"[..])
+    );
+    assert_eq!(
+        tracing_link_kind(&tracing(BPF_MODIFY_RETURN)),
+        Some(&b"fmod_ret"[..])
+    );
+    assert_eq!(tracing_link_kind(&tracing(BPF_LSM_MAC)), Some(&b"lsm"[..]));
+
+    let mut other = Info::<LINK_INFO_SIZE>::new();
+    other.set(LINK_TYPE, &BPF_LINK_TYPE_PERF_EVENT.to_ne_bytes());
+    assert_eq!(tracing_link_kind(&other), None);
+    other.set(LINK_TYPE, &1u32.to_ne_bytes());
+    assert_eq!(tracing_link_kind(&other), None);
+}
