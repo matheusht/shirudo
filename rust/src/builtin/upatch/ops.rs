@@ -314,8 +314,14 @@ fn pin_dir(name: &[u8]) -> Vec<u8> {
 }
 
 /// Whether the upatch has its pin directory, loaded or part way there.
-fn is_pinned(name: &[u8]) -> bool {
-    fs::metadata(os(&pin_dir(name))).is_ok()
+/// An error other than absence is kept: an unreadable directory may hold
+/// a live link and must never be taken for none.
+fn pinned(name: &[u8]) -> Result<bool, c_int> {
+    match fs::metadata(os(&pin_dir(name))) {
+        Ok(_) => Ok(true),
+        Err(e) if e.raw_os_error() == Some(ENOENT) => Ok(false),
+        Err(e) => Err(io_err(&e)),
+    }
 }
 
 /// Removes the entries of `dir`, none a directory, and then `dir`.
@@ -1253,7 +1259,24 @@ fn unload_steps(a: &OpArgs, file: &CStr, rep: &mut OpReport, name_out: &mut CStr
     // An archive with no pins is one init could not restore, or one an
     // interrupted unload left: the directive removes it only when it is
     // the payload the directive names, as it would its pins.
-    if !is_pinned(&name) {
+    let pinned = match pinned(&name) {
+        Ok(pinned) => pinned,
+        Err(err) => {
+            log_err(
+                &[
+                    &b"upatch unload: cannot look at the pins of "[..],
+                    &name,
+                    b": ",
+                    strerr(-err),
+                    b"; nothing detached",
+                ]
+                .concat(),
+            );
+            fail(rep, c"pin", c"unknown", err, b"pin directory unreadable");
+            return 1;
+        }
+    };
+    if !pinned {
         match archive_verify(&name, &payload).map(drop) {
             Ok(()) => unarchive(),
             Err(err) if err != -ESTALE || fs::metadata(os(archived.to_bytes())).is_ok() => {
@@ -1415,7 +1438,10 @@ fn purge_locked(name: &[u8], signer: *const Cert, reason: &[u8]) -> c_int {
     }
 
     // As for unload: the event first, then the detach it describes.
-    let loaded = is_pinned(name);
+    let loaded = match pinned(name) {
+        Ok(loaded) => loaded,
+        Err(err) => return err,
+    };
     if loaded {
         let (ret, _) = measure(
             c"shirudo-unload",
